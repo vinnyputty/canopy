@@ -10,15 +10,20 @@ import {
 } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 // Stage the hermetic bundle in a writable directory for Electron and packaging.
 const cache = join(workspace, '.cache');
 await mkdir(cache, { recursive: true });
 const staging = await mkdtemp(join(cache, 'desktop-'));
 const stagedDist = join(staging, 'dist');
-await cp('dist', stagedDist, { recursive: true, dereference: true });
-const manifest = JSON.parse(await readFile('package.json', 'utf8'));
+await cp(join(root, 'dist'), stagedDist, {
+  recursive: true,
+  dereference: true,
+});
+const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 delete manifest.dependencies;
 delete manifest.devDependencies;
 delete manifest.packageManager;
@@ -55,14 +60,19 @@ if (mode === 'dev' || mode === 'smoke') {
   delete env.ELECTRON_RUN_AS_NODE;
   const result =
     mode === 'smoke'
-      ? spawnSync(process.execPath, ['tools/smoke.mjs'], {
-          stdio: 'inherit',
-          env: {
-            ...env,
-            CANOPY_APP_PATH: staging,
-            CANOPY_ELECTRON_PATH: executable,
+      ? spawnSync(
+          process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
+          [join(root, 'tools', 'smoke.mjs')],
+          {
+            stdio: 'inherit',
+            cwd: root,
+            env: {
+              ...env,
+              CANOPY_APP_PATH: staging,
+              CANOPY_ELECTRON_PATH: executable,
+            },
           },
-        })
+        )
       : spawnSync(executable, [staging], { stdio: 'inherit', env });
   if (result.error) throw result.error;
   process.exit(result.status ?? 1);

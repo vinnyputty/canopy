@@ -4,6 +4,12 @@
   "private": true,
   "description": "A focused desktop workspace for issue trees",
   "author": "Canopy contributors",
+  "homepage": "https://github.com/vinnyputty/canopy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vinnyputty/canopy.git"
+  },
+  "desktopName": "canopy.desktop",
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node tools/build.mjs",
@@ -66,7 +72,8 @@
         "deb"
       ],
       "category": "Office",
-      "maintainer": "Canopy contributors"
+      "maintainer": "Canopy contributors",
+      "syncDesktopName": true
     }
   }
 }

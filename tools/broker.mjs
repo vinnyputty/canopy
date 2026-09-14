@@ -1,8 +1,17 @@
 import { spawn } from 'node:child_process';
-const child = spawn(process.execPath, ['dist/broker.cjs'], {
-  stdio: 'inherit',
-  env: process.env,
-});
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const child = spawn(
+  process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
+  [join(root, 'dist', 'broker.cjs')],
+  {
+    stdio: 'inherit',
+    env: process.env,
+    cwd: root,
+  },
+);
 child.on('error', (error) => {
   process.stderr.write(`${error.message}\n`);
   process.exit(1);

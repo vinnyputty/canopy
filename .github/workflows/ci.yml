@@ -1,6 +1,5 @@
 name: Canopy
 on:
-  push:
   pull_request:
   workflow_dispatch:
 jobs:
@@ -11,8 +10,8 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: bazel-contrib/setup-bazel@0.15.0
+      - uses: actions/checkout@v7.0.1
+      - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
           disk-cache: ${{ runner.os }}
@@ -26,7 +25,7 @@ jobs:
       - run: bazel run //:package
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: Canopy-${{ runner.os }}
           path: release/*
