@@ -844,7 +844,7 @@ select:focus-visible,
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: linear-gradient(145deg, #6b8fb9, #4c6585);
+  background-color: #687181;
   color: white;
   font-size: 8px;
   font-weight: 700;
@@ -852,31 +852,10 @@ select:focus-visible,
 .status {
   padding: 3px 7px;
   border-radius: 9px;
-  background: color-mix(in srgb, #7c8796 15%, transparent);
-  color: var(--muted);
+  background: #687181;
+  color: white;
   text-transform: uppercase;
   letter-spacing: 0.02em;
-}
-.status-new {
-  background: color-mix(in srgb, #5593d0 16%, transparent);
-  color: #3976b2;
-}
-.status-indeterminate {
-  background: color-mix(in srgb, #d39a38 16%, transparent);
-  color: #9b6b18;
-}
-.status-done {
-  background: color-mix(in srgb, #59a06d 16%, transparent);
-  color: #367b49;
-}
-:root[data-theme='dark'] .status-new {
-  color: #75abe3;
-}
-:root[data-theme='dark'] .status-indeterminate {
-  color: #e0ae59;
-}
-:root[data-theme='dark'] .status-done {
-  color: #72b885;
 }
 .row-actions {
   display: grid;

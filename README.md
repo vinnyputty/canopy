@@ -27,6 +27,7 @@ See [Jira connection setup](docs/connections.md) for token scopes and organizati
 - Open a root issue by key, Jira browse URL, or summary search. Each tab remembers its expanded nodes, hide-done setting, selection, and scroll position.
 - Hide done uses Jira's Done status category and retains done ancestors with unfinished descendants.
 - Double-click a summary to edit it; click priority, assignee, or status to choose a value. Jira workflow transitions requiring additional fields must be completed in Jira.
+- Assignees have consistent palette colors; unassigned avatars are gray. Each distinct status shown for a connection gets its own badge color, retained as you edit, filter, and refresh your open trees.
 - Drag a grab handle onto a sibling to place it before that issue. Focus a grab handle and use `Alt+↑` / `Alt+↓` for keyboard reordering. Reordering writes Jira rank; it does not change parents.
 - Background refresh runs every 30 seconds and on window focus, reconciling changed issue data into the existing view.
 - Open the command palette with `⌘K`, an issue with `⌘P`, or keyboard shortcuts with `⌘/` (`Ctrl` on Windows/Linux). The shortcut editor detects conflicts before saving.

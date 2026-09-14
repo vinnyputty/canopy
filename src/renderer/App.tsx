@@ -52,6 +52,7 @@ import {
   visibleTree,
   type IssueNode,
 } from './tree';
+import { StatusColors } from './status-colors';
 
 const PLATFORM_SHORTCUTS = defaultShortcuts();
 const EMPTY_WORKSPACE: Workspace = {
@@ -76,6 +77,35 @@ function initials(value?: string) {
     .join('')
     .toUpperCase();
 }
+const ASSIGNEE_COLORS = [
+  '#2563a6',
+  '#087f5b',
+  '#8749a8',
+  '#b45309',
+  '#be3a52',
+  '#4f46a5',
+  '#0e7490',
+  '#6b6617',
+];
+
+function AssigneeAvatar({ assignee }: { assignee: Choice | null }) {
+  let hash = 0;
+  for (const character of assignee?.id ?? '')
+    hash = (Math.imul(hash, 31) + character.charCodeAt(0)) >>> 0;
+  return (
+    <span
+      className="avatar"
+      aria-hidden="true"
+      style={
+        assignee
+          ? { backgroundColor: ASSIGNEE_COLORS[hash % ASSIGNEE_COLORS.length] }
+          : undefined
+      }
+    >
+      {assignee ? initials(assignee.name) : '—'}
+    </span>
+  );
+}
 function priorityTone(name?: string) {
   const value = name?.toLowerCase() ?? '';
   if (/highest|critical|blocker/.test(value)) return 'critical';
@@ -83,10 +113,6 @@ function priorityTone(name?: string) {
   if (/low|lowest/.test(value)) return 'low';
   return 'medium';
 }
-function statusTone(category: Issue['status']['category']) {
-  return `status-${category}`;
-}
-
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -113,6 +139,18 @@ export function App() {
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
+  const statusRegistries = useRef(new Map<string, StatusColors>());
+  const statusColors = useMemo(() => {
+    if (!activeTab) return new Map<string, string>();
+    let registry = statusRegistries.current.get(activeTab.connectionId);
+    if (!registry) {
+      registry = new StatusColors();
+      statusRegistries.current.set(activeTab.connectionId, registry);
+    }
+    return registry.include(
+      snapshot?.issues.map((issue) => issue.status) ?? [],
+    );
+  }, [activeTab?.connectionId, snapshot]);
   const scopedOptions = useMemo(() => {
     if (!activeTab) return {};
     const prefix = `${activeTab.connectionId}:`;
@@ -886,6 +924,7 @@ export function App() {
                 >
                   <TreeRows
                     node={shownTree}
+                    statusColors={statusColors}
                     depth={0}
                     expanded={expandedSet}
                     onToggle={(key) =>
@@ -1075,6 +1114,7 @@ function Connections({
 
 type RowsProps = {
   node: IssueNode;
+  statusColors: ReadonlyMap<string, string>;
   depth: number;
   expanded: Set<string>;
   onToggle: (key: string) => void;
@@ -1320,6 +1360,7 @@ function TreeRows(props: RowsProps) {
           onEdit={() => props.beginEdit(issue.key, 'status')}
         >
           <StatusEditor
+            color={props.statusColors.get(issue.status.id)}
             active={
               props.editor?.key === issue.key && props.editor.field === 'status'
             }
@@ -1502,7 +1543,7 @@ function AssigneeEditor({
   if (!active)
     return (
       <span className="assignee">
-        <span className="avatar">{initials(issue.assignee?.name)}</span>
+        <AssigneeAvatar assignee={issue.assignee} />
         <span>{issue.assignee?.name ?? 'Unassigned'}</span>
       </span>
     );
@@ -1521,7 +1562,8 @@ function AssigneeEditor({
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => save(null)}
         >
-          <span className="avatar">—</span>Unassigned
+          <AssigneeAvatar assignee={null} />
+          Unassigned
         </button>
         {choices?.map((choice) => (
           <button
@@ -1529,7 +1571,7 @@ function AssigneeEditor({
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => save(choice.id)}
           >
-            <span className="avatar">{initials(choice.name)}</span>
+            <AssigneeAvatar assignee={choice} />
             {choice.name}
             {issue.assignee?.id === choice.id && <Check size={13} />}
           </button>
@@ -1546,12 +1588,14 @@ function AssigneeEditor({
 }
 
 function StatusEditor({
+  color,
   active,
   issue,
   choices,
   save,
   cancel,
 }: {
+  color?: string;
   active: boolean;
   issue: Issue;
   choices?: EditOptions['transitions'];
@@ -1560,7 +1604,7 @@ function StatusEditor({
 }) {
   if (!active)
     return (
-      <span className={cx('status', statusTone(issue.status.category))}>
+      <span className="status" style={{ backgroundColor: color }}>
         {issue.status.name}
       </span>
     );
