@@ -1,0 +1,72 @@
+{
+  "name": "canopy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A focused desktop workspace for issue trees",
+  "author": "Canopy contributors",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "start": "node tools/desktop.mjs dev",
+    "test": "node tools/test.mjs",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "package": "node tools/desktop.mjs package"
+  },
+  "dependencies": {
+    "lucide-react": "0.468.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@electron/get": "5.1.0",
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.20.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.25.12",
+    "extract-zip": "2.0.1",
+    "prettier": "3.9.6",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@10.22.0",
+  "build": {
+    "appId": "app.canopy.desktop",
+    "productName": "Canopy",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/main.cjs",
+      "dist/preload.cjs",
+      "dist/renderer/**",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "identity": null
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "maintainer": "Canopy contributors"
+    }
+  }
+}
