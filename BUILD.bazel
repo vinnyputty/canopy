@@ -41,6 +41,12 @@ js_test(
     data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
 )
 
+js_test(
+    name = "portable_checks",
+    entry_point = "tools/portable-check.mjs",
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+)
+
 js_binary(
     name = "dev",
     entry_point = "tools/desktop.mjs",
@@ -72,5 +78,12 @@ js_binary(
     name = "broker",
     entry_point = "tools/broker.mjs",
     data = [":build"],
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "ci",
+    entry_point = "tools/ci.mjs",
+    patch_node_fs = False,
     tags = ["manual"],
 )
