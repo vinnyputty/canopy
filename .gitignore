@@ -1,0 +1,9 @@
+node_modules/
+dist/
+release/
+bazel-*
+.env
+.DS_Store
+test-results/
+playwright-report/
+.cache/

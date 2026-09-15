@@ -1,0 +1,11 @@
+# Jira provider notes
+
+Canopy uses Jira Cloud REST API v3 through an OAuth request function already scoped to `api.atlassian.com/ex/jira/{cloudId}`. Searches use the enhanced `POST /rest/api/3/search/jql` endpoint and follow every `nextPageToken`; Jira search is eventually consistent, so a just-completed edit can briefly lag in a subsequent tree refresh.
+
+The issue tree follows Jira's `parent` field one level at a time. This supports every hierarchy level exposed by the site rather than assuming a fixed epic/story/subtask shape. Issue links are shown as nonrecursive references on the issue that contains them because links can form cycles and do not define ownership.
+
+Sibling dragging calls Jira Software's `PUT /rest/agile/1.0/issue/rank`. It requires the Jira Software rank scope and a Rank field; Canopy rejects moves between different parents and moves of the tab root. Sites without an available Rank field display children in stable issue-key order and report that fallback in the tree warnings. Jira can still reject a valid sibling move because of project permissions or rank configuration, including a partial failure reported with HTTP 207.
+
+Priority choices come from the issue's edit metadata. Assignable users and workflow transitions are permission-dependent. Jira's assignable-user endpoint searches at most the first 1,000 users, so large sites should use the assignee search box rather than expect an exhaustive initial list. A transition whose screen requires extra fields is displayed but marked as requiring fields; Canopy refuses that transition until those fields are supported instead of submitting a partial change.
+
+Jira omits issues the signed-in user cannot browse. Canopy can report an inaccessible root directly, but Jira does not reveal inaccessible descendants, so it cannot distinguish them from absent children.
