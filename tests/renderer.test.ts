@@ -137,5 +137,7 @@ describe('renderer tree helpers', () => {
       [['open', 'search']],
     );
     assert.equal(defaultShortcuts('Win32').quickOpen, 'Ctrl+P');
+    assert.equal(defaultShortcuts('MacIntel').toggleSidebar, 'Meta+B');
+    assert.equal(defaultShortcuts('Win32').selectTab9, 'Ctrl+9');
   });
 });

@@ -11,8 +11,18 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
   expandAll: 'Meta+Shift+E',
   collapseAll: 'Meta+Shift+C',
   shortcuts: 'Meta+/',
+  toggleSidebar: 'Meta+B',
   nextTab: 'Ctrl+Tab',
   previousTab: 'Ctrl+Shift+Tab',
+  selectTab1: 'Meta+1',
+  selectTab2: 'Meta+2',
+  selectTab3: 'Meta+3',
+  selectTab4: 'Meta+4',
+  selectTab5: 'Meta+5',
+  selectTab6: 'Meta+6',
+  selectTab7: 'Meta+7',
+  selectTab8: 'Meta+8',
+  selectTab9: 'Meta+9',
 };
 
 export function defaultShortcuts(
@@ -36,8 +46,18 @@ export const SHORTCUT_LABELS: Record<string, string> = {
   expandAll: 'Expand all',
   collapseAll: 'Collapse all',
   shortcuts: 'Keyboard shortcuts',
+  toggleSidebar: 'Toggle sidebar',
   nextTab: 'Next tab',
   previousTab: 'Previous tab',
+  selectTab1: 'Select tab 1',
+  selectTab2: 'Select tab 2',
+  selectTab3: 'Select tab 3',
+  selectTab4: 'Select tab 4',
+  selectTab5: 'Select tab 5',
+  selectTab6: 'Select tab 6',
+  selectTab7: 'Select tab 7',
+  selectTab8: 'Select tab 8',
+  selectTab9: 'Select tab 9',
 };
 
 export function buildIssueTree(

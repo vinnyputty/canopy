@@ -2,7 +2,7 @@
 
 A focused Electron desktop workspace for Jira issue trees, with one root issue per tab. Expand the actual parent/child hierarchy, edit summaries, priorities, assignees, and status inline, and reorder siblings using Jira rank. Linked issues appear as references that open their own tabs.
 
-Canopy targets macOS, Windows, and Linux. The first version supports Jira Cloud and a persistent local demo; its provider boundary keeps the tree UI independent of Jira's REST payloads.
+Canopy targets macOS, Windows, and Linux. The first version supports Jira Cloud; its provider boundary keeps the tree UI independent of Jira's REST payloads.
 
 ## Run
 
@@ -24,7 +24,7 @@ bazel run //:ci
 
 This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke test, and packages Canopy. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
 
-Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. The app starts with a demo connection; open `CAN-100` or `CAN-200` to explore it. Demo edits are stored locally.
+Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. Normal builds start with your saved Jira connections. The local demo provider is included only in the smoke-test entry point and is excluded from release packages.
 
 Use **Connect Jira site** to add a Jira Cloud site, your Atlassian account email, and a personal API token. Select **Scoped** for a token created with scopes, or **Classic** for a token created without scopes. Canopy checks `/myself` before saving the connection and uses the operating system credential store to encrypt credentials. Tokens stay in the Electron main process. Each connection is associated with a site and account.
 
@@ -38,6 +38,7 @@ See [Jira connection setup](docs/connections.md) for token scopes and organizati
 - Assignees have consistent palette colors; unassigned avatars are gray. Each distinct status shown for a connection gets its own badge color, retained as you edit, filter, and refresh your open trees.
 - Drag a grab handle onto a sibling to place it before that issue. Focus a grab handle and use `Alt+↑` / `Alt+↓` for keyboard reordering. Reordering writes Jira rank; it does not change parents.
 - Background refresh runs every 30 seconds and on window focus, reconciling changed issue data into the existing view.
+- Quit with `⌘Q`, toggle the sidebar with `⌘B`, and select tabs 1–9 with `⌘1`–`⌘9` (`Ctrl` on Windows/Linux).
 - Open the command palette with `⌘K`, an issue with `⌘P`, or keyboard shortcuts with `⌘/` (`Ctrl` on Windows/Linux). The shortcut editor detects conflicts before saving.
 
 Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/jira.md).
@@ -52,7 +53,7 @@ Installers are written to `release/`: DMG/ZIP on macOS, NSIS on Windows, and App
 
 ## Development
 
-The renderer uses React and TypeScript. Electron's sandboxed preload exposes a narrow typed IPC API. Jira requests and credentials remain in the main process; the renderer cannot make network requests. Workspace state and demo data are stored under Electron's application user-data directory. Linux requires a working Secret Service/KWallet backend for real credentials; the insecure `basic_text` fallback is rejected.
+The renderer uses React and TypeScript. Electron's sandboxed preload exposes a narrow typed IPC API. Jira requests and credentials remain in the main process; the renderer cannot make network requests. Workspace state is stored under Electron's application user-data directory. Linux requires a working Secret Service/KWallet backend for real credentials; the insecure `basic_text` fallback is rejected.
 
 For an editor's local `node_modules`, with Node.js available:
 

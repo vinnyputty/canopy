@@ -1,6 +1,7 @@
 import { readFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { safeStorage } from 'electron';
+import { linuxCredentialStorageError } from './credentials';
 
 export class Storage {
   private pending: Promise<void> = Promise.resolve();
@@ -37,7 +38,12 @@ export class Storage {
         safeStorage.getSelectedStorageBackend() === 'basic_text')
     )
       throw new Error(
-        'Secure credential storage is unavailable. Enable your operating system keychain, then connect again.',
+        process.platform === 'linux'
+          ? linuxCredentialStorageError(
+              undefined,
+              safeStorage.getSelectedStorageBackend(),
+            )
+          : 'Secure credential storage is unavailable. Enable your operating system keychain, then connect again.',
       );
   }
   async readSecrets<T>(): Promise<T | null> {

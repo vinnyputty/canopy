@@ -14,3 +14,9 @@ The ability to create a token does not guarantee it may access every site. Your 
 An organization administrator can check **Security → User security → Authentication policies** for managed-account API-token controls. External users have separate controls under **Security → User security → External users**. See [Atlassian authentication policies](https://support.atlassian.com/security-and-access-policies/docs/authentication-policy-settings-for-your-organizations/) and [external-user token controls](https://support.atlassian.com/security-and-access-policies/docs/set-api-token-access/).
 
 Disconnecting a site removes its locally stored credentials. Revoke the token in Atlassian account settings to invalidate it everywhere. OAuth remains available as an [optional connection method](oauth.md).
+
+## Linux credential storage
+
+Canopy stores credentials through your desktop keyring. On GNOME and KDE, Electron selects the desktop's normal keyring backend. On other desktops, such as Sway, Canopy checks the session D-Bus for a Secret Service provider and uses it when available. GNOME Keyring and KeePassXC can provide this service.
+
+If Canopy reports that secure credential storage is unavailable, start and unlock a Secret Service keyring in the same desktop session, then restart Canopy. Advanced setups can select Electron's backend explicitly with `--password-store=gnome-libsecret`.

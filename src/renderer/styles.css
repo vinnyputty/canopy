@@ -539,6 +539,11 @@ select:focus-visible,
 .error-banner span {
   flex: 1;
 }
+.error-banner span,
+.dialog-error,
+.welcome-error {
+  user-select: text;
+}
 .error-banner button {
   background: transparent;
   display: grid;
@@ -1098,6 +1103,7 @@ select:focus-visible,
   margin: 0 0 17px;
   color: var(--muted);
   line-height: 1.5;
+  user-select: text;
 }
 .primary,
 .secondary {

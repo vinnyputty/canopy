@@ -1,6 +1,6 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -22,6 +22,7 @@ const executablePath = suppliedRuntime
 const userData = await mkdtemp(join(tmpdir(), 'canopy-smoke-'));
 const env = { ...process.env, CANOPY_USER_DATA: userData };
 delete env.ELECTRON_RUN_AS_NODE;
+const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 const paletteShortcut =
   process.platform === 'darwin' ? 'Meta+Shift+K' : 'Control+Shift+K';
 const paletteShortcutLabel =
@@ -31,10 +32,10 @@ let app;
 let page;
 const pageErrors = [];
 
-async function launch() {
+async function launch(production = false) {
   app = await electron.launch({
     executablePath,
-    args: [appPath],
+    args: [production ? join(appPath, 'dist/main.cjs') : appPath],
     env,
   });
   page = await app.firstWindow();
@@ -149,6 +150,27 @@ try {
   await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeVisible();
   await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeVisible();
 
+  await page.keyboard.press(`${modifier}+1`);
+  await expect(tree).toBeVisible();
+  await page.keyboard.press(`${modifier}+9`);
+  await expect(tree).toBeVisible();
+  await page.keyboard.press(`${modifier}+2`);
+  await expect(
+    page.getByRole('tree', { name: 'CAN-200 issue tree' }),
+  ).toBeVisible();
+  await page.keyboard.press(`${modifier}+b`);
+  await expect(page.locator('.app')).toHaveClass(/sidebar-is-collapsed/);
+  await page.keyboard.press(`${modifier}+b`);
+  await expect(page.locator('.app')).not.toHaveClass(/sidebar-is-collapsed/);
+
+  await page
+    .getByRole('button', { name: 'Copy link to CAN-200' })
+    .first()
+    .click();
+  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+    'https://example.invalid/browse/CAN-200',
+  );
+
   await page.getByRole('button', { name: 'Keyboard shortcuts' }).click();
   const shortcuts = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
   const paletteRow = shortcuts.locator('.shortcut-row').filter({
@@ -190,6 +212,62 @@ try {
   await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();
   await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
   await expectIssueBefore('CAN-112', 'CAN-111');
+
+  await page.getByTitle('Open in Jira', { exact: true }).first().click();
+  const errorText = page.locator('.error-banner span').first();
+  await expect(errorText).toContainText('Demo issues exist only in Canopy.');
+  await expect(errorText).toHaveCSS('user-select', 'text');
+  await errorText.selectText();
+  await page.keyboard.press(`${modifier}+c`);
+  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toContain(
+    'Demo issues exist only in Canopy.',
+  );
+
+  await page.getByTitle('Disconnect Canopy demo').click();
+  await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('tab')).toHaveCount(0);
+  await page.waitForTimeout(350);
+  await close();
+  await launch();
+  await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('tab')).toHaveCount(0);
+  const quittingProcess = app.process();
+  // Native menu shortcuts need Electron input; CDP keyboard events bypass it.
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].webContents.sendInputEvent({
+      type: 'keyDown',
+      keyCode: 'Q',
+      modifiers: [process.platform === 'darwin' ? 'meta' : 'control'],
+    });
+  });
+  await expect.poll(() => quittingProcess.exitCode).toBe(0);
+  app = undefined;
+  page = undefined;
+
+  // An upgrade must discard persisted demo tabs while retaining preferences.
+  await writeFile(
+    join(userData, 'workspace.json'),
+    JSON.stringify({
+      tabs: [
+        {
+          id: 'legacy-demo',
+          connectionId: 'demo',
+          rootKey: 'CAN-100',
+          expanded: [],
+          hideDone: true,
+          scrollTop: 0,
+        },
+      ],
+      activeTabId: 'legacy-demo',
+      shortcuts: {},
+      theme: 'dark',
+      sidebarCollapsed: false,
+    }),
+  );
+  await launch(true);
+  expect(await page.evaluate(() => window.canopy.connections())).toEqual([]);
+  await expect(page.getByRole('tab')).toHaveCount(0);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

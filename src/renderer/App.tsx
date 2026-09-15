@@ -176,10 +176,21 @@ export function App() {
       .then(([nextConnections, saved]) => {
         if (!live) return;
         setConnections(nextConnections);
+        // Remove the retired demo without dropping Jira tabs if a keyring is locked.
+        const hasDemo = nextConnections.some(
+          (connection) => connection.id === 'demo',
+        );
+        const tabs = (saved?.tabs ?? []).filter(
+          (tab) => tab.connectionId !== 'demo' || hasDemo,
+        );
         setWorkspace(
           saved
             ? {
                 ...saved,
+                tabs,
+                activeTabId: tabs.some((tab) => tab.id === saved.activeTabId)
+                  ? saved.activeTabId
+                  : (tabs[0]?.id ?? null),
                 shortcuts: { ...PLATFORM_SHORTCUTS, ...saved.shortcuts },
               }
             : EMPTY_WORKSPACE,
@@ -355,6 +366,13 @@ export function App() {
     });
   }, []);
 
+  const selectTabAt = useCallback((index: number) => {
+    setWorkspace((current) => {
+      const tab = current.tabs[index];
+      return tab ? { ...current, activeTabId: tab.id } : current;
+    });
+  }, []);
+
   const openExternal = useCallback(
     async (connectionId: string, key: string) => {
       try {
@@ -374,16 +392,19 @@ export function App() {
     [],
   );
 
-  const copyIssueKey = useCallback(async (key: string) => {
-    try {
-      await navigator.clipboard.writeText(key);
-    } catch (error) {
-      setErrors((current) => ({
-        ...current,
-        app: `Couldn’t copy ${key}: ${error instanceof Error ? error.message : String(error)}`,
-      }));
-    }
-  }, []);
+  const copyIssueLink = useCallback(
+    async (connectionId: string, key: string) => {
+      try {
+        await window.canopy.copyIssueLink(connectionId, key);
+      } catch (error) {
+        setErrors((current) => ({
+          ...current,
+          app: `Couldn’t copy link for ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+      }
+    },
+    [],
+  );
 
   const expandAll = useCallback(
     (expanded: boolean) => {
@@ -453,6 +474,15 @@ export function App() {
       } else if (command === 'previousTab') {
         event.preventDefault();
         selectRelativeTab(-1);
+      } else if (command === 'toggleSidebar') {
+        event.preventDefault();
+        setWorkspace((current) => ({
+          ...current,
+          sidebarCollapsed: !current.sidebarCollapsed,
+        }));
+      } else if (/^selectTab[1-9]$/.test(command)) {
+        event.preventDefault();
+        selectTabAt(Number(command.at(-1)) - 1);
       } else {
         const match = commands.find((item) => item.id === command);
         if (match) {
@@ -463,7 +493,14 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [workspace.shortcuts, activeTab, closeTab, commands, selectRelativeTab]);
+  }, [
+    workspace.shortcuts,
+    activeTab,
+    closeTab,
+    commands,
+    selectRelativeTab,
+    selectTabAt,
+  ]);
 
   const loadOptions = useCallback(
     async (key: string, query?: string) => {
@@ -709,7 +746,25 @@ export function App() {
           </nav>
           <Connections
             connections={connections}
-            setConnections={setConnections}
+            setConnections={(nextConnections) => {
+              setConnections(nextConnections);
+              setWorkspace((current) => {
+                const tabs = current.tabs.filter((tab) =>
+                  nextConnections.some(
+                    (connection) => connection.id === tab.connectionId,
+                  ),
+                );
+                return {
+                  ...current,
+                  tabs,
+                  activeTabId: tabs.some(
+                    (tab) => tab.id === current.activeTabId,
+                  )
+                    ? current.activeTabId
+                    : (tabs[0]?.id ?? null),
+                };
+              });
+            }}
             onConnect={() => setDialog('connect')}
             onError={(message) =>
               setErrors((value) => ({ ...value, app: message }))
@@ -942,7 +997,9 @@ export function App() {
                     onOpenExternal={(key) =>
                       void openExternal(activeTab.connectionId, key)
                     }
-                    onCopyKey={(key) => void copyIssueKey(key)}
+                    onCopyLink={(key) =>
+                      void copyIssueLink(activeTab.connectionId, key)
+                    }
                     editor={editor}
                     beginEdit={beginEdit}
                     cancelEdit={() => setEditor(null)}
@@ -1122,7 +1179,7 @@ type RowsProps = {
   onSelect: (key: string) => void;
   onOpenTab: (key: string) => void;
   onOpenExternal: (key: string) => void;
-  onCopyKey: (key: string) => void;
+  onCopyLink: (key: string) => void;
   editor: Editor;
   beginEdit: (key: string, field: EditField) => void;
   cancelEdit: () => void;
@@ -1275,9 +1332,9 @@ function TreeRows(props: RowsProps) {
             </button>
             <button
               className="copy-key"
-              onClick={() => props.onCopyKey(issue.key)}
-              title={`Copy ${issue.key}`}
-              aria-label={`Copy ${issue.key}`}
+              onClick={() => props.onCopyLink(issue.key)}
+              title={`Copy link to ${issue.key}`}
+              aria-label={`Copy link to ${issue.key}`}
             >
               <Copy size={11} />
             </button>

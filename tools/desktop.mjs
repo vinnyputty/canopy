@@ -23,12 +23,13 @@ await cp(join(root, 'dist'), stagedDist, {
   recursive: true,
   dereference: true,
 });
+const mode = process.argv[2];
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+if (mode === 'smoke') manifest.main = 'dist/smoke-main.cjs';
 delete manifest.dependencies;
 delete manifest.devDependencies;
 delete manifest.packageManager;
 await writeFile(join(staging, 'package.json'), JSON.stringify(manifest));
-const mode = process.argv[2];
 if (mode === 'dev' || mode === 'smoke') {
   // Electron's platform archive is a runtime download, outside Bazel actions.
   const { downloadArtifact } = await import('@electron/get');

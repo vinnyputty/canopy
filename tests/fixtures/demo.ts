@@ -4,7 +4,7 @@ import type {
   Issue,
   IssuePatch,
   TreeSnapshot,
-} from '../shared/types';
+} from '../../src/shared/types';
 
 const priorities: Choice[] = ['Highest', 'High', 'Medium', 'Low', 'Lowest'].map(
   (name, i) => ({ id: String(i + 1), name }),

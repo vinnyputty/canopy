@@ -14,6 +14,8 @@ const api: CanopyAPI = {
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
   saveWorkspace: (workspace) =>
     ipcRenderer.invoke('canopy:saveWorkspace', workspace),
+  copyIssueLink: (id, key) =>
+    ipcRenderer.invoke('canopy:copyIssueLink', id, key),
   openIssue: (id, key) => ipcRenderer.invoke('canopy:openIssue', id, key),
 };
 contextBridge.exposeInMainWorld('canopy', api);

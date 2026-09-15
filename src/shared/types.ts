@@ -72,6 +72,7 @@ export interface CanopyAPI {
   rank(connectionId: string, key: string, beforeKey: string): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;
+  copyIssueLink(connectionId: string, key: string): Promise<void>;
   openIssue(connectionId: string, key: string): Promise<void>;
 }
 declare global {
