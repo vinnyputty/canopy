@@ -3,8 +3,11 @@ import type {
   EditOptions,
   Issue,
   IssuePatch,
+  IssuePreview,
   TreeSnapshot,
 } from '../shared/types';
+
+import { documentText } from './adf';
 
 export type JiraRequest = (path: string, init?: RequestInit) => Promise<any>;
 
@@ -281,6 +284,44 @@ export class JiraProvider {
         ),
       ),
     ];
+  }
+
+  async preview(key: string): Promise<IssuePreview> {
+    const [raw, comments] = await Promise.all([
+      this.call(
+        `${issuePath(key)}?fields=${encodeURIComponent([...ISSUE_FIELDS, 'description'].join(','))}`,
+        undefined,
+        `load preview for ${key}`,
+      ),
+      this.call(
+        `${issuePath(key, '/comment')}?maxResults=10&orderBy=-created`,
+        undefined,
+        `load comments for ${key}`,
+      )
+        .then((page) => {
+          if (!Array.isArray(page?.comments))
+            throw new Error('Jira returned invalid comments.');
+          return { page, error: undefined };
+        })
+        .catch((error: unknown) => ({
+          page: undefined,
+          error: error instanceof Error ? error.message : String(error),
+        })),
+    ]);
+    return {
+      issue: parseIssue(raw),
+      description: documentText(raw.fields?.description),
+      comments: (comments.page?.comments ?? [])
+        .slice(0, 10)
+        .map((comment: any) => ({
+          id: String(comment.id),
+          author: String(comment.author?.displayName ?? 'Unknown author'),
+          created: String(comment.created ?? ''),
+          body: documentText(comment.body),
+        })),
+      totalComments: Number(comments.page?.total ?? 0),
+      ...(comments.error ? { commentsError: comments.error } : {}),
+    };
   }
 
   async search(query: string): Promise<Issue[]> {

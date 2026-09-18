@@ -2032,3 +2032,124 @@ kbd {
 .undo-banner small {
   opacity: 0.7;
 }
+
+.tree-with-preview {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.tree-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.issue-preview {
+  position: relative;
+  flex: 0 0 auto;
+  max-width: calc(100% - 120px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--panel-raised);
+}
+.issue-preview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.preview-content {
+  overflow: auto;
+  padding: 0 16px 20px;
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+.preview-content h2 {
+  font-size: 16px;
+}
+.preview-content h3 {
+  font-size: 12px;
+  margin-top: 24px;
+}
+.preview-text {
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+.preview-comment,
+.preview-link {
+  padding: 12px 0;
+  border-top: 1px solid var(--border-soft);
+}
+.preview-comment time {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 5px 0 8px;
+}
+.preview-link > strong,
+.preview-link > button {
+  display: block;
+  margin-bottom: 8px;
+}
+.preview-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+.preview-resize {
+  position: absolute;
+  z-index: 4;
+  width: 7px;
+  left: -4px;
+  top: 0;
+  bottom: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+.preview-resize:hover,
+.preview-resize:focus-visible {
+  background: var(--selected-border);
+}
+.row-actions {
+  display: flex;
+  justify-content: center;
+}
+.row-actions .row-menu-trigger {
+  opacity: 1;
+}
+.row-context-menu {
+  position: fixed;
+  z-index: 100;
+  width: 186px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  background: var(--panel-raised);
+}
+.row-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  background: transparent;
+}
+.row-context-menu button:hover,
+.row-context-menu button:focus {
+  background: var(--hover);
+}
+.preview-content .text-button {
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  text-align: left;
+  cursor: pointer;
+}
+.preview-content .text-button:hover {
+  text-decoration: underline;
+}

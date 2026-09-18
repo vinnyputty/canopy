@@ -7,6 +7,7 @@ launch(async (storage) => {
   const demo = new ControlledDemoProvider(
     (await storage.read<Issue[]>('demo')) ?? undefined,
     (issues) => storage.write('demo', issues),
+    process.env.CANOPY_SMOKE_PREVIEW_FAILURE === '1',
   );
   Object.assign(globalThis, { canopySmoke: demo });
   let rankAttempts = 0;
@@ -40,6 +41,7 @@ launch(async (storage) => {
           };
         return snapshot;
       },
+      preview: (key) => demo.preview(key),
       search: (query) => demo.search(query),
       editOptions: (key, query) => demo.editOptions(key, query),
       update: (key, patch) => demo.update(key, patch),

@@ -108,9 +108,9 @@ export function tableStyle(view: RootView) {
           ? `minmax(${view.widths.issue}px, 1fr)`
           : `${view.widths[column]}px`,
       ),
-      '34px',
+      '62px',
     ].join(' '),
-    '--table-width': `${view.columns.reduce((sum, column) => sum + view.widths[column], 34)}px`,
+    '--table-width': `${view.columns.reduce((sum, column) => sum + view.widths[column], 62)}px`,
     '--tree-font-size': `${{ small: 11, medium: 13, large: 15 }[view.textSize]}px`,
     '--row-height': `${view.spacing === 'compact' ? 30 : 40}px`,
   };

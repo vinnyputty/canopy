@@ -3,6 +3,7 @@ import type {
   EditOptions,
   Issue,
   IssuePatch,
+  IssuePreview,
   TreeSnapshot,
 } from '../../src/shared/types';
 
@@ -69,9 +70,11 @@ demoSeeds[8].links = [
 ];
 
 export class DemoProvider {
+  private previewRetryPending = false;
   constructor(
     private issues = structuredClone(demoSeeds),
     private persist: (issues: Issue[]) => Promise<void> = async () => {},
+    private previewFailureOnce = false,
   ) {}
   private get(key: string) {
     const found = this.issues.find((i) => i.key === key.toUpperCase());
@@ -105,6 +108,33 @@ export class DemoProvider {
     return priorities
       .filter((priority) => ids.has(priority.id))
       .map((priority) => priority.id);
+  }
+  async preview(key: string): Promise<IssuePreview> {
+    const commentsError =
+      key === 'CAN-108' && this.previewFailureOnce
+        ? 'Comments temporarily unavailable.'
+        : undefined;
+    if (commentsError) {
+      this.previewFailureOnce = false;
+      this.previewRetryPending = true;
+    } else if (key === 'CAN-108' && this.previewRetryPending) {
+      this.previewRetryPending = false;
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
+    return {
+      ...(commentsError ? { commentsError } : {}),
+      issue: structuredClone(this.get(key)),
+      description: `Details for ${key}.\n\nExplore this issue without leaving the tree.`,
+      comments: [
+        {
+          id: 'demo-comment',
+          author: 'Alex Morgan',
+          created: '2026-01-01T12:00:00Z',
+          body: 'Ready for review.',
+        },
+      ],
+      totalComments: 1,
+    };
   }
   async search(query: string) {
     return structuredClone(

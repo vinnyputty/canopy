@@ -539,3 +539,71 @@ describe('Jira table capabilities', () => {
     await assert.rejects(missing.priorityOrder(['A-2']), /could not be read/);
   });
 });
+
+describe('JiraProvider preview', () => {
+  it('loads recent comments and preserves relationship direction separately from hierarchy', async () => {
+    const request = recordingRequest((path) => {
+      if (path.includes('/comment?')) {
+        assert.ok(path.includes('maxResults=10&orderBy=-created'));
+        return {
+          total: 20,
+          comments: [
+            {
+              id: '1',
+              author: { displayName: 'Ada' },
+              created: '2026-01-01T12:00:00Z',
+              body: {
+                type: 'doc',
+                content: [
+                  {
+                    type: 'paragraph',
+                    content: [{ type: 'text', text: 'Recent comment' }],
+                  },
+                ],
+              },
+            },
+          ],
+        };
+      }
+      assert.ok(decodeURIComponent(path).includes('description'));
+      return rawIssue('TEST-1', 'PARENT-1', {
+        description: 'Details',
+        issuelinks: [
+          {
+            type: { outward: 'blocks', inward: 'is blocked by' },
+            outwardIssue: rawIssue('TEST-2'),
+          },
+          {
+            type: { outward: 'blocks', inward: 'is blocked by' },
+            inwardIssue: rawIssue('TEST-3'),
+          },
+        ],
+      });
+    });
+    const result = await new JiraProvider(request).preview('TEST-1');
+    assert.equal(result.description, 'Details');
+    assert.equal(result.comments[0].body, 'Recent comment');
+    assert.equal(result.totalComments, 20);
+    assert.deepEqual(
+      result.issue.links.map((link) => link.relationship),
+      ['blocks', 'is blocked by'],
+    );
+    assert.equal(result.issue.parentKey, 'PARENT-1');
+  });
+  it('retains issue details when comments fail and can retry', async () => {
+    let fails = true;
+    const provider = new JiraProvider(async (path) => {
+      if (!path.includes('/comment?'))
+        return rawIssue('TEST-1', undefined, {
+          description: 'Still available',
+        });
+      if (fails) throw new Error('No comment access');
+      return { total: 0, comments: [] };
+    });
+    const partial = await provider.preview('TEST-1');
+    assert.equal(partial.description, 'Still available');
+    assert.match(partial.commentsError!, /No comment access/);
+    fails = false;
+    assert.equal((await provider.preview('TEST-1')).commentsError, undefined);
+  });
+});
