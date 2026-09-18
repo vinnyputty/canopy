@@ -1,6 +1,6 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -72,6 +72,9 @@ async function resizeWindow(height) {
       height,
     });
   }, height);
+  await expect
+    .poll(() => page.evaluate(() => window.innerHeight))
+    .toBeLessThanOrEqual(height);
 }
 
 async function openIssue(key) {
@@ -110,6 +113,23 @@ try {
   await openIssue('CAN-100');
   const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
   await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  const rootSummary = 'A calmer place to get things done';
+  const rootTab = page.getByRole('tab', { name: /CAN-100/ });
+  const rootSidebar = page.locator('.side-tab').filter({ hasText: 'CAN-100' });
+  for (const label of [rootTab, rootSidebar]) {
+    await expect(label).toHaveAttribute(
+      'title',
+      `CAN-100: ${rootSummary} · Canopy demo`,
+    );
+    const subtitle = label.locator('small');
+    await expect(subtitle).toHaveText(rootSummary);
+    await expect(subtitle).toHaveCSS('text-overflow', 'ellipsis');
+    expect(
+      await subtitle.evaluate(
+        (element) => element.scrollWidth > element.clientWidth,
+      ),
+    ).toBe(true);
+  }
 
   await page.getByRole('button', { name: 'Expand', exact: true }).click();
   await expect(issue('CAN-108')).toBeVisible();
@@ -164,12 +184,35 @@ try {
     'xpath=ancestor::div[contains(@class,"issue-row")]/following-sibling::div[contains(@class,"linked-panel")]',
   );
   await expect(links.getByText('CAN-200')).toBeVisible();
+  await resizeWindow(600);
+  await links.getByRole('button', { name: 'Open tree' }).focus();
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.scrollTop = 100;
+  });
+  const linkedSourceScroll = await page
+    .locator('.tree-scroll')
+    .evaluate((element) => element.scrollTop);
+  expect(linkedSourceScroll).toBeGreaterThan(0);
   await links.getByRole('button', { name: 'Open tree' }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
   ).toBeVisible();
   await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeVisible();
   await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(issue('CAN-108')).toHaveAttribute('aria-selected', 'true');
+  await expect(links.getByText('CAN-200')).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+    )
+    .toBe(linkedSourceScroll);
+  await page.getByRole('button', { name: 'Forward', exact: true }).click();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
 
   await page.keyboard.press(`${modifier}+1`);
   await expect(tree).toBeVisible();
@@ -270,9 +313,26 @@ try {
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');
 
   const divider = page.getByRole('separator', { name: 'Sidebar width' });
+  const dividerBounds = await divider.boundingBox();
+  await page.mouse.move(
+    dividerBounds.x + dividerBounds.width / 2,
+    dividerBounds.y + 40,
+  );
+  await page.mouse.down();
+  await page.mouse.move(300, dividerBounds.y + 40);
+  await page.mouse.up();
+  await expect(divider).toHaveAttribute('aria-valuenow', '300');
+  expect((await page.locator('.sidebar').boundingBox()).width).toBe(300);
   await divider.focus();
+  await page.keyboard.press('Home');
+  await expect(divider).toHaveAttribute('aria-valuenow', '180');
+  await page.keyboard.press('ArrowRight');
+  await expect(divider).toHaveAttribute('aria-valuenow', '190');
   await page.keyboard.press('End');
   await expect(divider).toHaveAttribute('aria-valuenow', '400');
+  // Save a genuinely changed drag order, rather than the original open order.
+  await firstTab.dragTo(secondTab);
+  await expect(page.getByRole('tab').first()).toContainText('CAN-200');
   await resizeWindow(700);
   const savedWindowBounds = await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].getNormalBounds(),
@@ -284,14 +344,39 @@ try {
   await expect(
     page.getByRole('dialog').getByText('Recent roots'),
   ).toBeVisible();
-  await page.keyboard.press('Escape');
+  const pickerInput = page
+    .getByRole('dialog')
+    .getByLabel('Issue key, Jira URL, or summary');
+  await pickerInput.fill('CAN-100');
+  await pickerInput.press('Alt+ArrowLeft');
+  await expect(secondTab).toHaveAttribute('aria-selected', 'true');
+  await expect(pickerInput).toHaveValue('CAN-100');
+  await pickerInput.fill('');
+  await page
+    .getByRole('dialog')
+    .getByRole('button', { name: /CAN-100 A calmer/ })
+    .click();
+  await expect(firstTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab')).toHaveCount(2);
+  await secondTab.click();
 
   // Workspace writes are intentionally debounced.
   await page.waitForTimeout(350);
   await close();
+  // The preview UI belongs to the preview feature; exercise its saved-width
+  // contract through the same workspace file that a resized preview updates.
+  const savedWorkspace = JSON.parse(
+    await readFile(join(userData, 'workspace.json'), 'utf8'),
+  );
+  expect(savedWorkspace.previewWidth).toBe(420);
+  savedWorkspace.previewWidth = 560;
+  await writeFile(
+    join(userData, 'workspace.json'),
+    JSON.stringify(savedWorkspace),
+  );
   await launch();
 
-  await expect(page.getByRole('tab').first()).toContainText('CAN-100');
+  await expect(page.getByRole('tab').first()).toContainText('CAN-200');
   await expect(
     page.getByRole('navigation', { name: 'Pinned roots' }),
   ).toBeVisible();
@@ -314,6 +399,47 @@ try {
   ).toBeVisible();
   await page.keyboard.press('Escape');
 
+  const reloadedWorkspace = await page.evaluate(() =>
+    window.canopy.loadWorkspace(),
+  );
+  expect(reloadedWorkspace.previewWidth).toBe(560);
+  for (const [field, value] of [
+    ['sidebarWidth', 179],
+    ['sidebarWidth', 401],
+    ['previewWidth', 299],
+    ['previewWidth', 721],
+  ]) {
+    const error = await page.evaluate(
+      async ({ field, value }) => {
+        const workspace = await window.canopy.loadWorkspace();
+        try {
+          await window.canopy.saveWorkspace({ ...workspace, [field]: value });
+          return '';
+        } catch (error) {
+          return error.message;
+        }
+      },
+      { field, value },
+    );
+    expect(error).toContain('Invalid pane width');
+  }
+  // Closed destinations can be revisited; forward then returns to the source.
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'middle' });
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.getByRole('button', { name: 'Forward', exact: true }).click();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.getByRole('tab', { name: /CAN-100/ }).focus();
+  await page.keyboard.press('Alt+Shift+ArrowLeft');
+  await expect(page.getByRole('tab').first()).toContainText('CAN-100');
   await page.getByRole('tab', { name: /CAN-100/ }).click();
   await expect(issue('CAN-111').getByText(summary)).toBeVisible();
   await expect(issue('CAN-111').getByText('Highest')).toBeVisible();
@@ -342,6 +468,16 @@ try {
     'true',
   );
   await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
+  await page
+    .getByRole('menuitem', { name: 'Open in Jira', exact: true })
+    .click();
+  await expect(page.locator('.error-banner')).toContainText(
+    'Couldn’t open CAN-100:',
+  );
+  await expect(page.locator('.error-banner')).toContainText(
+    'Demo issues exist only in Canopy.',
+  );
+  await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Copy root link' }).click();
   expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
     'https://example.invalid/browse/CAN-100',
@@ -349,7 +485,15 @@ try {
   await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Close others' }).click();
   await expect(page.getByRole('tab')).toHaveCount(1);
+  await resizeWindow(600);
   await issue('CAN-111').focus();
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.scrollTop = 120;
+  });
+  const closedScroll = await page
+    .locator('.tree-scroll')
+    .evaluate((element) => element.scrollTop);
+  expect(closedScroll).toBeGreaterThan(0);
   await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'middle' });
   await expect(page.getByRole('tab')).toHaveCount(0);
   await expect(
@@ -359,7 +503,19 @@ try {
   await close();
   await launch();
   await expect(page.getByRole('tab')).toHaveCount(0);
+  // A favorite opens a closed root; reopen restores into that existing tab.
+  await page
+    .getByRole('navigation', { name: 'Pinned roots' })
+    .getByRole('button', { name: /CAN-100 A calmer/ })
+    .click();
+  await expect(page.getByRole('tab')).toHaveCount(1);
   await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(page.getByRole('tab')).toHaveCount(1);
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+    )
+    .toBe(closedScroll);
   await expect(page.getByRole('tab', { name: /CAN-100/ })).toHaveAttribute(
     'aria-selected',
     'true',
@@ -371,6 +527,24 @@ try {
   await expect(
     page.getByRole('checkbox', { name: 'Hide done' }),
   ).not.toBeChecked();
+
+  expect(
+    (await page.evaluate(() => window.canopy.loadWorkspace())).previewWidth,
+  ).toBe(560);
+  await page
+    .getByRole('button', { name: 'Unpin CAN-100', exact: true })
+    .click();
+  await expect(
+    page.getByRole('navigation', { name: 'Pinned roots' }),
+  ).toHaveCount(0);
+  await expect(page.getByRole('tab')).toHaveCount(1);
+  await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Pin root', exact: true }).click();
+  await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Unpin root', exact: true }).click();
+  await expect(
+    page.getByRole('navigation', { name: 'Pinned roots' }),
+  ).toHaveCount(0);
 
   await page.getByTitle('Disconnect Canopy demo').click();
   await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);

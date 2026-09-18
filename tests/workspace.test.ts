@@ -41,6 +41,30 @@ describe('workspace restoration', () => {
     assert.equal(next.activeTabId, '2');
     assert.equal(reorderTab(current, 'missing', '2'), current);
   });
+  it('leaves empty restore/navigation and unknown closes unchanged', () => {
+    const current = initial();
+    assert.equal(reopenTab(current), current);
+    assert.equal(closeTabs(current, ['missing']), current);
+    assert.equal(reorderTab(current, '1', '1'), current);
+    assert.equal(reorderTab(current, '1', 'missing'), current);
+    const history = { back: [], forward: [] };
+    assert.deepEqual(travel(history, tab('1'), 'back'), { history });
+    assert.deepEqual(travel(history, undefined, 'forward'), { history });
+  });
+  it('unpins only the matching site and root without closing its tab', () => {
+    const current = initial();
+    const pinned = togglePinned(
+      togglePinned(current, tab('1')),
+      tab('1', 'other-site'),
+    );
+    const next = togglePinned(pinned, tab('1'));
+    assert.deepEqual(
+      next.pinnedRoots?.map((root) => root.connectionId),
+      ['other-site'],
+    );
+    assert.equal(next.tabs, current.tabs);
+    assert.equal(next.activeTabId, current.activeTabId);
+  });
   it('keeps favorites independent from closed tabs and restores every tab field', () => {
     const current = initial();
     const saved = {
@@ -133,6 +157,26 @@ describe('workspace restoration', () => {
 
 describe('window restoration', () => {
   const primary = { x: 0, y: 0, width: 1440, height: 900 };
+  it('rejects absent displays, absent state, and nonfinite geometry', () => {
+    assert.equal(restoreWindow(null, [primary]), null);
+    assert.equal(
+      restoreWindow({ bounds: primary, maximized: false }, []),
+      null,
+    );
+    assert.equal(
+      restoreWindow({ bounds: { ...primary, x: NaN }, maximized: false }, [
+        primary,
+      ]),
+      null,
+    );
+    assert.equal(
+      restoreWindow(
+        { bounds: { ...primary, height: Infinity }, maximized: false },
+        [primary],
+      ),
+      null,
+    );
+  });
   it('clamps a removed monitor to the primary work area', () => {
     assert.deepEqual(
       restoreWindow(
