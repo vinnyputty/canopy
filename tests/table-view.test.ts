@@ -132,6 +132,32 @@ describe('table sorting', () => {
       ['A-3', 'A-10', 'A-4', 'A-2'],
     );
   });
+  it('sorts status names in both directions independently of status category', () => {
+    const tree = buildIssueTree(
+      [
+        issue('A-1'),
+        issue('A-2', 'A-1', {
+          status: { id: 'z', name: 'Waiting', category: 'new' },
+        }),
+        issue('A-3', 'A-1', {
+          status: { id: 'a', name: 'Closed', category: 'done' },
+        }),
+      ],
+      'A-1',
+    )!;
+    assert.deepEqual(
+      sortIssueTree(tree, { column: 'status', direction: 'asc' }).children.map(
+        (node) => node.issue.key,
+      ),
+      ['A-3', 'A-2'],
+    );
+    assert.deepEqual(
+      sortIssueTree(tree, { column: 'status', direction: 'desc' }).children.map(
+        (node) => node.issue.key,
+      ),
+      ['A-2', 'A-3'],
+    );
+  });
   it('gates rank writes by root, permissions, capability and active sort', () => {
     const snapshot: TreeSnapshot = {
       rootKey: 'A-1',
@@ -178,13 +204,24 @@ describe('persisted table views', () => {
     assert.equal(saved.tabs[1].hideDone, false);
     assert.deepEqual(saved.tabs[1].filters, { priority: 'p9' });
     assert.equal(rootView(saved, other).textSize, 'medium');
-    saved = setRootView(saved, b, { textSize: 'small' });
+    saved = setRootView(saved, b, {
+      textSize: 'small',
+      widths: { ...DEFAULT_VIEW.widths, issue: 650 },
+      sort: { column: 'status', direction: 'desc' },
+      spacing: 'comfortable',
+    });
     saved = setRootView(saved, a, { textSize: 'medium' });
     saved = defaultRootView(saved, a);
     assert.equal(rootView(saved, b).textSize, 'small');
     saved = { ...saved, tabs: saved.tabs.filter((t) => t.id !== b.id) };
     saved = JSON.parse(JSON.stringify(saved));
     assert.equal(rootView(saved, b).textSize, 'small');
+    assert.equal(rootView(saved, b).widths.issue, 650);
+    assert.deepEqual(rootView(saved, b).sort, {
+      column: 'status',
+      direction: 'desc',
+    });
+    assert.equal(rootView(saved, b).spacing, 'comfortable');
     saved = resetRootView(saved, b);
     assert.equal(rootView(saved, b).textSize, 'medium');
     assert.deepEqual(rootView(saved, b).filters, { priority: 'p9' });

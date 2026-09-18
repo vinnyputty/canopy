@@ -32,11 +32,11 @@ let app;
 let page;
 const pageErrors = [];
 
-async function launch(production = false) {
+async function launch(production = false, fixtureEnv = {}) {
   app = await electron.launch({
     executablePath,
     args: [production ? join(appPath, 'dist/main.cjs') : appPath],
-    env,
+    env: { ...env, ...fixtureEnv },
   });
   page = await app.firstWindow();
   page.on('pageerror', (error) => pageErrors.push(error));
@@ -955,6 +955,314 @@ try {
   await expect(
     page.getByRole('navigation', { name: 'Pinned roots' }),
   ).toHaveCount(0);
+
+  // Run table scenarios after the workspace held-load fixture has completed.
+  {
+    await page.waitForTimeout(350);
+    await close();
+    await launch();
+    await openIssue('CAN-100');
+    await page.getByLabel('Filter status').selectOption('');
+    await page.getByLabel('Filter priority').selectOption('');
+    await page.getByLabel('Filter assignee').selectOption('');
+    if (await page.getByRole('button', { name: 'Back to root', exact: true }).isVisible())
+      await page.getByRole('button', { name: 'Back to root', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Hide done', exact: true }).uncheck();
+    await page.getByRole('button', { name: 'Expand', exact: true }).click();
+    await openIssue('CAN-200');
+  // Table presentation is stored per root and survives closing and reopening.
+  await page.locator('.view-settings > summary').click();
+  await page.getByLabel('Text size', { exact: true }).selectOption('large');
+  await page
+    .getByLabel('Row spacing', { exact: true })
+    .selectOption('comfortable');
+  await page.getByLabel('Show Priority column').uncheck();
+  await page.getByLabel('Move Status column left').click();
+  await page.getByLabel('Sort by', { exact: true }).selectOption('status');
+  await page.getByLabel('Sort direction').selectOption('desc');
+  await page
+    .getByRole('checkbox', { name: 'Hide done', exact: true })
+    .uncheck();
+  await page.locator('.view-settings > summary').click();
+  await expect(page.locator('.column-heading').nth(1)).toHaveAttribute(
+    'data-column',
+    'status',
+  );
+  await expect(
+    page.getByRole('button', { name: 'Sort by Priority', exact: true }),
+  ).toHaveCount(0);
+  const statusResize = page.getByRole('separator', {
+    name: 'Resize Status column',
+  });
+  await statusResize.press('ArrowRight');
+  await expect(statusResize).toHaveAttribute('aria-valuenow', '128');
+  const divider = await statusResize.boundingBox();
+  await page.mouse.move(
+    divider.x + divider.width / 2,
+    divider.y + divider.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    divider.x + divider.width / 2 + 20,
+    divider.y + divider.height / 2,
+  );
+  await page.mouse.up();
+  await expect(statusResize).toHaveAttribute('aria-valuenow', '148');
+  await statusResize.dblclick();
+  await expect(statusResize).toHaveAttribute('aria-valuenow', '118');
+  await statusResize.press('ArrowRight');
+  const statusHeader = page.getByRole('button', {
+    name: 'Sort by Status',
+    exact: true,
+  });
+  const assigneeHeader = page.getByRole('button', {
+    name: 'Sort by Assignee',
+    exact: true,
+  });
+  await assigneeHeader.dragTo(statusHeader);
+  await expect(page.locator('.column-heading').nth(1)).toHaveAttribute(
+    'data-column',
+    'assignee',
+  );
+  await statusHeader.dragTo(assigneeHeader);
+  await expect(page.locator('.column-heading').nth(1)).toHaveAttribute(
+    'data-column',
+    'status',
+  );
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '40px',
+  );
+  await page.keyboard.press(`${modifier}+w`);
+  await openIssue('CAN-200');
+  await expect(
+    page.getByRole('separator', { name: 'Resize Status column' }),
+  ).toHaveAttribute('aria-valuenow', '128');
+  await expect(page.locator('.column-heading').nth(1)).toHaveAttribute(
+    'data-column',
+    'status',
+  );
+
+  // Workspace writes are intentionally debounced.
+  await page.waitForTimeout(350);
+  await close();
+  await launch();
+
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeVisible();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeVisible();
+  await expect(
+    page.getByRole('tree', { name: 'CAN-200 issue tree' }),
+  ).toBeVisible();
+  await page.keyboard.press(paletteShortcut);
+  await expect(
+    page.getByRole('dialog', { name: 'Command palette' }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await expect(
+    page.getByRole('separator', { name: 'Resize Status column' }),
+  ).toHaveAttribute('aria-valuenow', '128');
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
+  await page.locator('.view-settings > summary').click();
+  await expect(page.getByLabel('Sort by', { exact: true })).toHaveValue(
+    'status',
+  );
+  await expect(page.getByLabel('Sort direction')).toHaveValue('desc');
+  await expect(
+    page.getByRole('checkbox', { name: 'Hide done', exact: true }),
+  ).not.toBeChecked();
+  await expect(page.getByLabel('Row spacing', { exact: true })).toHaveValue(
+    'comfortable',
+  );
+  await expect(page.getByLabel('Show Priority column')).not.toBeChecked();
+  // Text size and row spacing remain independent in every combination used here.
+  await page.getByLabel('Text size', { exact: true }).selectOption('small');
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '40px',
+  );
+  await page.getByLabel('Row spacing', { exact: true }).selectOption('compact');
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '30px',
+  );
+  await page.getByLabel('Text size', { exact: true }).selectOption('large');
+  await page
+    .getByLabel('Row spacing', { exact: true })
+    .selectOption('comfortable');
+  await page.getByRole('button', { name: 'Use as connection default' }).click();
+  await page.getByLabel('Text size', { exact: true }).selectOption('small');
+  await page
+    .getByRole('button', { name: 'Reset this root to default' })
+    .click();
+  await expect(page.getByLabel('Text size', { exact: true })).toHaveValue(
+    'large',
+  );
+  await page.locator('.view-settings > summary').click();
+
+  // An uncustomized root inherits the saved connection view, including Hide done.
+  await openIssue('CAN-201');
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
+  await expect(
+    page.getByRole('checkbox', { name: 'Hide done', exact: true }),
+  ).not.toBeChecked();
+  await expect(
+    page.getByRole('button', { name: 'Sort by Priority', exact: true }),
+  ).toHaveCount(0);
+  await page.keyboard.press(`${modifier}+w`);
+
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await expect(issue('CAN-111').getByText(summary)).toBeVisible();
+  await expect(issue('CAN-111').getByText('Highest')).toBeVisible();
+  await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();
+  await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
+  await expectIssueBefore('CAN-112', 'CAN-111');
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '13px');
+  await expect(
+    issue('CAN-100').locator(':scope > .issue-row .grab'),
+  ).toHaveCount(0);
+  await page
+    .getByRole('button', { name: 'Sort by Priority', exact: true })
+    .click();
+  await expect(
+    page.getByText('Loading Jira priority order…', { exact: false }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: /Reorder CAN-111/ }),
+  ).toBeDisabled();
+  await expect(
+    page.getByText('Ranking is disabled while a column sort is active.', {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  const rankAttempts = await readFile(
+    join(userData, 'rank-attempts.json'),
+    'utf8',
+  );
+  const disabledHandle = page.getByRole('button', { name: /Reorder CAN-111/ });
+  await expect(disabledHandle).toHaveAttribute('draggable', 'false');
+  // Dispatch a shortcut directly too: the handler and write guard must reject it.
+  await disabledHandle.dispatchEvent('keydown', {
+    key: 'ArrowDown',
+    altKey: true,
+    bubbles: true,
+  });
+  await disabledHandle.dispatchEvent('dragstart', { bubbles: true });
+  await issue('CAN-112')
+    .locator(':scope > .issue-row')
+    .dispatchEvent('drop', { bubbles: true });
+  await page.waitForTimeout(100);
+  expect(await readFile(join(userData, 'rank-attempts.json'), 'utf8')).toBe(
+    rankAttempts,
+  );
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  for (const [name, first, second] of [
+    ['Issue summary', 'CAN-111', 'CAN-112'],
+    ['Assignee', 'CAN-112', 'CAN-111'],
+    ['Status', 'CAN-111', 'CAN-112'],
+  ]) {
+    const header = page.getByRole('button', {
+      name: `Sort by ${name}`,
+      exact: true,
+    });
+    await header.click();
+    await expectIssueBefore(first, second);
+    await header.click();
+    await expectIssueBefore(second, first);
+    await expect(
+      issue('CAN-110').locator(
+        ':scope > [role="group"] > [data-tree-key="CAN-111"]',
+      ),
+    ).toBeVisible();
+  }
+  await page.locator('.view-settings > summary').click();
+  await page.getByLabel('Sort by', { exact: true }).selectOption('rank');
+  await page.locator('.view-settings > summary').click();
+  await expectIssueBefore('CAN-112', 'CAN-111');
+  const headerTop = (await page.locator('.column-head').boundingBox()).y;
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.style.maxHeight = '180px';
+    element.scrollTop = 200;
+  });
+  expect(
+    Math.abs((await page.locator('.column-head').boundingBox()).y - headerTop),
+  ).toBeLessThan(1);
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.style.maxHeight = '';
+    element.scrollTop = 0;
+  });
+
+  await page.getByTitle('Open in Jira', { exact: true }).first().click();
+  const errorText = page.locator('.error-banner span').first();
+  await expect(errorText).toContainText('Demo issues exist only in Canopy.');
+  await expect(errorText).toHaveCSS('user-select', 'text');
+  await errorText.selectText();
+  await page.keyboard.press(`${modifier}+c`);
+  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toContain(
+    'Demo issues exist only in Canopy.',
+  );
+
+  // Capability failures keep the tree readable and remove every rank action.
+  await page.waitForTimeout(350);
+  for (const state of ['unsupported', 'unknown']) {
+    await close();
+    await launch(false, { CANOPY_SMOKE_RANKING: state });
+    await expect(
+      page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+    ).toBeVisible();
+    await expect(page.locator('.grab')).toHaveCount(0);
+    await expect(
+      page.getByText(
+        state === 'unsupported'
+          ? 'Jira Rank is unavailable for this tree.'
+          : 'Ranking permissions could not be verified. Refresh to try again.',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await issue('CAN-111').dispatchEvent('keydown', {
+      key: 'ArrowUp',
+      altKey: true,
+      bubbles: true,
+    });
+    await page.waitForTimeout(100);
+    expect(
+      JSON.parse(await readFile(join(userData, 'rank-attempts.json'), 'utf8')),
+    ).toBe(0);
+  }
+  await close();
+  await launch(false, { CANOPY_SMOKE_PRIORITY_FAILURES: '1' });
+  await expect(
+    page.getByRole('button', { name: /Reorder CAN-111/ }),
+  ).toBeEnabled();
+  await page
+    .getByRole('button', { name: 'Sort by Priority', exact: true })
+    .click();
+  await expect(
+    page.getByText('Priority order could not be loaded:', { exact: false }),
+  ).toBeVisible();
+  await expectIssueBefore('CAN-112', 'CAN-111');
+  await expect(
+    page.getByRole('button', { name: /Reorder CAN-111/ }),
+  ).toBeDisabled();
+  await page.getByRole('button', { name: 'Retry priority sort' }).click();
+  await expect(
+    page.getByText('Priority order could not be loaded:', { exact: false }),
+  ).toHaveCount(0);
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await expect(
+    issue('CAN-110').locator(
+      ':scope > [role="group"] > [data-tree-key="CAN-111"]',
+    ),
+  ).toBeVisible();
+  expect(
+    JSON.parse(await readFile(join(userData, 'rank-attempts.json'), 'utf8')),
+  ).toBe(0);
+
+  }
 
   await page.getByTitle('Disconnect Canopy demo').click();
   await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);

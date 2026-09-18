@@ -140,6 +140,8 @@ describe('JiraProvider tree', () => {
     assert.deepEqual(snapshot.warnings, [
       'Rank ordering is unavailable for this Jira site; children are ordered by issue key.',
     ]);
+    assert.equal(snapshot.ranking?.state, 'unsupported');
+    assert.deepEqual(snapshot.ranking?.issueKeys, []);
     assert.equal(request.calls.length, 3);
   });
 
@@ -407,6 +409,53 @@ describe('Jira table capabilities', () => {
       state: 'supported',
       issueKeys: ['CHILD-2'],
     });
+  });
+  it('marks denied ranking permissions unsupported and excludes every issue', async () => {
+    const provider = new JiraProvider(async (path, init) => {
+      if (path.startsWith('/rest/api/3/issue/ROOT-1?'))
+        return rawIssue('ROOT-1');
+      if (path === '/rest/api/3/permissions/check')
+        return { projectPermissions: [] };
+      return {
+        issues: body(init).jql.includes('"ROOT-1"')
+          ? [rawIssue('CHILD-2', 'ROOT-1')]
+          : [],
+        isLast: true,
+      };
+    });
+    const snapshot = await provider.tree('ROOT-1');
+    assert.equal(snapshot.ranking?.state, 'unsupported');
+    assert.match(snapshot.ranking!.reason!, /Schedule issues and Edit issues/);
+    assert.deepEqual(snapshot.ranking?.issueKeys, []);
+  });
+  it('batches ranking permission checks at the API limit without losing the last issues', async () => {
+    const sizes: number[] = [];
+    const provider = new JiraProvider(async (path, init) => {
+      if (path.startsWith('/rest/api/3/issue/ROOT-1?'))
+        return rawIssue('ROOT-1');
+      const request = body(init);
+      if (path === '/rest/api/3/permissions/check') {
+        const ids = request.projectPermissions[0].issues;
+        sizes.push(ids.length);
+        return {
+          projectPermissions: ['SCHEDULE_ISSUES', 'EDIT_ISSUES'].map(
+            (permission) => ({ permission, issues: ids }),
+          ),
+        };
+      }
+      return {
+        issues: request.jql.includes('"ROOT-1"')
+          ? Array.from({ length: 1001 }, (_, index) =>
+              rawIssue(`CHILD-${index + 2}`, 'ROOT-1'),
+            )
+          : [],
+        isLast: true,
+      };
+    });
+    const snapshot = await provider.tree('ROOT-1');
+    assert.deepEqual(sizes, [1000, 1]);
+    assert.equal(snapshot.ranking?.issueKeys.length, 1001);
+    assert.ok(snapshot.ranking?.issueKeys.includes('CHILD-1002'));
   });
   it('reports unknown permissions without failing tree loading', async () => {
     const provider = new JiraProvider(async (path, init) => {
