@@ -7,6 +7,9 @@ import React, {
 } from 'react';
 import {
   AlertCircle,
+  ArrowLeft,
+  ArrowRight,
+  Pin,
   Check,
   ChevronDown,
   ChevronRight,
@@ -35,6 +38,7 @@ import type {
   EditOptions,
   Issue,
   IssuePatch,
+  RootReference,
   TabState,
   TreeSnapshot,
   Workspace,
@@ -53,6 +57,18 @@ import {
   type IssueNode,
 } from './tree';
 import { StatusColors } from './status-colors';
+import {
+  activateTab,
+  closeTabs,
+  removeConnection,
+  reorderTab,
+  reopenTab,
+  sameRoot,
+  togglePinned,
+  travel,
+  visit,
+  type Navigation,
+} from './workspace';
 
 const PLATFORM_SHORTCUTS = defaultShortcuts();
 const EMPTY_WORKSPACE: Workspace = {
@@ -61,6 +77,8 @@ const EMPTY_WORKSPACE: Workspace = {
   shortcuts: PLATFORM_SHORTCUTS,
   theme: 'system',
   sidebarCollapsed: false,
+  sidebarWidth: 220,
+  previewWidth: 420,
 };
 
 type EditField = 'summary' | 'priority' | 'assignee' | 'status';
@@ -128,6 +146,17 @@ export function App() {
   const [options, setOptions] = useState<Record<string, EditOptions>>({});
   const [saving, setSaving] = useState<Set<string>>(new Set());
   const [dragKey, setDragKey] = useState<string | null>(null);
+  const [tabMenu, setTabMenu] = useState<{
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [history, setHistory] = useState<Navigation>({ back: [], forward: [] });
+  const historyRef = useRef(history);
+  const workspaceRef = useRef(workspace);
+  const draggedTab = useRef<string | null>(null);
+  workspaceRef.current = workspace;
+  historyRef.current = history;
   const scrollRef = useRef<HTMLDivElement>(null);
   const attemptedLoads = useRef(new Set<string>());
   const inflightRefreshes = useRef(new Set<string>());
@@ -186,8 +215,18 @@ export function App() {
         setWorkspace(
           saved
             ? {
+                ...EMPTY_WORKSPACE,
                 ...saved,
                 tabs,
+                pinnedRoots: saved.pinnedRoots?.filter(
+                  (root) => root.connectionId !== 'demo' || hasDemo,
+                ),
+                recentRoots: saved.recentRoots?.filter(
+                  (root) => root.connectionId !== 'demo' || hasDemo,
+                ),
+                closedTabs: saved.closedTabs?.filter(
+                  (root) => root.connectionId !== 'demo' || hasDemo,
+                ),
                 activeTabId: tabs.some((tab) => tab.id === saved.activeTabId)
                   ? saved.activeTabId
                   : (tabs[0]?.id ?? null),
@@ -296,7 +335,7 @@ export function App() {
       return;
     scrollRef.current.scrollTop = activeTab.scrollTop;
     pendingScrollRestore.current = null;
-  }, [activeTab?.id, Boolean(snapshot)]);
+  }, [activeTab, Boolean(snapshot)]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
     setWorkspace((current) => ({
@@ -307,71 +346,154 @@ export function App() {
     }));
   }, []);
 
-  const openTab = useCallback((connectionId: string, rootKey: string) => {
-    const key = rootKey.toUpperCase();
-    setWorkspace((current) => {
-      const existing = current.tabs.find(
+  const navigate = useCallback((tab: TabState, restoring = false) => {
+    const current = workspaceRef.current;
+    const from = current.tabs.find((item) => item.id === current.activeTabId);
+    if (!restoring) setHistory(visit(historyRef.current, from, tab));
+    pendingScrollRestore.current =
+      current.tabs.find((item) => sameRoot(item, tab))?.id ?? tab.id;
+    setWorkspace((value) => activateTab(value, tab));
+  }, []);
+
+  const selectTab = useCallback(
+    (id: string) => {
+      const tab = workspaceRef.current.tabs.find((item) => item.id === id);
+      if (tab) navigate(tab);
+    },
+    [navigate],
+  );
+
+  const openTab = useCallback(
+    (connectionId: string, rootKey: string) => {
+      const key = rootKey.toUpperCase();
+      const existing = workspaceRef.current.tabs.find(
         (tab) => tab.connectionId === connectionId && tab.rootKey === key,
       );
-      if (existing) return { ...current, activeTabId: existing.id };
-      const id =
-        globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-      return {
-        ...current,
-        tabs: [
-          ...current.tabs,
-          {
-            id,
-            connectionId,
-            rootKey: key,
-            expanded: [key],
-            hideDone: true,
-            scrollTop: 0,
-          },
-        ],
-        activeTabId: id,
-      };
-    });
-    setDialog(null);
-  }, []);
+      navigate(
+        existing ?? {
+          id:
+            globalThis.crypto?.randomUUID?.() ??
+            `${Date.now()}-${Math.random()}`,
+          connectionId,
+          rootKey: key,
+          expanded: [key],
+          hideDone: true,
+          scrollTop: 0,
+        },
+      );
+      setDialog(null);
+    },
+    [navigate],
+  );
 
-  const closeTab = useCallback((id: string) => {
-    setWorkspace((current) => {
-      const index = current.tabs.findIndex((tab) => tab.id === id);
-      const tabs = current.tabs.filter((tab) => tab.id !== id);
-      const activeTabId =
-        current.activeTabId === id
-          ? (tabs[Math.min(index, tabs.length - 1)]?.id ?? null)
-          : current.activeTabId;
-      return { ...current, tabs, activeTabId };
-    });
-    setSnapshots((current) => {
-      const copy = { ...current };
-      delete copy[id];
-      return copy;
-    });
-    attemptedLoads.current.delete(id);
-    delete refreshSequences.current[id];
+  const closeTabIds = useCallback((ids: string[]) => {
+    setWorkspace((current) => closeTabs(current, ids));
+    setTabMenu(null);
   }, []);
+  const closeTab = useCallback(
+    (id: string) => closeTabIds([id]),
+    [closeTabIds],
+  );
+  const reopenClosedTab = useCallback(() => {
+    const current = workspaceRef.current;
+    const next = reopenTab(current);
+    if (next === current) return;
+    const tab = next.tabs.find((item) => item.id === next.activeTabId)!;
+    setHistory(
+      visit(
+        historyRef.current,
+        current.tabs.find((item) => item.id === current.activeTabId),
+        tab,
+      ),
+    );
+    pendingScrollRestore.current = tab.id;
+    setWorkspace(next);
+  }, []);
+  const navigateHistory = useCallback(
+    (direction: 'back' | 'forward') => {
+      const current = workspaceRef.current;
+      const result = travel(
+        historyRef.current,
+        current.tabs.find((item) => item.id === current.activeTabId),
+        direction,
+      );
+      setHistory(result.history);
+      if (result.tab) navigate(result.tab, true);
+    },
+    [navigate],
+  );
 
-  const selectRelativeTab = useCallback((direction: -1 | 1) => {
-    setWorkspace((current) => {
-      if (current.tabs.length < 2) return current;
+  const selectRelativeTab = useCallback(
+    (direction: -1 | 1) => {
+      const current = workspaceRef.current;
+      if (current.tabs.length < 2) return;
       const index = current.tabs.findIndex(
         (tab) => tab.id === current.activeTabId,
       );
-      const next =
-        (index + direction + current.tabs.length) % current.tabs.length;
-      return { ...current, activeTabId: current.tabs[next].id };
-    });
-  }, []);
+      navigate(
+        current.tabs[
+          (index + direction + current.tabs.length) % current.tabs.length
+        ],
+      );
+    },
+    [navigate],
+  );
 
-  const selectTabAt = useCallback((index: number) => {
+  const selectTabAt = useCallback(
+    (index: number) => {
+      const tab = workspaceRef.current.tabs[index];
+      if (tab) navigate(tab);
+    },
+    [navigate],
+  );
+
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = () => setTabMenu(null);
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        close();
+        document
+          .querySelector<HTMLElement>(
+            `[data-tab-id="${CSS.escape(tabMenu.id)}"]`,
+          )
+          ?.focus();
+      }
+    };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('keydown', escape);
+    };
+  }, [tabMenu]);
+
+  useEffect(() => {
     setWorkspace((current) => {
-      const tab = current.tabs[index];
-      return tab ? { ...current, activeTabId: tab.id } : current;
+      let changed = false;
+      const summaries = new Map<string, string>();
+      for (const tab of current.tabs) {
+        const summary = snapshots[tab.id]?.issues.find(
+          (issue) => issue.key === tab.rootKey,
+        )?.summary;
+        if (summary !== undefined)
+          summaries.set(`${tab.connectionId}:${tab.rootKey}`, summary);
+      }
+      const update = <T extends RootReference>(root: T): T => {
+        const summary = summaries.get(`${root.connectionId}:${root.rootKey}`);
+        if (summary === undefined || summary === root.summary) return root;
+        changed = true;
+        return { ...root, summary };
+      };
+      const next = {
+        ...current,
+        tabs: current.tabs.map(update),
+        pinnedRoots: current.pinnedRoots?.map(update),
+        recentRoots: current.recentRoots?.map(update),
+      };
+      return changed ? next : current;
     });
-  }, []);
+  }, [snapshots]);
 
   const openExternal = useCallback(
     async (connectionId: string, key: string) => {
@@ -458,6 +580,32 @@ export function App() {
       const command = Object.keys(workspace.shortcuts).find((id) =>
         matchesShortcut(event, workspace.shortcuts[id]),
       );
+      if (
+        !dialog &&
+        !editor &&
+        !(
+          event.target instanceof Element &&
+          event.target.closest(
+            'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+          )
+        ) &&
+        !event.shiftKey &&
+        ((event.altKey &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          ['ArrowLeft', 'ArrowRight'].includes(event.key)) ||
+          (/mac/i.test(navigator.platform) &&
+            event.metaKey &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            ['[', ']'].includes(event.key)))
+      ) {
+        event.preventDefault();
+        navigateHistory(
+          ['ArrowLeft', '['].includes(event.key) ? 'back' : 'forward',
+        );
+        return;
+      }
       if (!command) return;
       if (command === 'commandPalette') {
         event.preventDefault();
@@ -468,6 +616,9 @@ export function App() {
       } else if (command === 'closeTab' && activeTab) {
         event.preventDefault();
         closeTab(activeTab.id);
+      } else if (command === 'reopenTab') {
+        event.preventDefault();
+        reopenClosedTab();
       } else if (command === 'nextTab') {
         event.preventDefault();
         selectRelativeTab(1);
@@ -500,6 +651,10 @@ export function App() {
     commands,
     selectRelativeTab,
     selectTabAt,
+    reopenClosedTab,
+    navigateHistory,
+    dialog,
+    editor,
   ]);
 
   const loadOptions = useCallback(
@@ -682,6 +837,11 @@ export function App() {
 
   return (
     <div
+      style={
+        {
+          '--sidebar-width': `${workspace.sidebarWidth ?? 220}px`,
+        } as React.CSSProperties
+      }
       className={cx(
         'app',
         workspace.sidebarCollapsed && 'sidebar-is-collapsed',
@@ -709,6 +869,46 @@ export function App() {
           <Menu size={17} />
         </button>
         <div className="sidebar-body">
+          {(workspace.pinnedRoots?.length ?? 0) > 0 && (
+            <>
+              <div className="side-heading">
+                <span>PINNED ROOTS</span>
+              </div>
+              <nav className="side-tabs" aria-label="Pinned roots">
+                {workspace.pinnedRoots!.map((root) => (
+                  <div
+                    className="pinned-root"
+                    key={`${root.connectionId}:${root.rootKey}`}
+                  >
+                    <button
+                      className={cx(
+                        'side-tab',
+                        activeTab && sameRoot(root, activeTab) && 'active',
+                      )}
+                      title={`${root.rootKey}: ${root.summary ?? ''} · ${connections.find((item) => item.id === root.connectionId)?.name ?? 'Unavailable site'}`}
+                      onClick={() => openTab(root.connectionId, root.rootKey)}
+                    >
+                      <Pin size={14} />
+                      <span>
+                        <b>{root.rootKey}</b>
+                        <small>{root.summary ?? root.rootKey}</small>
+                      </span>
+                    </button>
+                    <button
+                      className="icon-button unpin-root"
+                      aria-label={`Unpin ${root.rootKey}`}
+                      onClick={() =>
+                        setWorkspace((current) => togglePinned(current, root))
+                      }
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                ))}
+              </nav>
+            </>
+          )}
+
           <div className="side-heading">
             <span>OPEN TREES</span>
             <button
@@ -723,17 +923,18 @@ export function App() {
             {workspace.tabs.map((tab) => (
               <button
                 key={tab.id}
+                title={`${tab.rootKey}: ${tab.summary ?? ''} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable site'}`}
                 className={cx('side-tab', tab.id === activeTab?.id && 'active')}
-                onClick={() =>
-                  setWorkspace((value) => ({ ...value, activeTabId: tab.id }))
-                }
+                onClick={() => selectTab(tab.id)}
               >
                 <ChevronRight size={14} />
                 <span>
                   <b>{tab.rootKey}</b>
                   <small>
-                    {connections.find((item) => item.id === tab.connectionId)
-                      ?.name ?? 'Unknown site'}
+                    {tab.summary ??
+                      connections.find((item) => item.id === tab.connectionId)
+                        ?.name ??
+                      'Unknown site'}
                   </small>
                 </span>
               </button>
@@ -748,22 +949,25 @@ export function App() {
             connections={connections}
             setConnections={(nextConnections) => {
               setConnections(nextConnections);
-              setWorkspace((current) => {
-                const tabs = current.tabs.filter((tab) =>
-                  nextConnections.some(
-                    (connection) => connection.id === tab.connectionId,
-                  ),
-                );
-                return {
-                  ...current,
-                  tabs,
-                  activeTabId: tabs.some(
-                    (tab) => tab.id === current.activeTabId,
-                  )
-                    ? current.activeTabId
-                    : (tabs[0]?.id ?? null),
-                };
-              });
+              const removed = connections.filter(
+                (item) => !nextConnections.some((next) => next.id === item.id),
+              );
+              setWorkspace((current) =>
+                removed.reduce(
+                  (value, item) => removeConnection(value, item.id),
+                  current,
+                ),
+              );
+              setHistory((current) => ({
+                back: current.back.filter(
+                  (tab) =>
+                    !removed.some((item) => item.id === tab.connectionId),
+                ),
+                forward: current.forward.filter(
+                  (tab) =>
+                    !removed.some((item) => item.id === tab.connectionId),
+                ),
+              }));
             }}
             onConnect={() => setDialog('connect')}
             onError={(message) =>
@@ -778,6 +982,49 @@ export function App() {
           <Settings2 size={16} />
           <span>Keyboard shortcuts</span>
         </button>
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-label="Sidebar width"
+          aria-orientation="vertical"
+          tabIndex={0}
+          aria-valuemin={180}
+          aria-valuemax={400}
+          aria-valuenow={workspace.sidebarWidth ?? 220}
+          onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key))
+              return;
+            event.preventDefault();
+            setWorkspace((current) => ({
+              ...current,
+              sidebarWidth:
+                event.key === 'Home'
+                  ? 180
+                  : event.key === 'End'
+                    ? 400
+                    : Math.max(
+                        180,
+                        Math.min(
+                          400,
+                          (current.sidebarWidth ?? 220) +
+                            (event.key === 'ArrowLeft' ? -10 : 10),
+                        ),
+                      ),
+            }));
+          }}
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            event.preventDefault();
+          }}
+          onPointerMove={(event) => {
+            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            const width = Math.max(180, Math.min(400, event.clientX));
+            setWorkspace((current) => ({ ...current, sidebarWidth: width }));
+          }}
+          onPointerUp={(event) =>
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          }
+        />
       </aside>
 
       <main className="main">
@@ -795,17 +1042,87 @@ export function App() {
             <div
               key={tab.id}
               role="tab"
+              data-tab-id={tab.id}
+              title={`${tab.rootKey}: ${tab.summary ?? ''} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable site'}`}
+              draggable
+              onDragStart={(event) => {
+                draggedTab.current = tab.id;
+                event.dataTransfer.setData('application/x-canopy-tab', tab.id);
+                event.dataTransfer.effectAllowed = 'move';
+              }}
+              onDragEnd={() => {
+                draggedTab.current = null;
+              }}
+              onDragOver={(event) => {
+                if (draggedTab.current) {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'move';
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                const source = draggedTab.current;
+                if (source)
+                  setWorkspace((current) =>
+                    reorderTab(current, source, tab.id),
+                  );
+                draggedTab.current = null;
+              }}
+              onAuxClick={(event) => {
+                if (event.button === 1) {
+                  event.preventDefault();
+                  closeTab(tab.id);
+                }
+              }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setTabMenu({
+                  id: tab.id,
+                  x: Math.min(event.clientX, window.innerWidth - 220),
+                  y: Math.min(event.clientY, window.innerHeight - 245),
+                });
+              }}
               aria-selected={tab.id === activeTab?.id}
               tabIndex={tab.id === activeTab?.id ? 0 : -1}
               className={cx('top-tab', tab.id === activeTab?.id && 'active')}
-              onClick={() =>
-                setWorkspace((value) => ({ ...value, activeTabId: tab.id }))
-              }
+              onClick={() => selectTab(tab.id)}
               onKeyDown={(event) => {
                 if (event.target !== event.currentTarget) return;
+                if (
+                  event.key === 'ContextMenu' ||
+                  (event.shiftKey && event.key === 'F10')
+                ) {
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setTabMenu({
+                    id: tab.id,
+                    x: Math.min(rect.left, window.innerWidth - 220),
+                    y: rect.bottom,
+                  });
+                  return;
+                }
+                if (
+                  event.altKey &&
+                  event.shiftKey &&
+                  ['ArrowLeft', 'ArrowRight'].includes(event.key)
+                ) {
+                  event.preventDefault();
+                  const index = workspace.tabs.findIndex(
+                    (item) => item.id === tab.id,
+                  );
+                  const target =
+                    workspace.tabs[
+                      index + (event.key === 'ArrowLeft' ? -1 : 1)
+                    ];
+                  if (target)
+                    setWorkspace((current) =>
+                      reorderTab(current, tab.id, target.id),
+                    );
+                  return;
+                }
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
-                  setWorkspace((value) => ({ ...value, activeTabId: tab.id }));
+                  selectTab(tab.id);
                 }
                 if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
                   event.preventDefault();
@@ -824,7 +1141,10 @@ export function App() {
               }}
             >
               <CircleDot size={14} />
-              <span>{tab.rootKey}</span>
+              <span className="tab-label">
+                <b>{tab.rootKey}</b>
+                <small>{tab.summary ?? 'Loading…'}</small>
+              </span>
               {refreshing.has(tab.id) && <Loader2 className="spin" size={12} />}
               <button
                 aria-label={`Close ${tab.rootKey}`}
@@ -850,6 +1170,24 @@ export function App() {
         {activeTab && (
           <>
             <header className="toolbar">
+              <button
+                className="icon-button"
+                aria-label="Back"
+                title="Back (Alt+←)"
+                disabled={!history.back.length}
+                onClick={() => navigateHistory('back')}
+              >
+                <ArrowLeft size={16} />
+              </button>
+              <button
+                className="icon-button"
+                aria-label="Forward"
+                title="Forward (Alt+→)"
+                disabled={!history.forward.length}
+                onClick={() => navigateHistory('forward')}
+              >
+                <ArrowRight size={16} />
+              </button>
               <div className="crumb">
                 <span>
                   {
@@ -982,6 +1320,16 @@ export function App() {
                     statusColors={statusColors}
                     depth={0}
                     expanded={expandedSet}
+                    linkedExpanded={new Set(activeTab.linkedExpanded ?? [])}
+                    onToggleLinks={(key) =>
+                      updateTab(activeTab.id, {
+                        linkedExpanded: activeTab.linkedExpanded?.includes(key)
+                          ? activeTab.linkedExpanded.filter(
+                              (item) => item !== key,
+                            )
+                          : [...(activeTab.linkedExpanded ?? []), key],
+                      })
+                    }
                     onToggle={(key) =>
                       updateTab(activeTab.id, {
                         expanded: expandedSet.has(key)
@@ -1056,6 +1404,29 @@ export function App() {
             )}
           </>
         )}
+        {!activeTab &&
+          (history.back.length > 0 || history.forward.length > 0) && (
+            <header className="toolbar">
+              <button
+                className="icon-button"
+                aria-label="Back"
+                title="Back (Alt+←)"
+                disabled={!history.back.length}
+                onClick={() => navigateHistory('back')}
+              >
+                <ArrowLeft size={16} />
+              </button>
+              <button
+                className="icon-button"
+                aria-label="Forward"
+                title="Forward (Alt+→)"
+                disabled={!history.forward.length}
+                onClick={() => navigateHistory('forward')}
+              >
+                <ArrowRight size={16} />
+              </button>
+            </header>
+          )}
         {!activeTab && (
           <Welcome
             onOpen={() => setDialog('open')}
@@ -1066,9 +1437,113 @@ export function App() {
         )}
       </main>
 
+      {tabMenu &&
+        (() => {
+          const tab = workspace.tabs.find((item) => item.id === tabMenu.id);
+          if (!tab) return null;
+          const pinned = workspace.pinnedRoots?.some((root) =>
+            sameRoot(root, tab),
+          );
+          const action = (run: () => void) => {
+            run();
+            setTabMenu(null);
+          };
+          return (
+            <div
+              className="tab-context-menu"
+              role="menu"
+              aria-label={`Actions for ${tab.rootKey}`}
+              style={{ left: tabMenu.x, top: tabMenu.y }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (
+                  !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)
+                )
+                  return;
+                event.preventDefault();
+                const items = [
+                  ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                    'button',
+                  ),
+                ];
+                const index = items.indexOf(
+                  document.activeElement as HTMLButtonElement,
+                );
+                items[
+                  event.key === 'Home'
+                    ? 0
+                    : event.key === 'End'
+                      ? items.length - 1
+                      : (index +
+                          (event.key === 'ArrowDown' ? 1 : -1) +
+                          items.length) %
+                        items.length
+                ]?.focus();
+              }}
+            >
+              <button
+                autoFocus
+                role="menuitem"
+                onClick={() =>
+                  closeTabIds(
+                    workspace.tabs
+                      .filter((item) => item.id !== tab.id)
+                      .map((item) => item.id),
+                  )
+                }
+              >
+                Close others
+              </button>
+              <button
+                role="menuitem"
+                onClick={() =>
+                  closeTabIds(
+                    workspace.tabs
+                      .slice(
+                        workspace.tabs.findIndex((item) => item.id === tab.id) +
+                          1,
+                      )
+                      .map((item) => item.id),
+                  )
+                }
+              >
+                Close to the right
+              </button>
+              <button
+                role="menuitem"
+                onClick={() =>
+                  action(() =>
+                    setWorkspace((current) => togglePinned(current, tab)),
+                  )
+                }
+              >
+                {pinned ? 'Unpin root' : 'Pin root'}
+              </button>
+              <button
+                role="menuitem"
+                onClick={() =>
+                  action(
+                    () => void copyIssueLink(tab.connectionId, tab.rootKey),
+                  )
+                }
+              >
+                Copy root link
+              </button>
+              <button
+                role="menuitem"
+                onClick={() =>
+                  action(() => void openExternal(tab.connectionId, tab.rootKey))
+                }
+              >
+                Open in Jira
+              </button>
+            </div>
+          );
+        })()}
       {dialog === 'open' && (
         <OpenIssueDialog
           connections={connections}
+          recentRoots={workspace.recentRoots ?? []}
           onClose={() => setDialog(null)}
           onOpen={openTab}
         />
@@ -1174,6 +1649,8 @@ type RowsProps = {
   statusColors: ReadonlyMap<string, string>;
   depth: number;
   expanded: Set<string>;
+  linkedExpanded: Set<string>;
+  onToggleLinks: (key: string) => void;
   onToggle: (key: string) => void;
   selectedKey?: string;
   onSelect: (key: string) => void;
@@ -1211,14 +1688,16 @@ function TreeRows(props: RowsProps) {
   const { issue } = node;
   const open = expanded.has(issue.key);
   const hasChildren = node.children.length > 0;
-  const [linksOpen, setLinksOpen] = useState(false);
+  const linksOpen = props.linkedExpanded.has(issue.key);
   const onTreeKey = (event: React.KeyboardEvent) => {
+    if (event.altKey || event.metaKey || event.ctrlKey) return;
     if (
       (event.target as HTMLElement).closest(
         'input,button,select,[role="button"]',
       )
     )
       return;
+    event.stopPropagation();
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       focusNeighbor(issue.key, 1);
@@ -1253,7 +1732,10 @@ function TreeRows(props: RowsProps) {
       tabIndex={
         selectedKey === issue.key || (!selectedKey && depth === 0) ? 0 : -1
       }
-      onFocus={() => onSelect(issue.key)}
+      onFocus={(event) => {
+        event.stopPropagation();
+        onSelect(issue.key);
+      }}
       onKeyDown={onTreeKey}
     >
       <div
@@ -1359,7 +1841,7 @@ function TreeRows(props: RowsProps) {
           {issue.links.length > 0 && (
             <button
               className={cx('link-count', linksOpen && 'active')}
-              onClick={() => setLinksOpen(!linksOpen)}
+              onClick={() => props.onToggleLinks(issue.key)}
               aria-expanded={linksOpen}
               title={`${issue.links.length} linked issue${issue.links.length === 1 ? '' : 's'}`}
             >
@@ -1922,10 +2404,12 @@ function ConnectDialog({
 
 function OpenIssueDialog({
   connections,
+  recentRoots,
   onClose,
   onOpen,
 }: {
   connections: Connection[];
+  recentRoots: RootReference[];
   onClose: () => void;
   onOpen: (connectionId: string, key: string) => void;
 }) {
@@ -2015,6 +2499,28 @@ function OpenIssueDialog({
         )}
         {error && <p className="dialog-error">{error}</p>}
         <div className="search-results">
+          {!query.trim() &&
+            recentRoots.some((root) => root.connectionId === connectionId) && (
+              <>
+                <p className="dialog-note">Recent roots</p>
+                {recentRoots
+                  .filter((root) => root.connectionId === connectionId)
+                  .map((root) => (
+                    <button
+                      key={root.rootKey}
+                      title={root.summary}
+                      onClick={() => onOpen(root.connectionId, root.rootKey)}
+                    >
+                      <CircleDot size={14} />
+                      <span>
+                        <b>{root.rootKey}</b>
+                        {root.summary}
+                      </span>
+                      <ChevronRight size={14} />
+                    </button>
+                  ))}
+              </>
+            )}
           {results.map((issue) => (
             <button
               key={issue.key}

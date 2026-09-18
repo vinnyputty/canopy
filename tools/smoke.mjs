@@ -190,11 +190,112 @@ try {
     page.getByRole('dialog', { name: 'Command palette' }),
   ).toBeHidden();
 
+  // Favorites are independent from open tabs; reopening retains complete state.
+  const firstTab = page.getByRole('tab', { name: /CAN-100/ });
+  const secondTab = page.getByRole('tab', { name: /CAN-200/ });
+  await firstTab.click();
+  await issue('CAN-111').focus();
+  await firstTab.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Pin root', exact: true }).click();
+  const pinnedRoots = page.getByRole('navigation', { name: 'Pinned roots' });
+  await expect(
+    pinnedRoots.getByRole('button', { name: /CAN-100 A calmer/ }),
+  ).toBeVisible();
+  await firstTab.click({ button: 'middle' });
+  await expect(firstTab).toHaveCount(0);
+  await expect(pinnedRoots).toBeVisible();
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(firstTab).toHaveAttribute('aria-selected', 'true');
+  await expect(issue('CAN-111')).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.locator('.linked-panel').getByText('CAN-200'),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('checkbox', { name: 'Hide done' }),
+  ).not.toBeChecked();
+
+  // Drag order is durable; keyboard reordering is also available.
+  await firstTab.dragTo(secondTab);
+  await expect(page.getByRole('tab').first()).toContainText('CAN-100');
+  await firstTab.focus();
+  await page.keyboard.press('Alt+Shift+ArrowRight');
+  await expect(page.getByRole('tab').last()).toContainText('CAN-100');
+  await page.keyboard.press('Alt+Shift+ArrowLeft');
+  await expect(page.getByRole('tab').first()).toContainText('CAN-100');
+
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].setBounds({
+      x: 40,
+      y: 50,
+      width: 1100,
+      height: 600,
+    }),
+  );
+  // History restores selection and scroll rather than the destination's latest state.
+  await issue('CAN-111').focus();
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.scrollTop = 100;
+  });
+  const savedScroll = await page
+    .locator('.tree-scroll')
+    .evaluate((element) => element.scrollTop);
+  expect(savedScroll).toBeGreaterThan(0);
+  await secondTab.click();
+  await issue('CAN-200').focus();
+  await page.keyboard.press('Alt+Shift+ArrowLeft');
+  await expect(secondTab).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Alt+ArrowLeft');
+  await expect(firstTab).toHaveAttribute('aria-selected', 'true');
+  await expect(issue('CAN-111')).toHaveAttribute('aria-selected', 'true');
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+    )
+    .toBe(savedScroll);
+  await page.getByRole('button', { name: 'Forward', exact: true }).click();
+  await expect(secondTab).toHaveAttribute('aria-selected', 'true');
+
+  const divider = page.getByRole('separator', { name: 'Sidebar width' });
+  await divider.focus();
+  await page.keyboard.press('End');
+  await expect(divider).toHaveAttribute('aria-valuenow', '400');
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].setBounds({
+      x: 40,
+      y: 50,
+      width: 1100,
+      height: 700,
+    }),
+  );
+  const savedWindowBounds = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].getNormalBounds(),
+  );
+  await page
+    .getByRole('button', { name: 'Open issue', exact: true })
+    .first()
+    .click();
+  await expect(
+    page.getByRole('dialog').getByText('Recent roots'),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+
   // Workspace writes are intentionally debounced.
   await page.waitForTimeout(350);
   await close();
   await launch();
 
+  await expect(page.getByRole('tab').first()).toContainText('CAN-100');
+  await expect(
+    page.getByRole('navigation', { name: 'Pinned roots' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('separator', { name: 'Sidebar width' }),
+  ).toHaveAttribute('aria-valuenow', '400');
+  expect(
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].getNormalBounds(),
+    ),
+  ).toEqual(savedWindowBounds);
   await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeVisible();
   await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeVisible();
   await expect(
@@ -222,6 +323,47 @@ try {
   expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toContain(
     'Demo issues exist only in Canopy.',
   );
+
+  // Context actions operate on the clicked tab, including inactive tabs.
+  await openIssue('CAN-101');
+  await page.getByRole('tab', { name: /CAN-200/ }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Close to the right' }).click();
+  await expect(page.getByRole('tab', { name: /CAN-101/ })).toHaveCount(0);
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(page.getByRole('tab', { name: /CAN-101/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Copy root link' }).click();
+  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+    'https://example.invalid/browse/CAN-100',
+  );
+  await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Close others' }).click();
+  await expect(page.getByRole('tab')).toHaveCount(1);
+  await issue('CAN-111').focus();
+  await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'middle' });
+  await expect(page.getByRole('tab')).toHaveCount(0);
+  await expect(
+    page.getByRole('navigation', { name: 'Pinned roots' }),
+  ).toBeVisible();
+  await page.waitForTimeout(350);
+  await close();
+  await launch();
+  await expect(page.getByRole('tab')).toHaveCount(0);
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await expect(issue('CAN-111')).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.locator('.linked-panel').getByText('CAN-200'),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('checkbox', { name: 'Hide done' }),
+  ).not.toBeChecked();
 
   await page.getByTitle('Disconnect Canopy demo').click();
   await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);
@@ -258,6 +400,18 @@ try {
           scrollTop: 0,
         },
       ],
+      pinnedRoots: [{ connectionId: 'demo', rootKey: 'CAN-100' }],
+      recentRoots: [{ connectionId: 'demo', rootKey: 'CAN-100' }],
+      closedTabs: [
+        {
+          id: 'legacy-closed',
+          connectionId: 'demo',
+          rootKey: 'CAN-200',
+          expanded: [],
+          hideDone: true,
+          scrollTop: 0,
+        },
+      ],
       activeTabId: 'legacy-demo',
       shortcuts: {},
       theme: 'dark',
@@ -268,6 +422,11 @@ try {
   expect(await page.evaluate(() => window.canopy.connections())).toEqual([]);
   await expect(page.getByRole('tab')).toHaveCount(0);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(
+    page.getByRole('navigation', { name: 'Pinned roots' }),
+  ).toHaveCount(0);
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(page.getByRole('tab')).toHaveCount(0);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

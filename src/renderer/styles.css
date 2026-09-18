@@ -104,19 +104,19 @@ select:focus-visible,
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 220px) minmax(0, 1fr);
   background: var(--bg);
 }
 .app.sidebar-is-collapsed {
   grid-template-columns: 0 minmax(0, 1fr);
 }
 .app.sidebar-is-collapsed .sidebar {
-  transform: translateX(-224px);
+  transform: translateX(calc(-1 * var(--sidebar-width, 220px)));
 }
 .sidebar {
   position: relative;
   z-index: 3;
-  min-width: 224px;
+  min-width: var(--sidebar-width, 220px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -139,6 +139,8 @@ select:focus-visible,
   padding-left: 82px;
 }
 :root[data-platform='mac'] .sidebar-is-collapsed .tabstrip {
+  overflow-x: auto;
+  overflow-y: hidden;
   padding-left: 78px;
 }
 .brand-mark {
@@ -1644,12 +1646,6 @@ kbd {
 }
 
 @media (max-width: 950px) {
-  .app {
-    grid-template-columns: 190px minmax(0, 1fr);
-  }
-  .sidebar {
-    min-width: 190px;
-  }
   .column-head,
   .issue-row {
     grid-template-columns: minmax(330px, 1fr) 88px 125px 105px 32px;
@@ -1684,4 +1680,78 @@ kbd {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+.sidebar-resizer {
+  position: absolute;
+  right: 0;
+  top: 39px;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resizer:hover,
+.sidebar-resizer:focus-visible {
+  background: var(--selected-border);
+}
+.tab-label b,
+.tab-label small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-label b {
+  font-size: 11px;
+  font-weight: 600;
+}
+.tab-label small {
+  font-size: 10px;
+  color: var(--faint);
+}
+.side-tab > span {
+  min-width: 0;
+}
+.side-tab small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pinned-root {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.pinned-root .side-tab {
+  flex: 1;
+  min-width: 0;
+  padding-right: 26px;
+}
+.unpin-root {
+  position: absolute;
+  right: 3px;
+}
+.tab-context-menu {
+  position: fixed;
+  z-index: 30;
+  width: 210px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 6px 24px #0004;
+}
+.tab-context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text);
+  padding: 8px;
+  border-radius: 4px;
+}
+.tab-context-menu button:hover,
+.tab-context-menu button:focus-visible {
+  background: var(--hover);
 }

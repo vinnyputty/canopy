@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   shell,
+  screen,
 } from 'electron';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +19,7 @@ import type {
 import { Auth } from './auth';
 import { JiraProvider } from './jira';
 import { Storage } from './storage';
+import { restoreWindow, type WindowState } from './window-state';
 import { configureLinuxCredentialStore } from './credentials';
 
 app.setName('Canopy');
@@ -66,7 +68,46 @@ function workspace(value: Workspace) {
     !value.shortcuts
   )
     throw new Error('Invalid workspace.');
-  for (const tab of value.tabs) {
+  for (const [name, minimum, maximum] of [
+    ['sidebarWidth', 180, 400],
+    ['previewWidth', 300, 720],
+  ] as const) {
+    if (
+      value[name] !== undefined &&
+      (!Number.isFinite(value[name]) ||
+        value[name]! < minimum ||
+        value[name]! > maximum)
+    )
+      throw new Error('Invalid pane width.');
+  }
+  for (const roots of [value.pinnedRoots, value.recentRoots]) {
+    if (roots !== undefined && (!Array.isArray(roots) || roots.length > 1000))
+      throw new Error('Invalid saved roots.');
+    for (const root of roots ?? []) {
+      text(root.connectionId);
+      key(root.rootKey);
+      if (
+        root.summary !== undefined &&
+        (typeof root.summary !== 'string' || root.summary.length > 10000)
+      )
+        throw new Error('Invalid root summary.');
+    }
+  }
+  if (
+    value.closedTabs !== undefined &&
+    (!Array.isArray(value.closedTabs) || value.closedTabs.length > 20)
+  )
+    throw new Error('Invalid closed tabs.');
+  for (const tab of [...value.tabs, ...(value.closedTabs ?? [])]) {
+    if (
+      tab.linkedExpanded !== undefined &&
+      (!Array.isArray(tab.linkedExpanded) ||
+        tab.linkedExpanded.length > 100_000 ||
+        !tab.linkedExpanded.every(
+          (key) => typeof key === 'string' && key.length < 500,
+        ))
+    )
+      throw new Error('Invalid linked expansion state.');
     text(tab.id);
     text(tab.connectionId);
     key(tab.rootKey);
@@ -171,12 +212,21 @@ async function start(
         throw new Error('Untrusted application window.');
       return handler(...args);
     });
+  let quitting = false;
+  app.on('before-quit', () => {
+    quitting = true;
+  });
   const createWindow = async () => {
+    const saved = restoreWindow(
+      await storage.read<WindowState>('window'),
+      screen.getAllDisplays().map((display) => display.workArea),
+    );
     window = new BrowserWindow({
       width: 1440,
       height: 920,
-      minWidth: 920,
-      minHeight: 600,
+      minWidth: Math.min(920, saved?.bounds.width ?? 920),
+      minHeight: Math.min(600, saved?.bounds.height ?? 600),
+      ...(saved?.bounds ?? {}),
       title: 'Canopy',
       backgroundColor: '#141719',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -187,6 +237,41 @@ async function start(
         sandbox: true,
         webSecurity: true,
       },
+    });
+    const created = window;
+    if (saved?.maximized) created.maximize();
+    let savingWindow: Promise<void> = Promise.resolve();
+    let closeApproved = false;
+    const saveBounds = () => {
+      if (
+        created.isDestroyed() ||
+        created.isMinimized() ||
+        created.isFullScreen()
+      )
+        return;
+      savingWindow = storage.write('window', {
+        bounds: created.getNormalBounds(),
+        maximized: created.isMaximized(),
+      } satisfies WindowState);
+      void savingWindow.catch((error) =>
+        console.error('Could not save window state:', error),
+      );
+    };
+    created.on('resize', saveBounds);
+    created.on('move', saveBounds);
+    created.on('maximize', saveBounds);
+    created.on('unmaximize', saveBounds);
+    created.on('close', (event) => {
+      if (closeApproved) return;
+      event.preventDefault();
+      saveBounds();
+      void savingWindow
+        .catch(() => {})
+        .finally(() => {
+          closeApproved = true;
+          if (quitting) app.quit();
+          else created.close();
+        });
     });
     window.webContents.on('before-input-event', (event, input) => {
       const modifier =
