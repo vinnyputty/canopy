@@ -233,8 +233,16 @@ async function start(
       ),
     update: (id: string, issue: string, value: IssuePatch) =>
       provider(id).update(key(issue), patch(value)),
-    rank: (id: string, issue: string, before: string) =>
-      provider(id).rank(key(issue), key(before)),
+    rank: (
+      id: string,
+      issue: string,
+      before: string,
+      position: 'before' | 'after' = 'before',
+    ) => {
+      if (position !== 'before' && position !== 'after')
+        throw new Error('Invalid rank position.');
+      return provider(id).rank(key(issue), key(before), position);
+    },
     loadWorkspace: async () => {
       const saved = await storage.read<Workspace>('workspace');
       return saved ? recoverWorkspaceViews(saved) : null;

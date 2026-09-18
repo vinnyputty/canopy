@@ -329,6 +329,19 @@ export class JiraProvider {
       transitions: (transitions?.transitions ?? []).map((transition: any) => ({
         id: String(transition.id),
         name: String(transition.name),
+        ...(transition.to?.id && transition.to?.name
+          ? {
+              to: {
+                id: String(transition.to.id),
+                name: String(transition.to.name),
+                category:
+                  transition.to.statusCategory?.key === 'new' ||
+                  transition.to.statusCategory?.key === 'done'
+                    ? transition.to.statusCategory.key
+                    : 'indeterminate',
+              },
+            }
+          : {}),
         requiresFields: Object.values(transition.fields ?? {}).some(
           (field: any) => field?.required === true,
         ),
@@ -367,7 +380,11 @@ export class JiraProvider {
     return this.getIssue(key);
   }
 
-  async rank(key: string, beforeKey: string): Promise<void> {
+  async rank(
+    key: string,
+    beforeKey: string,
+    position: 'before' | 'after' = 'before',
+  ): Promise<void> {
     if (key === beforeKey) return;
     const [issue, before] = await Promise.all([
       this.getIssue(key),
@@ -383,7 +400,11 @@ export class JiraProvider {
 
     const result = await this.call(
       '/rest/agile/1.0/issue/rank',
-      jsonInit('PUT', { issues: [key], rankBeforeIssue: beforeKey }),
+      jsonInit('PUT', {
+        issues: [key],
+        [position === 'after' ? 'rankAfterIssue' : 'rankBeforeIssue']:
+          beforeKey,
+      }),
       `rank Jira issue ${key}`,
     );
     const failed = Array.isArray(result?.entries)

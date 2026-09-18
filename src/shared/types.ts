@@ -52,7 +52,7 @@ export type IssuePatch = {
 export type EditOptions = {
   priorities: Choice[];
   assignees: Choice[];
-  transitions: (Choice & { requiresFields: boolean })[];
+  transitions: (Choice & { requiresFields: boolean; to?: Status })[];
 };
 export type RootReference = {
   connectionId: string;
@@ -111,7 +111,12 @@ export interface CanopyAPI {
     query?: string,
   ): Promise<EditOptions>;
   update(connectionId: string, key: string, patch: IssuePatch): Promise<Issue>;
-  rank(connectionId: string, key: string, beforeKey: string): Promise<void>;
+  rank(
+    connectionId: string,
+    key: string,
+    beforeKey: string,
+    position?: 'before' | 'after',
+  ): Promise<void>;
   priorityOrder(connectionId: string, keys: string[]): Promise<string[]>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;

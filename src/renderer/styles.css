@@ -2017,3 +2017,18 @@ kbd {
 .issue-tree .key {
   font-size: 0.85em;
 }
+
+.undo-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 18px;
+  font-size: 12px;
+}
+.undo-banner button {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.undo-banner small {
+  opacity: 0.7;
+}

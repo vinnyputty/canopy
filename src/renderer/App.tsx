@@ -52,7 +52,6 @@ import {
   flattenVisible,
   matchesShortcut,
   parseIssueKey,
-  reconcileSnapshot,
   SHORTCUT_LABELS,
   shortcutCollisions,
   filterTree,
@@ -89,6 +88,7 @@ import {
   sortIssueTree,
   tableStyle,
 } from './table-view';
+import { Mutations } from './mutations';
 
 const PLATFORM_SHORTCUTS = defaultShortcuts();
 const EMPTY_WORKSPACE: Workspace = {
@@ -191,7 +191,23 @@ export function App() {
   const attemptedLoads = useRef(new Set<string>());
   const inflightRefreshes = useRef(new Set<string>());
   const refreshSequences = useRef<Record<string, number>>({});
-  const mutationEpoch = useRef(0);
+  const [undoState, setUndoState] = useState<{ label?: string; busy: boolean }>(
+    { busy: false },
+  );
+  const [mutations] = useState(
+    () =>
+      new Mutations(
+        window.canopy,
+        (view) => {
+          setSnapshots(view.snapshots);
+          setSaving(view.saving);
+          setUndoState({ label: view.undoLabel, busy: view.undoBusy });
+        },
+        (message) => setErrors((current) => ({ ...current, edit: message })),
+      ),
+  );
+  const editorRef = useRef(editor);
+  editorRef.current = editor;
   const optionSequences = useRef<Record<string, number>>({});
   const tabsRef = useRef<TabState[]>([]);
   const pendingScrollRestore = useRef<string | null>(null);
@@ -403,23 +419,24 @@ export function App() {
   }, [workspace, ready]);
 
   const refreshTab = useCallback(async (tab: TabState, quiet = false) => {
-    if (inflightRefreshes.current.has(tab.id)) return;
+    if (
+      inflightRefreshes.current.has(tab.id) ||
+      editorRef.current?.connectionId === tab.connectionId
+    )
+      return;
     inflightRefreshes.current.add(tab.id);
     const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
     refreshSequences.current[tab.id] = sequence;
-    const epoch = mutationEpoch.current;
+    const epoch = mutations.beginRefresh();
     const setter = quiet ? setRefreshing : setLoading;
     setter((current) => new Set(current).add(tab.id));
     try {
       const next = await window.canopy.tree(tab.connectionId, tab.rootKey);
       if (
         refreshSequences.current[tab.id] === sequence &&
-        mutationEpoch.current === epoch
+        editorRef.current?.connectionId !== tab.connectionId
       ) {
-        setSnapshots((current) => ({
-          ...current,
-          [tab.id]: reconcileSnapshot(current[tab.id], next),
-        }));
+        mutations.receive(tab, next, epoch);
       }
       setErrors((current) => {
         const copy = { ...current };
@@ -432,6 +449,7 @@ export function App() {
         [tab.id]: error instanceof Error ? error.message : String(error),
       }));
     } finally {
+      mutations.endRefresh(epoch);
       inflightRefreshes.current.delete(tab.id);
       setter((current) => {
         const copy = new Set(current);
@@ -934,104 +952,55 @@ export function App() {
   const updateIssue = useCallback(
     async (key: string, patch: IssuePatch) => {
       if (!activeTab) return;
-      mutationEpoch.current += 1;
-      setSaving((current) => new Set(current).add(key));
-      try {
-        const next = await window.canopy.update(
-          activeTab.connectionId,
-          key,
-          patch,
-        );
-        setSnapshots((current) => {
-          const copy = { ...current };
-          for (const tab of workspace.tabs) {
-            if (tab.connectionId !== activeTab.connectionId || !copy[tab.id])
-              continue;
-            copy[tab.id] = {
-              ...copy[tab.id],
-              issues: copy[tab.id].issues.map((issue) =>
-                issue.key === key ? next : issue,
-              ),
-            };
-          }
-          return copy;
-        });
-        setEditor(null);
-        void loadOptions(key);
-        setErrors((current) => {
-          const copy = { ...current };
-          delete copy.edit;
-          return copy;
-        });
-      } catch (error) {
-        setErrors((current) => ({
-          ...current,
-          edit: `Couldn’t update ${key}: ${error instanceof Error ? error.message : String(error)}`,
-        }));
-      } finally {
-        mutationEpoch.current += 1;
-        setSaving((current) => {
-          const copy = new Set(current);
-          copy.delete(key);
-          return copy;
-        });
-      }
+      const connectionId = activeTab.connectionId;
+      setEditor((current) =>
+        current?.connectionId === connectionId && current.key === key
+          ? null
+          : current,
+      );
+      await mutations.update(
+        connectionId,
+        key,
+        patch,
+        options[`${connectionId}:${key}`],
+      );
+      void loadOptions(key);
     },
-    [activeTab, workspace.tabs, loadOptions],
+    [activeTab, mutations, options, loadOptions],
   );
 
   const rankBefore = useCallback(
     async (key: string, beforeKey: string) => {
+      if (!activeTab || !snapshot || key === beforeKey || !canRank(snapshot, view.sort, key)) return;
+      await mutations.rank(activeTab.connectionId, key, beforeKey);
+    },
+    [activeTab, mutations, snapshot, view.sort],
+  );
+
+  useEffect(() => {
+    const undo = (event: KeyboardEvent) => {
       if (
-        !activeTab ||
-        !snapshot ||
-        key === beforeKey ||
-        !canRank(snapshot, view.sort, key)
+        event.defaultPrevented ||
+        dialog ||
+        event.shiftKey ||
+        event.altKey ||
+        !(event.metaKey || event.ctrlKey) ||
+        event.key.toLowerCase() !== 'z'
       )
         return;
-      const moving = snapshot.issues.find((issue) => issue.key === key);
-      const target = snapshot.issues.find((issue) => issue.key === beforeKey);
-      if (!moving || !target || moving.parentKey !== target.parentKey) {
-        setErrors((current) => ({
-          ...current,
-          edit: 'Issues can only be reordered among siblings.',
-        }));
+      if (
+        (event.target as HTMLElement).closest(
+          'input,textarea,select,[contenteditable="true"]',
+        )
+      )
         return;
-      }
-      mutationEpoch.current += 1;
-      setSaving((current) => new Set(current).add(key));
-      try {
-        await window.canopy.rank(activeTab.connectionId, key, beforeKey);
-        setSnapshots((current) => {
-          const currentSnapshot = current[activeTab.id];
-          if (!currentSnapshot) return current;
-          const issues = [...currentSnapshot.issues];
-          const movingIndex = issues.findIndex((issue) => issue.key === key);
-          if (movingIndex < 0) return current;
-          const [movingIssue] = issues.splice(movingIndex, 1);
-          const targetIndex = issues.findIndex(
-            (issue) => issue.key === beforeKey,
-          );
-          if (targetIndex < 0) return current;
-          issues.splice(targetIndex, 0, movingIssue);
-          return { ...current, [activeTab.id]: { ...currentSnapshot, issues } };
-        });
-      } catch (error) {
-        setErrors((current) => ({
-          ...current,
-          edit: `Couldn’t reorder ${key}: ${error instanceof Error ? error.message : String(error)}`,
-        }));
-      } finally {
-        mutationEpoch.current += 1;
-        setSaving((current) => {
-          const copy = new Set(current);
-          copy.delete(key);
-          return copy;
-        });
-      }
-    },
-    [activeTab, snapshot, view.sort],
-  );
+      if (!undoState.label) return;
+      event.preventDefault();
+      void mutations.undo();
+    };
+    window.addEventListener('keydown', undo);
+    return () => window.removeEventListener('keydown', undo);
+  }, [mutations, undoState.label, dialog]);
 
   const keyboardRank = useCallback(
     (node: IssueNode, direction: -1 | 1) => {
@@ -1116,6 +1085,25 @@ export function App() {
     () => flattenVisible(shownTree, expandedSet),
     [shownTree, expandedSet],
   );
+
+  const advanceEdit = (key: string, field: EditField, direction: -1 | 1) => {
+    const fields: EditField[] = ['summary', 'priority', 'assignee', 'status'];
+    const index =
+      flat.findIndex((node) => node.issue.key === key) * fields.length +
+      fields.indexOf(field) +
+      direction;
+    const target = flat[Math.floor(index / fields.length)];
+    if (!target) {
+      setEditor(null);
+      return;
+    }
+    beginEdit(target.issue.key, fields[index % fields.length]);
+    requestAnimationFrame(() =>
+      document
+        .querySelector<HTMLElement>(`[data-tree-key="${target.issue.key}"]`)
+        ?.scrollIntoView({ block: 'nearest' }),
+    );
+  };
 
   const focusTreeNeighbor = (key: string, direction: -1 | 1) => {
     const index = flat.findIndex((node) => node.issue.key === key);
@@ -1846,6 +1834,18 @@ export function App() {
                 </button>
               </div>
             )}
+            {undoState.label && (
+              <div className="undo-banner" role="status">
+                <span>Change saved</span>
+                <button
+                  disabled={undoState.busy}
+                  onClick={() => void mutations.undo()}
+                >
+                  {undoState.label}
+                </button>
+                <small>⌘Z / Ctrl+Z</small>
+              </div>
+            )}
             {snapshot?.warnings.map((warning) => (
               <div className="warning-banner" key={warning}>
                 <AlertCircle size={14} />
@@ -1965,7 +1965,18 @@ export function App() {
                     options={scopedOptions}
                     loadOptions={loadOptions}
                     updateIssue={updateIssue}
-                    saving={saving}
+                    advanceEdit={advanceEdit}
+                    saving={
+                      new Set(
+                        [...saving]
+                          .filter((key) =>
+                            key.startsWith(`${activeTab.connectionId}:`),
+                          )
+                          .map((key) =>
+                            key.slice(activeTab.connectionId.length + 1),
+                          ),
+                      )
+                    }
                     dragKey={dragKey}
                     setDragKey={setDragKey}
                     rankBefore={rankBefore}
@@ -2294,6 +2305,7 @@ type RowsProps = {
   options: Record<string, EditOptions>;
   loadOptions: (key: string, query?: string) => Promise<void>;
   updateIssue: (key: string, patch: IssuePatch) => Promise<void>;
+  advanceEdit: (key: string, field: EditField, direction: -1 | 1) => void;
   saving: Set<string>;
   dragKey: string | null;
   setDragKey: (key: string | null) => void;
@@ -2325,6 +2337,11 @@ function TreeRows(props: RowsProps) {
   const onTreeKey = (event: React.KeyboardEvent) => {
     if (event.altKey || event.metaKey || event.ctrlKey) return;
     if (
+      (event.target as HTMLElement).closest('[data-tree-key]') !==
+      event.currentTarget
+    )
+      return;
+    if (
       (event.target as HTMLElement).closest(
         'input,button,select,[role="button"]',
       )
@@ -2352,11 +2369,11 @@ function TreeRows(props: RowsProps) {
       event.preventDefault();
       onToggle(issue.key);
     }
-    if (event.key === 'F2') {
+    if (event.key === 'F2' || event.key === 'Enter') {
       event.preventDefault();
       props.beginEdit(issue.key, 'summary');
     }
-    if (event.key === 'Enter' || event.key === ' ') {
+    if (event.key === ' ') {
       event.preventDefault();
       onSelect(issue.key);
     }
@@ -2446,6 +2463,7 @@ function TreeRows(props: RowsProps) {
           ) : (
             <button
               className="summary"
+              onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); props.beginEdit(issue.key, 'summary'); } }}
               onDoubleClick={() => props.beginEdit(issue.key, 'summary')}
               onClick={() => onSelect(issue.key)}
               title="Double-click to edit"
@@ -2551,6 +2569,27 @@ function TreeRows(props: RowsProps) {
         onSelect(issue.key);
       }}
       onKeyDown={onTreeKey}
+      onKeyDownCapture={(event) => {
+        if (
+          (event.target as HTMLElement).closest('[data-tree-key]') !==
+            event.currentTarget ||
+          props.editor?.key !== issue.key
+        )
+          return;
+        if (event.key === 'Escape' && props.editor.field !== 'summary') {
+          event.preventDefault();
+          event.stopPropagation();
+          props.cancelEdit();
+          event.currentTarget.focus();
+        }
+        if (event.key === 'Tab') {
+          event.preventDefault();
+          event.stopPropagation();
+          const field = props.editor.field;
+          (event.target as HTMLElement).blur();
+          props.advanceEdit(issue.key, field, event.shiftKey ? -1 : 1);
+        }
+      }}
     >
       <div
         className={cx(
@@ -2578,7 +2617,11 @@ function TreeRows(props: RowsProps) {
         ))}
         <div className="row-actions">
           {props.saving.has(issue.key) ? (
-            <Loader2 className="spin" size={14} />
+            <Loader2
+              className="spin"
+              size={14}
+              aria-label={`Saving ${issue.key}`}
+            />
           ) : (
             <button
               className="icon-button"
@@ -2825,6 +2868,7 @@ function StatusEditor({
       {choices.map((choice) => (
         <button
           role="menuitem"
+          autoFocus={choice === choices.find((value) => !value.requiresFields)}
           disabled={choice.requiresFields}
           title={
             choice.requiresFields

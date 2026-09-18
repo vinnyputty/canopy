@@ -515,6 +515,23 @@ try {
   await page.getByRole('menuitem', { name: 'In Progress' }).click();
   await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
 
+  // Enter edits a focused summary; Escape cancels without saving on blur.
+  await issue('CAN-111').getByTitle('Double-click to edit').press('Enter');
+  await summaryInput.fill('Cancelled draft');
+  await summaryInput.press('Escape');
+  await expect(issue('CAN-111').getByText(summary)).toBeVisible();
+  await issue('CAN-111').getByTitle('Double-click to edit').press('Enter');
+  await summaryInput.fill('Keyboard draft');
+  await summaryInput.press('Tab');
+  await expect(page.getByLabel('Choose value')).toBeFocused();
+  await page.getByLabel('Choose value').press('Escape');
+  await expect(issue('CAN-111').getByText('Keyboard draft')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Undo edit to CAN-111' }),
+  ).toBeEnabled();
+  await page.keyboard.press(`${modifier}+z`);
+  await expect(issue('CAN-111').getByText(summary)).toBeVisible();
+
   await mkdir(join(workspace, '.cache'), { recursive: true });
   await page.screenshot({ path: screenshotPath, fullPage: true });
 

@@ -95,12 +95,14 @@ export function buildIssueTree(
 export function visibleTree(
   node: IssueNode,
   hideDone: boolean,
+  keepKey?: string,
 ): IssueNode | null {
   const children = node.children
-    .map((child) => visibleTree(child, hideDone))
+    .map((child) => visibleTree(child, hideDone, keepKey))
     .filter((child): child is IssueNode => child !== null);
   if (
     hideDone &&
+    node.issue.key !== keepKey &&
     node.issue.status.category === 'done' &&
     children.length === 0
   )
