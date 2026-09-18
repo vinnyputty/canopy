@@ -1,0 +1,7 @@
+node_modules
+dist
+release
+bazel-*
+pnpm-lock.yaml
+MODULE.bazel.lock
+.cache

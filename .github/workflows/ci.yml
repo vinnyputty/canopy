@@ -1,0 +1,23 @@
+name: Canopy
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ runner.os }}
+          repository-cache: true
+      - run: bazel run //:ci
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: Canopy-${{ runner.os }}
+          path: release/*
