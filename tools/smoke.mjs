@@ -53,6 +53,27 @@ async function close() {
   page = undefined;
 }
 
+async function resizeWindow(height) {
+  await app.evaluate(({ BrowserWindow, screen }, requestedHeight) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    const area = screen.getDisplayMatching(window.getBounds()).workArea;
+    const width = Math.min(1100, area.width);
+    const height = Math.min(Math.max(600, requestedHeight), area.height);
+    window.setMinimumSize(
+      Math.min(920, area.width),
+      Math.min(600, area.height),
+    );
+    // CI desktops can be narrower than the preferred test window. Keep the
+    // saved bounds on screen so restart tests exact restoration, not clamping.
+    window.setBounds({
+      x: area.x + Math.floor((area.width - width) / 2),
+      y: area.y + Math.floor((area.height - height) / 2),
+      width,
+      height,
+    });
+  }, height);
+}
+
 async function openIssue(key) {
   await page.getByRole('button', { name: 'Open issue' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
@@ -223,14 +244,7 @@ try {
   await page.keyboard.press('Alt+Shift+ArrowLeft');
   await expect(page.getByRole('tab').first()).toContainText('CAN-100');
 
-  await app.evaluate(({ BrowserWindow }) =>
-    BrowserWindow.getAllWindows()[0].setBounds({
-      x: 40,
-      y: 50,
-      width: 1100,
-      height: 600,
-    }),
-  );
+  await resizeWindow(600);
   // History restores selection and scroll rather than the destination's latest state.
   await issue('CAN-111').focus();
   await page.locator('.tree-scroll').evaluate((element) => {
@@ -259,14 +273,7 @@ try {
   await divider.focus();
   await page.keyboard.press('End');
   await expect(divider).toHaveAttribute('aria-valuenow', '400');
-  await app.evaluate(({ BrowserWindow }) =>
-    BrowserWindow.getAllWindows()[0].setBounds({
-      x: 40,
-      y: 50,
-      width: 1100,
-      height: 700,
-    }),
-  );
+  await resizeWindow(700);
   const savedWindowBounds = await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].getNormalBounds(),
   );
