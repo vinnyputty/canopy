@@ -217,6 +217,11 @@ export function App() {
   useEffect(() => {
     setReveal(null);
   }, [activeTab?.id, query, activeTab?.filters, activeTab?.hideDone]);
+  useEffect(() => {
+    setReveal((current) =>
+      current?.key === activeTab?.selectedKey ? current : null,
+    );
+  }, [activeTab?.selectedKey]);
   const statusRegistries = useRef(new Map<string, StatusColors>());
   const statusColors = useMemo(() => {
     if (!activeTab) return new Map<string, string>();
@@ -971,13 +976,26 @@ export function App() {
     activeTab?.selectedKey ?? activeTab?.focusKey,
   );
   useEffect(() => {
-    if (!reveal || reveal.tabId !== activeTab?.id) return;
-    const element = document.querySelector<HTMLElement>(
-      `[data-tree-key="${reveal.key}"]`,
-    );
-    element?.scrollIntoView({ block: 'center' });
-    element?.focus({ preventScroll: true });
-  }, [reveal, activeTab?.id, snapshot]);
+    if (
+      !reveal ||
+      reveal.tabId !== activeTab?.id ||
+      reveal.key !== activeTab?.selectedKey ||
+      editor
+    )
+      return;
+    document
+      .querySelector<HTMLElement>(
+        `[data-tree-key="${reveal.key}"] > .issue-row`,
+      )
+      ?.scrollIntoView({ block: 'center' });
+  }, [reveal, activeTab?.id, activeTab?.selectedKey, snapshot, editor]);
+  useEffect(() => {
+    // Only an explicit reveal request moves keyboard focus. Refresh preserves it.
+    if (!reveal || reveal.tabId !== activeTab?.id || editor) return;
+    document
+      .querySelector<HTMLElement>(`[data-tree-key="${reveal.key}"]`)
+      ?.focus({ preventScroll: true });
+  }, [reveal, activeTab?.id]);
   const flat = useMemo(
     () => flattenVisible(shownTree, expandedSet),
     [shownTree, expandedSet],

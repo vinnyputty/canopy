@@ -229,9 +229,224 @@ try {
   );
   await page.getByRole('button', { name: 'Clear tree search' }).click();
   await page.getByLabel('Filter assignee').selectOption('me');
+  await expect(issue('CAN-109')).toBeVisible();
   await expect(issue('CAN-108')).toHaveCount(0);
   await page.getByLabel('Filter assignee').selectOption('');
   await page.locator('.tree-view-menu summary').click();
+
+  // Exercise every tree-control path, including partial expansion and saved view restoration.
+  const expand = page.getByRole('button', { name: 'Expand', exact: true });
+  const collapse = page.getByRole('button', { name: 'Collapse', exact: true });
+  const actions = page.locator('.tree-view-menu summary');
+  const searchTree = page.getByRole('textbox', { name: 'Find in tree' });
+  await collapse.click();
+  await searchTree.fill('unfinished descendants');
+  await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  for (const key of ['CAN-100', 'CAN-106', 'CAN-107', 'CAN-108'])
+    await expect(issue(key)).toBeVisible();
+  await searchTree.press('Escape');
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await expect(
+    issue('CAN-100').getByText('3/4 children', { exact: true }),
+  ).toHaveAttribute(
+    'title',
+    '3 open / 4 total direct children; 14 total descendants',
+  );
+
+  await expand.click({ modifiers: ['Alt'] });
+  await expect(page.locator('.linked-panel')).toBeVisible();
+  await collapse.click({ modifiers: ['Alt'] });
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await expect(page.locator('.linked-panel')).toHaveCount(0);
+  await expand.dblclick();
+  await collapse.dblclick();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await expect(page.locator('.linked-panel')).toHaveCount(0);
+  await actions.click();
+  await page
+    .getByRole('button', {
+      name: 'Expand hierarchy and linked issues',
+      exact: true,
+    })
+    .click();
+  await expect(page.locator('.linked-panel')).toBeVisible();
+  await page
+    .getByRole('button', {
+      name: 'Collapse hierarchy and linked issues',
+      exact: true,
+    })
+    .click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await page
+    .getByRole('button', { name: 'Expand immediate children', exact: true })
+    .click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(5);
+  await actions.click();
+  await collapse.click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await expand.click();
+  await expect(page.locator('.linked-panel')).toHaveCount(0);
+  await issue('CAN-106')
+    .getByRole('button', { name: 'Collapse CAN-106', exact: true })
+    .click();
+  await collapse.click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await expand.click();
+  await issue('CAN-106').getByTitle('Double-click to edit').first().click();
+  await actions.click();
+  await page
+    .getByRole('button', { name: 'Collapse selected branch', exact: true })
+    .click();
+  await expect(issue('CAN-107')).toHaveCount(0);
+  await expect(issue('CAN-105')).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Expand selected branch', exact: true })
+    .click();
+  await expect(issue('CAN-108')).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Focus selected subtree', exact: true })
+    .click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  await page
+    .getByRole('navigation', { name: 'Issue ancestry' })
+    .getByRole('button', { name: 'CAN-100', exact: true })
+    .click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(15);
+  await actions.click();
+
+  await issue('CAN-109').getByLabel('Edit assignee for CAN-109').click();
+  await page.getByRole('button', { name: 'Unassigned', exact: true }).click();
+  await expect(
+    issue('CAN-109').getByText('Unassigned', { exact: true }),
+  ).toBeVisible();
+  await page.getByLabel('Filter assignee').selectOption('unassigned');
+  await expect(tree.getByRole('treeitem')).toHaveCount(3);
+  await expect(issue('CAN-109')).toBeVisible();
+  await expect(issue('CAN-108')).toHaveCount(0);
+  await page.getByLabel('Filter status').selectOption('todo');
+  await page.getByLabel('Filter priority').selectOption('4');
+  await expect(issue('CAN-109')).toBeVisible();
+  await page.getByLabel('Filter priority').selectOption('1');
+  await expect(
+    page.getByRole('heading', { name: 'No matching issues' }),
+  ).toBeVisible();
+  await page.getByLabel('Filter priority').selectOption('4');
+  await openIssue('CAN-200');
+  await expect(page.getByLabel('Filter assignee')).toHaveValue('');
+  await expect(page.getByLabel('Filter status')).toHaveValue('');
+  await expect(page.getByLabel('Filter priority')).toHaveValue('');
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await expect(page.getByLabel('Filter assignee')).toHaveValue('unassigned');
+  await expect(page.getByLabel('Filter status')).toHaveValue('todo');
+  await expect(page.getByLabel('Filter priority')).toHaveValue('4');
+  await expect(issue('CAN-109')).toBeVisible();
+  await page.getByLabel('Filter assignee').selectOption('');
+  await page.getByLabel('Filter status').selectOption('');
+  await page.getByLabel('Filter priority').selectOption('');
+  await issue('CAN-109').getByLabel('Edit assignee for CAN-109').click();
+  await page.getByRole('button', { name: /Alex Morgan/ }).click();
+
+  // Reveal must scroll an off-screen selection into view after both collapse and refresh.
+  const originalBounds = await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    const bounds = window.getBounds();
+    window.setMinimumSize(800, 480);
+    window.setSize(1100, 560);
+    return bounds;
+  });
+  await issue('CAN-114').getByTitle('Double-click to edit').click();
+  await expect(
+    page.getByRole('navigation', { name: 'Issue ancestry' }),
+  ).toContainText('CAN-113');
+  expect(
+    await page
+      .locator('.tree-branch')
+      .first()
+      .evaluate(
+        (element) => getComputedStyle(element, '::before').borderLeftWidth,
+      ),
+  ).toBe('1px');
+  await collapse.click();
+  await actions.click();
+  await page
+    .getByRole('button', { name: 'Reveal selection', exact: true })
+    .click();
+  await expect(issue('CAN-114').locator(':scope > .issue-row')).toHaveClass(
+    /revealed/,
+  );
+  const selectionInViewport = () =>
+    page.evaluate(() => {
+      const row = document
+        .querySelector('[data-tree-key="CAN-114"] > .issue-row')
+        .getBoundingClientRect();
+      const viewport = document
+        .querySelector('.tree-scroll')
+        .getBoundingClientRect();
+      return row.top >= viewport.top && row.bottom <= viewport.bottom;
+    });
+  await expect.poll(selectionInViewport).toBe(true);
+  await expand.click();
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect.poll(selectionInViewport).toBe(false);
+  await page
+    .getByRole('button', { name: 'Reveal selection', exact: true })
+    .click();
+  await expect.poll(selectionInViewport).toBe(true);
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+    )
+    .toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Refresh', exact: true }),
+  ).toBeEnabled();
+  await expect.poll(selectionInViewport).toBe(true);
+  await page.getByLabel('Filter priority').focus();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await expect(page.getByLabel('Filter priority')).toBeFocused();
+  await issue('CAN-114').getByTitle('Double-click to edit').dblclick();
+  const revealedDraft = page.getByLabel('Summary for CAN-114');
+  await revealedDraft.fill('Unsaved revealed issue draft');
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await expect(revealedDraft).toBeFocused();
+  await expect(revealedDraft).toHaveValue('Unsaved revealed issue draft');
+  await revealedDraft.press('Escape');
+  await page.getByRole('button', { name: 'Back to root', exact: true }).click();
+  await expect(issue('CAN-114').locator(':scope > .issue-row')).not.toHaveClass(
+    /revealed/,
+  );
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+    )
+    .toBe(0);
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await page
+    .getByRole('button', { name: 'Reveal selection', exact: true })
+    .click();
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+    )
+    .toBe(0);
+  await actions.click();
+  await app.evaluate(
+    ({ BrowserWindow }, bounds) =>
+      BrowserWindow.getAllWindows()[0].setBounds(bounds),
+    originalBounds,
+  );
+  await expand.click();
+  await page
+    .getByRole('tab', { name: /CAN-200/ })
+    .getByRole('button', { name: 'Close CAN-200' })
+    .click();
 
   await expectIssueBefore('CAN-111', 'CAN-112');
   await page

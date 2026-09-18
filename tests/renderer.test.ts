@@ -196,6 +196,20 @@ describe('tree navigation', () => {
       ['A-1', 'A-2'],
     );
   });
+  it('filters null priorities and respects completed leaves without pruning matching ancestors', () => {
+    assert.deepEqual(
+      expansionKeys(filterTree(root, '', { priority: '__none__' }, false)),
+      ['A-1', 'A-2', 'A-4'],
+    );
+    assert.deepEqual(
+      expansionKeys(filterTree(root, '', { status: 'done' }, false)),
+      ['A-1', 'A-2'],
+    );
+    assert.equal(filterTree(root, '', { status: 'done' }, true), null);
+    assert.deepEqual(expansionKeys(root.children[0], 0), []);
+    assert.deepEqual(expansionKeys(root.children[0]), ['A-2', 'A-3']);
+    assert.deepEqual(expansionKeys(root), ['A-1', 'A-2', 'A-3', 'A-4']);
+  });
   it('reveals an excluded selection and keeps only its ancestor path', () => {
     assert.deepEqual(
       expansionKeys(filterTree(root, 'missing', {}, true, undefined, 'A-3')),
