@@ -53,7 +53,12 @@ import {
   reconcileSnapshot,
   SHORTCUT_LABELS,
   shortcutCollisions,
-  visibleTree,
+  filterTree,
+  findNode,
+  ancestorPath,
+  expansionKeys,
+  childCounts,
+  indexTree,
   type IssueNode,
 } from './tree';
 import { StatusColors } from './status-colors';
@@ -157,6 +162,16 @@ export function App() {
   const draggedTab = useRef<string | null>(null);
   workspaceRef.current = workspace;
   historyRef.current = history;
+  const [queries, setQueries] = useState<Record<string, string>>({});
+  const [reveal, setReveal] = useState<{ tabId: string; key: string } | null>(
+    null,
+  );
+  const [currentUsers, setCurrentUsers] = useState<Record<string, Choice>>({});
+  const [identityErrors, setIdentityErrors] = useState<Record<string, string>>(
+    {},
+  );
+  const [identityRetry, setIdentityRetry] = useState(0);
+  const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const attemptedLoads = useRef(new Set<string>());
   const inflightRefreshes = useRef(new Set<string>());
@@ -168,6 +183,40 @@ export function App() {
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
+  const query = activeTab ? (queries[activeTab.id] ?? '') : '';
+  const filtering = Boolean(
+    query.trim() || Object.values(activeTab?.filters ?? {}).some(Boolean),
+  );
+  useEffect(() => {
+    const id = activeTab?.connectionId;
+    if (!id || currentUsers[id]) return;
+    let live = true;
+    window.canopy
+      .currentUser(id)
+      .then((user) => {
+        if (live) {
+          setCurrentUsers((current) => ({ ...current, [id]: user }));
+          setIdentityErrors((current) => {
+            const next = { ...current };
+            delete next[id];
+            return next;
+          });
+        }
+      })
+      .catch((error) => {
+        if (live)
+          setIdentityErrors((current) => ({
+            ...current,
+            [id]: `Couldn’t identify your Jira account: ${String(error)}. Check your connection, then retry.`,
+          }));
+      });
+    return () => {
+      live = false;
+    };
+  }, [activeTab?.connectionId, identityRetry]);
+  useEffect(() => {
+    setReveal(null);
+  }, [activeTab?.id, query, activeTab?.filters, activeTab?.hideDone]);
   const statusRegistries = useRef(new Map<string, StatusColors>());
   const statusColors = useMemo(() => {
     if (!activeTab) return new Map<string, string>();
@@ -529,17 +578,97 @@ export function App() {
   );
 
   const expandAll = useCallback(
-    (expanded: boolean) => {
-      if (!activeTab || !snapshot) return;
+    (expanded: boolean, includeLinks = false) => {
+      if (!activeTab || !snapshot || filtering) return;
+      const root = buildIssueTree(snapshot.issues, snapshot.rootKey);
+      const focused = findNode(root, activeTab.focusKey) ?? root;
+      const keys = expansionKeys(focused);
+      const nodes = [
+        ...indexTree(filterTree(focused, '', {}, activeTab.hideDone)).values(),
+      ];
+      const branches = nodes
+        .filter((node) => node.children.length > 0)
+        .map((node) => node.issue.key);
+      const linked = nodes
+        .filter((node) => node.issue.links.length > 0)
+        .map((node) => node.issue.key);
+      const scope = new Set(keys);
+      const oldLinks = activeTab.linkedExpanded ?? [];
+      const fullyExpanded =
+        branches.every((key) => activeTab.expanded.includes(key)) &&
+        linked.length > 0 &&
+        linked.every((key) => oldLinks.includes(key));
       updateTab(activeTab.id, {
-        expanded: expanded ? snapshot.issues.map((issue) => issue.key) : [],
+        expanded: expanded
+          ? [...new Set([...activeTab.expanded, ...keys])]
+          : fullyExpanded && !includeLinks
+            ? activeTab.expanded
+            : activeTab.expanded.filter((key) => !scope.has(key)),
+        linkedExpanded: expanded
+          ? includeLinks
+            ? [...new Set([...oldLinks, ...linked])]
+            : oldLinks
+          : oldLinks.filter((key) => !scope.has(key)),
       });
     },
-    [activeTab, snapshot, updateTab],
+    [activeTab, snapshot, updateTab, filtering],
   );
+  const expandDepth = (depth: number, branch = false) => {
+    if (!activeTab || !snapshot || filtering) return;
+    const root = buildIssueTree(snapshot.issues, snapshot.rootKey);
+    const target =
+      findNode(root, branch ? activeTab.selectedKey : activeTab.focusKey) ??
+      root;
+    const scope = new Set(expansionKeys(target));
+    updateTab(activeTab.id, {
+      expanded: [
+        ...activeTab.expanded.filter((key) => !scope.has(key)),
+        ...expansionKeys(target, depth),
+      ],
+    });
+  };
+  const revealSelection = () => {
+    if (!activeTab?.selectedKey || !snapshot) return;
+    const root = buildIssueTree(snapshot.issues, snapshot.rootKey);
+    const path = ancestorPath(root, activeTab.selectedKey);
+    if (!path.length) return;
+    updateTab(activeTab.id, {
+      focusKey: undefined,
+      expanded: filtering
+        ? activeTab.expanded
+        : [
+            ...new Set([
+              ...activeTab.expanded,
+              ...path.map((node) => node.issue.key),
+            ]),
+          ],
+    });
+    setReveal({ tabId: activeTab.id, key: activeTab.selectedKey });
+  };
 
   const commands = useMemo(
     () => [
+      {
+        id: 'findInTree',
+        label: 'Find in tree',
+        icon: Search,
+        run: () => {
+          searchRef.current?.focus();
+          searchRef.current?.select();
+        },
+      },
+      {
+        id: 'expandLinked',
+        label: 'Expand hierarchy and linked issues',
+        icon: ChevronsUpDown,
+        run: () => expandAll(true, true),
+      },
+      {
+        id: 'collapseLinked',
+        label: 'Collapse hierarchy and linked issues',
+        icon: ChevronsDownUp,
+        run: () => expandAll(false, true),
+      },
       {
         id: 'quickOpen',
         label: 'Open issue…',
@@ -805,14 +934,50 @@ export function App() {
     () => (snapshot ? buildIssueTree(snapshot.issues, snapshot.rootKey) : null),
     [snapshot],
   );
-  const shownTree = useMemo(
-    () => (tree && activeTab ? visibleTree(tree, activeTab.hideDone) : tree),
-    [tree, activeTab?.hideDone],
+  const focusedTree = findNode(tree, activeTab?.focusKey) ?? tree;
+  const shownTree = filterTree(
+    focusedTree,
+    query,
+    activeTab?.filters ?? {},
+    activeTab?.hideDone ?? false,
+    activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
+    reveal?.tabId === activeTab?.id ? reveal?.key : undefined,
   );
-  const expandedSet = useMemo(
-    () => new Set(activeTab?.expanded ?? []),
-    [activeTab?.expanded],
+  const expandedSet = new Set(
+    filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
+  const linkedSet = new Set(activeTab?.linkedExpanded ?? []);
+  const counts = useMemo(() => {
+    const result = new Map<string, ReturnType<typeof childCounts>>();
+    const visit = (node: IssueNode): number => {
+      const descendants = node.children.reduce(
+        (sum, child) => sum + 1 + visit(child),
+        0,
+      );
+      result.set(node.issue.key, {
+        open: node.children.filter(
+          (child) => child.issue.status.category !== 'done',
+        ).length,
+        total: node.children.length,
+        descendants,
+      });
+      return descendants;
+    };
+    if (tree) visit(tree);
+    return result;
+  }, [tree]);
+  const breadcrumb = ancestorPath(
+    tree,
+    activeTab?.selectedKey ?? activeTab?.focusKey,
+  );
+  useEffect(() => {
+    if (!reveal || reveal.tabId !== activeTab?.id) return;
+    const element = document.querySelector<HTMLElement>(
+      `[data-tree-key="${reveal.key}"]`,
+    );
+    element?.scrollIntoView({ block: 'center' });
+    element?.focus({ preventScroll: true });
+  }, [reveal, activeTab?.id, snapshot]);
   const flat = useMemo(
     () => flattenVisible(shownTree, expandedSet),
     [shownTree, expandedSet],
@@ -1215,16 +1380,24 @@ export function App() {
                 <span className="separator" />
                 <button
                   className="tool-button"
-                  onClick={() => expandAll(false)}
-                  title="Collapse all"
+                  disabled={filtering}
+                  onClick={(event) =>
+                    expandAll(false, event.altKey || event.detail > 1)
+                  }
+                  onDoubleClick={() => expandAll(false, true)}
+                  title="Collapse all; double-click or Alt-click to include linked issues"
                 >
                   <ChevronsDownUp size={15} />
                   <span>Collapse</span>
                 </button>
                 <button
                   className="tool-button"
-                  onClick={() => expandAll(true)}
-                  title="Expand all"
+                  disabled={filtering}
+                  onClick={(event) =>
+                    expandAll(true, event.altKey || event.detail > 1)
+                  }
+                  onDoubleClick={() => expandAll(true, true)}
+                  title="Expand all; double-click or Alt-click to include linked issues"
                 >
                   <ChevronsUpDown size={15} />
                   <span>Expand</span>
@@ -1249,6 +1422,234 @@ export function App() {
                 </button>
               </div>
             </header>
+            <div className="tree-navigation">
+              <label className="tree-search">
+                <Search size={14} />
+                <input
+                  ref={searchRef}
+                  aria-label="Find in tree"
+                  placeholder="Find key or title…"
+                  value={query}
+                  onChange={(event) =>
+                    setQueries((current) => ({
+                      ...current,
+                      [activeTab.id]: event.target.value,
+                    }))
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      setQueries((current) => ({
+                        ...current,
+                        [activeTab.id]: '',
+                      }));
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+                {query && (
+                  <button
+                    aria-label="Clear tree search"
+                    onClick={() =>
+                      setQueries((current) => ({
+                        ...current,
+                        [activeTab.id]: '',
+                      }))
+                    }
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </label>
+              <select
+                aria-label="Filter assignee"
+                value={activeTab.filters?.assignee ?? ''}
+                title={identityErrors[activeTab.connectionId]}
+                onChange={(event) =>
+                  updateTab(activeTab.id, {
+                    filters: {
+                      ...activeTab.filters,
+                      assignee:
+                        (event.target.value as 'me' | 'unassigned') ||
+                        undefined,
+                    },
+                  })
+                }
+              >
+                <option value="">All assignees</option>
+                <option
+                  value="me"
+                  disabled={!currentUsers[activeTab.connectionId]}
+                >
+                  Assigned to me
+                </option>
+                <option value="unassigned">Unassigned</option>
+              </select>
+              <select
+                aria-label="Filter status"
+                value={activeTab.filters?.status ?? ''}
+                onChange={(event) =>
+                  updateTab(activeTab.id, {
+                    filters: {
+                      ...activeTab.filters,
+                      status: event.target.value || undefined,
+                    },
+                  })
+                }
+              >
+                <option value="">All statuses</option>
+                {[
+                  ...new Map(
+                    snapshot?.issues.map((issue) => [
+                      issue.status.id,
+                      issue.status,
+                    ]),
+                  ).values(),
+                ].map((status) => (
+                  <option key={status.id} value={status.id}>
+                    {status.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filter priority"
+                value={activeTab.filters?.priority ?? ''}
+                onChange={(event) =>
+                  updateTab(activeTab.id, {
+                    filters: {
+                      ...activeTab.filters,
+                      priority: event.target.value || undefined,
+                    },
+                  })
+                }
+              >
+                <option value="">All priorities</option>
+                <option value="__none__">No priority</option>
+                {[
+                  ...new Map(
+                    snapshot?.issues
+                      .filter((issue) => issue.priority)
+                      .map((issue) => [issue.priority!.id, issue.priority!]),
+                  ).values(),
+                ].map((priority) => (
+                  <option key={priority.id} value={priority.id}>
+                    {priority.name}
+                  </option>
+                ))}
+              </select>
+              <details className="tree-view-menu">
+                <summary>Tree actions</summary>
+                <div>
+                  <button disabled={filtering} onClick={() => expandDepth(1)}>
+                    Expand immediate children
+                  </button>
+                  <button disabled={filtering} onClick={() => expandDepth(2)}>
+                    Expand two levels
+                  </button>
+                  <button disabled={filtering} onClick={() => expandAll(true)}>
+                    Expand all descendants
+                  </button>
+                  <button
+                    disabled={filtering}
+                    onClick={() => expandAll(true, true)}
+                  >
+                    Expand hierarchy and linked issues
+                  </button>
+                  <button
+                    disabled={filtering}
+                    onClick={() => expandAll(false, true)}
+                  >
+                    Collapse hierarchy and linked issues
+                  </button>
+                  <button
+                    disabled={filtering || !activeTab.selectedKey}
+                    onClick={() => expandDepth(Infinity, true)}
+                  >
+                    Expand selected branch
+                  </button>
+                  <button
+                    disabled={filtering || !activeTab.selectedKey}
+                    onClick={() => expandDepth(0, true)}
+                  >
+                    Collapse selected branch
+                  </button>
+                  <button
+                    disabled={!activeTab.selectedKey}
+                    onClick={() =>
+                      updateTab(activeTab.id, {
+                        focusKey: activeTab.selectedKey,
+                      })
+                    }
+                  >
+                    Focus selected subtree
+                  </button>
+                  <button
+                    disabled={!activeTab.selectedKey}
+                    onClick={revealSelection}
+                  >
+                    Reveal selection
+                  </button>
+                  <button
+                    onClick={() => {
+                      updateTab(activeTab.id, {
+                        focusKey: undefined,
+                        selectedKey: activeTab.rootKey,
+                      });
+                      scrollRef.current?.scrollTo({ top: 0 });
+                    }}
+                  >
+                    Back to root
+                  </button>
+                </div>
+              </details>
+            </div>
+            {identityErrors[activeTab.connectionId] && (
+              <div className="identity-hint" role="status">
+                {identityErrors[activeTab.connectionId]}{' '}
+                <button onClick={() => setIdentityRetry((value) => value + 1)}>
+                  Retry account lookup
+                </button>
+              </div>
+            )}
+            {filtering && (
+              <div className="identity-hint">
+                Matching paths are expanded automatically. Clear search and
+                filters to restore your expansion.
+              </div>
+            )}
+            {
+              <nav className="tree-breadcrumb" aria-label="Issue ancestry">
+                <button
+                  onClick={() => {
+                    updateTab(activeTab.id, { focusKey: undefined });
+                    scrollRef.current?.scrollTo({ top: 0 });
+                  }}
+                >
+                  {activeTab.rootKey}
+                </button>
+                {breadcrumb.slice(1).map((node) => (
+                  <React.Fragment key={node.issue.key}>
+                    <ChevronRight size={12} />
+                    <button
+                      title={node.issue.summary}
+                      aria-current={
+                        node.issue.key === activeTab.focusKey
+                          ? 'location'
+                          : undefined
+                      }
+                      onClick={() =>
+                        updateTab(activeTab.id, {
+                          focusKey: node.issue.key,
+                          selectedKey: node.issue.key,
+                        })
+                      }
+                    >
+                      {node.issue.key}
+                    </button>
+                  </React.Fragment>
+                ))}
+                {activeTab.focusKey && <span>Focused subtree</span>}
+              </nav>
+            }
             {(errors[activeTab.id] ||
               errors.edit ||
               errors.workspace ||
@@ -1320,15 +1721,18 @@ export function App() {
                     statusColors={statusColors}
                     depth={0}
                     expanded={expandedSet}
-                    linkedExpanded={new Set(activeTab.linkedExpanded ?? [])}
+                    expansionLocked={filtering}
+                    linkedExpanded={linkedSet}
                     onToggleLinks={(key) =>
                       updateTab(activeTab.id, {
-                        linkedExpanded: activeTab.linkedExpanded?.includes(key)
-                          ? activeTab.linkedExpanded.filter(
-                              (item) => item !== key,
-                            )
-                          : [...(activeTab.linkedExpanded ?? []), key],
+                        linkedExpanded: linkedSet.has(key)
+                          ? [...linkedSet].filter((item) => item !== key)
+                          : [...linkedSet, key],
                       })
+                    }
+                    counts={counts}
+                    revealedKey={
+                      reveal?.tabId === activeTab.id ? reveal.key : undefined
                     }
                     onToggle={(key) =>
                       updateTab(activeTab.id, {
@@ -1362,6 +1766,20 @@ export function App() {
                     focusNeighbor={focusTreeNeighbor}
                   />
                 </div>
+              ) : tree && filtering ? (
+                <EmptyState
+                  icon={Search}
+                  title="No matching issues"
+                  detail="Try another search or clear the filters."
+                  action="Clear search and filters"
+                  onAction={() => {
+                    setQueries((current) => ({
+                      ...current,
+                      [activeTab.id]: '',
+                    }));
+                    updateTab(activeTab.id, { filters: {} });
+                  }}
+                />
               ) : tree && activeTab.hideDone ? (
                 <EmptyState
                   icon={Check}
@@ -1649,8 +2067,11 @@ type RowsProps = {
   statusColors: ReadonlyMap<string, string>;
   depth: number;
   expanded: Set<string>;
+  expansionLocked: boolean;
   linkedExpanded: Set<string>;
   onToggleLinks: (key: string) => void;
+  counts: Map<string, ReturnType<typeof childCounts>>;
+  revealedKey?: string;
   onToggle: (key: string) => void;
   selectedKey?: string;
   onSelect: (key: string) => void;
@@ -1689,6 +2110,7 @@ function TreeRows(props: RowsProps) {
   const open = expanded.has(issue.key);
   const hasChildren = node.children.length > 0;
   const linksOpen = props.linkedExpanded.has(issue.key);
+  const count = props.counts.get(issue.key);
   const onTreeKey = (event: React.KeyboardEvent) => {
     if (event.altKey || event.metaKey || event.ctrlKey) return;
     if (
@@ -1706,11 +2128,16 @@ function TreeRows(props: RowsProps) {
       event.preventDefault();
       focusNeighbor(issue.key, -1);
     }
-    if (event.key === 'ArrowRight' && hasChildren && !open) {
+    if (
+      event.key === 'ArrowRight' &&
+      hasChildren &&
+      !open &&
+      !props.expansionLocked
+    ) {
       event.preventDefault();
       onToggle(issue.key);
     }
-    if (event.key === 'ArrowLeft' && open) {
+    if (event.key === 'ArrowLeft' && open && !props.expansionLocked) {
       event.preventDefault();
       onToggle(issue.key);
     }
@@ -1742,6 +2169,7 @@ function TreeRows(props: RowsProps) {
         className={cx(
           'issue-row',
           selectedKey === issue.key && 'selected',
+          props.revealedKey === issue.key && 'revealed',
           dragKey && dragKey !== issue.key && 'drop-ready',
         )}
         onDragOver={(event) => {
@@ -1791,7 +2219,15 @@ function TreeRows(props: RowsProps) {
             className={cx('disclosure', !hasChildren && 'placeholder')}
             aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
             tabIndex={hasChildren ? 0 : -1}
-            onClick={() => hasChildren && onToggle(issue.key)}
+            disabled={props.expansionLocked}
+            title={
+              props.expansionLocked
+                ? 'Matching paths expand automatically'
+                : undefined
+            }
+            onClick={() =>
+              hasChildren && !props.expansionLocked && onToggle(issue.key)
+            }
           >
             {hasChildren &&
               (open ? <ChevronDown size={15} /> : <ChevronRight size={15} />)}
@@ -1838,6 +2274,14 @@ function TreeRows(props: RowsProps) {
               </button>
             )}
           </div>
+          {!open && count && count.total > 0 && (
+            <span
+              className="child-count"
+              title={`${count.open} open / ${count.total} total direct children; ${count.descendants} total descendants`}
+            >
+              {count.open}/{count.total} children
+            </span>
+          )}
           {issue.links.length > 0 && (
             <button
               className={cx('link-count', linksOpen && 'active')}
@@ -1934,7 +2378,11 @@ function TreeRows(props: RowsProps) {
         />
       )}
       {hasChildren && open && (
-        <div role="group">
+        <div
+          role="group"
+          className="tree-branch"
+          style={{ '--branch-depth': depth } as React.CSSProperties}
+        >
           {node.children.map((child) => (
             <TreeRows
               key={child.issue.key}

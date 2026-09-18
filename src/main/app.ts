@@ -119,6 +119,31 @@ function workspace(value: Workspace) {
       !Number.isFinite(tab.scrollTop)
     )
       throw new Error('Invalid tab state.');
+    if (
+      tab.linkedExpanded !== undefined &&
+      (!Array.isArray(tab.linkedExpanded) ||
+        tab.linkedExpanded.length > 100_000 ||
+        !tab.linkedExpanded.every(
+          (k) => typeof k === 'string' && k.length < 500,
+        ))
+    )
+      throw new Error('Invalid linked expansion.');
+    if (tab.focusKey !== undefined) key(tab.focusKey);
+    if (tab.filters !== undefined) {
+      if (
+        !tab.filters ||
+        typeof tab.filters !== 'object' ||
+        Array.isArray(tab.filters)
+      )
+        throw new Error('Invalid filters.');
+      if (
+        tab.filters.assignee !== undefined &&
+        !['me', 'unassigned'].includes(tab.filters.assignee)
+      )
+        throw new Error('Invalid assignee filter.');
+      if (tab.filters.status !== undefined) text(tab.filters.status);
+      if (tab.filters.priority !== undefined) text(tab.filters.priority);
+    }
   }
   if (JSON.stringify(value).length > 4_000_000)
     throw new Error('Workspace is too large to save.');
@@ -167,6 +192,16 @@ async function start(
   };
   const handlers: Record<string, (...args: any[]) => unknown> = {
     connections,
+    currentUser: async (id: string) => {
+      provider(id);
+      if (id === fixture?.connection.id)
+        return { id: 'alex', name: 'Alex Morgan' };
+      const user = await auth.request(id, '/rest/api/3/myself');
+      return {
+        id: text(user.accountId),
+        name: text(user.displayName ?? user.accountId),
+      };
+    },
     connect: async (input?: TokenConnectionInput) => {
       if (authError) throw new Error(authError);
       await auth.connect(input);

@@ -110,7 +110,25 @@ try {
     page.getByRole('heading', { name: 'See the whole tree.' }),
   ).toBeVisible();
 
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('canopy:currentUser');
+    let calls = 0;
+    ipcMain.handle('canopy:currentUser', () => {
+      if (++calls === 1) throw new Error('Temporary identity failure');
+      return { id: 'alex', name: 'Alex Morgan' };
+    });
+  });
   await openIssue('CAN-100');
+  await expect(page.getByRole('status')).toContainText(
+    'Temporary identity failure',
+  );
+  await page.getByRole('button', { name: 'Retry account lookup' }).click();
+  await expect(
+    page.getByRole('button', { name: 'Retry account lookup' }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByLabel('Filter assignee').locator('option[value="me"]'),
+  ).toBeEnabled();
   const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
   await expect(tree.getByRole('treeitem')).toHaveCount(4);
   const rootSummary = 'A calmer place to get things done';
@@ -151,6 +169,69 @@ try {
   await expect(tree.getByRole('treeitem')).toHaveCount(1);
   await page.getByRole('button', { name: 'Expand', exact: true }).click();
   await expect(tree.getByRole('treeitem')).toHaveCount(15);
+
+  // Search preserves the saved hierarchy expansion and reveals ancestor context.
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click();
+  await page.keyboard.press(`${modifier}+f`);
+  await expect(
+    page.getByRole('textbox', { name: 'Find in tree' }),
+  ).toBeFocused();
+  await page.getByRole('textbox', { name: 'Find in tree' }).fill('CAN-108');
+  await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  await expect(issue('CAN-108')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Collapse CAN-100', exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Collapse', exact: true }),
+  ).toBeDisabled();
+  await page.getByRole('button', { name: 'Clear tree search' }).click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await expect(
+    issue('CAN-100').getByText('3/4 children', { exact: true }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Expand', exact: true }).dblclick();
+  await expect(page.locator('.linked-panel')).toBeVisible();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click();
+  await expect(page.locator('.linked-panel')).toHaveCount(0);
+  await expect(tree.getByRole('treeitem')).toHaveCount(15);
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await page.locator('.tree-view-menu summary').click();
+  await page
+    .getByRole('button', { name: 'Expand two levels', exact: true })
+    .click();
+  await expect(issue('CAN-107')).toBeVisible();
+  await expect(issue('CAN-108')).toHaveCount(0);
+  await page
+    .getByRole('button', { name: 'Expand all descendants', exact: true })
+    .click();
+  await issue('CAN-108').getByTitle('Double-click to edit').click();
+  await page.getByRole('button', { name: 'Focus selected subtree' }).click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await expect(
+    page.getByRole('navigation', { name: 'Issue ancestry' }),
+  ).toContainText('CAN-100');
+  await page.getByRole('button', { name: 'Back to root', exact: true }).click();
+  await issue('CAN-108').getByTitle('Double-click to edit').click();
+  await page
+    .getByRole('textbox', { name: 'Find in tree' })
+    .fill('no such issue');
+  await expect(
+    page.getByRole('heading', { name: 'No matching issues' }),
+  ).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Reveal selection', exact: true })
+    .click();
+  await expect(issue('CAN-108')).toBeVisible();
+  await expect(issue('CAN-108').locator(':scope > .issue-row')).toHaveClass(
+    /revealed/,
+  );
+  await page.getByRole('button', { name: 'Clear tree search' }).click();
+  await page.getByLabel('Filter assignee').selectOption('me');
+  await expect(issue('CAN-108')).toHaveCount(0);
+  await page.getByLabel('Filter assignee').selectOption('');
+  await page.locator('.tree-view-menu summary').click();
 
   await expectIssueBefore('CAN-111', 'CAN-112');
   await page
@@ -368,6 +449,13 @@ try {
   await expect(page.getByRole('tab')).toHaveCount(2);
   await secondTab.click();
 
+  await page.getByLabel('Filter status').selectOption('todo');
+  await expect(issue('CAN-202')).toBeVisible();
+  await issue('CAN-202').getByTitle('Double-click to edit').click();
+  await page.locator('.tree-view-menu summary').click();
+  await page.getByRole('button', { name: 'Focus selected subtree' }).click();
+  await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(1);
+
   // Workspace writes are intentionally debounced.
   await page.waitForTimeout(350);
   await close();
@@ -401,6 +489,9 @@ try {
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
   ).toBeVisible();
+  await expect(page.getByLabel('Filter status')).toHaveValue('todo');
+  await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(1);
+  await expect(issue('CAN-202')).toBeVisible();
   await page.keyboard.press(paletteShortcut);
   await expect(
     page.getByRole('dialog', { name: 'Command palette' }),
@@ -449,6 +540,7 @@ try {
   await page.keyboard.press('Alt+Shift+ArrowLeft');
   await expect(page.getByRole('tab').first()).toContainText('CAN-100');
   await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await expect(page.locator('.linked-panel')).toBeVisible();
   await expect(issue('CAN-111').getByText(summary)).toBeVisible();
   await expect(issue('CAN-111').getByText('Highest')).toBeVisible();
   await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();

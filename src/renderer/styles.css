@@ -1755,3 +1755,123 @@ kbd {
 .tab-context-menu button:focus-visible {
   background: var(--hover);
 }
+
+.tree-navigation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.tree-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 160px;
+}
+.tree-search input {
+  width: 100%;
+  min-width: 80px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+}
+.tree-navigation select {
+  max-width: 150px;
+  color: inherit;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px;
+}
+.tree-view-menu {
+  position: relative;
+  font-size: 12px;
+}
+.tree-view-menu summary {
+  cursor: pointer;
+}
+.tree-view-menu > div {
+  position: absolute;
+  right: 0;
+  top: 24px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 8px 24px #0003;
+  padding: 6px;
+}
+.tree-view-menu button {
+  text-align: left;
+  padding: 7px;
+  border-radius: 4px;
+}
+.tree-view-menu button:hover {
+  background: var(--hover);
+}
+.tree-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 18px;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.tree-breadcrumb span,
+.identity-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+.identity-hint {
+  padding: 4px 18px;
+}
+.child-count {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  margin-left: 6px;
+}
+.tree-branch {
+  position: relative;
+}
+.tree-branch::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(43px + var(--branch-depth) * 23px);
+  border-left: 1px solid var(--border);
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.55;
+}
+.issue-row.revealed {
+  box-shadow: inset 3px 0 var(--accent);
+}
+.tree-breadcrumb button,
+.tree-view-menu button,
+.tree-search button,
+.identity-hint button {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+}
+.tree-breadcrumb button:hover,
+.identity-hint button:hover {
+  color: var(--accent);
+}
+.tree-view-menu button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.tree-breadcrumb {
+  min-height: 27px;
+}

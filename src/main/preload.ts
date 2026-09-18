@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
 const api: CanopyAPI = {
+  currentUser: (id) => ipcRenderer.invoke('canopy:currentUser', id),
   connections: () => ipcRenderer.invoke('canopy:connections'),
   connect: (input) => ipcRenderer.invoke('canopy:connect', input),
   disconnect: (id) => ipcRenderer.invoke('canopy:disconnect', id),

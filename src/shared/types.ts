@@ -40,6 +40,11 @@ export type RootReference = {
   rootKey: string;
   summary?: string;
 };
+export type TreeFilters = {
+  assignee?: 'me' | 'unassigned';
+  status?: string;
+  priority?: string;
+};
 export type TabState = {
   id: string;
   connectionId: string;
@@ -47,6 +52,8 @@ export type TabState = {
   expanded: string[];
   linkedExpanded?: string[];
   summary?: string;
+  filters?: TreeFilters;
+  focusKey?: string;
   hideDone: boolean;
   selectedKey?: string;
   scrollTop: number;
@@ -71,6 +78,7 @@ export type TokenConnectionInput = {
 };
 export interface CanopyAPI {
   connections(): Promise<Connection[]>;
+  currentUser(connectionId: string): Promise<Choice>;
   connect(input?: TokenConnectionInput): Promise<Connection[]>;
   disconnect(connectionId: string): Promise<void>;
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
