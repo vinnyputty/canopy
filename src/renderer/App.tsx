@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -89,6 +90,7 @@ import {
   tableStyle,
 } from './table-view';
 import { Mutations } from './mutations';
+import { RefreshSchedule } from './refresh';
 import {
   nextEditableCell,
   retainEditingOrder,
@@ -194,7 +196,16 @@ export function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
-  const inflightRefreshes = useRef(new Set<string>());
+  const refreshSchedule = useRef(new RefreshSchedule());
+  const deferredRefreshes = useRef(new Set<string>());
+  const refreshBlocked = useRef<(connectionId: string) => boolean>(() => false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [foreground, setForeground] = useState(
+    document.visibilityState === 'visible' && document.hasFocus(),
+  );
+  const [connectionErrors, setConnectionErrors] = useState<Set<string>>(
+    new Set(),
+  );
   const refreshSequences = useRef<Record<string, number>>({});
   const [undoState, setUndoState] = useState<{ label?: string; busy: boolean }>(
     { busy: false },
@@ -216,6 +227,10 @@ export function App() {
   const optionSequences = useRef<Record<string, number>>({});
   const tabsRef = useRef<TabState[]>([]);
   const pendingScrollRestore = useRef<string | null>(null);
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = workspace.activeTabId;
+  refreshBlocked.current = (connectionId) =>
+    editorRef.current?.connectionId === connectionId || mutations.pending(connectionId);
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
@@ -423,85 +438,142 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [workspace, ready]);
 
-  const refreshTab = useCallback(async (tab: TabState, quiet = false) => {
-    if (
-      inflightRefreshes.current.has(tab.id) ||
-      editorRef.current?.connectionId === tab.connectionId
-    )
-      return;
-    inflightRefreshes.current.add(tab.id);
-    const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
-    refreshSequences.current[tab.id] = sequence;
-    const epoch = mutations.beginRefresh();
-    const setter = quiet ? setRefreshing : setLoading;
-    setter((current) => new Set(current).add(tab.id));
-    try {
-      const next = await window.canopy.tree(tab.connectionId, tab.rootKey);
-      if (refreshSequences.current[tab.id] !== sequence) return;
-      if (
-        refreshSequences.current[tab.id] === sequence &&
-        editorRef.current?.connectionId !== tab.connectionId
-      ) {
-        mutations.receive(tab, next, epoch);
+  const refreshTab = useCallback(
+    async (tab: TabState, quiet = false, explicit = !quiet) => {
+      if (!tabsRef.current.some((item) => item.id === tab.id)) return;
+      if (!navigator.onLine || refreshBlocked.current(tab.connectionId)) {
+        deferredRefreshes.current.add(tab.id);
+        return;
       }
-      setErrors((current) => {
-        const copy = { ...current };
-        delete copy[tab.id];
-        return copy;
-      });
-    } catch (error) {
-      if (refreshSequences.current[tab.id] !== sequence) return;
-      setErrors((current) => ({
-        ...current,
-        [tab.id]: error instanceof Error ? error.message : String(error),
-      }));
-    } finally {
-      mutations.endRefresh(epoch);
-      if (refreshSequences.current[tab.id] === sequence) {
-        inflightRefreshes.current.delete(tab.id);
-        setter((current) => {
+      if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) return;
+      deferredRefreshes.current.delete(tab.id);
+      const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
+      refreshSequences.current[tab.id] = sequence;
+      const epoch = mutations.beginRefresh();
+      const setter = quiet ? setRefreshing : setLoading;
+      setter((current) => new Set(current).add(tab.id));
+      try {
+        const next = await window.canopy.tree(tab.connectionId, tab.rootKey);
+        if (
+          refreshSequences.current[tab.id] === sequence &&
+          !refreshBlocked.current(tab.connectionId)
+        ) {
+          mutations.receive(tab, next, epoch);
+        } else if (refreshSequences.current[tab.id] === sequence) {
+          deferredRefreshes.current.add(tab.id);
+        }
+        if (refreshSequences.current[tab.id] !== sequence) return;
+        setConnectionErrors((current) => {
           const copy = new Set(current);
           copy.delete(tab.id);
           return copy;
         });
+        setErrors((current) => {
+          const copy = { ...current };
+          delete copy[tab.id];
+          return copy;
+        });
+      } catch (error) {
+        if (refreshSequences.current[tab.id] !== sequence) return;
+        setConnectionErrors((current) => new Set(current).add(tab.id));
+        setErrors((current) => ({
+          ...current,
+          [tab.id]: error instanceof Error ? error.message : String(error),
+        }));
+      } finally {
+        mutations.endRefresh(epoch);
+        if (refreshSequences.current[tab.id] === sequence) {
+          refreshSchedule.current.finish(tab.id, Date.now());
+          setter((current) => {
+            const copy = new Set(current);
+            copy.delete(tab.id);
+            return copy;
+          });
+        }
       }
-    }
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!ready) return;
+    const activated = refreshSchedule.current.sync(
+      workspace.tabs.map((tab) => tab.id),
+      foreground ? workspace.activeTabId : null,
+      Date.now(),
+    );
     for (const tab of workspace.tabs) {
       if (!snapshots[tab.id] && !attemptedLoads.current.has(tab.id)) {
         attemptedLoads.current.add(tab.id);
         void refreshTab(tab);
+      } else if (activated.includes(tab.id)) {
+        void refreshTab(tab, true);
       }
     }
-  }, [ready, workspace.tabs, snapshots, refreshTab]);
+  }, [
+    ready,
+    workspace.tabs,
+    workspace.activeTabId,
+    foreground,
+    snapshots,
+    refreshTab,
+  ]);
 
   useEffect(() => {
     if (!ready) return;
-    const refresh = () =>
-      tabsRef.current.forEach((tab) => void refreshTab(tab, true));
-    const timer = window.setInterval(refresh, 30_000);
-    const onFocus = refresh;
-    window.addEventListener('focus', onFocus);
+    const tick = () => {
+      if (!navigator.onLine) return;
+      const due = new Set(refreshSchedule.current.due(Date.now()));
+      for (const tab of tabsRef.current) {
+        if (due.has(tab.id) || deferredRefreshes.current.has(tab.id))
+          void refreshTab(tab, true);
+      }
+    };
+    const timer = window.setInterval(tick, 1000);
+    const refreshActive = () => {
+      const tab = tabsRef.current.find(
+        (item) => item.id === activeIdRef.current,
+      );
+      if (tab) void refreshTab(tab, true);
+    };
+    const visibility = () => {
+      const visible =
+        document.visibilityState === 'visible' && document.hasFocus();
+      setForeground(visible);
+      if (visible) refreshActive();
+    };
+    const blur = () => setForeground(false);
+    const connectivity = () => {
+      setOnline(navigator.onLine);
+      if (navigator.onLine) refreshActive();
+    };
+    window.addEventListener('focus', visibility);
+    window.addEventListener('blur', blur);
+    document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('online', connectivity);
+    window.addEventListener('offline', connectivity);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('focus', visibility);
+      window.removeEventListener('blur', blur);
+      document.removeEventListener('visibilitychange', visibility);
+      window.removeEventListener('online', connectivity);
+      window.removeEventListener('offline', connectivity);
     };
   }, [ready, refreshTab]);
 
   useEffect(() => {
-    if (
-      !activeTab ||
-      !snapshot ||
-      !scrollRef.current ||
-      pendingScrollRestore.current !== activeTab.id
-    )
-      return;
-    scrollRef.current.scrollTop = activeTab.scrollTop;
-    pendingScrollRestore.current = null;
-  }, [activeTab, Boolean(snapshot)]);
+    for (const tab of workspace.tabs) {
+      if (deferredRefreshes.current.has(tab.id)) void refreshTab(tab, true);
+    }
+  }, [editor, saving, online, workspace.tabs, refreshTab]);
+
+  useLayoutEffect(() => {
+    if (activeTab && snapshot && scrollRef.current) {
+      scrollRef.current.scrollTop = activeTab.scrollTop;
+      pendingScrollRestore.current = null;
+    }
+  }, [activeTab?.id, snapshot, pendingScrollRestore.current]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
     setWorkspace((current) => {
@@ -576,9 +648,10 @@ export function App() {
         displayedTrees.current.delete(id);
         attemptedLoads.current.delete(id);
         refreshSequences.current[id] = (refreshSequences.current[id] ?? 0) + 1;
-        inflightRefreshes.current.delete(id);
+        refreshSchedule.current.forget(id);
+        deferredRefreshes.current.delete(id);
       }
-      for (const setter of [setLoading, setRefreshing])
+      for (const setter of [setLoading, setRefreshing, setConnectionErrors])
         setter(
           (current) => new Set([...current].filter((id) => !ids.includes(id))),
         );
@@ -844,7 +917,7 @@ export function App() {
         id: 'refresh',
         label: 'Refresh current tree',
         icon: RefreshCw,
-        run: () => activeTab && void refreshTab(activeTab, true),
+        run: () => activeTab && void refreshTab(activeTab, true, true),
       },
       {
         id: 'expandAll',
@@ -1614,7 +1687,7 @@ export function App() {
                 <button
                   className="icon-button"
                   disabled={refreshing.has(activeTab.id)}
-                  onClick={() => void refreshTab(activeTab, true)}
+                  onClick={() => void refreshTab(activeTab, true, true)}
                   title="Refresh"
                 >
                   <RefreshCw
@@ -1889,6 +1962,11 @@ export function App() {
                     errors.workspace ??
                     errors.app}
                 </span>
+                {errors[activeTab.id] && (
+                  <button onClick={() => void refreshTab(activeTab, true, true)} disabled={!online || refreshing.has(activeTab.id) || loading.has(activeTab.id)}>
+                    Retry
+                  </button>
+                )}
                 <button
                   onClick={() =>
                     setErrors((value) => {
@@ -2087,28 +2165,43 @@ export function App() {
                 />
               )}
             </div>
-            {snapshot && (
-              <footer className="statusbar">
-                <span>
-                  {snapshot.issues.length} issue
-                  {snapshot.issues.length === 1 ? '' : 's'}
-                </span>
-                <span>
-                  Updated{' '}
-                  {new Date(snapshot.fetchedAt).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </span>
-                {refreshing.has(activeTab.id) && (
+            <footer className="statusbar">
+              {snapshot ? (
+                <>
                   <span>
-                    <Loader2 className="spin" size={12} /> Checking for changes
+                    {snapshot.issues.length} issue
+                    {snapshot.issues.length === 1 ? '' : 's'}
                   </span>
-                )}
-                <span className="status-spacer" />
-                <span>Auto-refresh 30s</span>
-              </footer>
-            )}
+                  <span title={new Date(snapshot.fetchedAt).toLocaleString()}>
+                    Last updated{' '}
+                    {new Date(snapshot.fetchedAt).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </>
+              ) : (
+                <span>Not updated yet</span>
+              )}
+              {(refreshing.has(activeTab.id) || loading.has(activeTab.id)) && (
+                <span>
+                  <Loader2 className="spin" size={12} /> Checking for changes
+                </span>
+              )}
+              <span className="status-spacer" />
+              <span role="status" aria-label="Connection status">
+                {!online
+                  ? 'Offline'
+                  : connectionErrors.has(activeTab.id)
+                    ? 'Connection error'
+                    : snapshot
+                      ? 'Connected'
+                      : 'Connecting'}
+              </span>
+              <span>
+                {foreground ? 'Auto-refresh 30s' : 'Background refresh'}
+              </span>
+            </footer>
           </>
         )}
         {!activeTab &&
