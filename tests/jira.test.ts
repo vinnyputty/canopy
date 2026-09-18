@@ -607,3 +607,48 @@ describe('JiraProvider preview', () => {
     assert.equal((await provider.preview('TEST-1')).commentsError, undefined);
   });
 });
+
+it('caps preview comments at ten, retains author/date, and supports absent content', async () => {
+  const provider = new JiraProvider(async (path) =>
+    path.includes('/comment?')
+      ? {
+          total: 12,
+          comments: Array.from({ length: 12 }, (_, index) => ({
+            id: String(index),
+            created: '2026-01-01T00:00:00Z',
+            author: { displayName: 'Ada' },
+            body: index ? null : 'Latest',
+          })),
+        }
+      : rawIssue('TEST-1'),
+  );
+  const preview = await provider.preview('TEST-1');
+  assert.equal(preview.description, '');
+  assert.equal(preview.comments.length, 10);
+  assert.equal(preview.totalComments, 12);
+  assert.deepEqual(preview.comments[0], {
+    id: '0',
+    author: 'Ada',
+    created: '2026-01-01T00:00:00Z',
+    body: 'Latest',
+  });
+  assert.equal(preview.comments[1].body, '');
+});
+
+it('isolates malformed comment responses and rejects inaccessible preview issues', async () => {
+  const malformed = new JiraProvider(async (path) =>
+    path.includes('/comment?') ? { comments: null } : rawIssue('TEST-1'),
+  );
+  assert.match(
+    (await malformed.preview('TEST-1')).commentsError!,
+    /invalid comments/,
+  );
+  const inaccessible = new JiraProvider(async (path) => {
+    if (path.includes('/comment?')) return { comments: [], total: 0 };
+    throw new Error('Issue not accessible');
+  });
+  await assert.rejects(
+    inaccessible.preview('TEST-1'),
+    /load preview for TEST-1.*Issue not accessible/,
+  );
+});

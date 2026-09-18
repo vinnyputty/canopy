@@ -681,6 +681,10 @@ try {
   await page.getByRole('button', { name: 'Expand', exact: true }).click();
   await expect(tree.getByRole('treeitem')).toHaveCount(15);
 
+  expect(
+    await app.evaluate(() => globalThis.canopyPreviewTest.requests),
+  ).toEqual([]);
+
   // Preview leaves the tree mounted and keeps its selection, focus, and scroll.
   await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].setSize(1240, 600),
@@ -711,6 +715,23 @@ try {
     preview.getByText('Details for CAN-108.', { exact: false }),
   ).toBeVisible();
   await expect(preview.getByText('Ready for review.')).toBeVisible();
+  await expect(
+    preview.getByText('CAN-108 blocks', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    preview.getByText('CAN-108 is blocked by', { exact: true }),
+  ).toBeVisible();
+  await expect(
+    preview.getByRole('heading', {
+      name: 'Linked issue references',
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    preview.getByText(/separate from hierarchy children/),
+  ).toBeVisible();
+  await expect(tree.getByRole('treeitem')).toHaveCount(15);
+  await expect(issue('CAN-200')).toHaveCount(0);
   await mkdir(join(workspace, '.cache'), { recursive: true });
   await page.screenshot({
     path: join(workspace, '.cache', 'preview.png'),
@@ -765,6 +786,47 @@ try {
   expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
     'https://example.invalid/browse/CAN-109',
   );
+  // All entry points expose the same menu and its keyboard navigation.
+  await issue('CAN-109').locator('.summary').click({ button: 'right' });
+  await expect(
+    rowMenu.getByRole('menuitem', { name: 'Copy key', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(
+    rowMenu.getByRole('menuitem', { name: 'Open in Jira', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(
+    rowMenu.getByRole('menuitem', { name: 'Copy key', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.error-banner')).toContainText(
+    'Demo issues exist only in Canopy.',
+  );
+  await expect(issue('CAN-109')).toBeFocused();
+  await issue('CAN-109')
+    .getByRole('button', { name: 'Actions for CAN-109', exact: true })
+    .click();
+  await expect(rowMenu).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(rowMenu).toBeHidden();
+  await expect(issue('CAN-109')).toBeFocused();
+  const title = issue('CAN-109').locator('.summary');
+  await expect(title).toHaveAttribute(
+    'title',
+    'Add linked issue references — Double-click to edit',
+  );
+  await expect(title).toHaveAccessibleName('Add linked issue references');
+  await expect(issue('CAN-109')).toHaveAccessibleName(
+    'CAN-109: Add linked issue references',
+  );
+  expect(
+    await title.evaluate(
+      (element) => element.scrollWidth > element.clientWidth,
+    ),
+  ).toBe(true);
+
   const resize = page.getByRole('separator', { name: 'Resize issue preview' });
   await resize.focus();
   await page.keyboard.press('ArrowLeft');
@@ -793,6 +855,92 @@ try {
     .focus();
   await page.keyboard.press('Space');
   await expect(page.locator('.issue-preview')).toHaveCount(0);
+
+  // A late request must never replace a newly selected preview or reopen a closed pane.
+  await app.evaluate(() => {
+    globalThis.canopyPreviewTest.hold = ['CAN-101'];
+  });
+  await issue('CAN-101').focus();
+  await page.keyboard.press('Space');
+  await expect(page.locator('.issue-preview')).toContainText(
+    'Loading issue preview…',
+  );
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        Boolean(globalThis.canopyPreviewTest.release['CAN-101']),
+      ),
+    )
+    .toBe(true);
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('.issue-preview h2')).toHaveText(
+    'Design the navigation shell',
+  );
+  await app.evaluate(() => globalThis.canopyPreviewTest.release['CAN-101']());
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        globalThis.canopyPreviewTest.completed.includes('CAN-101'),
+      ),
+    )
+    .toBe(true);
+  await expect(page.locator('.issue-preview h2')).toHaveText(
+    'Design the navigation shell',
+  );
+  await page.keyboard.press('Escape');
+  await app.evaluate(() => {
+    globalThis.canopyPreviewTest.hold = ['CAN-103'];
+    globalThis.canopyPreviewTest.completed = [];
+  });
+  await issue('CAN-103').focus();
+  await page.keyboard.press('Space');
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        Boolean(globalThis.canopyPreviewTest.release['CAN-103']),
+      ),
+    )
+    .toBe(true);
+  await page.keyboard.press('Escape');
+  await app.evaluate(() => globalThis.canopyPreviewTest.release['CAN-103']());
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        globalThis.canopyPreviewTest.completed.includes('CAN-103'),
+      ),
+    )
+    .toBe(true);
+  await expect(page.locator('.issue-preview')).toHaveCount(0);
+  await expect(issue('CAN-103')).toBeFocused();
+
+  // Full fetch errors can retry into explicit empty states without editable controls.
+  await app.evaluate(() => {
+    globalThis.canopyPreviewTest.hold = [];
+    globalThis.canopyPreviewTest.fail = ['CAN-103'];
+  });
+  await page.keyboard.press('Space');
+  await expect(page.locator('.issue-preview')).toContainText(
+    'Preview temporarily unavailable.',
+  );
+  await app.evaluate(() => {
+    globalThis.canopyPreviewTest.fail = [];
+    globalThis.canopyPreviewTest.empty = ['CAN-103'];
+  });
+  await page
+    .locator('.issue-preview')
+    .getByRole('button', { name: 'Retry', exact: true })
+    .click();
+  await expect(page.locator('.issue-preview')).toContainText('No description.');
+  await expect(page.locator('.issue-preview')).toContainText('No comments.');
+  await expect(page.locator('.issue-preview')).toContainText(
+    'No linked issue references.',
+  );
+  await expect(
+    page.locator(
+      '.issue-preview input, .issue-preview textarea, .issue-preview [contenteditable=true]',
+    ),
+  ).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
   // Search preserves the saved hierarchy expansion and reveals ancestor context.
   await page.getByRole('button', { name: 'Collapse', exact: true }).click();

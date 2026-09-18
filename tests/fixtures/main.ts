@@ -15,6 +15,48 @@ launch(async (storage) => {
     process.env.CANOPY_SMOKE_PRIORITY_FAILURES ?? 0,
   );
   await storage.write('rank-attempts', rankAttempts);
+  if (process.env.CANOPY_SMOKE_PREVIEW_FAILURE === '1') {
+    const controls = {
+      requests: [] as string[],
+      completed: [] as string[],
+      hold: [] as string[],
+      fail: [] as string[],
+      empty: [] as string[],
+      release: {} as Record<string, () => void>,
+    };
+    Object.assign(globalThis, { canopyPreviewTest: controls });
+    const preview = demo.preview.bind(demo);
+    demo.preview = async (key) => {
+      controls.requests.push(key);
+      if (controls.hold.includes(key))
+        await new Promise<void>((resolve) => {
+          controls.release[key] = resolve;
+        });
+      try {
+        if (controls.fail.includes(key))
+          throw new Error('Preview temporarily unavailable.');
+        const result = await preview(key);
+        if (key === 'CAN-108')
+          result.issue.links.push(
+            {
+              key: 'CAN-101',
+              summary: 'Build the workspace foundation',
+              relationship: 'blocks',
+            },
+            {
+              key: 'CAN-102',
+              summary: 'Design the navigation shell',
+              relationship: 'is blocked by',
+            },
+          );
+        if (controls.empty.includes(key))
+          return { ...result, description: '', comments: [], totalComments: 0 };
+        return result;
+      } finally {
+        controls.completed.push(key);
+      }
+    };
+  }
   return {
     disconnect: () => storage.write('demo-removed', true),
     openIssue: () => {
