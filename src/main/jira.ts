@@ -181,7 +181,106 @@ export class JiraProvider {
       frontier = nextFrontier;
     }
 
-    return { rootKey: root.key, issues, fetchedAt: Date.now(), warnings };
+    const ranking = rankOrderingAvailable
+      ? await this.rankingPermissions(
+          issues.filter((issue) => issue.key !== root.key),
+        )
+      : {
+          state: 'unsupported' as const,
+          reason: 'Jira Rank is unavailable for this tree.',
+          issueKeys: [],
+        };
+    return {
+      rootKey: root.key,
+      issues,
+      fetchedAt: Date.now(),
+      warnings,
+      ranking,
+    };
+  }
+
+  private async rankingPermissions(
+    issues: Issue[],
+  ): Promise<NonNullable<TreeSnapshot['ranking']>> {
+    if (!issues.length)
+      return {
+        state: 'unsupported',
+        reason: 'This tree has no issues to rank.',
+        issueKeys: [],
+      };
+    const allowed = new Set<string>();
+    try {
+      for (let offset = 0; offset < issues.length; offset += 1000) {
+        const batch = issues.slice(offset, offset + 1000);
+        const ids = batch.map((issue) => Number(issue.id));
+        if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0))
+          throw new Error('Jira returned invalid issue IDs.');
+        const result = await this.call(
+          '/rest/api/3/permissions/check',
+          jsonInit('POST', {
+            projectPermissions: [
+              {
+                issues: ids,
+                permissions: ['SCHEDULE_ISSUES', 'EDIT_ISSUES'],
+              },
+            ],
+          }),
+          'check ranking permissions',
+        );
+        if (!Array.isArray(result?.projectPermissions))
+          throw new Error('Jira returned invalid ranking permissions.');
+        const grants = ['SCHEDULE_ISSUES', 'EDIT_ISSUES'].map(
+          (permission) =>
+            new Set(
+              result.projectPermissions
+                .filter((entry: any) => entry.permission === permission)
+                .flatMap((entry: any) => entry.issues ?? [])
+                .map(String),
+            ),
+        );
+        for (const issue of batch)
+          if (grants.every((grant) => grant.has(issue.id)))
+            allowed.add(issue.key);
+      }
+      return allowed.size
+        ? { state: 'supported', issueKeys: [...allowed] }
+        : {
+            state: 'unsupported',
+            reason:
+              'Ranking requires Schedule issues and Edit issues permissions.',
+            issueKeys: [],
+          };
+    } catch {
+      return {
+        state: 'unknown',
+        reason:
+          'Ranking permissions could not be verified. Refresh to try again.',
+        issueKeys: [],
+      };
+    }
+  }
+
+  async priorityOrder(keys: string[]): Promise<string[]> {
+    if (!keys.length) return [];
+    const representatives = [...new Set(keys)];
+    const issues = await this.searchAll(
+      `key in (${representatives.map(quoteJql).join(', ')}) ORDER BY priority DESC`,
+    );
+    if (
+      representatives.some((key) => !issues.some((issue) => issue.key === key))
+    )
+      throw new Error(
+        'Some priorities could not be read. Refresh the tree and try again.',
+      );
+    return [
+      ...new Set(
+        issues.flatMap((issue) =>
+          issue.fields?.priority?.id == null
+            ? []
+            : [String(issue.fields.priority.id)],
+        ),
+      ),
+    ];
   }
 
   async search(query: string): Promise<Issue[]> {

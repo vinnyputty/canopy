@@ -94,7 +94,17 @@ export class DemoProvider {
       issues: structuredClone(this.issues.filter((i) => included.has(i.key))),
       fetchedAt: Date.now(),
       warnings: [],
+      ranking: {
+        state: 'supported',
+        issueKeys: [...included].filter((key) => key !== root.key),
+      },
     };
+  }
+  async priorityOrder(keys: string[]) {
+    const ids = new Set(keys.map((key) => this.get(key).priority?.id));
+    return priorities
+      .filter((priority) => ids.has(priority.id))
+      .map((priority) => priority.id);
   }
   async search(query: string) {
     return structuredClone(

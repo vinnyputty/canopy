@@ -1,0 +1,78 @@
+import type { RootView, TableColumn, Workspace } from './types';
+
+export const COLUMN_BOUNDS: Record<TableColumn, readonly [number, number]> = {
+  issue: [240, 1200],
+  priority: [80, 480],
+  assignee: [80, 480],
+  status: [80, 480],
+};
+function record(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+export function validRootView(value: unknown): value is RootView {
+  if (!record(value)) return false;
+  const { columns, widths, sort, textSize, spacing, hideDone, filters } = value;
+  return (
+    Array.isArray(columns) &&
+    columns[0] === 'issue' &&
+    columns.every(
+      (column) =>
+        typeof column === 'string' && Object.hasOwn(COLUMN_BOUNDS, column),
+    ) &&
+    new Set(columns).size === columns.length &&
+    record(widths) &&
+    Object.entries(COLUMN_BOUNDS).every(([column, [min, max]]) => {
+      const width = widths[column];
+      return (
+        typeof width === 'number' &&
+        Number.isFinite(width) &&
+        width >= min &&
+        width <= max
+      );
+    }) &&
+    record(sort) &&
+    typeof sort.column === 'string' &&
+    (sort.column === 'rank' || Object.hasOwn(COLUMN_BOUNDS, sort.column)) &&
+    (sort.direction === 'asc' || sort.direction === 'desc') &&
+    ['small', 'medium', 'large'].includes(String(textSize)) &&
+    ['compact', 'comfortable'].includes(String(spacing)) &&
+    typeof hideDone === 'boolean' &&
+    record(filters) &&
+    Object.keys(filters).every((key) =>
+      ['assignee', 'status', 'priority'].includes(key),
+    ) &&
+    (filters.assignee === undefined ||
+      filters.assignee === 'me' ||
+      filters.assignee === 'unassigned') &&
+    ['status', 'priority'].every(
+      (key) =>
+        filters[key] === undefined ||
+        (typeof filters[key] === 'string' &&
+          filters[key].length > 0 &&
+          filters[key].length <= 500),
+    )
+  );
+}
+export function validViewMap(
+  value: unknown,
+): value is Record<string, RootView> {
+  return record(value) && Object.values(value).every(validRootView);
+}
+/** Retain unrelated workspace state when an old or hand-edited view is invalid. */
+export function recoverWorkspaceViews(workspace: Workspace): Workspace {
+  const recover = (value: unknown) =>
+    Object.fromEntries(
+      Object.entries(record(value) ? value : {}).filter(([, view]) =>
+        validRootView(view),
+      ),
+    ) as Record<string, RootView>;
+  return {
+    ...workspace,
+    ...(workspace.rootViews !== undefined
+      ? { rootViews: recover(workspace.rootViews) }
+      : {}),
+    ...(workspace.viewDefaults !== undefined
+      ? { viewDefaults: recover(workspace.viewDefaults) }
+      : {}),
+  };
+}

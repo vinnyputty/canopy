@@ -12,6 +12,8 @@ const api: CanopyAPI = {
   update: (id, key, patch) =>
     ipcRenderer.invoke('canopy:update', id, key, patch),
   rank: (id, key, before) => ipcRenderer.invoke('canopy:rank', id, key, before),
+  priorityOrder: (id, keys) =>
+    ipcRenderer.invoke('canopy:priorityOrder', id, keys),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
   saveWorkspace: (workspace) =>
     ipcRenderer.invoke('canopy:saveWorkspace', workspace),

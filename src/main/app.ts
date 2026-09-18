@@ -21,6 +21,7 @@ import { JiraProvider } from './jira';
 import { Storage } from './storage';
 import { restoreWindow, type WindowState } from './window-state';
 import { configureLinuxCredentialStore } from './credentials';
+import { recoverWorkspaceViews, validViewMap } from '../shared/views';
 
 app.setName('Canopy');
 configureLinuxCredentialStore((store) =>
@@ -68,6 +69,11 @@ function workspace(value: Workspace) {
     !value.shortcuts
   )
     throw new Error('Invalid workspace.');
+  if (
+    (value.rootViews !== undefined && !validViewMap(value.rootViews)) ||
+    (value.viewDefaults !== undefined && !validViewMap(value.viewDefaults))
+  )
+    throw new Error('Invalid table view.');
   for (const [name, minimum, maximum] of [
     ['sidebarWidth', 180, 400],
     ['previewWidth', 300, 720],
@@ -146,7 +152,7 @@ type Fixture = {
   connection: Connection;
   provider: Pick<
     JiraProvider,
-    'tree' | 'search' | 'editOptions' | 'update' | 'rank'
+    'tree' | 'search' | 'editOptions' | 'update' | 'rank' | 'priorityOrder'
   >;
 };
 
@@ -208,6 +214,11 @@ async function start(
       return auth.disconnect(id);
     },
     tree: (id: string, root: string) => provider(id).tree(key(root)),
+    priorityOrder: (id: string, keys: unknown) => {
+      if (!Array.isArray(keys) || keys.length > 1000)
+        throw new Error('Invalid priority representatives.');
+      return provider(id).priorityOrder(keys.map(key));
+    },
     search: (id: string, query: string) => provider(id).search(text(query)),
     editOptions: (id: string, issue: string, query?: string) =>
       provider(id).editOptions(
@@ -218,7 +229,10 @@ async function start(
       provider(id).update(key(issue), patch(value)),
     rank: (id: string, issue: string, before: string) =>
       provider(id).rank(key(issue), key(before)),
-    loadWorkspace: () => storage.read<Workspace>('workspace'),
+    loadWorkspace: async () => {
+      const saved = await storage.read<Workspace>('workspace');
+      return saved ? recoverWorkspaceViews(saved) : null;
+    },
     saveWorkspace: (value: Workspace) =>
       storage.write('workspace', workspace(value)),
     copyIssueLink: (id: string, issue: string) =>

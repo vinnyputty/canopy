@@ -378,3 +378,86 @@ describe('JiraProvider ranking', () => {
     assert.equal(siblingRequest.calls.length, 2);
   });
 });
+
+describe('Jira table capabilities', () => {
+  it('checks issue-specific ranking permissions without assuming a project type', async () => {
+    const request = recordingRequest((path, init) => {
+      if (path.startsWith('/rest/api/3/issue/ROOT-1?'))
+        return rawIssue('ROOT-1');
+      if (path === '/rest/api/3/permissions/check') {
+        assert.deepEqual(body(init).projectPermissions, [
+          { issues: [2, 3], permissions: ['SCHEDULE_ISSUES', 'EDIT_ISSUES'] },
+        ]);
+        return {
+          projectPermissions: [
+            { permission: 'SCHEDULE_ISSUES', issues: [2, 3] },
+            { permission: 'EDIT_ISSUES', issues: [2] },
+          ],
+        };
+      }
+      return {
+        issues: body(init).jql.includes('"ROOT-1"')
+          ? [rawIssue('CHILD-2', 'ROOT-1'), rawIssue('CHILD-3', 'ROOT-1')]
+          : [],
+        isLast: true,
+      };
+    });
+    const snapshot = await new JiraProvider(request).tree('ROOT-1');
+    assert.deepEqual(snapshot.ranking, {
+      state: 'supported',
+      issueKeys: ['CHILD-2'],
+    });
+  });
+  it('reports unknown permissions without failing tree loading', async () => {
+    const provider = new JiraProvider(async (path, init) => {
+      if (path.startsWith('/rest/api/3/issue/ROOT-1?'))
+        return rawIssue('ROOT-1');
+      if (path === '/rest/api/3/permissions/check') throw new Error('403');
+      return {
+        issues: body(init).jql.includes('"ROOT-1"')
+          ? [rawIssue('CHILD-2', 'ROOT-1')]
+          : [],
+        isLast: true,
+      };
+    });
+    const snapshot = await provider.tree('ROOT-1');
+    assert.equal(snapshot.issues.length, 2);
+    assert.equal(snapshot.ranking?.state, 'unknown');
+    assert.deepEqual(snapshot.ranking?.issueKeys, []);
+  });
+  it('loads configured priority order through paginated JQL and rejects missing representatives', async () => {
+    const provider = new JiraProvider(async (_path, init) => {
+      assert.equal(
+        body(init).jql,
+        'key in ("A-2", "A-3") ORDER BY priority DESC',
+      );
+      return body(init).nextPageToken
+        ? {
+            issues: [
+              rawIssue('A-2', undefined, {
+                priority: { id: '20', name: 'Urgent' },
+              }),
+            ],
+            isLast: true,
+          }
+        : {
+            issues: [
+              rawIssue('A-3', undefined, {
+                priority: { id: '90', name: 'Highest' },
+              }),
+            ],
+            nextPageToken: 'next',
+            isLast: false,
+          };
+    });
+    assert.deepEqual(await provider.priorityOrder(['A-2', 'A-3']), [
+      '90',
+      '20',
+    ]);
+    const missing = new JiraProvider(async () => ({
+      issues: [],
+      isLast: true,
+    }));
+    await assert.rejects(missing.priorityOrder(['A-2']), /could not be read/);
+  });
+});
