@@ -13,6 +13,7 @@ type Gate = {
 // Only the smoke entry point installs these controls. Gates delay real fixture
 // operations through IPC, so renderer tests observe pending and failed requests.
 export class ControlledDemoProvider extends DemoProvider {
+  retryAt: number | null = null;
   private gates = new Map<string, Gate>();
   readonly calls: { operation: Operation; key: string; patch?: IssuePatch }[] =
     [];

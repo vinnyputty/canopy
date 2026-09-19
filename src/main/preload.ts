@@ -5,6 +5,7 @@ const api: CanopyAPI = {
   connections: () => ipcRenderer.invoke('canopy:connections'),
   connect: (input) => ipcRenderer.invoke('canopy:connect', input),
   disconnect: (id) => ipcRenderer.invoke('canopy:disconnect', id),
+  syncStatus: (id) => ipcRenderer.invoke('canopy:syncStatus', id),
   tree: (id, key) => ipcRenderer.invoke('canopy:tree', id, key),
   preview: (id, key) => ipcRenderer.invoke('canopy:preview', id, key),
   copyText: (value) => ipcRenderer.invoke('canopy:copyText', value),

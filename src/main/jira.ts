@@ -1,3 +1,4 @@
+import { JiraRateLimitError } from './jira-requests';
 import type {
   Choice,
   EditOptions,
@@ -253,7 +254,8 @@ export class JiraProvider {
               'Ranking requires Schedule issues and Edit issues permissions.',
             issueKeys: [],
           };
-    } catch {
+    } catch (error) {
+      if (error instanceof JiraRateLimitError) throw error;
       return {
         state: 'unknown',
         reason:
@@ -342,7 +344,10 @@ export class JiraProvider {
         issuePath(key, '/editmeta'),
         undefined,
         `load edit metadata for ${key}`,
-      ).catch(() => null),
+      ).catch((error) => {
+        if (error instanceof JiraRateLimitError) throw error;
+        return null;
+      }),
       this.assignableUsers(key, encodedQuery),
       this.call(
         `${issuePath(key, '/transitions')}?expand=transitions.fields`,
@@ -578,6 +583,7 @@ export class JiraProvider {
   }
 
   private contextError(message: string, error: unknown): Error {
+    if (error instanceof JiraRateLimitError) return error;
     const detail = error instanceof Error ? error.message : String(error);
     return new Error(detail ? `${message}: ${detail}` : message);
   }

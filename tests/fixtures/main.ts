@@ -58,6 +58,7 @@ launch(async (storage) => {
     };
   }
   return {
+    syncStatus: () => ({ retryAt: demo.retryAt }),
     disconnect: () => storage.write('demo-removed', true),
     openIssue: () => {
       throw new Error('Demo issues exist only in Canopy.');

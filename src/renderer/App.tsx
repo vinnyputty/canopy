@@ -218,6 +218,11 @@ export function App() {
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const refreshSchedule = useRef(new RefreshSchedule());
+  const cooldowns = useRef<Record<string, number>>({});
+  const [cooldownTimes, setCooldownTimes] = useState<Record<string, number>>(
+    {},
+  );
+  const [syncNow, setSyncNow] = useState(Date.now());
   const deferredRefreshes = useRef(new Set<string>());
   const refreshBlocked = useRef<(connectionId: string) => boolean>(() => false);
   const [online, setOnline] = useState(navigator.onLine);
@@ -489,6 +494,7 @@ export function App() {
         deferredRefreshes.current.add(tab.id);
         return;
       }
+      if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
       if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) return;
       deferredRefreshes.current.delete(tab.id);
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
@@ -519,6 +525,14 @@ export function App() {
         });
       } catch (error) {
         if (refreshSequences.current[tab.id] !== sequence) return;
+        const status = await window.canopy
+          .syncStatus(tab.connectionId)
+          .catch(() => null);
+        if (refreshSequences.current[tab.id] !== sequence) return;
+        if (status?.retryAt) {
+          cooldowns.current[tab.connectionId] = status.retryAt;
+          setCooldownTimes({ ...cooldowns.current });
+        }
         setConnectionErrors((current) => new Set(current).add(tab.id));
         setErrors((current) => ({
           ...current,
@@ -546,7 +560,11 @@ export function App() {
       foreground ? workspace.activeTabId : null,
       Date.now(),
     );
-    for (const tab of workspace.tabs) {
+    for (const tab of [...workspace.tabs].sort(
+      (a, b) =>
+        Number(b.id === workspace.activeTabId) -
+        Number(a.id === workspace.activeTabId),
+    )) {
       if (!snapshots[tab.id] && !attemptedLoads.current.has(tab.id)) {
         attemptedLoads.current.add(tab.id);
         void refreshTab(tab);
@@ -566,10 +584,29 @@ export function App() {
   useEffect(() => {
     if (!ready) return;
     const tick = () => {
+      const now = Date.now();
+      const recovered = new Set<string>();
+      for (const [id, retryAt] of Object.entries(cooldowns.current)) {
+        if (retryAt <= now) {
+          delete cooldowns.current[id];
+          recovered.add(id);
+        }
+      }
+      if (Object.keys(cooldowns.current).length || recovered.size)
+        setSyncNow(now);
+      if (recovered.size) setCooldownTimes({ ...cooldowns.current });
       if (!navigator.onLine) return;
       const due = new Set(refreshSchedule.current.due(Date.now()));
-      for (const tab of tabsRef.current) {
-        if (due.has(tab.id) || deferredRefreshes.current.has(tab.id))
+      for (const tab of [...tabsRef.current].sort(
+        (a, b) =>
+          Number(b.id === activeIdRef.current) -
+          Number(a.id === activeIdRef.current),
+      )) {
+        if (
+          due.has(tab.id) ||
+          deferredRefreshes.current.has(tab.id) ||
+          (tab.id === activeIdRef.current && recovered.has(tab.connectionId))
+        )
           void refreshTab(tab, true);
       }
     };
@@ -1453,6 +1490,9 @@ export function App() {
               const removed = connections.filter(
                 (item) => !nextConnections.some((next) => next.id === item.id),
               );
+              for (const connection of removed)
+                delete cooldowns.current[connection.id];
+              setCooldownTimes({ ...cooldowns.current });
               forgetTabs(
                 workspace.tabs
                   .filter((tab) =>
@@ -1763,7 +1803,10 @@ export function App() {
                 </button>
                 <button
                   className="icon-button"
-                  disabled={refreshing.has(activeTab.id)}
+                  disabled={
+                    refreshing.has(activeTab.id) ||
+                    (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                  }
                   onClick={() => void refreshTab(activeTab, true, true)}
                   title="Refresh"
                 >
@@ -2030,20 +2073,24 @@ export function App() {
             {(errors[activeTab.id] ||
               errors.edit ||
               errors.workspace ||
-              errors.app) && (
+              errors.app ||
+              (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow) && (
               <div className="error-banner" role="alert">
                 <AlertCircle size={15} />
                 <span>
-                  {errors.edit ??
-                    errors[activeTab.id] ??
-                    errors.workspace ??
-                    errors.app}
+                  {(cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                    ? `Jira rate limit reached. Refresh resumes after ${new Date(cooldownTimes[activeTab.connectionId]).toLocaleTimeString()}.`
+                    : (errors.edit ??
+                      errors[activeTab.id] ??
+                      errors.workspace ??
+                      errors.app)}
                 </span>
                 {errors[activeTab.id] && (
                   <button
                     onClick={() => void refreshTab(activeTab, true, true)}
                     disabled={
                       !online ||
+                      (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
                       refreshing.has(activeTab.id) ||
                       loading.has(activeTab.id)
                     }
@@ -2307,6 +2354,8 @@ export function App() {
                   <span role="status" aria-label="Connection status">
                     {!online
                       ? 'Offline'
+                      : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                      ? 'Rate limited'
                       : connectionErrors.has(activeTab.id)
                         ? 'Connection error'
                         : snapshot
@@ -2514,6 +2563,27 @@ export function App() {
           onClose={() => setDialog(null)}
           onConnected={(value) => {
             setConnections(value);
+            // Token replacement can retain a connection ID. Refresh its transport
+            // deadline while preserving limits on other authenticated connections.
+            for (const [id, previous] of Object.entries(cooldowns.current)) {
+              void window.canopy
+                .syncStatus(id)
+                .then((status) => {
+                  if (cooldowns.current[id] !== previous) return;
+                  if (status.retryAt) cooldowns.current[id] = status.retryAt;
+                  else {
+                    delete cooldowns.current[id];
+                    const active = tabsRef.current.find(
+                      (tab) =>
+                        tab.id === activeIdRef.current &&
+                        tab.connectionId === id,
+                    );
+                    if (active) deferredRefreshes.current.add(active.id);
+                  }
+                  setCooldownTimes({ ...cooldowns.current });
+                })
+                .catch(() => {});
+            }
             setErrors((current) => {
               const copy = { ...current };
               delete copy.app;
