@@ -1,7 +1,15 @@
 import type { IssuePatch } from '../../src/shared/types';
 import { DemoProvider } from './demo';
 
-type Operation = 'tree' | 'update' | 'rank';
+type Operation =
+  | 'tree'
+  | 'update'
+  | 'rank'
+  | 'priorities'
+  | 'transitions'
+  | 'assignees'
+  | 'validateAssignee'
+  | 'cachedUsers';
 type Gate = {
   operation: Operation;
   key: string;
@@ -72,15 +80,40 @@ export class ControlledDemoProvider extends DemoProvider {
   remoteUpdate(key: string, patch: IssuePatch) {
     return super.update(key, patch);
   }
+  unassignableUsers = new Set<string>();
+  override async priorities(key: string, refresh = false) {
+    await this.pause('priorities', key);
+    return super.priorities(key, refresh);
+  }
+  override async cachedUsers() {
+    await this.pause('cachedUsers', '');
+    return super.cachedUsers();
+  }
+  override async assignees(
+    key: string,
+    query = '',
+    startAt = 0,
+    refresh = false,
+  ) {
+    await this.pause('assignees', key);
+    return super.assignees(key, query, startAt, refresh);
+  }
+  override async validateAssignee(
+    key: string,
+    accountId: string,
+    refresh = false,
+  ) {
+    await this.pause('validateAssignee', key);
+    if (this.unassignableUsers.has(accountId)) return null;
+    return super.validateAssignee(key, accountId, refresh);
+  }
   blockedTransitions = new Set<string>();
-  override async editOptions(key: string, query = '') {
-    const options = await super.editOptions(key, query);
-    return {
-      ...options,
-      transitions: options.transitions.map((choice) => ({
-        ...choice,
-        requiresFields: this.blockedTransitions.has(choice.id),
-      })),
-    };
+  override async transitions(key: string, refresh = false) {
+    await this.pause('transitions', key);
+    const choices = await super.transitions(key, refresh);
+    return choices.map((choice) => ({
+      ...choice,
+      requiresFields: this.blockedTransitions.has(choice.id),
+    }));
   }
 }

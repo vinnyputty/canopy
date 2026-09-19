@@ -211,7 +211,7 @@ describe('JiraProvider search and editing', () => {
     );
   });
 
-  it('combines editable priorities, assignable users, and transition requirements', async () => {
+  it('loads independent priorities, assignable users, and transition requirements', async () => {
     const request = recordingRequest((path) => {
       if (path.endsWith('/editmeta')) {
         return {
@@ -248,8 +248,13 @@ describe('JiraProvider search and editing', () => {
       throw new Error(`Unexpected request: ${path}`);
     });
 
+    const provider = new JiraProvider(request);
     assert.deepEqual(
-      await new JiraProvider(request).editOptions('ABC-1', 'ad a'),
+      {
+        priorities: await provider.priorities('ABC-1'),
+        assignees: (await provider.assignees('ABC-1', 'ad a')).users,
+        transitions: await provider.transitions('ABC-1'),
+      },
       {
         priorities: [{ id: '1', name: 'Highest' }],
         assignees: [{ id: 'user-1', name: 'Ada' }],
@@ -651,4 +656,262 @@ it('isolates malformed comment responses and rejects inaccessible preview issues
     inaccessible.preview('TEST-1'),
     /load preview for TEST-1.*Issue not accessible/,
   );
+});
+
+describe('connection picker caches', () => {
+  it('deduplicates independent field reads and keeps unrelated choices after searches and edits', async () => {
+    const request = recordingRequest((path) => {
+      if (path.endsWith('/editmeta'))
+        return {
+          fields: { priority: { allowedValues: [{ id: '1', name: 'High' }] } },
+        };
+      if (path.includes('/transitions')) return { transitions: [] };
+      if (path.includes('/user/assignable/')) return [];
+      return rawIssue('ABC-1');
+    });
+    const provider = new JiraProvider(request);
+    await Promise.all([
+      provider.priorities('ABC-1'),
+      provider.priorities('ABC-1'),
+      provider.transitions('ABC-1'),
+      provider.transitions('ABC-1'),
+    ]);
+    assert.equal(request.calls.length, 2);
+    await provider.assignees('ABC-1', 'Ada');
+    await provider.assignees('ABC-1', 'Sam');
+    await provider.update('ABC-1', { summary: 'New' });
+    await provider.priorities('ABC-1');
+    // The first observed status replaces the previously unknown transition context.
+    await provider.transitions('ABC-1');
+    await provider.transitions('ABC-1');
+    assert.equal(
+      request.calls.filter(([path]) => path.endsWith('/editmeta')).length,
+      1,
+    );
+    assert.equal(
+      request.calls.filter(([path]) => path.includes('/transitions')).length,
+      2,
+    );
+  });
+
+  it('does not hide priority errors or poison successful independent reads', async () => {
+    let fail = true;
+    const request = recordingRequest((path) => {
+      if (path.endsWith('/editmeta')) {
+        if (fail) throw new Error('Metadata unavailable');
+        return { fields: {} };
+      }
+      if (path.includes('/user/assignable/'))
+        throw new Error('Users unavailable');
+      return { transitions: [] };
+    });
+    const provider = new JiraProvider(request);
+    const results = await Promise.allSettled([
+      provider.priorities('ABC-1'),
+      provider.assignees('ABC-1'),
+      provider.transitions('ABC-1'),
+    ]);
+    assert.deepEqual(
+      results.map((result) => result.status),
+      ['rejected', 'rejected', 'fulfilled'],
+    );
+    await assert.rejects(provider.priorities('ABC-1'), /Metadata unavailable/);
+    fail = false;
+    await assert.rejects(
+      provider.priorities('ABC-1'),
+      /Priority cannot be edited/,
+    );
+    assert.deepEqual(await provider.transitions('ABC-1'), []);
+    assert.equal(
+      request.calls.filter(([path]) => path.includes('/transitions')).length,
+      1,
+    );
+  });
+
+  it('bounds recent identities to 100, updates recency, and isolates provider connections', async () => {
+    let users = Array.from({ length: 110 }, (_, i) => ({
+      accountId: `user-${i}`,
+      displayName: `Person ${i}`,
+    }));
+    const provider = new JiraProvider(async () => users);
+    await provider.assignees('ABC-1');
+    assert.equal((await provider.cachedUsers()).length, 100);
+    assert.equal((await provider.cachedUsers()).at(-1)?.id, 'user-10');
+    users = [{ accountId: 'user-10', displayName: 'Renamed' }];
+    await provider.assignees('ABC-2');
+    assert.deepEqual((await provider.cachedUsers())[0], {
+      id: 'user-10',
+      name: 'Renamed',
+    });
+    assert.deepEqual(await new JiraProvider(async () => []).cachedUsers(), []);
+  });
+
+  it('seeds identities from issues without treating them as assignment eligibility', async () => {
+    const request = recordingRequest((path) =>
+      path.includes('/user/assignable/')
+        ? []
+        : { issues: [rawIssue('ABC-1')], isLast: true },
+    );
+    const provider = new JiraProvider(request);
+    await provider.search('ABC');
+    assert.deepEqual(await provider.cachedUsers(), [
+      { id: 'account-1', name: 'Ada' },
+    ]);
+    assert.equal(await provider.validateAssignee('ABC-2', 'account-1'), null);
+    assert.equal(
+      request.calls.filter(([path]) => path.includes('accountId=account-1'))
+        .length,
+      1,
+    );
+  });
+
+  it('advances candidate windows even on empty pages and stops at 1,000', async () => {
+    const request = recordingRequest(() => []);
+    const provider = new JiraProvider(request);
+    let start: number | undefined = 0;
+    while (start !== undefined)
+      start = (await provider.assignees('ABC-1', 'a b', start)).nextStartAt;
+    assert.equal(request.calls.length, 10);
+    assert.match(
+      request.calls[9][0],
+      /query=a%20b&startAt=900&maxResults=100$/,
+    );
+    assert.throws(
+      () => provider.assignees('ABC-1', '', 1000),
+      /Invalid assignee/,
+    );
+    await provider.assignees('ABC-1', 'a b', 0);
+    assert.equal(request.calls.length, 11);
+  });
+
+  it('refreshes all issue metadata on observed status changes and only a rejected field otherwise', async () => {
+    let status = '10';
+    let rejectPriority = false;
+    const request = recordingRequest((path, init) => {
+      if (init?.method === 'PUT' && rejectPriority)
+        throw new Error('Priority rejected');
+      if (path.endsWith('/editmeta'))
+        return { fields: { priority: { allowedValues: [] } } };
+      if (path.includes('/transitions')) return { transitions: [] };
+      if (path.includes('/user/assignable/')) return [];
+      if (path === '/rest/api/3/search/jql')
+        return {
+          issues: [rawIssue('ABC-1', undefined, { status: { id: status } })],
+          isLast: true,
+        };
+      return rawIssue('ABC-1', undefined, { status: { id: status } });
+    });
+    const provider = new JiraProvider(request);
+    await provider.search('ABC');
+    const load = () =>
+      Promise.all([
+        provider.priorities('ABC-1'),
+        provider.transitions('ABC-1'),
+        provider.assignees('ABC-1'),
+      ]);
+    await load();
+    status = '20';
+    await provider.search('ABC');
+    await load();
+    assert.equal(
+      request.calls.filter(([path]) => path.endsWith('/editmeta')).length,
+      2,
+    );
+    assert.equal(
+      request.calls.filter(([path]) => path.includes('/transitions')).length,
+      2,
+    );
+    assert.equal(
+      request.calls.filter(([path]) => path.includes('/user/assignable'))
+        .length,
+      2,
+    );
+    rejectPriority = true;
+    await assert.rejects(
+      provider.update('ABC-1', { priorityId: '9' }),
+      /Priority rejected/,
+    );
+    await load();
+    assert.equal(
+      request.calls.filter(([path]) => path.endsWith('/editmeta')).length,
+      3,
+    );
+    assert.equal(
+      request.calls.filter(([path]) => path.includes('/transitions')).length,
+      2,
+    );
+    await Promise.all([
+      provider.transitions('ABC-1', true),
+      provider.transitions('ABC-1', true),
+    ]);
+    assert.equal(
+      request.calls.filter(([path]) => path.includes('/transitions')).length,
+      3,
+    );
+  });
+
+  it('keeps eligibility issue-specific and revalidates when explicitly refreshed', async () => {
+    const request = recordingRequest((path) =>
+      path.includes('issueKey=ABC-1')
+        ? [{ accountId: 'ada', displayName: 'Ada' }]
+        : [],
+    );
+    const provider = new JiraProvider(request);
+    await Promise.all([
+      provider.validateAssignee('ABC-1', 'ada'),
+      provider.validateAssignee('ABC-1', 'ada'),
+    ]);
+    assert.equal(request.calls.length, 1);
+    assert.equal(await provider.validateAssignee('ABC-2', 'ada'), null);
+    await provider.validateAssignee('ABC-1', 'ada', true);
+    assert.equal(request.calls.length, 3);
+  });
+});
+
+it('shares pending assignee pages but searches again after completion', async () => {
+  let finish!: (value: unknown[]) => void;
+  let calls = 0;
+  const provider = new JiraProvider(async () => {
+    calls++;
+    return new Promise<unknown[]>((resolve) => {
+      finish = resolve;
+    });
+  });
+  const a = provider.assignees('ABC-1', 'Ada');
+  const b = provider.assignees('ABC-1', 'Ada');
+  assert.equal(calls, 1);
+  finish([{ accountId: 'ada', displayName: 'Ada' }]);
+  await Promise.all([a, b]);
+  const changed = provider.assignees('ABC-1', 'Ada');
+  assert.equal(calls, 2);
+  finish([]);
+  assert.deepEqual((await changed).users, []);
+});
+
+it('checks fresh required fields before submitting a cached transition and invalidates rejection', async () => {
+  let required = false;
+  const request = recordingRequest((path, init) => {
+    if (path.includes('/transitions?'))
+      return {
+        transitions: [
+          {
+            id: 'finish',
+            name: 'Finish',
+            fields: { resolution: { required } },
+          },
+        ],
+      };
+    if (init?.method === 'POST')
+      throw new Error('A transition requiring fields must not be submitted');
+    return rawIssue('ABC-1');
+  });
+  const provider = new JiraProvider(request);
+  assert.equal((await provider.transitions('ABC-1'))[0].requiresFields, false);
+  required = true;
+  await assert.rejects(
+    provider.update('ABC-1', { transitionId: 'finish' }),
+    /requires fields/,
+  );
+  assert.equal((await provider.transitions('ABC-1'))[0].requiresFields, true);
+  assert.equal(request.calls.length, 3);
 });

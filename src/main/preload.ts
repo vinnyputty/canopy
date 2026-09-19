@@ -9,8 +9,15 @@ const api: CanopyAPI = {
   preview: (id, key) => ipcRenderer.invoke('canopy:preview', id, key),
   copyText: (value) => ipcRenderer.invoke('canopy:copyText', value),
   search: (id, query) => ipcRenderer.invoke('canopy:search', id, query),
-  editOptions: (id, key, query) =>
-    ipcRenderer.invoke('canopy:editOptions', id, key, query),
+  priorities: (id, key, refresh) =>
+    ipcRenderer.invoke('canopy:priorities', id, key, refresh),
+  transitions: (id, key, refresh) =>
+    ipcRenderer.invoke('canopy:transitions', id, key, refresh),
+  cachedUsers: (id) => ipcRenderer.invoke('canopy:cachedUsers', id),
+  assignees: (id, key, query, startAt, refresh) =>
+    ipcRenderer.invoke('canopy:assignees', id, key, query, startAt, refresh),
+  validateAssignee: (id, key, accountId, refresh) =>
+    ipcRenderer.invoke('canopy:validateAssignee', id, key, accountId, refresh),
   update: (id, key, patch) =>
     ipcRenderer.invoke('canopy:update', id, key, patch),
   rank: (id, key, before, position) =>

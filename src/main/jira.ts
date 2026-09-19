@@ -1,4 +1,5 @@
 import type {
+  AssigneePage,
   Choice,
   EditOptions,
   Issue,
@@ -22,7 +23,7 @@ const ISSUE_FIELDS = [
 ];
 const SEARCH_PAGE_SIZE = 100;
 const PARENT_BATCH_SIZE = 50;
-const ASSIGNEE_PAGE_SIZE = 1000;
+const ASSIGNEE_PAGE_SIZE = 100;
 const ISSUE_KEY = /^[A-Z][A-Z0-9_]*-\d+$/i;
 
 type JiraFields = Record<string, any>;
@@ -121,6 +122,69 @@ function uniqueChoices(values: Choice[]): Choice[] {
 
 /** Jira Cloud REST operations scoped to one authenticated Atlassian cloud site. */
 export class JiraProvider {
+  private identities = new Map<string, Choice>();
+  private statuses = new Map<string, string>();
+  private pickerCache = new Map<
+    string,
+    { promise: Promise<any>; pending: boolean }
+  >();
+
+  private cached<T>(
+    key: string,
+    refresh: boolean,
+    load: () => Promise<T>,
+    retain = true,
+  ): Promise<T> {
+    const existing = this.pickerCache.get(key);
+    if (existing && (!refresh || existing.pending)) return existing.promise;
+    const entry = {
+      promise: undefined as unknown as Promise<T>,
+      pending: true,
+    };
+    entry.promise = load().then(
+      (value) => {
+        entry.pending = false;
+        if (!retain && this.pickerCache.get(key) === entry)
+          this.pickerCache.delete(key);
+        return value;
+      },
+      (error) => {
+        if (this.pickerCache.get(key) === entry) this.pickerCache.delete(key);
+        throw error;
+      },
+    );
+    this.pickerCache.set(key, entry);
+    return entry.promise;
+  }
+  private invalidate(key: string, field?: 'priority' | 'assignee' | 'status') {
+    for (const entry of this.pickerCache.keys()) {
+      const [issue, kind] = JSON.parse(entry);
+      if (issue === key.toUpperCase() && (!field || field === kind))
+        this.pickerCache.delete(entry);
+    }
+  }
+  private cacheKey(key: string, field: string, ...context: unknown[]) {
+    return JSON.stringify([key.toUpperCase(), field, ...context]);
+  }
+  private remember(user: Choice) {
+    this.identities.delete(user.id);
+    this.identities.set(user.id, user);
+    if (this.identities.size > 100)
+      this.identities.delete(this.identities.keys().next().value!);
+  }
+  private observeIssue(raw: JiraIssue): Issue {
+    const issue = parseIssue(raw);
+    const key = issue.key.toUpperCase();
+    if (this.statuses.has(key) && this.statuses.get(key) !== issue.status.id)
+      this.invalidate(key);
+    this.statuses.set(key, issue.status.id);
+    if (issue.assignee) this.remember(issue.assignee);
+    return issue;
+  }
+  async cachedUsers(): Promise<Choice[]> {
+    return [...this.identities.values()].reverse();
+  }
+
   constructor(private readonly request: JiraRequest) {}
 
   async tree(rootKey: string): Promise<TreeSnapshot> {
@@ -171,7 +235,7 @@ export class JiraProvider {
         }
 
         for (const raw of children) {
-          const child = parseIssue(raw);
+          const child = this.observeIssue(raw);
           if (visited.has(child.key)) {
             warnings.push(`Ignored duplicate or cyclic child ${child.key}.`);
             continue;
@@ -332,65 +396,158 @@ export class JiraProvider {
     const jql = ISSUE_KEY.test(value)
       ? `(key = ${quoteJql(value)} OR ${summaryClause}) ORDER BY updated DESC`
       : `${summaryClause} ORDER BY updated DESC`;
-    return (await this.searchAll(jql)).map(parseIssue);
+    return (await this.searchAll(jql)).map((raw) => this.observeIssue(raw));
   }
 
-  async editOptions(key: string, query = ''): Promise<EditOptions> {
-    const encodedQuery = encodeURIComponent(query.trim());
-    const [metadata, assignees, transitions] = await Promise.all([
-      this.call(
+  priorities(key: string, refresh = false): Promise<Choice[]> {
+    return this.cached(this.cacheKey(key, 'priority'), refresh, async () => {
+      const metadata = await this.call(
         issuePath(key, '/editmeta'),
         undefined,
-        `load edit metadata for ${key}`,
-      ).catch(() => null),
-      this.assignableUsers(key, encodedQuery),
-      this.call(
-        `${issuePath(key, '/transitions')}?expand=transitions.fields`,
-        undefined,
-        `load workflow transitions for ${key}`,
-      ),
-    ]);
+        `load priority choices for ${key}`,
+      );
+      if (!metadata?.fields || typeof metadata.fields !== 'object')
+        throw new Error('Jira returned invalid edit metadata.');
+      const priority = metadata.fields.priority;
+      if (!priority)
+        throw new Error('Priority cannot be edited for this issue.');
+      if (!Array.isArray(priority.allowedValues))
+        throw new Error(
+          'Jira did not provide priority choices for this issue.',
+        );
+      return uniqueChoices(
+        priority.allowedValues
+          .map(choice)
+          .filter((value: Choice | null): value is Choice => value !== null),
+      );
+    });
+  }
 
-    const priorities = uniqueChoices(
-      (metadata?.fields?.priority?.allowedValues ?? [])
-        .map(choice)
-        .filter((value: Choice | null): value is Choice => value !== null),
+  transitions(
+    key: string,
+    refresh = false,
+  ): Promise<EditOptions['transitions']> {
+    return this.cached(
+      this.cacheKey(key, 'status', this.statuses.get(key.toUpperCase())),
+      refresh,
+      async () => {
+        const response = await this.call(
+          `${issuePath(key, '/transitions')}?expand=transitions.fields`,
+          undefined,
+          `load workflow transitions for ${key}`,
+        );
+        if (!Array.isArray(response?.transitions))
+          throw new Error('Jira returned invalid workflow transitions.');
+        return response.transitions.map((transition: any) => ({
+          id: String(transition.id),
+          name: String(transition.name),
+          ...(transition.to?.id && transition.to?.name
+            ? {
+                to: {
+                  id: String(transition.to.id),
+                  name: String(transition.to.name),
+                  category:
+                    transition.to.statusCategory?.key === 'new' ||
+                    transition.to.statusCategory?.key === 'done'
+                      ? transition.to.statusCategory.key
+                      : 'indeterminate',
+                },
+              }
+            : {}),
+          requiresFields: Object.values(transition.fields ?? {}).some(
+            (field: any) => field?.required === true,
+          ),
+        }));
+      },
     );
+  }
 
-    return {
-      priorities,
-      assignees: uniqueChoices(
-        assignees
-          .filter((user: any) => user?.accountId)
-          .map((user: any) => ({
-            id: String(user.accountId),
-            name: String(user.displayName ?? user.accountId),
-          })),
-      ),
-      transitions: (transitions?.transitions ?? []).map((transition: any) => ({
-        id: String(transition.id),
-        name: String(transition.name),
-        ...(transition.to?.id && transition.to?.name
-          ? {
-              to: {
-                id: String(transition.to.id),
-                name: String(transition.to.name),
-                category:
-                  transition.to.statusCategory?.key === 'new' ||
-                  transition.to.statusCategory?.key === 'done'
-                    ? transition.to.statusCategory.key
-                    : 'indeterminate',
-              },
-            }
-          : {}),
-        requiresFields: Object.values(transition.fields ?? {}).some(
-          (field: any) => field?.required === true,
-        ),
-      })),
-    };
+  assignees(
+    key: string,
+    query = '',
+    startAt = 0,
+    refresh = false,
+  ): Promise<AssigneePage> {
+    if (
+      !Number.isInteger(startAt) ||
+      startAt < 0 ||
+      startAt >= 1000 ||
+      startAt % ASSIGNEE_PAGE_SIZE !== 0
+    )
+      throw new Error('Invalid assignee search position.');
+    const normalized = query.trim();
+    return this.cached(
+      this.cacheKey(key, 'assignee', 'search', normalized, startAt),
+      refresh,
+      async () => {
+        const page = await this.call(
+          `/rest/api/3/user/assignable/search?issueKey=${encodeURIComponent(key)}&query=${encodeURIComponent(normalized)}&startAt=${startAt}&maxResults=${ASSIGNEE_PAGE_SIZE}`,
+          undefined,
+          `load assignable users for ${key}`,
+        );
+        const users = this.parseUsers(page);
+        // Jira filters after selecting the candidate window; a short page is not exhaustion.
+        return {
+          users,
+          ...(startAt + ASSIGNEE_PAGE_SIZE < 1000
+            ? { nextStartAt: startAt + ASSIGNEE_PAGE_SIZE }
+            : {}),
+        };
+      },
+      false,
+    );
+  }
+
+  async validateAssignee(
+    key: string,
+    accountId: string,
+    refresh = false,
+  ): Promise<Choice | null> {
+    const eligible = await this.cached(
+      this.cacheKey(key, 'assignee', 'identity', accountId),
+      refresh,
+      async () => {
+        const page = await this.call(
+          `/rest/api/3/user/assignable/search?issueKey=${encodeURIComponent(key)}&accountId=${encodeURIComponent(accountId)}&startAt=0&maxResults=1000`,
+          undefined,
+          `check assignment eligibility for ${key}`,
+        );
+        return this.parseUsers(page).some((user) => user.id === accountId);
+      },
+    );
+    if (!eligible) return null;
+    return this.identities.get(accountId) ?? { id: accountId, name: accountId };
+  }
+
+  private parseUsers(page: unknown): Choice[] {
+    if (!Array.isArray(page))
+      throw new Error(
+        'Jira assignable-user search returned an invalid response.',
+      );
+    const users = uniqueChoices(
+      page
+        .filter((user: any) => user?.accountId)
+        .map((user: any) => ({
+          id: String(user.accountId),
+          name: String(user.displayName ?? user.accountId),
+        })),
+    );
+    for (const user of users) this.remember(user);
+    return users;
   }
 
   async update(key: string, patch: IssuePatch): Promise<Issue> {
+    try {
+      return await this.performUpdate(key, patch);
+    } catch (error) {
+      if (patch.priorityId !== undefined) this.invalidate(key, 'priority');
+      if (patch.assigneeId !== undefined) this.invalidate(key, 'assignee');
+      if (patch.transitionId !== undefined) this.invalidate(key, 'status');
+      throw error;
+    }
+  }
+
+  private async performUpdate(key: string, patch: IssuePatch): Promise<Issue> {
     const fields: Record<string, unknown> = {};
     if (patch.summary !== undefined) fields.summary = patch.summary;
     if (patch.priorityId !== undefined)
@@ -398,6 +555,14 @@ export class JiraProvider {
     if (patch.assigneeId !== undefined)
       fields.assignee =
         patch.assigneeId === null ? null : { accountId: patch.assigneeId };
+
+    if (
+      patch.assigneeId &&
+      !(await this.validateAssignee(key, patch.assigneeId))
+    )
+      throw new Error(
+        'Jira could not confirm this person is assignable to this issue.',
+      );
 
     if (patch.transitionId !== undefined)
       await this.assertTransitionNeedsNoFields(key, patch.transitionId);
@@ -418,6 +583,7 @@ export class JiraProvider {
       );
     }
 
+    if (patch.transitionId !== undefined) this.invalidate(key);
     return this.getIssue(key);
   }
 
@@ -473,7 +639,7 @@ export class JiraProvider {
       undefined,
       `load Jira issue ${key}`,
     );
-    return parseIssue(raw);
+    return this.observeIssue(raw);
   }
 
   private async searchAll(jql: string): Promise<JiraIssue[]> {
@@ -514,29 +680,6 @@ export class JiraProvider {
     } while (nextPageToken);
 
     return issues;
-  }
-
-  private async assignableUsers(
-    key: string,
-    encodedQuery: string,
-  ): Promise<any[]> {
-    const users: any[] = [];
-    let startAt = 0;
-    while (true) {
-      const page = await this.call(
-        `/rest/api/3/user/assignable/search?issueKey=${encodeURIComponent(key)}&query=${encodedQuery}&startAt=${startAt}&maxResults=${ASSIGNEE_PAGE_SIZE}`,
-        undefined,
-        `load assignable users for ${key}`,
-      );
-      if (!Array.isArray(page))
-        throw new Error(
-          'Jira assignable-user search returned an invalid response.',
-        );
-      users.push(...page);
-      if (page.length < ASSIGNEE_PAGE_SIZE) break;
-      startAt += page.length;
-    }
-    return users;
   }
 
   private async assertTransitionNeedsNoFields(
