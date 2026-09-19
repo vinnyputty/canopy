@@ -5,6 +5,7 @@ import type {
   IssuePatch,
   IssuePreview,
   TreeSnapshot,
+  SearchPage,
 } from '../shared/types';
 
 import { documentText } from './adf';
@@ -324,15 +325,58 @@ export class JiraProvider {
     };
   }
 
-  async search(query: string): Promise<Issue[]> {
+  async search(
+    query: string,
+    nextPageToken?: string,
+    signal?: AbortSignal,
+  ): Promise<SearchPage> {
     const value = query.trim();
-    if (!value) return [];
-
-    const summaryClause = `summary ~ ${quoteTextJql(value)}`;
+    if (!value) return { issues: [] };
+    signal?.throwIfAborted();
+    const literal = `summary ~ ${quoteTextJql(value)}`;
+    // Only Canopy's generated suffix is syntax; user punctuation stays escaped.
+    const summaryClause = /[\p{L}\p{N}]$/u.test(value)
+      ? `(${literal} OR summary ~ ${quoteTextJql(value).slice(0, -1)}*")`
+      : literal;
     const jql = ISSUE_KEY.test(value)
-      ? `(key = ${quoteJql(value)} OR ${summaryClause}) ORDER BY updated DESC`
-      : `${summaryClause} ORDER BY updated DESC`;
-    return (await this.searchAll(jql)).map(parseIssue);
+      ? `(key = ${quoteJql(value)} OR ${summaryClause}) ORDER BY updated DESC, key ASC`
+      : `${summaryClause} ORDER BY updated DESC, key ASC`;
+    const page = await this.call(
+      '/rest/api/3/search/jql',
+      {
+        ...jsonInit('POST', {
+          jql,
+          fields: [...ISSUE_FIELDS, 'updated'],
+          maxResults: 25,
+          ...(nextPageToken ? { nextPageToken } : {}),
+        }),
+        signal,
+      },
+      'search Jira issues',
+    );
+    if (!Array.isArray(page?.issues))
+      throw new Error('Jira search returned an invalid response.');
+    const token =
+      typeof page.nextPageToken === 'string' && page.nextPageToken
+        ? page.nextPageToken
+        : undefined;
+    if (token && token === nextPageToken)
+      throw new Error(
+        'Jira search repeated a page token. Try the search again.',
+      );
+    if (page.isLast === false && !token)
+      throw new Error(
+        'Jira search indicated more results but supplied no page token.',
+      );
+    return {
+      issues: page.issues.map((raw: JiraIssue) => ({
+        ...parseIssue(raw),
+        ...(typeof raw.fields?.updated === 'string'
+          ? { updated: raw.fields.updated }
+          : {}),
+      })),
+      ...(token ? { nextPageToken: token } : {}),
+    };
   }
 
   async editOptions(key: string, query = ''): Promise<EditOptions> {

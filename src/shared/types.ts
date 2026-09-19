@@ -25,6 +25,9 @@ export type IssuePreview = {
   totalComments: number;
   commentsError?: string;
 };
+export type SearchIssue = Issue & { updated?: string };
+export type SearchPage = { issues: SearchIssue[]; nextPageToken?: string };
+export type SearchOptions = { requestId: string; nextPageToken?: string };
 export type TreeSnapshot = {
   rootKey: string;
   issues: Issue[];
@@ -113,7 +116,12 @@ export interface CanopyAPI {
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
   preview(connectionId: string, key: string): Promise<IssuePreview>;
   copyText(value: string): Promise<void>;
-  search(connectionId: string, query: string): Promise<Issue[]>;
+  search(
+    connectionId: string,
+    query: string,
+    options: SearchOptions,
+  ): Promise<SearchPage>;
+  cancelSearch(connectionId: string, requestId: string): Promise<void>;
   editOptions(
     connectionId: string,
     key: string,

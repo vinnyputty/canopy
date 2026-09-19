@@ -1,6 +1,8 @@
 # Jira provider notes
 
-Canopy uses Jira Cloud REST API v3 through an OAuth request function already scoped to `api.atlassian.com/ex/jira/{cloudId}`. Searches use the enhanced `POST /rest/api/3/search/jql` endpoint and follow every `nextPageToken`; Jira search is eventually consistent, so a just-completed edit can briefly lag in a subsequent tree refresh.
+Canopy uses Jira Cloud REST API v3 through an OAuth request function already scoped to `api.atlassian.com/ex/jira/{cloudId}`. Searches use the enhanced `POST /rest/api/3/search/jql` endpoint. Tree loading follows every `nextPageToken`; the open-issue picker requests 25 matches at a time and loads further pages on demand. Picker queries include escaped literal text and a generated trailing wildcard when the query ends in a letter or number, so partial words can match. User-entered metacharacters stay escaped. Jira supplies candidates by update time; Canopy ranks the loaded set by exact summary, summary prefix, substring, then other text matches, with current project and update time as secondary signals. The picker labels incomplete sets explicitly because later pages may contain stronger matches. Query changes and closing the picker abort its request; stale responses cannot replace a newer search. See Atlassian’s [text search syntax](https://support.atlassian.com/jira-software-cloud/docs/search-for-work-items-using-the-text-field/) and [enhanced search API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/).
+
+Jira search is eventually consistent, so a just-completed edit can briefly lag in a subsequent tree refresh.
 
 The issue tree follows Jira's `parent` field one level at a time. This supports every hierarchy level exposed by the site rather than assuming a fixed epic/story/subtask shape. Issue links are shown as nonrecursive references on the issue that contains them because links can form cycles and do not define ownership.
 

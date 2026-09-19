@@ -178,7 +178,7 @@ describe('JiraProvider tree', () => {
 });
 
 describe('JiraProvider search and editing', () => {
-  it('escapes user input in JQL and follows nextPageToken', async () => {
+  it('escapes user input and returns each page on demand', async () => {
     const request = recordingRequest((_path, init) => {
       const requestBody = body(init);
       if (!requestBody.nextPageToken)
@@ -192,12 +192,23 @@ describe('JiraProvider search and editing', () => {
 
     const result = await new JiraProvider(request).search('a"b\\c+');
     assert.deepEqual(
-      result.map((issue) => issue.key),
-      ['ONE-1', 'TWO-2'],
+      result.issues.map((issue) => issue.key),
+      ['ONE-1'],
     );
     assert.equal(
       body(request.calls[0][1]).jql,
-      'summary ~ "a\\"b\\\\\\\\c\\\\+" ORDER BY updated DESC',
+      'summary ~ "a\\"b\\\\\\\\c\\\\+" ORDER BY updated DESC, key ASC',
+    );
+    assert.equal(request.calls.length, 1);
+    assert.equal(result.nextPageToken, 'next');
+    assert.equal(body(request.calls[0][1]).maxResults, 25);
+    const second = await new JiraProvider(request).search(
+      'a\"b\\c+',
+      result.nextPageToken,
+    );
+    assert.deepEqual(
+      second.issues.map((issue) => issue.key),
+      ['TWO-2'],
     );
     assert.equal(body(request.calls[1][1]).nextPageToken, 'next');
   });
@@ -205,10 +216,51 @@ describe('JiraProvider search and editing', () => {
   it('adds exact-key matching only for issue-key-shaped searches', async () => {
     const request = recordingRequest(() => ({ issues: [], isLast: true }));
     await new JiraProvider(request).search('ABC-123');
+    const jql = body(request.calls[0][1]).jql;
+    assert.ok(jql.startsWith('(key = "ABC-123" OR (summary ~ '));
+    assert.ok(jql.includes('123*"'));
+  });
+
+  it('adds only a generated suffix wildcard and forwards request cancellation', async () => {
+    const controller = new AbortController();
+    const request = recordingRequest(() => ({ issues: [], isLast: true }));
+    await new JiraProvider(request).search(
+      'platf',
+      undefined,
+      controller.signal,
+    );
     assert.equal(
       body(request.calls[0][1]).jql,
-      '(key = "ABC-123" OR summary ~ "ABC\\\\-123") ORDER BY updated DESC',
+      '(summary ~ "platf" OR summary ~ "platf*") ORDER BY updated DESC, key ASC',
     );
+    assert.equal(request.calls[0][1]?.signal, controller.signal);
+    controller.abort();
+    await assert.rejects(
+      new JiraProvider(request).search(
+        'platform',
+        undefined,
+        controller.signal,
+      ),
+      /abort/i,
+    );
+    assert.equal(request.calls.length, 1);
+    await new JiraProvider(request).search('plat*');
+    assert.equal(body(request.calls[1][1]).jql.includes(' OR '), false);
+    assert.equal(body(request.calls[1][1]).jql.includes('\\\\*'), true);
+  });
+
+  it('reports malformed and repeated pagination instead of dropping matches', async () => {
+    for (const page of [
+      { issues: [], isLast: false },
+      { issues: [], nextPageToken: 'same' },
+      { unexpected: [] },
+    ]) {
+      const provider = new JiraProvider(async () => page);
+      await assert.rejects(
+        provider.search('query', 'same'),
+        /page token|invalid response/,
+      );
+    }
   });
 
   it('combines editable priorities, assignable users, and transition requirements', async () => {

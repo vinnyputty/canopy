@@ -293,7 +293,9 @@ export class Auth {
             ? `Basic ${Buffer.from(`${account.email}:${account.token}`).toString('base64')}`
             : `Bearer ${grant!.tokens.accessToken}`,
         },
-        signal: AbortSignal.timeout(30_000),
+        signal: init.signal
+          ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)])
+          : AbortSignal.timeout(30_000),
         redirect: 'error',
       });
     let response = await send();

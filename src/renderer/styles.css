@@ -1501,7 +1501,8 @@ kbd {
   background: transparent;
   text-align: left;
 }
-.search-results button:hover {
+.search-results button:hover,
+.search-results button[aria-selected='true'] {
   background: var(--hover);
 }
 .search-results button > span:nth-child(2) {
