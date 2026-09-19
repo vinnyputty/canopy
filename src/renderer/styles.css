@@ -906,6 +906,7 @@ select:focus-visible,
   overflow-y: auto;
   margin-top: 4px;
 }
+.assignee-popover > button,
 .choice-list button,
 .status-popover button {
   width: 100%;
@@ -918,10 +919,12 @@ select:focus-visible,
   background: transparent;
   text-align: left;
 }
-.choice-list button:hover,
+.assignee-popover > button:hover:not(:disabled),
+.choice-list button:hover:not(:disabled),
 .status-popover button:hover:not(:disabled) {
   background: var(--hover);
 }
+.assignee-popover > button svg,
 .choice-list button svg {
   margin-left: auto;
   color: var(--accent);

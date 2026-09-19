@@ -1,6 +1,6 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { auditRefresh } from './smoke-refresh.mjs';
-import { auditPickers } from './smoke-pickers.mjs';
+import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -220,6 +220,10 @@ async function auditMutations() {
   await hold('assignee');
   await issue(key).getByLabel(`Edit assignee for ${key}`).press('Enter');
   await page.getByLabel('Search assignees').press('ArrowDown');
+  await expect(
+    page.getByRole('button', { name: 'Assign to me', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('ArrowDown');
   await expect(
     page.getByRole('button', { name: 'Unassigned', exact: true }),
   ).toBeFocused();
@@ -665,6 +669,13 @@ try {
   await expect(page.locator('.identity-hint')).toContainText(
     'Temporary identity failure',
   );
+  await page
+    .getByRole('button', { name: 'Edit assignee for CAN-100', exact: true })
+    .click();
+  await expect(
+    page.getByRole('button', { name: 'Assign to me', exact: true }),
+  ).toBeDisabled();
+  await page.getByLabel('Search assignees').press('Escape');
   await page.getByRole('button', { name: 'Retry account lookup' }).click();
   await expect(
     page.getByRole('button', { name: 'Retry account lookup' }),
@@ -675,6 +686,7 @@ try {
   const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
   await expect(tree.getByRole('treeitem')).toHaveCount(4);
   await auditPickers(app, page);
+  await auditSelfConnections(app, page);
   const rootSummary = 'A calmer place to get things done';
   const rootTab = page.getByRole('tab', { name: /CAN-100/ });
   const rootSidebar = page.locator('.side-tab').filter({ hasText: 'CAN-100' });
