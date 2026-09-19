@@ -1339,3 +1339,79 @@ it('invalidates cached and pending workflow choices without a status change', as
   await provider.transitions('ABC-1');
   assert.equal(calls, 3);
 });
+
+it('shares matching reads across overlapping trees while preserving each complete hierarchy', async () => {
+  const { JiraRequests } = await import('../src/main/jira-requests');
+  const requests = new JiraRequests();
+  const counts = new Map<string, number>();
+  let release!: () => void;
+  const children = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const request: JiraRequest = (path, init = {}) =>
+    requests.run('site', path, init, async () => {
+      const id = `${path}:${String(init.body ?? '')}`;
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+      if (path.includes('/issue/EPIC-1?')) return rawIssue('EPIC-1');
+      if (path.includes('/issue/STORY-2?'))
+        return rawIssue('STORY-2', 'EPIC-1');
+      if (path.includes('/permissions/check'))
+        return { projectPermissions: [] };
+      const jql = body(init).jql;
+      if (jql.includes('"EPIC-1"'))
+        return { issues: [rawIssue('STORY-2', 'EPIC-1')] };
+      if (jql.includes('"STORY-2"')) {
+        await children;
+        return { issues: [rawIssue('TASK-3', 'STORY-2')] };
+      }
+      if (jql.includes('"TASK-3"')) return { issues: [] };
+      throw new Error(`Unexpected request ${id}`);
+    });
+  const a = new JiraProvider(request).tree('EPIC-1');
+  const duplicate = new JiraProvider(request).tree('EPIC-1');
+  const b = new JiraProvider(request).tree('STORY-2');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  release();
+  const [epic, copy, subtree] = await Promise.all([a, duplicate, b]);
+  assert.deepEqual(
+    epic.issues.map((issue) => issue.key),
+    ['EPIC-1', 'STORY-2', 'TASK-3'],
+  );
+  assert.deepEqual(copy.issues, epic.issues);
+  assert.deepEqual(
+    subtree.issues.map((issue) => issue.key),
+    ['STORY-2', 'TASK-3'],
+  );
+  assert.equal(
+    counts.size,
+    7,
+    'two root reads, three child searches, and two permission checks',
+  );
+  assert.equal(
+    [...counts.values()].every((count) => count === 1),
+    true,
+  );
+});
+
+it('propagates typed rate limits from optional ranking and metadata reads', async () => {
+  const { JiraRateLimitError } = await import('../src/main/jira-requests');
+  const limited = new JiraRateLimitError(Date.now() + 30_000);
+  const provider = new JiraProvider(async (path, init) => {
+    if (path.includes('/issue/EPIC-1?')) return rawIssue('EPIC-1');
+    if (path.includes('/permissions/check') || path.endsWith('/editmeta'))
+      throw limited;
+    if (path.includes('/search/jql'))
+      return {
+        issues: body(init).jql.includes('"EPIC-1"')
+          ? [rawIssue('TASK-2', 'EPIC-1')]
+          : [],
+      };
+    if (path.includes('/user/assignable')) return [];
+    return { transitions: [] };
+  });
+  await assert.rejects(provider.tree('EPIC-1'), (error) => error === limited);
+  await assert.rejects(
+    provider.priorities('EPIC-1'),
+    (error) => error === limited,
+  );
+});

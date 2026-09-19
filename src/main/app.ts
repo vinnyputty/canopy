@@ -154,6 +154,7 @@ function workspace(value: Workspace) {
   return value;
 }
 type Fixture = {
+  syncStatus?(): { retryAt: number | null };
   disconnect(): Promise<void>;
   openIssue(): never;
   connection: Connection;
@@ -256,6 +257,12 @@ async function start(
       } finally {
         providers.remove(id);
       }
+    },
+    syncStatus: (id: string) => {
+      provider(id);
+      return id === fixture?.connection.id
+        ? (fixture.syncStatus?.() ?? { retryAt: null })
+        : auth.syncStatus(id);
     },
     tree: (id: string, root: string) => provider(id).tree(key(root)),
     priorityOrder: (id: string, keys: unknown) => {

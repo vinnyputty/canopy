@@ -137,6 +137,75 @@ export async function auditRefresh(app, page, resizeWindow) {
     .toEqual([]);
   await expect(status).toHaveText('Connected');
 
+  // Connection cooldown retains the last tree and blocks manual/focus requests.
+  const retryAt = await page.evaluate(() => Date.now() + 10_000);
+  await app.evaluate((_electron, value) => {
+    globalThis.canopySmoke.retryAt = value;
+  }, retryAt);
+  await hold('rate-limited-refresh', 'tree', key);
+  await refresh.click();
+  await started('rate-limited-refresh');
+  await release('rate-limited-refresh', 'Jira rate limit reached.');
+  await expect(status).toHaveText('Rate limited');
+  await expect(page.getByRole('alert')).toContainText('Refresh resumes after');
+  await expect(summary(key)).toHaveText(baseline);
+  await expect(refresh).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Retry', exact: true }),
+  ).toBeDisabled();
+  const limitedCalls = await calls(key);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.clock.runFor(5000);
+  expect(await calls(key)).toBe(limitedCalls);
+  await hold('rate-limit-recovery', 'tree', key);
+  await app.evaluate(() => {
+    globalThis.canopySmoke.retryAt = null;
+  });
+  await page.clock.runFor(6000);
+  await started('rate-limit-recovery');
+  await release('rate-limit-recovery');
+  await idle();
+  await expect(status).toHaveText('Connected');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  // Replacing credentials under the same ID clears the renderer's old deadline.
+  const replacementDeadline = await page.evaluate(() => Date.now() + 60_000);
+  await app.evaluate((_electron, value) => {
+    globalThis.canopySmoke.retryAt = value;
+  }, replacementDeadline);
+  await hold('replacement-limit', 'tree', key);
+  await refresh.click();
+  await started('replacement-limit');
+  await release('replacement-limit', 'Jira rate limit reached.');
+  await expect(status).toHaveText('Rate limited');
+  const connections = await page.evaluate(() => window.canopy.connections());
+  await app.evaluate(({ ipcMain }, connections) => {
+    ipcMain.removeHandler('canopy:connect');
+    ipcMain.handle('canopy:connect', () => {
+      globalThis.canopySmoke.retryAt = null;
+      return connections;
+    });
+  }, connections);
+  await page
+    .getByRole('button', { name: 'Connect Jira site', exact: true })
+    .click();
+  await page.getByLabel('Jira site URL').fill('https://fixture.atlassian.net');
+  await page.getByLabel('Atlassian email').fill('fixture@example.com');
+  await page.getByPlaceholder('Paste your token').fill('fixture-only');
+  await page
+    .getByRole('button', { name: 'Connect with token', exact: true })
+    .click();
+  await expect(
+    page.getByRole('dialog', { name: 'Connect Jira', exact: true }),
+  ).toBeHidden();
+  await expect(refresh).toBeEnabled();
+  await hold('replacement-recovery', 'tree', key);
+  await page.clock.runFor(1000);
+  await started('replacement-recovery');
+  await release('replacement-recovery');
+  await idle();
+  await expect(status).toHaveText('Connected');
+
   // Editing blocks focus, background, and reconnect refreshes on this connection.
   await summary(key).press('Enter');
   await input(key).fill('Draft across background and offline');

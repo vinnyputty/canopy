@@ -123,3 +123,222 @@ test('OAuth service origins require HTTPS except loopback and prohibit credentia
   ])
     assert.throws(() => brokerOrigin(origin));
 });
+
+function transportHarness() {
+  const connection = {
+    id: 'test-a',
+    name: 'A',
+    url: 'https://example.atlassian.net',
+    provider: 'jira',
+  };
+  const other = { ...connection, id: 'test-b' };
+  const auth = new Auth(
+    {
+      readSecrets: async () => ({
+        accounts: [connection, other].map((connection) => ({
+          connection,
+          email: 'test@example.com',
+          token: 'fixture-token',
+          apiBase: 'https://example.atlassian.net',
+        })),
+        grants: [],
+      }),
+      writeSecrets: async () => {},
+    } as unknown as Storage,
+    async () => {},
+  );
+  return auth;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test('Auth shares overlapping reads and enforces rate limits across reads and writes with connection isolation', async () => {
+  const original = globalThis.fetch;
+  const auth = transportHarness();
+  await auth.load();
+  const response = deferred<Response>();
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return response.promise;
+  };
+  try {
+    const a = auth.request('test-a', '/rest/api/3/myself');
+    const b = auth.request('test-a', '/rest/api/3/myself');
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    response.resolve(
+      new Response(null, { status: 429, headers: { 'Retry-After': '60' } }),
+    );
+    await Promise.all([
+      assert.rejects(a, /rate limit/),
+      assert.rejects(b, /rate limit/),
+    ]);
+    assert.ok(auth.syncStatus('test-a').retryAt! > Date.now());
+    await assert.rejects(
+      auth.request('test-a', '/rest/api/3/issue/A-1', {
+        method: 'PUT',
+        body: '{}',
+      }),
+      /rate limit/,
+    );
+    assert.equal(calls, 1);
+    globalThis.fetch = async () => {
+      calls++;
+      return Response.json({ id: 'b' });
+    };
+    assert.deepEqual(await auth.request('test-b', '/rest/api/3/myself'), {
+      id: 'b',
+    });
+    assert.equal(calls, 2);
+    await auth.disconnect('test-a');
+    assert.deepEqual(auth.syncStatus('test-a'), { retryAt: null });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('disconnect rejects late response bodies and late rate limits without recreating connection state', async () => {
+  const original = globalThis.fetch;
+  const auth = transportHarness();
+  await auth.load();
+  const body = deferred<string>();
+  const response = Response.json({});
+  response.text = () => body.promise;
+  const arrived = deferred<void>();
+  globalThis.fetch = async () => {
+    arrived.resolve();
+    return response;
+  };
+  try {
+    const request = auth.request('test-a', '/rest/api/3/myself');
+    await arrived.promise;
+    await Promise.resolve();
+    await auth.disconnect('test-a');
+    body.resolve('{}');
+    await assert.rejects(request, /connection changed/);
+    const late = deferred<Response>();
+    globalThis.fetch = () => late.promise;
+    const limited = auth.request('test-b', '/rest/api/3/myself');
+    await Promise.resolve();
+    await auth.disconnect('test-b');
+    late.resolve(
+      new Response(null, { status: 429, headers: { 'Retry-After': '60' } }),
+    );
+    await assert.rejects(limited, /connection changed/);
+    assert.deepEqual(auth.syncStatus('test-b'), { retryAt: null });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('canceling a caller signal does not cancel a shared unsignaled read', async () => {
+  const original = globalThis.fetch;
+  const auth = transportHarness();
+  await auth.load();
+  const pending = deferred<Response>();
+  const controller = new AbortController();
+  const started = deferred<void>();
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    calls++;
+    if (calls === 1) return pending.promise;
+    started.resolve();
+    return new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener(
+        'abort',
+        () => reject(init!.signal!.reason),
+        { once: true },
+      );
+    });
+  };
+  try {
+    const ordinary = auth.request('test-a', '/rest/api/3/myself');
+    const canceled = auth.request('test-a', '/rest/api/3/myself', {
+      signal: controller.signal,
+    });
+    await started.promise;
+    controller.abort();
+    await assert.rejects(canceled, /abort/i);
+    pending.resolve(Response.json({ id: 'success' }));
+    assert.deepEqual(await ordinary, { id: 'success' });
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a write waiting for OAuth refresh checks a newly established cooldown before dispatch', async () => {
+  const original = globalThis.fetch;
+  const grant = {
+    id: 'grant',
+    brokerUrl: 'https://broker.example.com',
+    tokens: {
+      accessToken: 'fixture-access',
+      refreshToken: 'fixture-refresh',
+      expiresAt: Date.now() + 3_600_000,
+    },
+    connections: [
+      {
+        id: 'grant:cloud',
+        name: 'Fixture',
+        url: 'https://fixture.atlassian.net',
+        provider: 'jira',
+      },
+    ],
+  };
+  const auth = new Auth(
+    {
+      readSecrets: async () => ({ grants: [grant], accounts: [] }),
+      writeSecrets: async () => {},
+    } as unknown as Storage,
+    async () => {},
+  );
+  await auth.load();
+  const readResponse = deferred<Response>();
+  const tokenResponse = deferred<Response>();
+  const refreshing = deferred<void>();
+  let writes = 0;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/refresh')) {
+      refreshing.resolve();
+      return tokenResponse.promise;
+    }
+    if (init?.method === 'PUT') {
+      writes++;
+      return new Response(null, { status: 204 });
+    }
+    return readResponse.promise;
+  };
+  try {
+    const read = auth.request('grant:cloud', '/rest/api/3/myself');
+    await Promise.resolve();
+    grant.tokens.expiresAt = 0;
+    const write = auth.request('grant:cloud', '/rest/api/3/issue/A-1', {
+      method: 'PUT',
+      body: '{}',
+    });
+    await refreshing.promise;
+    readResponse.resolve(
+      new Response(null, { status: 429, headers: { 'Retry-After': '30' } }),
+    );
+    await assert.rejects(read, /rate limit/);
+    tokenResponse.resolve(
+      Response.json({
+        accessToken: 'new-fixture-access',
+        refreshToken: 'new-fixture-refresh',
+        expiresAt: Date.now() + 3_600_000,
+      }),
+    );
+    await assert.rejects(write, /rate limit/);
+    assert.equal(writes, 0);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
