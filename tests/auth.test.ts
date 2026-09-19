@@ -48,6 +48,14 @@ test('token connections verify scoped credentials before persistence and keep se
       calls[2].url,
       'https://api.atlassian.com/ex/jira/cloud-123/rest/api/3/search/jql',
     );
+    const controller = new AbortController();
+    await auth.request(connections[0].id, '/rest/api/3/search/jql', {
+      signal: controller.signal,
+    });
+    const forwarded = calls.at(-1)!.init!.signal!;
+    assert.equal(forwarded.aborted, false);
+    controller.abort();
+    assert.equal(forwarded.aborted, true);
     await auth.disconnect(connections[0].id);
     assert.deepEqual(auth.connections(), []);
   } finally {

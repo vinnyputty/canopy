@@ -84,7 +84,7 @@ launch(async (storage) => {
         return snapshot;
       },
       preview: (key) => demo.preview(key),
-      search: (query) => demo.search(query),
+      search: (query, token, signal) => demo.search(query, token, signal),
       editOptions: (key, query) => demo.editOptions(key, query),
       update: (key, patch) => demo.update(key, patch),
       rank: async (key, before, position) => {
