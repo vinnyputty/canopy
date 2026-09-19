@@ -35,11 +35,18 @@ export type EditOptions = {
   assignees: Choice[];
   transitions: (Choice & { requiresFields: boolean })[];
 };
+export type RootReference = {
+  connectionId: string;
+  rootKey: string;
+  summary?: string;
+};
 export type TabState = {
   id: string;
   connectionId: string;
   rootKey: string;
   expanded: string[];
+  linkedExpanded?: string[];
+  summary?: string;
   hideDone: boolean;
   selectedKey?: string;
   scrollTop: number;
@@ -50,6 +57,11 @@ export type Workspace = {
   shortcuts: Record<string, string>;
   theme: 'system' | 'dark' | 'light';
   sidebarCollapsed: boolean;
+  pinnedRoots?: RootReference[];
+  recentRoots?: RootReference[];
+  closedTabs?: TabState[];
+  sidebarWidth?: number;
+  previewWidth?: number;
 };
 export type TokenConnectionInput = {
   siteUrl: string;

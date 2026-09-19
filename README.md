@@ -39,6 +39,7 @@ See [Jira connection setup](docs/connections.md) for token scopes and organizati
 - Drag a grab handle onto a sibling to place it before that issue. Focus a grab handle and use `Alt+↑` / `Alt+↓` for keyboard reordering. Reordering writes Jira rank; it does not change parents.
 - Background refresh runs every 30 seconds and on window focus, reconciling changed issue data into the existing view.
 - Quit with `⌘Q`, toggle the sidebar with `⌘B`, and select tabs 1–9 with `⌘1`–`⌘9` (`Ctrl` on Windows/Linux).
+- Drag tabs to reorder, right-click for root actions, and pin favorites independently of open tabs. Reopen closed tabs with `⌘⇧T` / `Ctrl+Shift+T`; use Back/Forward to restore visited positions. See [workspace controls](docs/workspace.md) for saved layouts and keyboard controls.
 - Open the command palette with `⌘K`, an issue with `⌘P`, or keyboard shortcuts with `⌘/` (`Ctrl` on Windows/Linux). The shortcut editor detects conflicts before saving.
 
 Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/jira.md).
