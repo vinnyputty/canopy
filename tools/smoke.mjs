@@ -1,5 +1,6 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { auditRefresh } from './smoke-refresh.mjs';
+import { auditPreview } from './smoke-preview.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -2479,6 +2480,8 @@ try {
   ).toHaveCount(0);
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(page.getByRole('tab')).toHaveCount(0);
+
+  await auditPreview(app, page);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(
