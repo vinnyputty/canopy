@@ -77,6 +77,40 @@ async function resizeWindow(height) {
     .toBeLessThanOrEqual(height);
 }
 
+async function setScrollbars(mode) {
+  await page.evaluate((mode) => {
+    let style = document.getElementById('smoke-scrollbars');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'smoke-scrollbars';
+      document.head.append(style);
+    }
+    style.textContent = `.tree-scroll { scrollbar-width: ${mode}; }`;
+  }, mode);
+}
+
+async function scrollGeometry() {
+  return page.locator('.tree-scroll').evaluate((element) => {
+    const offset = element.scrollTop;
+    // Read Chromium's actual limit; scrollHeight/clientHeight round CSS pixels.
+    element.scrollTop = 1e9;
+    const maximum = element.scrollTop;
+    element.scrollTop = offset;
+    return {
+      offset,
+      maximum,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+      viewportHeight: element.getBoundingClientRect().height,
+      windowHeight: innerHeight,
+      scale: devicePixelRatio,
+      errorHeight:
+        document.querySelector('.error-banner')?.getBoundingClientRect()
+          .height ?? 0,
+    };
+  });
+}
+
 async function openIssue(key, expectTree = true) {
   await page.getByRole('button', { name: 'Open issue' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
@@ -830,14 +864,28 @@ try {
   await page.getByRole('menuitem', { name: 'Close others' }).click();
   await expect(page.getByRole('tab')).toHaveCount(1);
   await resizeWindow(600);
+  // The earlier error assertion is complete. Its banner is transient across
+  // restart, so remove it before testing restoration under an unchanged layout.
+  await page.locator('.error-banner button').click();
+  await expect(page.locator('.error-banner')).toHaveCount(0);
+  // Exercise the gutter-free geometry used by overlay scrollbars on macOS.
+  await setScrollbars('none');
   await issue('CAN-111').focus();
-  await page.locator('.tree-scroll').evaluate((element) => {
-    element.scrollTop = 120;
-  });
+  const beforeClose = await scrollGeometry();
+  expect(beforeClose.maximum, JSON.stringify(beforeClose)).toBeGreaterThan(2);
+  await page.locator('.tree-scroll').evaluate(
+    (element, target) => {
+      element.scrollTop = target;
+    },
+    Math.min(120, Math.floor(beforeClose.maximum / 2)),
+  );
   const closedScroll = await page
     .locator('.tree-scroll')
     .evaluate((element) => element.scrollTop);
   expect(closedScroll).toBeGreaterThan(0);
+  expect(beforeClose.maximum - closedScroll).toBeGreaterThanOrEqual(
+    closedScroll,
+  );
   // Setting scrollTop queues a browser scroll event. Wait for the renderer's
   // saved view before closing so the fixture does not race that event.
   await expect
@@ -869,6 +917,7 @@ try {
   await page.waitForTimeout(350);
   await close();
   await launch();
+  await setScrollbars('none');
   await expect(page.getByRole('tab')).toHaveCount(0);
   // Hold the initial tree response to cover restoration into a still-loading favorite.
   await app.evaluate(({ ipcMain }, snapshot) => {
@@ -923,9 +972,23 @@ try {
     )
     .toBe(closedScroll);
   await app.evaluate(() => globalThis.releaseRestoreTree());
+  await expect(
+    page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+  ).toBeVisible();
+  const afterRestore = await scrollGeometry();
+  const restoreGeometry = JSON.stringify({
+    beforeClose,
+    afterRestore,
+    closedScroll,
+  });
+  expect(closedScroll, restoreGeometry).toBeLessThanOrEqual(
+    afterRestore.maximum,
+  );
   await expect
-    .poll(() =>
-      page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+    .poll(
+      () =>
+        page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+      { message: restoreGeometry },
     )
     .toBe(closedScroll);
   await expect(page.getByRole('tab', { name: /CAN-100/ })).toHaveAttribute(
@@ -939,6 +1002,72 @@ try {
   await expect(
     page.getByRole('checkbox', { name: 'Hide done' }),
   ).not.toBeChecked();
+
+  // A saved offset can become infeasible when the viewport grows. Reopening
+  // must restore to the native maximum, not to zero or the old unreachable value.
+  for (const scrollbarMode of ['auto', 'none']) {
+    await setScrollbars(scrollbarMode);
+    const normal = await scrollGeometry();
+    await page.locator('.tree-scroll').evaluate((element) => {
+      element.style.flex = '0 0 120px';
+      element.style.maxHeight = '120px';
+      element.scrollTop = 1e9;
+    });
+    const narrowed = await scrollGeometry();
+    expect(
+      narrowed.offset,
+      JSON.stringify({ scrollbarMode, normal, narrowed }),
+    ).toBeGreaterThan(normal.maximum);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async () =>
+            (await window.canopy.loadWorkspace()).tabs.find(
+              (tab) => tab.rootKey === 'CAN-100',
+            )?.scrollTop,
+        ),
+      )
+      .toBe(narrowed.offset);
+    await page
+      .getByRole('tab', { name: /CAN-100/ })
+      .click({ button: 'middle' });
+    await expect(page.getByRole('tab')).toHaveCount(0);
+    await page.keyboard.press(`${modifier}+Shift+t`);
+    await expect(
+      page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+    ).toBeVisible();
+    const expanded = await scrollGeometry();
+    const geometry = JSON.stringify({
+      scrollbarMode,
+      normal,
+      narrowed,
+      expanded,
+    });
+    expect(expanded.maximum, geometry).toBeGreaterThan(0);
+    expect(expanded.maximum, geometry).toBeLessThan(narrowed.offset);
+    await expect
+      .poll(
+        () =>
+          page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
+        { message: geometry },
+      )
+      .toBe(expanded.maximum);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async () =>
+              (await window.canopy.loadWorkspace()).tabs.find(
+                (tab) => tab.rootKey === 'CAN-100',
+              )?.scrollTop,
+          ),
+        { message: geometry },
+      )
+      .toBe(expanded.maximum);
+  }
+  await page
+    .locator('#smoke-scrollbars')
+    .evaluate((element) => element.remove());
 
   expect(
     (await page.evaluate(() => window.canopy.loadWorkspace())).previewWidth,
