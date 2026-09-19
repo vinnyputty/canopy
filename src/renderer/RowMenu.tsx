@@ -17,7 +17,9 @@ export function RowMenu({
   useEffect(() => {
     menu.current?.querySelector<HTMLElement>('button')?.focus();
     const click = (event: PointerEvent) => {
-      if (!menu.current?.contains(event.target as Node)) onClose(false);
+      const target = event.target as HTMLElement;
+      if (target.closest('[data-row-menu-trigger]')) return;
+      if (!menu.current?.contains(target)) onClose(false);
     };
     document.addEventListener('pointerdown', click);
     return () => document.removeEventListener('pointerdown', click);

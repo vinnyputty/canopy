@@ -2116,187 +2116,208 @@ export function App() {
                 )}
               </div>
             )}
-            <div className="tree-with-preview"><div className="tree-content">
-            <div
-              className="tree-scroll"
-              style={tableStyle(view) as React.CSSProperties}
-              ref={scrollRef}
-              onScroll={(event) => {
-                // Placeholder/layout scrolling must not replace a saved position
-                // before the restored tree has been rendered and positioned.
-                if (!snapshot || pendingScrollRestore.current === activeTab.id)
-                  return;
-                updateTab(activeTab.id, {
-                  scrollTop: event.currentTarget.scrollTop,
-                });
-              }}
-            >
-              <TableHeader view={view} update={updateView} />
-              {loading.has(activeTab.id) && !snapshot ? (
-                <TreeSkeleton />
-              ) : errors[activeTab.id] && !snapshot ? (
-                <EmptyState
-                  icon={AlertCircle}
-                  title="This tree couldn’t be loaded"
-                  detail={errors[activeTab.id]}
-                  action="Try again"
-                  onAction={() => void refreshTab(activeTab)}
-                />
-              ) : shownTree ? (
+            <div className="tree-with-preview">
+              <div className="tree-content">
                 <div
-                  role="tree"
-                  aria-label={`${activeTab.rootKey} issue tree`}
-                  className="issue-tree"
+                  className="tree-scroll"
+                  style={tableStyle(view) as React.CSSProperties}
+                  ref={scrollRef}
+                  onScroll={(event) => {
+                    // Placeholder/layout scrolling must not replace a saved position
+                    // before the restored tree has been rendered and positioned.
+                    if (
+                      !snapshot ||
+                      pendingScrollRestore.current === activeTab.id
+                    )
+                      return;
+                    updateTab(activeTab.id, {
+                      scrollTop: event.currentTarget.scrollTop,
+                    });
+                  }}
                 >
-                  <TreeRows
-                    node={shownTree}
-                    columns={view.columns}
-                    rankableKeys={
-                      new Set(
-                        snapshot?.ranking?.state === 'supported'
-                          ? snapshot.ranking.issueKeys
-                          : [],
-                      )
-                    }
-                    rankingEnabled={view.sort.column === 'rank'}
-                    statusColors={statusColors}
-                    depth={0}
-                    expanded={expandedSet}
-                    expansionLocked={filtering}
-                    linkedExpanded={linkedSet}
-                    onToggleLinks={(key) =>
-                      updateTab(activeTab.id, {
-                        linkedExpanded: linkedSet.has(key)
-                          ? [...linkedSet].filter((item) => item !== key)
-                          : [...linkedSet, key],
-                      })
-                    }
-                    counts={counts}
-                    revealedKey={
-                      reveal?.tabId === activeTab.id ? reveal.key : undefined
-                    }
-                    onToggle={(key) =>
-                      updateTab(activeTab.id, {
-                        expanded: expandedSet.has(key)
-                          ? activeTab.expanded.filter((item) => item !== key)
-                          : [...activeTab.expanded, key],
-                      })
-                    }
-                    selectedKey={activeTab.selectedKey}
-                    onSelect={(key) =>
-                      updateTab(activeTab.id, { selectedKey: key })
-                    }
-                    onOpenTab={(key) => openTab(activeTab.connectionId, key)}
-                    onOpenExternal={(key) =>
-                      void openExternal(activeTab.connectionId, key)
-                    }
-                    onCopyLink={(key) =>
-                      void copyIssueLink(activeTab.connectionId, key)
-                    }
+                  <TableHeader view={view} update={updateView} />
+                  {loading.has(activeTab.id) && !snapshot ? (
+                    <TreeSkeleton />
+                  ) : errors[activeTab.id] && !snapshot ? (
+                    <EmptyState
+                      icon={AlertCircle}
+                      title="This tree couldn’t be loaded"
+                      detail={errors[activeTab.id]}
+                      action="Try again"
+                      onAction={() => void refreshTab(activeTab)}
+                    />
+                  ) : shownTree ? (
+                    <div
+                      role="tree"
+                      aria-label={`${activeTab.rootKey} issue tree`}
+                      className="issue-tree"
+                    >
+                      <TreeRows
+                        node={shownTree}
+                        columns={view.columns}
+                        rankableKeys={
+                          new Set(
+                            snapshot?.ranking?.state === 'supported'
+                              ? snapshot.ranking.issueKeys
+                              : [],
+                          )
+                        }
+                        rankingEnabled={view.sort.column === 'rank'}
+                        statusColors={statusColors}
+                        depth={0}
+                        expanded={expandedSet}
+                        expansionLocked={filtering}
+                        linkedExpanded={linkedSet}
+                        onToggleLinks={(key) =>
+                          updateTab(activeTab.id, {
+                            linkedExpanded: linkedSet.has(key)
+                              ? [...linkedSet].filter((item) => item !== key)
+                              : [...linkedSet, key],
+                          })
+                        }
+                        counts={counts}
+                        revealedKey={
+                          reveal?.tabId === activeTab.id
+                            ? reveal.key
+                            : undefined
+                        }
+                        onToggle={(key) =>
+                          updateTab(activeTab.id, {
+                            expanded: expandedSet.has(key)
+                              ? activeTab.expanded.filter(
+                                  (item) => item !== key,
+                                )
+                              : [...activeTab.expanded, key],
+                          })
+                        }
+                        selectedKey={activeTab.selectedKey}
+                        onSelect={(key) =>
+                          updateTab(activeTab.id, { selectedKey: key })
+                        }
+                        onOpenTab={(key) =>
+                          openTab(activeTab.connectionId, key)
+                        }
+                        onOpenExternal={(key) =>
+                          void openExternal(activeTab.connectionId, key)
+                        }
+                        onCopyLink={(key) =>
+                          void copyIssueLink(activeTab.connectionId, key)
+                        }
                         onPreview={(key) =>
                           setPreviewKey((current) =>
                             current === key ? null : key,
                           )
                         }
-                        onContextMenu={(issue, x, y) => {
+                        menuKey={rowMenu?.issue.key}
+                        onContextMenu={(issue, x, y, toggle) => {
                           updateTab(activeTab.id, { selectedKey: issue.key });
-                          setRowMenu({ issue, x, y });
+                          setRowMenu((current) =>
+                            toggle && current?.issue.key === issue.key
+                              ? null
+                              : { issue, x, y },
+                          );
                         }}
-                    editor={editor}
-                    beginEdit={beginEdit}
-                    cancelEdit={() => setEditor(null)}
-                    options={scopedOptions}
-                    loadOptions={loadOptions}
-                    updateIssue={updateIssue}
-                    advanceEdit={advanceEdit}
-                    saving={
-                      new Set(
-                        [...saving]
-                          .filter((key) =>
-                            key.startsWith(`${activeTab.connectionId}:`),
+                        editor={editor}
+                        beginEdit={beginEdit}
+                        cancelEdit={() => setEditor(null)}
+                        options={scopedOptions}
+                        loadOptions={loadOptions}
+                        updateIssue={updateIssue}
+                        advanceEdit={advanceEdit}
+                        saving={
+                          new Set(
+                            [...saving]
+                              .filter((key) =>
+                                key.startsWith(`${activeTab.connectionId}:`),
+                              )
+                              .map((key) =>
+                                key.slice(activeTab.connectionId.length + 1),
+                              ),
                           )
-                          .map((key) =>
-                            key.slice(activeTab.connectionId.length + 1),
-                          ),
-                      )
-                    }
-                    dragKey={dragKey}
-                    setDragKey={setDragKey}
-                    rankBefore={rankBefore}
-                    keyboardRank={keyboardRank}
-                    focusNeighbor={focusTreeNeighbor}
-                  />
+                        }
+                        dragKey={dragKey}
+                        setDragKey={setDragKey}
+                        rankBefore={rankBefore}
+                        keyboardRank={keyboardRank}
+                        focusNeighbor={focusTreeNeighbor}
+                      />
+                    </div>
+                  ) : tree && filtering ? (
+                    <EmptyState
+                      icon={Search}
+                      title="No matching issues"
+                      detail="Try another search or clear the filters."
+                      action="Clear search and filters"
+                      onAction={() => {
+                        setQueries((current) => ({
+                          ...current,
+                          [activeTab.id]: '',
+                        }));
+                        updateTab(activeTab.id, { filters: {} });
+                      }}
+                    />
+                  ) : tree && activeTab.hideDone ? (
+                    <EmptyState
+                      icon={Check}
+                      title="All issues are done"
+                      detail="Completed issues in this tree are currently hidden."
+                      action="Show done issues"
+                      onAction={() =>
+                        updateTab(activeTab.id, { hideDone: false })
+                      }
+                    />
+                  ) : (
+                    <EmptyState
+                      icon={Search}
+                      title="No issue tree yet"
+                      detail="Open an issue key or Jira URL to see its full hierarchy."
+                      action="Open issue"
+                      onAction={() => setDialog('open')}
+                    />
+                  )}
                 </div>
-              ) : tree && filtering ? (
-                <EmptyState
-                  icon={Search}
-                  title="No matching issues"
-                  detail="Try another search or clear the filters."
-                  action="Clear search and filters"
-                  onAction={() => {
-                    setQueries((current) => ({
-                      ...current,
-                      [activeTab.id]: '',
-                    }));
-                    updateTab(activeTab.id, { filters: {} });
-                  }}
-                />
-              ) : tree && activeTab.hideDone ? (
-                <EmptyState
-                  icon={Check}
-                  title="All issues are done"
-                  detail="Completed issues in this tree are currently hidden."
-                  action="Show done issues"
-                  onAction={() => updateTab(activeTab.id, { hideDone: false })}
-                />
-              ) : (
-                <EmptyState
-                  icon={Search}
-                  title="No issue tree yet"
-                  detail="Open an issue key or Jira URL to see its full hierarchy."
-                  action="Open issue"
-                  onAction={() => setDialog('open')}
-                />
-              )}
-            </div>
-            <footer className="statusbar">
-              {snapshot ? (
-                <>
+                <footer className="statusbar">
+                  {snapshot ? (
+                    <>
+                      <span>
+                        {snapshot.issues.length} issue
+                        {snapshot.issues.length === 1 ? '' : 's'}
+                      </span>
+                      <span
+                        title={new Date(snapshot.fetchedAt).toLocaleString()}
+                      >
+                        Last updated{' '}
+                        {new Date(snapshot.fetchedAt).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                    </>
+                  ) : (
+                    <span>Not updated yet</span>
+                  )}
+                  {(refreshing.has(activeTab.id) ||
+                    loading.has(activeTab.id)) && (
+                    <span>
+                      <Loader2 className="spin" size={12} /> Checking for
+                      changes
+                    </span>
+                  )}
+                  <span className="status-spacer" />
+                  <span role="status" aria-label="Connection status">
+                    {!online
+                      ? 'Offline'
+                      : connectionErrors.has(activeTab.id)
+                        ? 'Connection error'
+                        : snapshot
+                          ? 'Connected'
+                          : 'Connecting'}
+                  </span>
                   <span>
-                    {snapshot.issues.length} issue
-                    {snapshot.issues.length === 1 ? '' : 's'}
+                    {foreground ? 'Auto-refresh 30s' : 'Background refresh'}
                   </span>
-                  <span title={new Date(snapshot.fetchedAt).toLocaleString()}>
-                    Last updated{' '}
-                    {new Date(snapshot.fetchedAt).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </span>
-                </>
-              ) : (
-                <span>Not updated yet</span>
-              )}
-              {(refreshing.has(activeTab.id) || loading.has(activeTab.id)) && (
-                <span>
-                  <Loader2 className="spin" size={12} /> Checking for changes
-                </span>
-              )}
-              <span className="status-spacer" />
-              <span role="status" aria-label="Connection status">
-                {!online
-                  ? 'Offline'
-                  : connectionErrors.has(activeTab.id)
-                    ? 'Connection error'
-                    : snapshot
-                      ? 'Connected'
-                      : 'Connecting'}
-              </span>
-              <span>
-                {foreground ? 'Auto-refresh 30s' : 'Background refresh'}
-              </span>
-            </footer>
-</div>
+                </footer>
+              </div>
               {previewKey && (
                 <IssuePreview
                   connectionId={activeTab.connectionId}
@@ -2604,7 +2625,8 @@ type RowsProps = {
   onOpenExternal: (key: string) => void;
   onCopyLink: (key: string) => void;
   onPreview: (key: string) => void;
-  onContextMenu: (issue: Issue, x: number, y: number) => void;
+  onContextMenu: (issue: Issue, x: number, y: number, toggle?: boolean) => void;
+  menuKey?: string;
   editor: Editor;
   beginEdit: (key: string, field: EditField) => void;
   cancelEdit: () => void;
@@ -2653,11 +2675,16 @@ function TreeRows(props: RowsProps) {
       )
     )
       return;
+    if (event.key === 'Escape') return;
     event.stopPropagation();
-    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+    if (
+      event.key === 'ContextMenu' ||
+      (event.shiftKey && event.key === 'F10')
+    ) {
       event.preventDefault();
       const rect = event.currentTarget.getBoundingClientRect();
-      props.onContextMenu(issue, rect.left + 30, rect.top + 30); return;
+      props.onContextMenu(issue, rect.left + 30, rect.top + 30);
+      return;
     }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
@@ -2684,7 +2711,11 @@ function TreeRows(props: RowsProps) {
       event.preventDefault();
       props.beginEdit(issue.key, 'summary');
     }
-    if (event.key === ' ' && !event.shiftKey && event.target === event.currentTarget) {
+    if (
+      event.key === ' ' &&
+      !event.shiftKey &&
+      event.target === event.currentTarget
+    ) {
       event.preventDefault();
       props.onPreview(issue.key);
     }
@@ -2919,7 +2950,11 @@ function TreeRows(props: RowsProps) {
             dragKey !== issue.key &&
             'drop-ready',
         )}
-        onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); props.onContextMenu(issue, event.clientX, event.clientY); }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          props.onContextMenu(issue, event.clientX, event.clientY);
+        }}
         onDragOver={(event) => {
           if (props.rankingEnabled && dragKey && dragKey !== issue.key)
             event.preventDefault();
@@ -2937,12 +2972,14 @@ function TreeRows(props: RowsProps) {
         <div className="row-actions">
           <button
             className="icon-button row-menu-trigger"
+            data-row-menu-trigger
+            aria-expanded={props.menuKey === issue.key}
             aria-label={`Actions for ${issue.key}`}
             aria-haspopup="menu"
             title={`Actions for ${issue.key}`}
             onClick={(event) => {
               const rect = event.currentTarget.getBoundingClientRect();
-              props.onContextMenu(issue, rect.left, rect.bottom);
+              props.onContextMenu(issue, rect.left, rect.bottom, true);
             }}
           >
             <MoreHorizontal size={14} />
@@ -3275,7 +3312,9 @@ function LinkedIssues({
     >
       <div className="linked-rail" />
       <div className="linked-content">
-        <span className="preview-hint">Linked issue references · separate from hierarchy children</span>
+        <span className="preview-hint">
+          Linked issue references · separate from hierarchy children
+        </span>
         {Object.entries(groups).map(([relationship, links]) => (
           <div className="link-group" key={relationship}>
             <span className="relationship">{relationship}</span>

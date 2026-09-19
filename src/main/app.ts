@@ -158,7 +158,13 @@ type Fixture = {
   connection: Connection;
   provider: Pick<
     JiraProvider,
-    'preview' | 'tree' | 'search' | 'editOptions' | 'update' | 'rank' | 'priorityOrder'
+    | 'preview'
+    | 'tree'
+    | 'search'
+    | 'editOptions'
+    | 'update'
+    | 'rank'
+    | 'priorityOrder'
   >;
 };
 

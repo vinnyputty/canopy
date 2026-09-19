@@ -809,6 +809,34 @@ try {
     .getByRole('button', { name: 'Actions for CAN-109', exact: true })
     .click();
   await expect(rowMenu).toBeVisible();
+  const rowTrigger = issue('CAN-109').getByRole('button', {
+    name: 'Actions for CAN-109',
+    exact: true,
+  });
+  await expect(rowTrigger).toHaveAttribute('aria-expanded', 'true');
+  await rowTrigger.locator('svg').click();
+  await expect(rowMenu).toBeHidden();
+  await expect(rowTrigger).toHaveAttribute('aria-expanded', 'false');
+  await rowTrigger.press('Enter');
+  await expect(rowMenu).toBeVisible();
+  await rowTrigger.press('Space');
+  await expect(rowMenu).toBeHidden();
+  await rowTrigger.click();
+  const otherTrigger = issue('CAN-108').getByRole('button', {
+    name: 'Actions for CAN-108',
+    exact: true,
+  });
+  await otherTrigger.click();
+  await expect(
+    page.getByRole('menu', { name: 'Actions for CAN-108' }),
+  ).toBeVisible();
+  await expect(rowMenu).toBeHidden();
+  await expect(otherTrigger).toHaveAttribute('aria-expanded', 'true');
+  await expect(rowTrigger).toHaveAttribute('aria-expanded', 'false');
+  await rowTrigger.press('Enter');
+  await expect(
+    rowMenu.getByRole('menuitem', { name: 'Copy key', exact: true }),
+  ).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(rowMenu).toBeHidden();
   await expect(issue('CAN-109')).toBeFocused();
@@ -867,6 +895,52 @@ try {
     .focus();
   await page.keyboard.press('Space');
   await expect(page.locator('.issue-preview')).toHaveCount(0);
+
+  // Customized wide columns retain horizontal and vertical position across menus/previews.
+  const issueColumnResize = page.getByRole('separator', {
+    name: 'Resize Issue column',
+  });
+  const initialIssueWidth = Number(
+    await issueColumnResize.getAttribute('aria-valuenow'),
+  );
+  for (let step = 0; step < 40; step++)
+    await issueColumnResize.press('ArrowRight');
+  await expect(issueColumnResize).toHaveAttribute(
+    'aria-valuenow',
+    String(initialIssueWidth + 400),
+  );
+  await issue('CAN-109').focus();
+  await page.keyboard.press('Space');
+  await page.locator('.tree-scroll').evaluate((element) => {
+    element.scrollLeft = 100;
+    element.scrollTop = 120;
+  });
+  const scrolledPosition = await page
+    .locator('.tree-scroll')
+    .evaluate((element) => ({ x: element.scrollLeft, y: element.scrollTop }));
+  expect(scrolledPosition.x).toBeGreaterThan(0);
+  expect(scrolledPosition.y).toBeGreaterThan(0);
+  await page.keyboard.press('Shift+F10');
+  await expect(rowMenu).toBeVisible();
+  await page.keyboard.press('Escape');
+  expect(
+    await page
+      .locator('.tree-scroll')
+      .evaluate((element) => ({ x: element.scrollLeft, y: element.scrollTop })),
+  ).toEqual(scrolledPosition);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.issue-preview')).toHaveCount(0);
+  expect(
+    await page
+      .locator('.tree-scroll')
+      .evaluate((element) => ({ x: element.scrollLeft, y: element.scrollTop })),
+  ).toEqual(scrolledPosition);
+  for (let step = 0; step < 40; step++)
+    await issueColumnResize.press('ArrowLeft');
+  await expect(issueColumnResize).toHaveAttribute(
+    'aria-valuenow',
+    String(initialIssueWidth),
+  );
 
   // A late request must never replace a newly selected preview or reopen a closed pane.
   await app.evaluate(() => {
@@ -990,14 +1064,18 @@ try {
   await page
     .getByRole('button', { name: 'Expand all descendants', exact: true })
     .click();
-  await issue('CAN-108').getByTitle(/Double-click to edit/).click();
+  await issue('CAN-108')
+    .getByTitle(/Double-click to edit/)
+    .click();
   await page.getByRole('button', { name: 'Focus selected subtree' }).click();
   await expect(tree.getByRole('treeitem')).toHaveCount(1);
   await expect(
     page.getByRole('navigation', { name: 'Issue ancestry' }),
   ).toContainText('CAN-100');
   await page.getByRole('button', { name: 'Back to root', exact: true }).click();
-  await issue('CAN-108').getByTitle(/Double-click to edit/).click();
+  await issue('CAN-108')
+    .getByTitle(/Double-click to edit/)
+    .click();
   await page
     .getByRole('textbox', { name: 'Find in tree' })
     .fill('no such issue');
@@ -1076,7 +1154,10 @@ try {
   await collapse.click();
   await expect(tree.getByRole('treeitem')).toHaveCount(1);
   await expand.click();
-  await issue('CAN-106').getByTitle(/Double-click to edit/).first().click();
+  await issue('CAN-106')
+    .getByTitle(/Double-click to edit/)
+    .first()
+    .click();
   await actions.click();
   await page
     .getByRole('button', { name: 'Collapse selected branch', exact: true })
@@ -1138,7 +1219,9 @@ try {
     window.setSize(1100, 560);
     return bounds;
   });
-  await issue('CAN-114').getByTitle(/Double-click to edit/).click();
+  await issue('CAN-114')
+    .getByTitle(/Double-click to edit/)
+    .click();
   await expect(
     page.getByRole('navigation', { name: 'Issue ancestry' }),
   ).toContainText('CAN-113');
@@ -1192,7 +1275,9 @@ try {
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await expect(page.getByText('Checking for changes')).toBeHidden();
   await expect(page.getByLabel('Filter priority')).toBeFocused();
-  await issue('CAN-114').getByTitle(/Double-click to edit/).dblclick();
+  await issue('CAN-114')
+    .getByTitle(/Double-click to edit/)
+    .dblclick();
   const revealedDraft = page.getByLabel('Summary for CAN-114');
   await revealedDraft.fill('Unsaved revealed issue draft');
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
@@ -1266,11 +1351,15 @@ try {
   await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
 
   // Enter edits a focused summary; Escape cancels without saving on blur.
-  await issue('CAN-111').getByTitle(/Double-click to edit/).press('Enter');
+  await issue('CAN-111')
+    .getByTitle(/Double-click to edit/)
+    .press('Enter');
   await summaryInput.fill('Cancelled draft');
   await summaryInput.press('Escape');
   await expect(issue('CAN-111').getByText(summary)).toBeVisible();
-  await issue('CAN-111').getByTitle(/Double-click to edit/).press('Enter');
+  await issue('CAN-111')
+    .getByTitle(/Double-click to edit/)
+    .press('Enter');
   await summaryInput.fill('Keyboard draft');
   await summaryInput.press('Tab');
   await expect(page.getByLabel('Choose value')).toBeFocused();
@@ -1473,7 +1562,9 @@ try {
 
   await page.getByLabel('Filter status').selectOption('todo');
   await expect(issue('CAN-202')).toBeVisible();
-  await issue('CAN-202').getByTitle(/Double-click to edit/).click();
+  await issue('CAN-202')
+    .getByTitle(/Double-click to edit/)
+    .click();
   await page.locator('.tree-view-menu summary').click();
   await page.getByRole('button', { name: 'Focus selected subtree' }).click();
   await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(1);
@@ -1508,12 +1599,11 @@ try {
   // Workspace writes are intentionally debounced.
   await page.waitForTimeout(350);
   await close();
-  // The preview UI belongs to the preview feature; exercise its saved-width
-  // contract through the same workspace file that a resized preview updates.
+  // A resized preview persists its width; loaded workspace widths are honored.
   const savedWorkspace = JSON.parse(
     await readFile(join(userData, 'workspace.json'), 'utf8'),
   );
-  expect(savedWorkspace.previewWidth).toBe(420);
+  expect(savedWorkspace.previewWidth).toBe(440);
   savedWorkspace.previewWidth = 560;
   await writeFile(
     join(userData, 'workspace.json'),
@@ -1594,7 +1684,7 @@ try {
   await page.keyboard.press('Space');
   await expect(
     page.getByRole('separator', { name: 'Resize issue preview' }),
-  ).toHaveAttribute('aria-valuenow', '440');
+  ).toHaveAttribute('aria-valuenow', '560');
   await page
     .getByRole('button', { name: 'Close issue preview', exact: true })
     .click();
