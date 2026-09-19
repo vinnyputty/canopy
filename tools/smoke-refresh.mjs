@@ -192,18 +192,19 @@ export async function auditRefresh(app, page, resizeWindow) {
   await page.getByLabel('Jira site URL').fill('https://fixture.atlassian.net');
   await page.getByLabel('Atlassian email').fill('fixture@example.com');
   await page.getByPlaceholder('Paste your token').fill('fixture-only');
+  await hold('replacement-recovery', 'tree', key);
   await page
     .getByRole('button', { name: 'Connect with token', exact: true })
     .click();
   await expect(
     page.getByRole('dialog', { name: 'Connect Jira', exact: true }),
   ).toBeHidden();
-  await expect(refresh).toBeEnabled();
-  await hold('replacement-recovery', 'tree', key);
-  await page.clock.runFor(1000);
+  // Allow the scheduler's one-second request spacing and its next timer tick.
+  await page.clock.runFor(2000);
   await started('replacement-recovery');
   await release('replacement-recovery');
   await idle();
+  await expect(refresh).toBeEnabled();
   await expect(status).toHaveText('Connected');
 
   // Editing blocks focus, background, and reconnect refreshes on this connection.
