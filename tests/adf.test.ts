@@ -55,3 +55,42 @@ it('renders readable ADF paragraphs, lists, mentions, and safe link text', () =>
     'Unsafe',
   );
 });
+
+it('separates table headers and values while preserving code and media text', () => {
+  const cell = (type: string, text: string) => ({
+    type,
+    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+  });
+  assert.equal(
+    documentText({
+      type: 'doc',
+      content: [
+        {
+          type: 'table',
+          content: [
+            {
+              type: 'tableRow',
+              content: [
+                cell('tableHeader', 'Owner'),
+                cell('tableHeader', 'Status'),
+              ],
+            },
+            {
+              type: 'tableRow',
+              content: [cell('tableCell', 'Ada'), cell('tableCell', 'Ready')],
+            },
+          ],
+        },
+        {
+          type: 'codeBlock',
+          content: [{ type: 'text', text: '<script>alert(1)</script>' }],
+        },
+        {
+          type: 'paragraph',
+          content: [{ type: 'emoji', attrs: { text: '✓' } }, { type: 'media' }],
+        },
+      ],
+    }),
+    'Owner\tStatus\t\n\nAda\tReady\t\n\n<script>alert(1)</script>\n\n✓[attachment]',
+  );
+});
