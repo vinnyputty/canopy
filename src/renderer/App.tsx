@@ -441,6 +441,11 @@ export function App() {
   );
 
   const closeTabIds = useCallback((ids: string[]) => {
+    setQueries((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([id]) => !ids.includes(id)),
+      ),
+    );
     setWorkspace((current) => closeTabs(current, ids));
     setTabMenu(null);
   }, []);

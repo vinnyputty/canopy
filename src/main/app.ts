@@ -119,15 +119,6 @@ function workspace(value: Workspace) {
       !Number.isFinite(tab.scrollTop)
     )
       throw new Error('Invalid tab state.');
-    if (
-      tab.linkedExpanded !== undefined &&
-      (!Array.isArray(tab.linkedExpanded) ||
-        tab.linkedExpanded.length > 100_000 ||
-        !tab.linkedExpanded.every(
-          (k) => typeof k === 'string' && k.length < 500,
-        ))
-    )
-      throw new Error('Invalid linked expansion.');
     if (tab.focusKey !== undefined) key(tab.focusKey);
     if (tab.filters !== undefined) {
       if (

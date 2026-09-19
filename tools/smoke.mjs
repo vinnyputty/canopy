@@ -670,6 +670,33 @@ try {
   await page.locator('.tree-view-menu summary').click();
   await page.getByRole('button', { name: 'Focus selected subtree' }).click();
   await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(1);
+  await page.getByLabel('Filter priority').selectOption('3');
+  await page.getByRole('textbox', { name: 'Find in tree' }).fill('arrow keys');
+  await secondTab.click({ button: 'middle' });
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(secondTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByLabel('Filter status')).toHaveValue('todo');
+  await expect(page.getByLabel('Filter priority')).toHaveValue('3');
+  await expect(page.getByRole('textbox', { name: 'Find in tree' })).toHaveValue(
+    '',
+  );
+  await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(1);
+  await expect(issue('CAN-202')).toHaveAttribute('aria-selected', 'true');
+  // History restores its captured filtered subtree, rather than a later edit to that tab.
+  await firstTab.click();
+  await secondTab.click();
+  await page.getByLabel('Filter status').selectOption('');
+  await page.getByLabel('Filter priority').selectOption('');
+  await page.getByRole('button', { name: 'Back to root', exact: true }).click();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(secondTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByLabel('Filter status')).toHaveValue('todo');
+  await expect(page.getByLabel('Filter priority')).toHaveValue('3');
+  await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(1);
+  await expect(issue('CAN-202')).toHaveAttribute('aria-selected', 'true');
+  // Restore the previously saved drag order after reopening appended the tab.
+  await secondTab.dragTo(firstTab);
 
   // Workspace writes are intentionally debounced.
   await page.waitForTimeout(350);
