@@ -53,6 +53,8 @@ See [Jira connection setup](docs/connections.md) for token scopes and organizati
 - Right-click a row, press `Shift+F10`, or use its actions button to copy its key, title, or Jira link, or open Jira. Hover a truncated title to read it in full.
 - Open the command palette with `⌘K`, an issue with `⌘P`, or keyboard shortcuts with `⌘/` (`Ctrl` on Windows/Linux). The shortcut editor detects conflicts before saving.
 
+Priority, assignee, and status pickers load independently with field-specific Retry actions. Assignee suggestions use the last 100 people seen on the connection; selection checks issue eligibility, and search or Load more fetches additional results within Jira’s 1,000-user discovery limit.
+
 Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/jira.md).
 
 ## Packaging

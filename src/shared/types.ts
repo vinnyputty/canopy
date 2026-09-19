@@ -59,6 +59,7 @@ export type IssuePatch = {
   assigneeId?: string | null;
   transitionId?: string;
 };
+export type AssigneePage = { users: Choice[]; nextStartAt?: number };
 export type EditOptions = {
   priorities: Choice[];
   assignees: Choice[];
@@ -122,11 +123,30 @@ export interface CanopyAPI {
     options: SearchOptions,
   ): Promise<SearchPage>;
   cancelSearch(connectionId: string, requestId: string): Promise<void>;
-  editOptions(
+  priorities(
+    connectionId: string,
+    key: string,
+    refresh?: boolean,
+  ): Promise<Choice[]>;
+  transitions(
+    connectionId: string,
+    key: string,
+    refresh?: boolean,
+  ): Promise<EditOptions['transitions']>;
+  cachedUsers(connectionId: string): Promise<Choice[]>;
+  assignees(
     connectionId: string,
     key: string,
     query?: string,
-  ): Promise<EditOptions>;
+    startAt?: number,
+    refresh?: boolean,
+  ): Promise<AssigneePage>;
+  validateAssignee(
+    connectionId: string,
+    key: string,
+    accountId: string,
+    refresh?: boolean,
+  ): Promise<Choice | null>;
   update(connectionId: string, key: string, patch: IssuePatch): Promise<Issue>;
   rank(
     connectionId: string,

@@ -1,4 +1,10 @@
 import { IssueSearch, type SearchState } from './issue-search';
+import {
+  Pickers,
+  type PickerOptions,
+  type PickerField,
+  type FieldLoad,
+} from './pickers';
 import React, {
   useCallback,
   useEffect,
@@ -172,7 +178,7 @@ export function App() {
     'open' | 'commands' | 'shortcuts' | 'connect' | null
   >(null);
   const [editor, setEditor] = useState<Editor>(null);
-  const [options, setOptions] = useState<Record<string, EditOptions>>({});
+  const [options, setOptions] = useState<Record<string, PickerOptions>>({});
   const [saving, setSaving] = useState<Set<string>>(new Set());
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [tabMenu, setTabMenu] = useState<{
@@ -244,9 +250,27 @@ export function App() {
         (message) => setErrors((current) => ({ ...current, edit: message })),
       ),
   );
+  const editSession = useRef(0);
   const editorRef = useRef(editor);
   editorRef.current = editor;
-  const optionSequences = useRef<Record<string, number>>({});
+  const [pickers] = useState(() => new Pickers(window.canopy, setOptions));
+  useEffect(() => {
+    pickers.clear();
+    setEditor(null);
+  }, [connections, pickers]);
+  useEffect(() => {
+    for (const tab of workspace.tabs) {
+      const tree = snapshots[tab.id];
+      if (tree) pickers.observe(tab.connectionId, tree.issues);
+    }
+  }, [snapshots, workspace.tabs, pickers]);
+  useEffect(
+    () => () => {
+      if (editor && editor.field !== 'summary')
+        pickers.close(editor.connectionId, editor.key, editor.field);
+    },
+    [editor, pickers],
+  );
   const tabsRef = useRef<TabState[]>([]);
   const pendingScrollRestore = useRef<string | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -1103,56 +1127,74 @@ export function App() {
   ]);
 
   const loadOptions = useCallback(
-    async (key: string, query?: string) => {
-      if (!activeTab) return;
-      const connectionId = activeTab.connectionId;
-      const scopedKey = `${connectionId}:${key}`;
-      const sequence = (optionSequences.current[scopedKey] ?? 0) + 1;
-      optionSequences.current[scopedKey] = sequence;
-      try {
-        const next = await window.canopy.editOptions(connectionId, key, query);
-        if (optionSequences.current[scopedKey] !== sequence) return;
-        setOptions((current) => ({
-          ...current,
-          [scopedKey]: next,
-        }));
-      } catch (error) {
-        setErrors((current) => ({
-          ...current,
-          edit: error instanceof Error ? error.message : String(error),
-        }));
-      }
+    async (
+      key: string,
+      field: PickerField,
+      query = '',
+      more = false,
+      refresh = false,
+    ) => {
+      if (activeTab)
+        await pickers.load(
+          activeTab.connectionId,
+          key,
+          field,
+          query,
+          more,
+          refresh,
+        );
     },
-    [activeTab],
+    [activeTab, pickers],
   );
-
   const beginEdit = useCallback(
     (key: string, field: EditField) => {
       if (!activeTab) return;
+      editSession.current++;
       setEditor({ connectionId: activeTab.connectionId, key, field });
-      if (!options[`${activeTab.connectionId}:${key}`]) void loadOptions(key);
+      if (field !== 'summary')
+        void pickers.open(activeTab.connectionId, key, field);
     },
-    [activeTab, loadOptions, options],
+    [activeTab, pickers],
   );
 
   const updateIssue = useCallback(
     async (key: string, patch: IssuePatch) => {
       if (!activeTab) return;
       const connectionId = activeTab.connectionId;
+      const tabId = activeTab.id;
+      const session = editSession.current;
+      const field: EditField =
+        patch.assigneeId !== undefined
+          ? 'assignee'
+          : patch.priorityId !== undefined
+            ? 'priority'
+            : patch.transitionId !== undefined
+              ? 'status'
+              : 'summary';
+      if (
+        patch.assigneeId &&
+        !(await pickers.validate(connectionId, key, patch.assigneeId))
+      )
+        return;
       setEditor((current) =>
         current?.connectionId === connectionId && current.key === key
           ? null
           : current,
       );
-      await mutations.update(
+      const success = await mutations.update(
         connectionId,
         key,
         patch,
-        options[`${connectionId}:${key}`],
+        pickers.values[`${connectionId}:${key}`],
       );
-      void loadOptions(key);
+      if (success && field === 'status') pickers.invalidate(connectionId, key);
+      if (!success && field !== 'summary') {
+        pickers.rejected(connectionId, key, field);
+        if (activeIdRef.current === tabId && editSession.current === session)
+          setEditor((current) => current ?? { connectionId, key, field });
+      }
     },
-    [activeTab, mutations, options, loadOptions],
+    [activeTab, mutations, pickers],
   );
 
   const rankBefore = useCallback(
@@ -2223,6 +2265,14 @@ export function App() {
                         cancelEdit={() => setEditor(null)}
                         options={scopedOptions}
                         loadOptions={loadOptions}
+                        changeAssigneeQuery={(key, query) => {
+                          if (activeTab)
+                            pickers.changeQuery(
+                              activeTab.connectionId,
+                              key,
+                              query,
+                            );
+                        }}
                         updateIssue={updateIssue}
                         advanceEdit={advanceEdit}
                         saving={
@@ -2632,8 +2682,15 @@ type RowsProps = {
   editor: Editor;
   beginEdit: (key: string, field: EditField) => void;
   cancelEdit: () => void;
-  options: Record<string, EditOptions>;
-  loadOptions: (key: string, query?: string) => Promise<void>;
+  changeAssigneeQuery: (key: string, query: string) => void;
+  options: Record<string, PickerOptions>;
+  loadOptions: (
+    key: string,
+    field: PickerField,
+    query?: string,
+    more?: boolean,
+    refresh?: boolean,
+  ) => Promise<void>;
   updateIssue: (key: string, patch: IssuePatch) => Promise<void>;
   advanceEdit: (key: string, field: EditField, direction: -1 | 1) => void;
   saving: Set<string>;
@@ -2857,6 +2914,10 @@ function TreeRows(props: RowsProps) {
           }
           value={issue.priority}
           choices={props.options[issue.key]?.priorities}
+          state={props.options[issue.key]?.priority}
+          retry={() =>
+            void props.loadOptions(issue.key, 'priority', '', false, true)
+          }
           className={`priority ${priorityTone(issue.priority?.name)}`}
           empty="No priority"
           onSave={(id) => void props.updateIssue(issue.key, { priorityId: id })}
@@ -2878,7 +2939,12 @@ function TreeRows(props: RowsProps) {
           }
           issue={issue}
           choices={props.options[issue.key]?.assignees}
-          search={(query) => props.loadOptions(issue.key, query)}
+          state={props.options[issue.key]?.assignee}
+          hasMore={props.options[issue.key]?.nextStartAt !== undefined}
+          changeQuery={(query) => props.changeAssigneeQuery(issue.key, query)}
+          search={(query, more, refresh) =>
+            props.loadOptions(issue.key, 'assignee', query, more, refresh)
+          }
           save={(id) => void props.updateIssue(issue.key, { assigneeId: id })}
           cancel={props.cancelEdit}
         />
@@ -2899,6 +2965,10 @@ function TreeRows(props: RowsProps) {
           }
           issue={issue}
           choices={props.options[issue.key]?.transitions}
+          state={props.options[issue.key]?.status}
+          retry={() =>
+            void props.loadOptions(issue.key, 'status', '', false, true)
+          }
           save={(id) => void props.updateIssue(issue.key, { transitionId: id })}
           cancel={props.cancelEdit}
         />
@@ -3042,14 +3112,34 @@ function FieldCell({
   label: string;
   children: React.ReactNode;
 }) {
+  const element = useRef<HTMLDivElement>(null);
+  const wasActive = useRef(false);
+  useLayoutEffect(() => {
+    if (
+      active &&
+      (!wasActive.current || document.activeElement === document.body) &&
+      !element.current?.contains(document.activeElement)
+    )
+      element.current?.focus();
+    wasActive.current = active;
+  });
   return (
     <div
+      ref={element}
       className={cx('field-cell', active && 'editing')}
       role={active ? undefined : 'button'}
       tabIndex={active ? -1 : 0}
       aria-label={active ? undefined : label}
       onClick={() => !active && onEdit()}
       onKeyDown={(event) => {
+        if (
+          active &&
+          event.target === event.currentTarget &&
+          ['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(event.key)
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
         if (!active && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
           onEdit();
@@ -3101,10 +3191,36 @@ function SummaryEditor({
   );
 }
 
+function PickerFeedback({
+  state,
+  retry,
+}: {
+  state?: FieldLoad;
+  retry: () => void;
+}) {
+  return (
+    <>
+      {state?.loading && (
+        <span className="choice-loading" role="status">
+          <Loader2 className="spin" size={13} />
+          {state.validating ? 'Checking assignment…' : 'Loading…'}
+        </span>
+      )}
+      {state?.error && (
+        <div className="picker-error" role="alert">
+          <span>{state.error}</span>
+          <button onClick={retry}>Retry</button>
+        </div>
+      )}
+    </>
+  );
+}
 function ChoiceEditor({
   active,
   value,
   choices,
+  state,
+  retry,
   className,
   empty,
   onSave,
@@ -3113,30 +3229,42 @@ function ChoiceEditor({
   active: boolean;
   value: Choice | null;
   choices?: Choice[];
+  state?: FieldLoad;
+  retry: () => void;
   className: string;
   empty: string;
   onSave: (id: string) => void;
   onCancel: () => void;
 }) {
   if (!active) return <span className={className}>{value?.name ?? empty}</span>;
-  if (!choices) return <Loader2 className="spin" size={14} />;
   return (
-    <select
-      autoFocus
-      value={value?.id ?? ''}
-      onChange={(event) => onSave(event.target.value)}
-      onBlur={onCancel}
-      aria-label="Choose value"
-    >
-      <option value="" disabled>
-        {empty}
-      </option>
-      {choices.map((choice) => (
-        <option value={choice.id} key={choice.id}>
-          {choice.name}
-        </option>
-      ))}
-    </select>
+    <div className="priority-editor">
+      <PickerFeedback state={state} retry={retry} />
+      {!state?.loading && !state?.error && choices?.length === 0 && (
+        <span className="no-choices">No editable priorities available</span>
+      )}
+      {choices && !state?.error && !state?.loading && choices.length > 0 && (
+        <select
+          autoFocus
+          value={value?.id ?? ''}
+          onChange={(event) => onSave(event.target.value)}
+          onBlur={onCancel}
+          aria-label="Choose value"
+        >
+          <option value="" disabled>
+            {empty}
+          </option>
+          {choices.map((choice) => (
+            <option value={choice.id} key={choice.id}>
+              {choice.name}
+            </option>
+          ))}
+        </select>
+      )}
+      {(state?.error || choices?.length === 0) && (
+        <button onClick={onCancel}>Cancel</button>
+      )}
+    </div>
   );
 }
 
@@ -3163,21 +3291,37 @@ function AssigneeEditor({
   active,
   issue,
   choices,
+  state,
+  hasMore,
   search,
+  changeQuery,
   save,
   cancel,
 }: {
   active: boolean;
   issue: Issue;
   choices?: Choice[];
-  search: (query: string) => Promise<void>;
+  state?: FieldLoad;
+  hasMore: boolean;
+  changeQuery: (query: string) => void;
+  search: (query: string, more?: boolean, refresh?: boolean) => Promise<void>;
   save: (id: string | null) => void;
   cancel: () => void;
 }) {
   const [query, setQuery] = useState('');
+  const previousQuery = useRef('');
   useEffect(() => {
-    if (!active) return;
-    const timer = window.setTimeout(() => void search(query), 220);
+    if (!active) {
+      setQuery('');
+      previousQuery.current = '';
+    }
+  }, [active]);
+  useEffect(() => {
+    if (!active || query === previousQuery.current) return;
+    const timer = window.setTimeout(() => {
+      previousQuery.current = query;
+      void search(query);
+    }, 250);
     return () => window.clearTimeout(timer);
   }, [active, query]);
   if (!active)
@@ -3187,32 +3331,50 @@ function AssigneeEditor({
         <span>{issue.assignee?.name ?? 'Unassigned'}</span>
       </span>
     );
+  const visible = choices?.filter((choice) =>
+    choice.name.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+  const more = () => {
+    if (hasMore && !state?.loading && !state?.error) void search(query, true);
+  };
   return (
     <div
       className="popover assignee-popover"
       onKeyDown={(event) =>
-        navigateChoices(event, 'input, .choice-list button:not(:disabled)')
+        navigateChoices(event, 'input, button:not(:disabled)')
       }
     >
       <input
         autoFocus
         value={query}
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => {
+          setQuery(event.target.value);
+          changeQuery(event.target.value);
+        }}
         onKeyDown={(event) => event.key === 'Escape' && cancel()}
         placeholder="Search people…"
         aria-label="Search assignees"
       />
-      <div className="choice-list">
+      <div
+        className="choice-list"
+        onScroll={(event) => {
+          const list = event.currentTarget;
+          if (list.scrollTop + list.clientHeight >= list.scrollHeight - 8)
+            more();
+        }}
+      >
         <button
+          disabled={state?.validating}
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => save(null)}
         >
           <AssigneeAvatar assignee={null} />
           Unassigned
         </button>
-        {choices?.map((choice) => (
+        {visible?.map((choice) => (
           <button
             key={choice.id}
+            disabled={state?.validating}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => save(choice.id)}
           >
@@ -3221,18 +3383,37 @@ function AssigneeEditor({
             {issue.assignee?.id === choice.id && <Check size={13} />}
           </button>
         ))}
-        {!choices && (
-          <span className="choice-loading">
-            <Loader2 className="spin" size={13} />
-            Loading…
-          </span>
+        {!state?.loading && !state?.error && visible?.length === 0 && (
+          <span className="no-choices">No people found in these results</span>
+        )}
+        <PickerFeedback
+          state={state}
+          retry={() => void search(query, false, true)}
+        />
+        {hasMore && (
+          <button
+            disabled={state?.loading || Boolean(state?.error)}
+            onClick={more}
+          >
+            Load more people
+          </button>
         )}
       </div>
+      <p className="picker-note">
+        Recent people are suggestions; Jira checks assignment for this issue
+        when selected. Search covers only Jira’s first 1,000 users and may be
+        incomplete.
+      </p>
+      <button className="cancel-choice" onClick={cancel}>
+        Cancel
+      </button>
     </div>
   );
 }
 
 function StatusEditor({
+  state,
+  retry,
   color,
   active,
   issue,
@@ -3244,6 +3425,8 @@ function StatusEditor({
   active: boolean;
   issue: Issue;
   choices?: EditOptions['transitions'];
+  state?: FieldLoad;
+  retry: () => void;
   save: (id: string) => void;
   cancel: () => void;
 }) {
@@ -3253,7 +3436,6 @@ function StatusEditor({
         {issue.status.name}
       </span>
     );
-  if (!choices) return <Loader2 className="spin" size={14} />;
   return (
     <div
       className="popover status-popover"
@@ -3262,26 +3444,31 @@ function StatusEditor({
         navigateChoices(event, '[role="menuitem"]:not(:disabled)')
       }
     >
-      {choices.length === 0 && (
+      <PickerFeedback state={state} retry={retry} />
+      {!state?.loading && !state?.error && choices?.length === 0 && (
         <span className="no-choices">No transitions available</span>
       )}
-      {choices.map((choice) => (
-        <button
-          role="menuitem"
-          autoFocus={choice === choices.find((value) => !value.requiresFields)}
-          disabled={choice.requiresFields}
-          title={
-            choice.requiresFields
-              ? 'This transition requires fields that Canopy does not edit yet.'
-              : undefined
-          }
-          key={choice.id}
-          onClick={() => save(choice.id)}
-        >
-          {choice.name}
-          {choice.requiresFields && <small>Requires fields</small>}
-        </button>
-      ))}
+      {!state?.error &&
+        !state?.loading &&
+        choices?.map((choice) => (
+          <button
+            role="menuitem"
+            autoFocus={
+              choice === choices?.find((value) => !value.requiresFields)
+            }
+            disabled={choice.requiresFields}
+            title={
+              choice.requiresFields
+                ? 'This transition requires fields that Canopy does not edit yet.'
+                : undefined
+            }
+            key={choice.id}
+            onClick={() => save(choice.id)}
+          >
+            {choice.name}
+            {choice.requiresFields && <small>Requires fields</small>}
+          </button>
+        ))}
       <button className="cancel-choice" onClick={cancel}>
         Cancel
       </button>
