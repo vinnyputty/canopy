@@ -2770,6 +2770,25 @@ function ChoiceEditor({
   );
 }
 
+function navigateChoices(event: React.KeyboardEvent, selector: string) {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+  const choices = [
+    ...event.currentTarget.querySelectorAll<HTMLElement>(selector),
+  ];
+  if (!choices.length) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const current = choices.indexOf(event.target as HTMLElement);
+  const next =
+    current < 0
+      ? event.key === 'ArrowDown'
+        ? 0
+        : choices.length - 1
+      : (current + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) %
+        choices.length;
+  choices[next].focus();
+}
+
 function AssigneeEditor({
   active,
   issue,
@@ -2799,7 +2818,12 @@ function AssigneeEditor({
       </span>
     );
   return (
-    <div className="popover assignee-popover">
+    <div
+      className="popover assignee-popover"
+      onKeyDown={(event) =>
+        navigateChoices(event, 'input, .choice-list button:not(:disabled)')
+      }
+    >
       <input
         autoFocus
         value={query}
@@ -2861,7 +2885,13 @@ function StatusEditor({
     );
   if (!choices) return <Loader2 className="spin" size={14} />;
   return (
-    <div className="popover status-popover" role="menu">
+    <div
+      className="popover status-popover"
+      role="menu"
+      onKeyDown={(event) =>
+        navigateChoices(event, '[role="menuitem"]:not(:disabled)')
+      }
+    >
       {choices.length === 0 && (
         <span className="no-choices">No transitions available</span>
       )}

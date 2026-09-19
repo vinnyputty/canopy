@@ -1,13 +1,14 @@
 import { launch } from '../../src/main/app';
 import type { Issue } from '../../src/shared/types';
-import { DemoProvider } from './demo';
+import { ControlledDemoProvider } from './controlled';
 
 launch(async (storage) => {
   if (await storage.read<boolean>('demo-removed')) return undefined;
-  const demo = new DemoProvider(
+  const demo = new ControlledDemoProvider(
     (await storage.read<Issue[]>('demo')) ?? undefined,
     (issues) => storage.write('demo', issues),
   );
+  Object.assign(globalThis, { canopySmoke: demo });
   let rankAttempts = 0;
   let priorityFailures = Number(
     process.env.CANOPY_SMOKE_PRIORITY_FAILURES ?? 0,
@@ -42,9 +43,9 @@ launch(async (storage) => {
       search: (query) => demo.search(query),
       editOptions: (key, query) => demo.editOptions(key, query),
       update: (key, patch) => demo.update(key, patch),
-      rank: async (key, before) => {
+      rank: async (key, before, position) => {
         await storage.write('rank-attempts', ++rankAttempts);
-        return demo.rank(key, before);
+        return demo.rank(key, before, position);
       },
       priorityOrder: (keys) => {
         if (priorityFailures-- > 0)

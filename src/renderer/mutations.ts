@@ -276,12 +276,19 @@ export class Mutations {
     this.checkingUndo = true;
     this.publish();
     const revision = this.revision;
+    const assertCurrent = () => {
+      if (revision !== this.revision || this.entries.length)
+        throw new Error(
+          'Another edit started while checking Jira. Try undo again after it finishes.',
+        );
+    };
     try {
       const { connectionId, change, before } = entry;
       const fresh = await this.api.tree(
         connectionId,
         entry.parentKey ?? change.key,
       );
+      assertCurrent();
       const current = fresh.issues.find((issue) => issue.key === change.key);
       if (!current || !before)
         throw new UndoUnavailable('The issue is no longer available.');
@@ -310,6 +317,7 @@ export class Mutations {
           patch.priorityId = before.priority.id;
         }
         options = await this.api.editOptions(connectionId, change.key);
+        assertCurrent();
         if (
           'priority' in change.fields &&
           !options.priorities.some((choice) => choice.id === patch!.priorityId)
@@ -338,6 +346,7 @@ export class Mutations {
             change.key,
             before.assignee.name,
           );
+          assertCurrent();
           if (
             !searched.assignees.some(
               (choice) => choice.id === before.assignee!.id,
@@ -364,6 +373,7 @@ export class Mutations {
           .filter((issue) => issue.parentKey === entry.parentKey)
           .map((issue) => issue.key);
         if (
+          actual.length !== order.length ||
           JSON.stringify(expected) !== JSON.stringify(actual) ||
           current.parentKey !== entry.parentKey
         )
@@ -376,10 +386,7 @@ export class Mutations {
         if (!anchor)
           throw new UndoUnavailable('The original rank cannot be restored.');
       }
-      if (revision !== this.revision || this.entries.length)
-        throw new Error(
-          'Another edit started while checking Jira. Try undo again after it finishes.',
-        );
+      assertCurrent();
       const success = patch
         ? await this.update(connectionId, change.key, patch, options, false)
         : await this.rank(connectionId, change.key, anchor!, position, false);

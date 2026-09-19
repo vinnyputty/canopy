@@ -140,6 +140,271 @@ async function expectIssueBefore(firstKey, secondKey) {
     .toBe(true);
 }
 
+async function auditMutations() {
+  const key = 'CAN-111';
+  const input = () => page.getByLabel(`Summary for ${key}`);
+  const summaryCell = () => issue(key).getByTitle('Double-click to edit');
+  const fixture = (method, ...args) =>
+    app.evaluate(
+      (_electron, { method, args }) => globalThis.canopySmoke[method](...args),
+      { method, args },
+    );
+  const hold = (id, operation = 'update', issueKey = key) =>
+    fixture('hold', id, operation, issueKey);
+  const started = (id) => expect.poll(() => fixture('started', id)).toBe(true);
+  const release = (id, error) => fixture('release', id, error);
+  const saved = (issueKey = key) =>
+    expect(page.getByLabel(`Saving ${issueKey}`, { exact: true })).toHaveCount(
+      0,
+    );
+  const edit = async (value) => {
+    await summaryCell().press('Enter');
+    await input().fill(value);
+    await input().press('Enter');
+  };
+  const switchTab = (root) =>
+    page.getByRole('tab', { name: new RegExp(root) }).click();
+  const dismissError = async (text) => {
+    await expect(page.getByRole('alert')).toContainText(text);
+    await page.getByRole('alert').getByRole('button').click();
+  };
+  const undo = async (name) => {
+    const button = page.getByRole('button', { name, exact: true });
+    await expect(button).toBeEnabled();
+    await button.click();
+  };
+  const baseline = await summaryCell().innerText();
+  await app.evaluate(() =>
+    globalThis.canopySmoke.blockedTransitions.add('todo'),
+  );
+  await openIssue('CAN-110');
+  await page.getByRole('checkbox', { name: 'Hide done' }).uncheck();
+
+  // Pending and confirmed values propagate to another open tree immediately.
+  await hold('summary');
+  await edit('Optimistic across tabs');
+  await started('summary');
+  await expect(summaryCell()).toHaveText('Optimistic across tabs');
+  await expect(page.getByLabel(`Saving ${key}`, { exact: true })).toBeVisible();
+  await switchTab('CAN-100');
+  await expect(summaryCell()).toHaveText('Optimistic across tabs');
+  await expect(page.getByLabel(`Saving ${key}`, { exact: true })).toBeVisible();
+  await release('summary');
+  await saved();
+  await undo(`Undo edit to ${key}`);
+  await expect(summaryCell()).toHaveText(baseline);
+  await switchTab('CAN-110');
+  await expect(summaryCell()).toHaveText(baseline);
+
+  // Every picker applies before the request resolves and rolls back on failure.
+  await hold('priority');
+  await issue(key).getByLabel(`Edit priority for ${key}`).press('Enter');
+  await page.getByLabel('Choose value').selectOption({ label: 'Low' });
+  await started('priority');
+  await expect(issue(key).getByText('Low', { exact: true })).toBeVisible();
+  await release('priority', 'Priority permission denied');
+  await saved();
+  await expect(issue(key).getByText('Highest', { exact: true })).toBeVisible();
+  await dismissError('Priority permission denied');
+
+  await hold('assignee');
+  await issue(key).getByLabel(`Edit assignee for ${key}`).press('Enter');
+  await page.getByLabel('Search assignees').press('ArrowDown');
+  await expect(
+    page.getByRole('button', { name: 'Unassigned', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('Enter');
+  await started('assignee');
+  await expect(
+    issue(key).getByText('Unassigned', { exact: true }),
+  ).toBeVisible();
+  await release('assignee', 'Assignee permission denied');
+  await saved();
+  await expect(
+    issue(key).getByText('Sam Rivera', { exact: true }),
+  ).toBeVisible();
+  await dismissError('Assignee permission denied');
+
+  await hold('status');
+  await issue(key).getByLabel(`Edit status for ${key}`).press('Enter');
+  await expect(page.getByRole('menuitem', { name: /To Do/ })).toBeDisabled();
+  await expect(
+    page.getByRole('menuitem', { name: 'In Progress', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(
+    page.getByRole('menuitem', { name: 'Done', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('Enter');
+  await started('status');
+  await expect(issue(key).getByText('Done', { exact: true })).toBeVisible();
+  await release('status', 'Workflow changed');
+  await saved();
+  await expect(
+    issue(key).getByText('In Progress', { exact: true }),
+  ).toBeVisible();
+  await dismissError('Workflow changed');
+
+  // Status undo revalidates the current reverse transition.
+  await issue(key).getByLabel(`Edit status for ${key}`).press('Enter');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await saved();
+  await expect(issue(key).getByText('Done', { exact: true })).toBeVisible();
+  await undo(`Undo edit to ${key}`);
+  await expect(
+    issue(key).getByText('In Progress', { exact: true }),
+  ).toBeVisible();
+
+  // A failed earlier write cannot erase a queued newer edit or its pending UI.
+  await hold('first');
+  await hold('second');
+  await edit('First pending');
+  await started('first');
+  await edit('Newest pending');
+  await expect(summaryCell()).toHaveText('Newest pending');
+  await switchTab('CAN-100');
+  await expect(summaryCell()).toHaveText('Newest pending');
+  await release('first', 'First edit rejected');
+  await started('second');
+  await expect(summaryCell()).toHaveText('Newest pending');
+  await expect(page.getByLabel(`Saving ${key}`, { exact: true })).toBeVisible();
+  await dismissError('First edit rejected');
+  await release('second');
+  await saved();
+  await expect(summaryCell()).toHaveText('Newest pending');
+
+  // A response must not close a later active draft; focus refresh preserves it.
+  await hold('under-draft');
+  await edit('Confirmed under draft');
+  await started('under-draft');
+  await summaryCell().press('Enter');
+  await input().fill('Unsaved active draft');
+  await release('under-draft');
+  await saved();
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(input()).toHaveValue('Unsaved active draft');
+  await expect(input()).toBeFocused();
+  await input().press('Escape');
+  await expect(summaryCell()).toHaveText('Confirmed under draft');
+
+  await hold('failed-under-draft');
+  await edit('Will fail below draft');
+  await started('failed-under-draft');
+  await summaryCell().press('Enter');
+  await input().fill('Draft survives failure');
+  await release('failed-under-draft', 'Draft predecessor rejected');
+  await saved();
+  await expect(input()).toHaveValue('Draft survives failure');
+  await expect(input()).toBeFocused();
+  await input().press('Escape');
+  await expect(summaryCell()).toHaveText('Confirmed under draft');
+  await dismissError('Draft predecessor rejected');
+
+  // An older refresh response cannot overwrite a mutation completed after it began.
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await hold('stale-tree', 'tree', 'CAN-100');
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await started('stale-tree');
+  await edit('Saved after refresh began');
+  await saved();
+  await release('stale-tree');
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await expect(summaryCell()).toHaveText('Saved after refresh began');
+  await switchTab('CAN-110');
+  await expect(summaryCell()).toHaveText('Saved after refresh began');
+
+  // An already-running refresh is also deferred when a draft opens afterward.
+  await hold('draft-tree', 'tree', 'CAN-110');
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await started('draft-tree');
+  await summaryCell().press('Enter');
+  await input().fill('Draft above old refresh');
+  await release('draft-tree');
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await expect(input()).toHaveValue('Draft above old refresh');
+  await expect(input()).toBeFocused();
+  await input().press('Escape');
+
+  // Row Enter, cell traversal in both directions, cancel, and native text undo.
+  await issue(key).focus();
+  await page.keyboard.press('Enter');
+  await expect(input()).toBeFocused();
+  await expect(issue(key)).toHaveAttribute('aria-selected', 'true');
+  await input().press('Tab');
+  await expect(page.getByLabel('Choose value')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Search assignees')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(
+    page.getByRole('menuitem', { name: 'In Progress', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.getByLabel('Search assignees')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await summaryCell().press('Enter');
+  await input().press('End');
+  await input().pressSequentially('x');
+  await input().press(`${modifier}+z`);
+  await expect(input()).toHaveValue('Saved after refresh began');
+  await input().press('Escape');
+  await expect(summaryCell()).toHaveText('Saved after refresh began');
+
+  // Tab crosses row boundaries and keeps the newly edited row in view.
+  await issue('CAN-112').focus();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await expect(input()).toBeFocused();
+  await expect(input()).toBeInViewport();
+  await page.keyboard.press('Shift+Tab');
+  await expect(
+    issue('CAN-112').getByRole('menuitem', {
+      name: 'In Progress',
+      exact: true,
+    }),
+  ).toBeFocused();
+  await page.keyboard.press('Escape');
+
+  // Optimistic ranks roll back across tabs, and a successful rank has an inverse.
+  await hold('rank-fail', 'rank');
+  await page
+    .getByRole('button', { name: /Reorder CAN-111/ })
+    .press('Alt+ArrowUp');
+  await started('rank-fail');
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await switchTab('CAN-100');
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await release('rank-fail', 'Rank permission denied');
+  await saved();
+  await expectIssueBefore('CAN-112', 'CAN-111');
+  await dismissError('Rank permission denied');
+  await page
+    .getByRole('button', { name: /Reorder CAN-111/ })
+    .press('Alt+ArrowUp');
+  await saved();
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await undo(`Undo reorder of ${key}`);
+  await expectIssueBefore('CAN-112', 'CAN-111');
+
+  // Remote changes prevent undo from overwriting someone else's work.
+  await edit('Local before remote');
+  await saved();
+  await fixture('remoteUpdate', key, { summary: 'Remote writer wins' });
+  await undo(`Undo edit to ${key}`);
+  await dismissError('The field changed in Jira');
+  expect((await fixture('tree', key)).issues[0].summary).toBe(
+    'Remote writer wins',
+  );
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(summaryCell()).toHaveText('Remote writer wins');
+  console.log(
+    'Optimistic mutation audit passed: pending, failures, rapid edits, overlapping trees/refreshes, keyboard pickers, and validated undo.',
+  );
+}
+
 try {
   await launch();
   await expect(
@@ -841,6 +1106,8 @@ try {
   await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();
   await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
   await expectIssueBefore('CAN-112', 'CAN-111');
+
+  await auditMutations();
 
   await page.getByTitle('Open in Jira', { exact: true }).first().click();
   const errorText = page.locator('.error-banner span').first();

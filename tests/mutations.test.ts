@@ -258,6 +258,37 @@ describe('optimistic mutation reconciliation', () => {
     assert.equal(h.current.summary, 'New');
   });
 
+  it('serializes sibling ranks and preserves a newer move when the earlier rank fails', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const calls: string[] = [];
+    const h = harness({
+      rank: async (_id, key) => {
+        calls.push(key);
+        return calls.length === 1 ? first.promise : second.promise;
+      },
+    });
+    const a = h.mutations.rank('jira', 'A-4', 'A-2');
+    const b = h.mutations.rank('jira', 'A-3', 'A-2');
+    await tick();
+    assert.deepEqual(calls, ['A-4']);
+    first.reject(new Error('First rank rejected'));
+    await a;
+    await tick();
+    assert.deepEqual(calls, ['A-4', 'A-3']);
+    assert.deepEqual(
+      h.view.snapshots.two.issues.map((value) => value.key),
+      ['A-1', 'A-3', 'A-2', 'A-4'],
+    );
+    second.resolve();
+    await b;
+    assert.deepEqual(
+      h.view.snapshots.one.issues.map((value) => value.key),
+      ['A-1', 'A-3', 'A-2', 'A-4'],
+    );
+    assert.equal(h.view.saving.size, 0);
+  });
+
   it('does not restore a closed tab when a mutation settles', async () => {
     const request = deferred<Issue>();
     const h = harness({ update: () => request.promise });
@@ -364,6 +395,27 @@ describe('validated undo', () => {
     assert.equal(ranks.length, 3);
   });
 
+  it('rejects rank undo when a former sibling was removed remotely', async () => {
+    let ranks = 0;
+    let remote = snapshot();
+    const h = harness({
+      rank: async () => {
+        ranks++;
+      },
+      tree: async () => remote,
+    });
+    await h.mutations.rank('jira', 'A-4', 'A-2');
+    remote = {
+      ...h.view.snapshots.one,
+      issues: h.view.snapshots.one.issues.filter(
+        (value) => value.key !== 'A-3',
+      ),
+    };
+    await h.mutations.undo();
+    assert.equal(ranks, 1);
+    assert.match(h.errors[0], /Sibling order changed/);
+  });
+
   it('requires a current supported reverse workflow transition', async () => {
     let current = issue('A-2', 'A-1');
     let calls = 0;
@@ -407,5 +459,195 @@ describe('validated undo', () => {
     await undo;
     assert.equal(calls, 2);
     assert.match(h.errors[0], /Another edit started/);
+  });
+});
+
+describe('undo audit regressions', () => {
+  it('preserves older history when a newer same-field edit finishes during validation', async () => {
+    let current = issue('A-2', 'A-1');
+    const validation = deferred<TreeSnapshot>();
+    let reads = 0;
+    const h = harness({
+      update: async (_id, _key, patch) => {
+        current = { ...current, summary: patch.summary! };
+        return current;
+      },
+      tree: async () =>
+        ++reads === 1
+          ? validation.promise
+          : { ...snapshot(), issues: [current] },
+    });
+    await h.mutations.update('jira', 'A-2', { summary: 'First' });
+    const undo = h.mutations.undo();
+    await h.mutations.update('jira', 'A-2', { summary: 'Second' });
+    validation.resolve({ ...snapshot(), issues: [current] });
+    await undo;
+    assert.match(h.errors[0], /Another edit started/);
+    await h.mutations.undo();
+    assert.equal(h.current.summary, 'First');
+    await h.mutations.undo();
+    assert.equal(h.current.summary, 'A-2');
+  });
+
+  it('preserves history when another edit completes during workflow-option validation', async () => {
+    let current = issue('A-2', 'A-1');
+    const validation = deferred<EditOptions>();
+    let reads = 0;
+    const h = harness({
+      update: async (_id, _key, patch) => {
+        current = {
+          ...current,
+          priority: options.priorities.find(
+            (choice) => choice.id === patch.priorityId,
+          )!,
+        };
+        return current;
+      },
+      tree: async () => ({ ...snapshot(), issues: [current] }),
+      editOptions: async () => (++reads === 1 ? validation.promise : options),
+    });
+    await h.mutations.update('jira', 'A-2', { priorityId: '2' }, options);
+    const undo = h.mutations.undo();
+    await tick();
+    await h.mutations.update('jira', 'A-2', { priorityId: '1' }, options);
+    validation.resolve({ ...options, priorities: [] });
+    await undo;
+    assert.match(h.errors[0], /Another edit started/);
+    await h.mutations.undo();
+    assert.equal(h.current.priority?.id, '2');
+    await h.mutations.undo();
+    assert.equal(h.current.priority?.id, '1');
+  });
+
+  it('retries transient undo reads and inverse write failures without losing history', async () => {
+    let current = issue('A-2', 'A-1');
+    let readFailures = 1;
+    let writeFailures = 0;
+    const h = harness({
+      update: async (_id, _key, patch) => {
+        if (writeFailures-- > 0) throw new Error('Write unavailable');
+        current = { ...current, summary: patch.summary! };
+        return current;
+      },
+      tree: async () => {
+        if (readFailures-- > 0) throw new Error('Read unavailable');
+        return { ...snapshot(), issues: [current] };
+      },
+    });
+    await h.mutations.update('jira', 'A-2', { summary: 'New' });
+    await h.mutations.undo();
+    assert.match(h.errors[0], /Read unavailable/);
+    assert.ok(h.view.undoLabel);
+    writeFailures = 1;
+    await h.mutations.undo();
+    assert.match(h.errors[1], /Write unavailable/);
+    assert.equal(h.current.summary, 'New');
+    assert.ok(h.view.undoLabel);
+    await h.mutations.undo();
+    assert.equal(h.current.summary, 'A-2');
+    assert.equal(h.view.undoLabel, undefined);
+  });
+
+  it('uses a safe reverse transition and skips one that requires additional fields', async () => {
+    let current = issue('A-2', 'A-1');
+    const transitions: string[] = [];
+    const open = current.status;
+    const h = harness({
+      update: async (_id, _key, patch) => {
+        transitions.push(patch.transitionId!);
+        current = {
+          ...current,
+          status:
+            patch.transitionId === 'finish' ? options.transitions[0].to! : open,
+        };
+        return current;
+      },
+      tree: async () => ({ ...snapshot(), issues: [current] }),
+      editOptions: async () => ({
+        ...options,
+        transitions: [
+          {
+            id: 'requires-fields',
+            name: 'Reopen with fields',
+            requiresFields: true,
+            to: open,
+          },
+          {
+            id: 'safe-reopen',
+            name: 'Reopen',
+            requiresFields: false,
+            to: open,
+          },
+        ],
+      }),
+    });
+    await h.mutations.update(
+      'jira',
+      'A-2',
+      { transitionId: 'finish' },
+      options,
+    );
+    await h.mutations.undo();
+    assert.deepEqual(transitions, ['finish', 'safe-reopen']);
+    assert.equal(h.current.status.id, 'open');
+  });
+
+  it('skips an unsupported inverse so an earlier supported edit remains undoable', async () => {
+    let current = {
+      ...issue('A-2', 'A-1'),
+      priority: null as Issue['priority'],
+    };
+    const h = harness({
+      update: async (_id, _key, patch) => {
+        current = {
+          ...current,
+          ...(patch.summary !== undefined ? { summary: patch.summary } : {}),
+          ...(patch.priorityId
+            ? {
+                priority: options.priorities.find(
+                  (choice) => choice.id === patch.priorityId,
+                )!,
+              }
+            : {}),
+        };
+        return current;
+      },
+      tree: async () => ({ ...snapshot(), issues: [current] }),
+    });
+    const original = snapshot();
+    original.issues[1] = current;
+    h.mutations.receive(tab(), original, 0);
+    await h.mutations.update('jira', 'A-2', { summary: 'New' });
+    await h.mutations.update('jira', 'A-2', { priorityId: '2' }, options);
+    await h.mutations.undo();
+    assert.match(h.errors[0], /empty priority/);
+    await h.mutations.undo();
+    assert.equal(h.current.summary, 'A-2');
+    assert.equal(h.current.priority?.id, '2');
+  });
+
+  it('keeps earlier confirmed values under a queued edit and late refresh responses', async () => {
+    const first = deferred<Issue>();
+    const second = deferred<Issue>();
+    let calls = 0;
+    const h = harness({
+      update: () => (++calls === 1 ? first.promise : second.promise),
+    });
+    const refresh1 = h.mutations.beginRefresh();
+    const a = h.mutations.update('jira', 'A-2', { summary: 'First' });
+    const b = h.mutations.update('jira', 'A-2', { summary: 'Second' });
+    first.resolve({ ...issue('A-2', 'A-1'), summary: 'First' });
+    await a;
+    assert.equal(h.current.summary, 'Second');
+    const refresh2 = h.mutations.beginRefresh();
+    h.mutations.receive(tab('two'), snapshot(), refresh1);
+    h.mutations.endRefresh(refresh1);
+    assert.equal(h.view.snapshots.two.issues[1].summary, 'Second');
+    second.resolve({ ...issue('A-2', 'A-1'), summary: 'Second' });
+    await b;
+    h.mutations.receive(tab(), snapshot(), refresh2);
+    h.mutations.endRefresh(refresh2);
+    assert.equal(h.current.summary, 'Second');
+    assert.equal(h.view.saving.size, 0);
   });
 });
