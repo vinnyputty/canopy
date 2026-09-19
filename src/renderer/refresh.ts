@@ -33,6 +33,9 @@ export class RefreshSchedule {
         entry.active = active;
         entry.interval = active ? ACTIVE_REFRESH_MS : ACTIVE_REFRESH_MS * 2;
         entry.due = now + entry.interval;
+        // The first background wait is already scheduled. A request that is
+        // still running instead schedules that first wait when it completes.
+        if (!active && !entry.inflight) entry.interval *= 2;
         if (active) activated.push(id);
       }
     }
