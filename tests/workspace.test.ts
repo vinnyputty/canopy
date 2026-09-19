@@ -74,7 +74,7 @@ describe('workspace restoration', () => {
       selectedKey: 'CAN-22',
       scrollTop: 347,
       hideDone: false,
-      filters: { search: 'urgent' },
+      filters: { status: 'todo', priority: 'high' },
       focusKey: 'CAN-22',
     };
     current.tabs[1] = saved;
@@ -143,6 +143,8 @@ describe('workspace restoration', () => {
       scrollTop: 212,
       selectedKey: 'CAN-10',
       linkedExpanded: ['CAN-1'],
+      filters: { status: 'todo', priority: 'high' },
+      focusKey: 'CAN-10',
     };
     const to = { ...tab('2'), scrollTop: 90 };
     const history = visit({ back: [], forward: [] }, from, to);

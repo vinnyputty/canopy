@@ -1,10 +1,11 @@
-import type { Issue, TreeSnapshot } from '../shared/types';
+import type { Issue, TreeSnapshot, TreeFilters } from '../shared/types';
 
 export type IssueNode = { issue: Issue; children: IssueNode[] };
 
 export const DEFAULT_SHORTCUTS: Record<string, string> = {
   commandPalette: 'Meta+K',
   quickOpen: 'Meta+P',
+  findInTree: 'Meta+F',
   newTab: 'Meta+T',
   closeTab: 'Meta+W',
   reopenTab: 'Meta+Shift+T',
@@ -41,6 +42,7 @@ export function defaultShortcuts(
 export const SHORTCUT_LABELS: Record<string, string> = {
   commandPalette: 'Show command palette',
   quickOpen: 'Open issue',
+  findInTree: 'Find in tree',
   newTab: 'Open issue in new tab',
   closeTab: 'Close active tab',
   reopenTab: 'Reopen closed tab',
@@ -188,4 +190,97 @@ export function matchesShortcut(
   shortcut: string | undefined,
 ): boolean {
   return Boolean(shortcut) && eventShortcut(event) === shortcut;
+}
+
+export function findNode(
+  node: IssueNode | null,
+  key?: string,
+): IssueNode | null {
+  if (!node || !key) return null;
+  if (node.issue.key === key) return node;
+  for (const child of node.children) {
+    const found = findNode(child, key);
+    if (found) return found;
+  }
+  return null;
+}
+export function ancestorPath(
+  node: IssueNode | null,
+  key?: string,
+): IssueNode[] {
+  if (!node || !key) return [];
+  if (node.issue.key === key) return [node];
+  for (const child of node.children) {
+    const path = ancestorPath(child, key);
+    if (path.length) return [node, ...path];
+  }
+  return [];
+}
+export function expansionKeys(
+  node: IssueNode | null,
+  depth = Infinity,
+): string[] {
+  if (!node || depth <= 0) return [];
+  return [
+    node.issue.key,
+    ...node.children.flatMap((child) => expansionKeys(child, depth - 1)),
+  ];
+}
+export function filterTree(
+  node: IssueNode | null,
+  query: string,
+  filters: TreeFilters,
+  hideDone: boolean,
+  accountId?: string,
+  revealKey?: string,
+): IssueNode | null {
+  if (!node) return null;
+  const children = node.children
+    .map((child) =>
+      filterTree(child, query, filters, hideDone, accountId, revealKey),
+    )
+    .filter((child): child is IssueNode => child !== null);
+  const issue = node.issue;
+  const matches =
+    (!hideDone || issue.status.category !== 'done') &&
+    (!query.trim() ||
+      `${issue.key} ${issue.summary}`
+        .toLowerCase()
+        .includes(query.trim().toLowerCase())) &&
+    (!filters.assignee ||
+      (filters.assignee === 'unassigned'
+        ? !issue.assignee
+        : Boolean(accountId) && issue.assignee?.id === accountId)) &&
+    (!filters.status || filters.status === issue.status.id) &&
+    (!filters.priority ||
+      filters.priority === (issue.priority?.id ?? '__none__'));
+  return matches || children.length || issue.key === revealKey
+    ? { issue, children }
+    : null;
+}
+export function childCounts(node: IssueNode): {
+  open: number;
+  total: number;
+  descendants: number;
+} {
+  return {
+    open: node.children.filter(
+      (child) => child.issue.status.category !== 'done',
+    ).length,
+    total: node.children.length,
+    descendants: node.children.reduce(
+      (count, child) => count + 1 + childCounts(child).descendants,
+      0,
+    ),
+  };
+}
+
+export function indexTree(node: IssueNode | null): Map<string, IssueNode> {
+  const result = new Map<string, IssueNode>();
+  const visit = (current: IssueNode) => {
+    result.set(current.issue.key, current);
+    current.children.forEach(visit);
+  };
+  if (node) visit(node);
+  return result;
 }

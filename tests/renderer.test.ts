@@ -3,6 +3,10 @@ import { describe, it } from 'node:test';
 import type { Issue, TreeSnapshot } from '../src/shared/types';
 import {
   buildIssueTree,
+  filterTree,
+  expansionKeys,
+  ancestorPath,
+  childCounts,
   defaultShortcuts,
   eventShortcut,
   flattenVisible,
@@ -139,5 +143,85 @@ describe('renderer tree helpers', () => {
     assert.equal(defaultShortcuts('Win32').quickOpen, 'Ctrl+P');
     assert.equal(defaultShortcuts('MacIntel').toggleSidebar, 'Meta+B');
     assert.equal(defaultShortcuts('Win32').selectTab9, 'Ctrl+9');
+  });
+});
+
+describe('tree navigation', () => {
+  const issues = [
+    issue('A-1'),
+    issue('A-2', 'A-1', 'done'),
+    issue('A-3', 'A-2'),
+    issue('A-4', 'A-1'),
+  ];
+  issues[2] = {
+    ...issues[2],
+    summary: 'Needle title',
+    assignee: { id: 'me', name: 'Same Name' },
+    priority: { id: 'high', name: 'High' },
+  };
+  issues[3] = { ...issues[3], assignee: { id: 'other', name: 'Same Name' } };
+  const root = buildIssueTree(issues, 'A-1')!;
+  it('reveals matching descendant paths while retaining completed ancestors', () => {
+    const filtered = filterTree(root, 'NEEDLE', {}, true);
+    assert.deepEqual(expansionKeys(filtered), ['A-1', 'A-2', 'A-3']);
+    assert.deepEqual(expansionKeys(filterTree(root, 'a-3', {}, false)), [
+      'A-1',
+      'A-2',
+      'A-3',
+    ]);
+    assert.equal(filterTree(root, 'missing', {}, false), null);
+    assert.deepEqual(expansionKeys(root, 1), ['A-1']);
+    assert.deepEqual(expansionKeys(root, 2), ['A-1', 'A-2', 'A-4']);
+  });
+  it('combines filters and compares account IDs rather than names', () => {
+    assert.deepEqual(
+      expansionKeys(
+        filterTree(
+          root,
+          '',
+          { assignee: 'me', status: 'new', priority: 'high' },
+          true,
+          'me',
+        ),
+      ),
+      ['A-1', 'A-2', 'A-3'],
+    );
+    assert.equal(filterTree(root, '', { assignee: 'me' }, false), null);
+    assert.equal(
+      filterTree(root, '', { assignee: 'me', status: 'done' }, false, 'me'),
+      null,
+    );
+    assert.deepEqual(
+      expansionKeys(filterTree(root, '', { assignee: 'unassigned' }, false)),
+      ['A-1', 'A-2'],
+    );
+  });
+  it('filters null priorities and respects completed leaves without pruning matching ancestors', () => {
+    assert.deepEqual(
+      expansionKeys(filterTree(root, '', { priority: '__none__' }, false)),
+      ['A-1', 'A-2', 'A-4'],
+    );
+    assert.deepEqual(
+      expansionKeys(filterTree(root, '', { status: 'done' }, false)),
+      ['A-1', 'A-2'],
+    );
+    assert.equal(filterTree(root, '', { status: 'done' }, true), null);
+    assert.deepEqual(expansionKeys(root.children[0], 0), []);
+    assert.deepEqual(expansionKeys(root.children[0]), ['A-2', 'A-3']);
+    assert.deepEqual(expansionKeys(root), ['A-1', 'A-2', 'A-3', 'A-4']);
+  });
+  it('reveals an excluded selection and keeps only its ancestor path', () => {
+    assert.deepEqual(
+      expansionKeys(filterTree(root, 'missing', {}, true, undefined, 'A-3')),
+      ['A-1', 'A-2', 'A-3'],
+    );
+    assert.deepEqual(
+      ancestorPath(root, 'A-3').map((node) => node.issue.key),
+      ['A-1', 'A-2', 'A-3'],
+    );
+    assert.deepEqual(ancestorPath(root, 'A-99'), []);
+  });
+  it('distinguishes direct open/total children from all descendants', () => {
+    assert.deepEqual(childCounts(root), { open: 1, total: 2, descendants: 3 });
   });
 });
