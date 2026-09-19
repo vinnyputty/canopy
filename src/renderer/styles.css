@@ -560,11 +560,14 @@ select:focus-visible,
 .column-head,
 .issue-row {
   display: grid;
-  grid-template-columns:
-    minmax(360px, 1fr) 104px minmax(130px, 165px)
-    118px 34px;
+  grid-template-columns: var(--table-columns);
 }
 .column-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--panel);
+  min-width: var(--table-width);
   height: 28px;
   flex: 0 0 28px;
   align-items: center;
@@ -589,7 +592,8 @@ select:focus-visible,
   scrollbar-color: var(--faint) transparent;
 }
 .issue-tree {
-  min-width: 780px;
+  min-width: var(--table-width);
+  font-size: var(--tree-font-size);
 }
 [role='treeitem']:focus-visible {
   outline: 0;
@@ -649,8 +653,8 @@ select:focus-visible,
   cursor: grabbing;
 }
 .grab:disabled {
-  opacity: 0;
-  pointer-events: none;
+  opacity: 0.2;
+  cursor: not-allowed;
 }
 .disclosure {
   width: 21px;
@@ -1648,7 +1652,7 @@ kbd {
 @media (max-width: 950px) {
   .column-head,
   .issue-row {
-    grid-template-columns: minmax(330px, 1fr) 88px 125px 105px 32px;
+    grid-template-columns: var(--table-columns);
   }
   .tool-button span {
     display: none;
@@ -1874,4 +1878,142 @@ kbd {
 }
 .tree-breadcrumb {
   min-height: 27px;
+}
+
+.view-settings {
+  position: relative;
+}
+.view-settings > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.view-settings > summary::-webkit-details-marker {
+  display: none;
+}
+.view-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  width: 280px;
+  max-height: calc(100vh - 140px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 28px #0002;
+}
+.view-panel > label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.view-panel select {
+  width: 145px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--bg);
+}
+.view-panel fieldset {
+  margin: 12px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+}
+.column-setting {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+}
+.column-setting label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.column-setting button {
+  background: var(--hover);
+  border-radius: 3px;
+  padding: 3px 6px;
+}
+.column-setting button:disabled {
+  opacity: 0.3;
+}
+.view-action {
+  width: 100%;
+  padding: 7px;
+  margin-bottom: 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  text-align: left;
+  background: var(--bg);
+}
+.view-panel p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.column-heading {
+  position: relative;
+  align-self: stretch;
+  min-width: 0;
+  display: flex;
+}
+.column-sort {
+  width: 100%;
+  text-align: left;
+  padding: 0 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+}
+.column-heading[data-column='issue'] .column-sort {
+  padding-left: 26px;
+}
+.column-resizer {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 1;
+}
+.column-resizer:hover,
+.column-resizer:focus-visible {
+  background: var(--accent);
+}
+.ranking-note:empty {
+  display: none;
+}
+.ranking-note {
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.ranking-note button {
+  margin-left: 6px;
+  color: var(--accent);
+  background: transparent;
+}
+.issue-tree .key,
+.issue-tree .priority,
+.issue-tree .assignee,
+.issue-tree .status,
+.issue-tree .summary,
+.issue-tree .summary-input,
+.issue-tree .choice-input,
+.issue-tree .linked-issue {
+  font-size: inherit;
+}
+.issue-tree .key {
+  font-size: 0.85em;
 }

@@ -39,6 +39,8 @@ import type {
   Issue,
   IssuePatch,
   RootReference,
+  RootView,
+  TableColumn,
   TabState,
   TreeSnapshot,
   Workspace,
@@ -74,6 +76,19 @@ import {
   visit,
   type Navigation,
 } from './workspace';
+import { TableHeader, ViewSettings } from './TableView';
+import {
+  canRank,
+  defaultRootView,
+  DEFAULT_VIEW,
+  migrateViews,
+  priorityRepresentatives,
+  resetRootView,
+  rootView,
+  setRootView,
+  sortIssueTree,
+  tableStyle,
+} from './table-view';
 
 const PLATFORM_SHORTCUTS = defaultShortcuts();
 const EMPTY_WORKSPACE: Workspace = {
@@ -222,6 +237,74 @@ export function App() {
       current?.key === activeTab?.selectedKey ? current : null,
     );
   }, [activeTab?.selectedKey]);
+  const view = activeTab ? rootView(workspace, activeTab) : DEFAULT_VIEW;
+  const [priorityOrders, setPriorityOrders] = useState<
+    Record<string, string[]>
+  >({});
+  const [priorityErrors, setPriorityErrors] = useState<Record<string, string>>(
+    {},
+  );
+  const representatives = useMemo(
+    () => priorityRepresentatives(snapshot?.issues ?? []),
+    [snapshot],
+  );
+  const priorityCacheKey = JSON.stringify([
+    activeTab?.connectionId,
+    representatives.map(([id]) => id),
+  ]);
+  const priorityOrder = priorityOrders[priorityCacheKey];
+  const priorityError = priorityErrors[priorityCacheKey];
+  useEffect(() => {
+    if (
+      !activeTab ||
+      !snapshot ||
+      view.sort.column !== 'priority' ||
+      priorityOrder ||
+      priorityError
+    )
+      return;
+    let live = true;
+    window.canopy
+      .priorityOrder(
+        activeTab.connectionId,
+        representatives.map(([, key]) => key),
+      )
+      .then((order) => {
+        if (representatives.some(([id]) => !order.includes(id)))
+          throw new Error('Priority values changed. Refresh and try again.');
+        if (live)
+          setPriorityOrders((current) => ({
+            ...current,
+            [priorityCacheKey]: order,
+          }));
+      })
+      .catch((error) => {
+        if (live)
+          setPriorityErrors((current) => ({
+            ...current,
+            [priorityCacheKey]: String(error.message ?? error),
+          }));
+      });
+    return () => {
+      live = false;
+    };
+  }, [
+    activeTab?.connectionId,
+    Boolean(snapshot),
+    view.sort.column,
+    priorityCacheKey,
+    priorityOrder,
+    priorityError,
+  ]);
+  const updateView = useCallback(
+    (patch: Partial<RootView>) => {
+      if (!activeTab) return;
+      setWorkspace((current) => setRootView(current, activeTab, patch));
+      setDragKey(null);
+      setEditor(null);
+    },
+    [activeTab],
+  );
   const statusRegistries = useRef(new Map<string, StatusColors>());
   const statusColors = useMemo(() => {
     if (!activeTab) return new Map<string, string>();
@@ -267,26 +350,28 @@ export function App() {
           (tab) => tab.connectionId !== 'demo' || hasDemo,
         );
         setWorkspace(
-          saved
-            ? {
-                ...EMPTY_WORKSPACE,
-                ...saved,
-                tabs,
-                pinnedRoots: saved.pinnedRoots?.filter(
-                  (root) => root.connectionId !== 'demo' || hasDemo,
-                ),
-                recentRoots: saved.recentRoots?.filter(
-                  (root) => root.connectionId !== 'demo' || hasDemo,
-                ),
-                closedTabs: saved.closedTabs?.filter(
-                  (root) => root.connectionId !== 'demo' || hasDemo,
-                ),
-                activeTabId: tabs.some((tab) => tab.id === saved.activeTabId)
-                  ? saved.activeTabId
-                  : (tabs[0]?.id ?? null),
-                shortcuts: { ...PLATFORM_SHORTCUTS, ...saved.shortcuts },
-              }
-            : EMPTY_WORKSPACE,
+          migrateViews(
+            saved
+              ? {
+                  ...EMPTY_WORKSPACE,
+                  ...saved,
+                  tabs,
+                  pinnedRoots: saved.pinnedRoots?.filter(
+                    (root) => root.connectionId !== 'demo' || hasDemo,
+                  ),
+                  recentRoots: saved.recentRoots?.filter(
+                    (root) => root.connectionId !== 'demo' || hasDemo,
+                  ),
+                  closedTabs: saved.closedTabs?.filter(
+                    (root) => root.connectionId !== 'demo' || hasDemo,
+                  ),
+                  activeTabId: tabs.some((tab) => tab.id === saved.activeTabId)
+                    ? saved.activeTabId
+                    : (tabs[0]?.id ?? null),
+                  shortcuts: { ...PLATFORM_SHORTCUTS, ...saved.shortcuts },
+                }
+              : EMPTY_WORKSPACE,
+          ),
         );
       })
       .catch((error) =>
@@ -392,12 +477,22 @@ export function App() {
   }, [activeTab, Boolean(snapshot)]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
-    setWorkspace((current) => ({
-      ...current,
-      tabs: current.tabs.map((tab) =>
-        tab.id === tabId ? { ...tab, ...patch } : tab,
-      ),
-    }));
+    setWorkspace((current) => {
+      const tab = current.tabs.find((tab) => tab.id === tabId);
+      const next =
+        tab && ('hideDone' in patch || 'filters' in patch)
+          ? setRootView(current, tab, {
+              ...('hideDone' in patch ? { hideDone: patch.hideDone } : {}),
+              ...('filters' in patch ? { filters: patch.filters ?? {} } : {}),
+            })
+          : current;
+      return {
+        ...next,
+        tabs: next.tabs.map((tab) =>
+          tab.id === tabId ? { ...tab, ...patch } : tab,
+        ),
+      };
+    });
   }, []);
 
   const navigate = useCallback((tab: TabState, restoring = false) => {
@@ -406,7 +501,7 @@ export function App() {
     if (!restoring) setHistory(visit(historyRef.current, from, tab));
     pendingScrollRestore.current =
       current.tabs.find((item) => sameRoot(item, tab))?.id ?? tab.id;
-    setWorkspace((value) => activateTab(value, tab));
+    setWorkspace((value) => activateTab(value, tab, restoring));
   }, []);
 
   const selectTab = useCallback(
@@ -431,7 +526,14 @@ export function App() {
           connectionId,
           rootKey: key,
           expanded: [key],
-          hideDone: true,
+          hideDone: rootView(workspaceRef.current, {
+            connectionId,
+            rootKey: key,
+          }).hideDone,
+          filters: rootView(workspaceRef.current, {
+            connectionId,
+            rootKey: key,
+          }).filters,
           scrollTop: 0,
         },
       );
@@ -880,7 +982,13 @@ export function App() {
 
   const rankBefore = useCallback(
     async (key: string, beforeKey: string) => {
-      if (!activeTab || !snapshot || key === beforeKey) return;
+      if (
+        !activeTab ||
+        !snapshot ||
+        key === beforeKey ||
+        !canRank(snapshot, view.sort, key)
+      )
+        return;
       const moving = snapshot.issues.find((issue) => issue.key === key);
       const target = snapshot.issues.find((issue) => issue.key === beforeKey);
       if (!moving || !target || moving.parentKey !== target.parentKey) {
@@ -922,12 +1030,12 @@ export function App() {
         });
       }
     },
-    [activeTab, snapshot],
+    [activeTab, snapshot, view.sort],
   );
 
   const keyboardRank = useCallback(
     (node: IssueNode, direction: -1 | 1) => {
-      if (!snapshot) return;
+      if (!snapshot || !canRank(snapshot, view.sort, node.issue.key)) return;
       const siblings = snapshot.issues.filter(
         (issue) => issue.parentKey === node.issue.parentKey,
       );
@@ -937,7 +1045,7 @@ export function App() {
       if (direction > 0 && index >= 0 && index < siblings.length - 1)
         void rankBefore(siblings[index + 1].key, node.issue.key);
     },
-    [snapshot, rankBefore],
+    [snapshot, rankBefore, view.sort],
   );
 
   const tree = useMemo(
@@ -945,7 +1053,7 @@ export function App() {
     [snapshot],
   );
   const focusedTree = findNode(tree, activeTab?.focusKey) ?? tree;
-  const shownTree = filterTree(
+  const filteredTree = filterTree(
     focusedTree,
     query,
     activeTab?.filters ?? {},
@@ -953,6 +1061,9 @@ export function App() {
     activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
     reveal?.tabId === activeTab?.id ? reveal?.key : undefined,
   );
+  const shownTree = filteredTree
+    ? sortIssueTree(filteredTree, view.sort, priorityOrder)
+    : null;
   const expandedSet = new Set(
     filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
@@ -1388,6 +1499,22 @@ export function App() {
                 <strong>{activeTab.rootKey}</strong>
               </div>
               <div className="toolbar-actions">
+                <ViewSettings
+                  view={view}
+                  update={updateView}
+                  useDefault={() =>
+                    setWorkspace((current) =>
+                      defaultRootView(current, activeTab),
+                    )
+                  }
+                  reset={() => {
+                    setEditor(null);
+                    setDragKey(null);
+                    setWorkspace((current) =>
+                      resetRootView(current, activeTab),
+                    );
+                  }}
+                />
                 <label className="checkbox">
                   <input
                     type="checkbox"
@@ -1520,6 +1647,14 @@ export function App() {
                 }
               >
                 <option value="">All statuses</option>
+                {activeTab.filters?.status &&
+                  !snapshot?.issues.some(
+                    (issue) => issue.status.id === activeTab.filters?.status,
+                  ) && (
+                    <option value={activeTab.filters.status}>
+                      Status {activeTab.filters.status} (not in this tree)
+                    </option>
+                  )}
                 {[
                   ...new Map(
                     snapshot?.issues.map((issue) => [
@@ -1547,6 +1682,16 @@ export function App() {
               >
                 <option value="">All priorities</option>
                 <option value="__none__">No priority</option>
+                {activeTab.filters?.priority &&
+                  activeTab.filters.priority !== '__none__' &&
+                  !snapshot?.issues.some(
+                    (issue) =>
+                      issue.priority?.id === activeTab.filters?.priority,
+                  ) && (
+                    <option value={activeTab.filters.priority}>
+                      Priority {activeTab.filters.priority} (not in this tree)
+                    </option>
+                  )}
                 {[
                   ...new Map(
                     snapshot?.issues
@@ -1707,15 +1852,40 @@ export function App() {
                 {warning}
               </div>
             ))}
-            <div className="column-head">
-              <span className="issue-column">Issue</span>
-              <span>Priority</span>
-              <span>Assignee</span>
-              <span>Status</span>
-              <span className="row-actions-head" />
-            </div>
+            {snapshot && (
+              <div className="ranking-note" role="status">
+                {view.sort.column !== 'rank'
+                  ? 'Ranking is disabled while a column sort is active. Select Jira rank in View to reorder.'
+                  : snapshot.ranking?.state !== 'supported'
+                    ? (snapshot.ranking?.reason ??
+                      'Ranking availability has not been verified. Refresh to try again.')
+                    : null}
+                {view.sort.column === 'priority' && !priorityOrder && (
+                  <span>
+                    {priorityError
+                      ? ` Priority order could not be loaded: ${priorityError}`
+                      : ' Loading Jira priority order…'}
+                    {' Showing Jira rank until priority order is available.'}
+                    {priorityError && (
+                      <button
+                        onClick={() =>
+                          setPriorityErrors((current) => {
+                            const next = { ...current };
+                            delete next[priorityCacheKey];
+                            return next;
+                          })
+                        }
+                      >
+                        Retry priority sort
+                      </button>
+                    )}
+                  </span>
+                )}
+              </div>
+            )}
             <div
               className="tree-scroll"
+              style={tableStyle(view) as React.CSSProperties}
               ref={scrollRef}
               onScroll={(event) => {
                 // Placeholder/layout scrolling must not replace a saved position
@@ -1727,6 +1897,7 @@ export function App() {
                 });
               }}
             >
+              <TableHeader view={view} update={updateView} />
               {loading.has(activeTab.id) && !snapshot ? (
                 <TreeSkeleton />
               ) : errors[activeTab.id] && !snapshot ? (
@@ -1745,6 +1916,15 @@ export function App() {
                 >
                   <TreeRows
                     node={shownTree}
+                    columns={view.columns}
+                    rankableKeys={
+                      new Set(
+                        snapshot?.ranking?.state === 'supported'
+                          ? snapshot.ranking.issueKeys
+                          : [],
+                      )
+                    }
+                    rankingEnabled={view.sort.column === 'rank'}
                     statusColors={statusColors}
                     depth={0}
                     expanded={expandedSet}
@@ -2090,6 +2270,9 @@ function Connections({
 }
 
 type RowsProps = {
+  columns: TableColumn[];
+  rankableKeys: Set<string>;
+  rankingEnabled: boolean;
   node: IssueNode;
   statusColors: ReadonlyMap<string, string>;
   depth: number;
@@ -2138,6 +2321,7 @@ function TreeRows(props: RowsProps) {
   const hasChildren = node.children.length > 0;
   const linksOpen = props.linkedExpanded.has(issue.key);
   const count = props.counts.get(issue.key);
+  const rankable = depth > 0 && props.rankableKeys.has(issue.key);
   const onTreeKey = (event: React.KeyboardEvent) => {
     if (event.altKey || event.metaKey || event.ctrlKey) return;
     if (
@@ -2177,6 +2361,182 @@ function TreeRows(props: RowsProps) {
       onSelect(issue.key);
     }
   };
+  const cells: Record<TableColumn, React.ReactNode> = {
+    issue: (
+      <div
+        className="issue-cell"
+        style={{ '--depth': depth } as React.CSSProperties}
+      >
+        {rankable && (
+          <button
+            className="grab"
+            draggable={props.rankingEnabled}
+            disabled={!props.rankingEnabled}
+            aria-label={`Reorder ${issue.key}. Use Alt plus arrow keys to move.`}
+            title={
+              !props.rankingEnabled
+                ? 'Select Jira rank in View to reorder'
+                : 'Drag to reorder; Alt+↑/↓ also works'
+            }
+            onDragStart={() => setDragKey(issue.key)}
+            onDragEnd={() => setDragKey(null)}
+            onKeyDown={(event) => {
+              if (!props.rankingEnabled || !event.altKey) return;
+              if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                keyboardRank(node, -1);
+              }
+              if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                keyboardRank(node, 1);
+              }
+            }}
+          >
+            <GripVertical size={14} />
+          </button>
+        )}
+        <button
+          className={cx('disclosure', !hasChildren && 'placeholder')}
+          aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
+          tabIndex={hasChildren ? 0 : -1}
+          disabled={props.expansionLocked}
+          title={
+            props.expansionLocked
+              ? 'Matching paths expand automatically'
+              : undefined
+          }
+          onClick={() =>
+            hasChildren && !props.expansionLocked && onToggle(issue.key)
+          }
+        >
+          {hasChildren &&
+            (open ? <ChevronDown size={15} /> : <ChevronRight size={15} />)}
+        </button>
+        <span
+          className={cx(
+            'type-icon',
+            `type-${issue.type.toLowerCase().replace(/\s/g, '-')}`,
+          )}
+        >
+          {issue.type.slice(0, 1).toUpperCase()}
+        </span>
+        <div className="issue-title">
+          <button
+            className="key"
+            onClick={() => props.onOpenExternal(issue.key)}
+            title="Open in Jira"
+          >
+            {issue.key}
+          </button>
+          <button
+            className="copy-key"
+            onClick={() => props.onCopyLink(issue.key)}
+            title={`Copy link to ${issue.key}`}
+            aria-label={`Copy link to ${issue.key}`}
+          >
+            <Copy size={11} />
+          </button>
+          {props.editor?.key === issue.key &&
+          props.editor.field === 'summary' ? (
+            <SummaryEditor
+              issue={issue}
+              save={props.updateIssue}
+              cancel={props.cancelEdit}
+            />
+          ) : (
+            <button
+              className="summary"
+              onDoubleClick={() => props.beginEdit(issue.key, 'summary')}
+              onClick={() => onSelect(issue.key)}
+              title="Double-click to edit"
+            >
+              {issue.summary}
+            </button>
+          )}
+        </div>
+        {!open && count && count.total > 0 && (
+          <span
+            className="child-count"
+            title={`${count.open} open / ${count.total} total direct children; ${count.descendants} total descendants`}
+          >
+            {count.open}/{count.total} children
+          </span>
+        )}
+        {issue.links.length > 0 && (
+          <button
+            className={cx('link-count', linksOpen && 'active')}
+            onClick={() => props.onToggleLinks(issue.key)}
+            aria-expanded={linksOpen}
+            title={`${issue.links.length} linked issue${issue.links.length === 1 ? '' : 's'}`}
+          >
+            <Link2 size={12} />
+            {issue.links.length}
+          </button>
+        )}
+      </div>
+    ),
+    priority: (
+      <FieldCell
+        label={`Edit priority for ${issue.key}`}
+        active={
+          props.editor?.key === issue.key && props.editor.field === 'priority'
+        }
+        onEdit={() => props.beginEdit(issue.key, 'priority')}
+      >
+        <ChoiceEditor
+          active={
+            props.editor?.key === issue.key && props.editor.field === 'priority'
+          }
+          value={issue.priority}
+          choices={props.options[issue.key]?.priorities}
+          className={`priority ${priorityTone(issue.priority?.name)}`}
+          empty="No priority"
+          onSave={(id) => void props.updateIssue(issue.key, { priorityId: id })}
+          onCancel={props.cancelEdit}
+        />
+      </FieldCell>
+    ),
+    assignee: (
+      <FieldCell
+        label={`Edit assignee for ${issue.key}`}
+        active={
+          props.editor?.key === issue.key && props.editor.field === 'assignee'
+        }
+        onEdit={() => props.beginEdit(issue.key, 'assignee')}
+      >
+        <AssigneeEditor
+          active={
+            props.editor?.key === issue.key && props.editor.field === 'assignee'
+          }
+          issue={issue}
+          choices={props.options[issue.key]?.assignees}
+          search={(query) => props.loadOptions(issue.key, query)}
+          save={(id) => void props.updateIssue(issue.key, { assigneeId: id })}
+          cancel={props.cancelEdit}
+        />
+      </FieldCell>
+    ),
+    status: (
+      <FieldCell
+        label={`Edit status for ${issue.key}`}
+        active={
+          props.editor?.key === issue.key && props.editor.field === 'status'
+        }
+        onEdit={() => props.beginEdit(issue.key, 'status')}
+      >
+        <StatusEditor
+          color={props.statusColors.get(issue.status.id)}
+          active={
+            props.editor?.key === issue.key && props.editor.field === 'status'
+          }
+          issue={issue}
+          choices={props.options[issue.key]?.transitions}
+          save={(id) => void props.updateIssue(issue.key, { transitionId: id })}
+          cancel={props.cancelEdit}
+        />
+      </FieldCell>
+    ),
+  };
   return (
     <div
       role="treeitem"
@@ -2197,191 +2557,25 @@ function TreeRows(props: RowsProps) {
           'issue-row',
           selectedKey === issue.key && 'selected',
           props.revealedKey === issue.key && 'revealed',
-          dragKey && dragKey !== issue.key && 'drop-ready',
+          props.rankingEnabled &&
+            dragKey &&
+            dragKey !== issue.key &&
+            'drop-ready',
         )}
         onDragOver={(event) => {
-          if (dragKey && dragKey !== issue.key) event.preventDefault();
+          if (props.rankingEnabled && dragKey && dragKey !== issue.key)
+            event.preventDefault();
         }}
         onDrop={(event) => {
           event.preventDefault();
-          if (dragKey) void rankBefore(dragKey, issue.key);
+          if (props.rankingEnabled && dragKey)
+            void rankBefore(dragKey, issue.key);
           setDragKey(null);
         }}
       >
-        <div
-          className="issue-cell"
-          style={{ '--depth': depth } as React.CSSProperties}
-        >
-          <button
-            className="grab"
-            draggable={depth > 0}
-            disabled={depth === 0}
-            aria-label={
-              depth === 0
-                ? `${issue.key} is the tree root`
-                : `Reorder ${issue.key}. Use Alt plus arrow keys to move.`
-            }
-            title={
-              depth === 0
-                ? 'The root issue cannot be reordered'
-                : 'Drag to reorder; Alt+↑/↓ also works'
-            }
-            onDragStart={() => setDragKey(issue.key)}
-            onDragEnd={() => setDragKey(null)}
-            onKeyDown={(event) => {
-              if (!event.altKey) return;
-              if (event.key === 'ArrowUp') {
-                event.preventDefault();
-                keyboardRank(node, -1);
-              }
-              if (event.key === 'ArrowDown') {
-                event.preventDefault();
-                keyboardRank(node, 1);
-              }
-            }}
-          >
-            <GripVertical size={14} />
-          </button>
-          <button
-            className={cx('disclosure', !hasChildren && 'placeholder')}
-            aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
-            tabIndex={hasChildren ? 0 : -1}
-            disabled={props.expansionLocked}
-            title={
-              props.expansionLocked
-                ? 'Matching paths expand automatically'
-                : undefined
-            }
-            onClick={() =>
-              hasChildren && !props.expansionLocked && onToggle(issue.key)
-            }
-          >
-            {hasChildren &&
-              (open ? <ChevronDown size={15} /> : <ChevronRight size={15} />)}
-          </button>
-          <span
-            className={cx(
-              'type-icon',
-              `type-${issue.type.toLowerCase().replace(/\s/g, '-')}`,
-            )}
-          >
-            {issue.type.slice(0, 1).toUpperCase()}
-          </span>
-          <div className="issue-title">
-            <button
-              className="key"
-              onClick={() => props.onOpenExternal(issue.key)}
-              title="Open in Jira"
-            >
-              {issue.key}
-            </button>
-            <button
-              className="copy-key"
-              onClick={() => props.onCopyLink(issue.key)}
-              title={`Copy link to ${issue.key}`}
-              aria-label={`Copy link to ${issue.key}`}
-            >
-              <Copy size={11} />
-            </button>
-            {props.editor?.key === issue.key &&
-            props.editor.field === 'summary' ? (
-              <SummaryEditor
-                issue={issue}
-                save={props.updateIssue}
-                cancel={props.cancelEdit}
-              />
-            ) : (
-              <button
-                className="summary"
-                onDoubleClick={() => props.beginEdit(issue.key, 'summary')}
-                onClick={() => onSelect(issue.key)}
-                title="Double-click to edit"
-              >
-                {issue.summary}
-              </button>
-            )}
-          </div>
-          {!open && count && count.total > 0 && (
-            <span
-              className="child-count"
-              title={`${count.open} open / ${count.total} total direct children; ${count.descendants} total descendants`}
-            >
-              {count.open}/{count.total} children
-            </span>
-          )}
-          {issue.links.length > 0 && (
-            <button
-              className={cx('link-count', linksOpen && 'active')}
-              onClick={() => props.onToggleLinks(issue.key)}
-              aria-expanded={linksOpen}
-              title={`${issue.links.length} linked issue${issue.links.length === 1 ? '' : 's'}`}
-            >
-              <Link2 size={12} />
-              {issue.links.length}
-            </button>
-          )}
-        </div>
-        <FieldCell
-          label={`Edit priority for ${issue.key}`}
-          active={
-            props.editor?.key === issue.key && props.editor.field === 'priority'
-          }
-          onEdit={() => props.beginEdit(issue.key, 'priority')}
-        >
-          <ChoiceEditor
-            active={
-              props.editor?.key === issue.key &&
-              props.editor.field === 'priority'
-            }
-            value={issue.priority}
-            choices={props.options[issue.key]?.priorities}
-            className={`priority ${priorityTone(issue.priority?.name)}`}
-            empty="No priority"
-            onSave={(id) =>
-              void props.updateIssue(issue.key, { priorityId: id })
-            }
-            onCancel={props.cancelEdit}
-          />
-        </FieldCell>
-        <FieldCell
-          label={`Edit assignee for ${issue.key}`}
-          active={
-            props.editor?.key === issue.key && props.editor.field === 'assignee'
-          }
-          onEdit={() => props.beginEdit(issue.key, 'assignee')}
-        >
-          <AssigneeEditor
-            active={
-              props.editor?.key === issue.key &&
-              props.editor.field === 'assignee'
-            }
-            issue={issue}
-            choices={props.options[issue.key]?.assignees}
-            search={(query) => props.loadOptions(issue.key, query)}
-            save={(id) => void props.updateIssue(issue.key, { assigneeId: id })}
-            cancel={props.cancelEdit}
-          />
-        </FieldCell>
-        <FieldCell
-          label={`Edit status for ${issue.key}`}
-          active={
-            props.editor?.key === issue.key && props.editor.field === 'status'
-          }
-          onEdit={() => props.beginEdit(issue.key, 'status')}
-        >
-          <StatusEditor
-            color={props.statusColors.get(issue.status.id)}
-            active={
-              props.editor?.key === issue.key && props.editor.field === 'status'
-            }
-            issue={issue}
-            choices={props.options[issue.key]?.transitions}
-            save={(id) =>
-              void props.updateIssue(issue.key, { transitionId: id })
-            }
-            cancel={props.cancelEdit}
-          />
-        </FieldCell>
+        {props.columns.map((column) => (
+          <React.Fragment key={column}>{cells[column]}</React.Fragment>
+        ))}
         <div className="row-actions">
           {props.saving.has(issue.key) ? (
             <Loader2 className="spin" size={14} />

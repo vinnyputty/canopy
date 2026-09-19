@@ -23,6 +23,25 @@ export type TreeSnapshot = {
   issues: Issue[];
   fetchedAt: number;
   warnings: string[];
+  ranking?: {
+    state: 'supported' | 'unsupported' | 'unknown';
+    reason?: string;
+    issueKeys: string[];
+  };
+};
+export type TableColumn = 'issue' | 'priority' | 'assignee' | 'status';
+export type TableSort = {
+  column: TableColumn | 'rank';
+  direction: 'asc' | 'desc';
+};
+export type RootView = {
+  columns: TableColumn[];
+  widths: Record<TableColumn, number>;
+  sort: TableSort;
+  textSize: 'small' | 'medium' | 'large';
+  spacing: 'compact' | 'comfortable';
+  hideDone: boolean;
+  filters: TreeFilters;
 };
 export type IssuePatch = {
   summary?: string;
@@ -46,6 +65,7 @@ export type TreeFilters = {
   priority?: string;
 };
 export type TabState = {
+  view?: RootView;
   id: string;
   connectionId: string;
   rootKey: string;
@@ -69,6 +89,8 @@ export type Workspace = {
   closedTabs?: TabState[];
   sidebarWidth?: number;
   previewWidth?: number;
+  viewDefaults?: Record<string, RootView>;
+  rootViews?: Record<string, RootView>;
 };
 export type TokenConnectionInput = {
   siteUrl: string;
@@ -90,6 +112,7 @@ export interface CanopyAPI {
   ): Promise<EditOptions>;
   update(connectionId: string, key: string, patch: IssuePatch): Promise<Issue>;
   rank(connectionId: string, key: string, beforeKey: string): Promise<void>;
+  priorityOrder(connectionId: string, keys: string[]): Promise<string[]>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;
