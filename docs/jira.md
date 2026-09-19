@@ -16,6 +16,6 @@ Priority choices come from the issue's edit metadata. Assignable users and workf
 
 Jira omits issues the signed-in user cannot browse. Canopy can report an inaccessible root directly, but Jira does not reveal inaccessible descendants, so it cannot distinguish them from absent children.
 
-The renderer applies supported edits optimistically across tabs sharing a connection. Field writes are serialized per issue, ranking per connection. Refreshes overlay pending edits and writes completed after the request began; failed writes remove only their own optimistic change. Active editors defer refresh application.
+The renderer applies supported edits optimistically across tabs sharing a connection. Field writes are serialized per issue, ranking per connection. Tree refreshes wait for active editors and pending writes on their connection. Responses reapply writes completed after the request began; closing a tab invalidates its outstanding responses. Failed writes remove only their own optimistic change.
 
 Undo is session-local and checks freshly fetched issue values or sibling order before writing. Status undo requires a currently available transition back with no required fields. Rank undo requires fresh supported ranking permissions for the moving issue, including when another display sort is active. Unsupported inverses and changed remote state are reported and skipped; transient failures remain retryable. These checks are best-effort: Jira does not expose an atomic compare-and-set for these operations, and its search results can lag completed writes.

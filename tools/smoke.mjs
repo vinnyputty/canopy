@@ -1,4 +1,5 @@
 import { _electron as electron, expect } from '@playwright/test';
+import { auditRefresh } from './smoke-refresh.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -304,7 +305,7 @@ async function auditMutations() {
   // An older refresh response cannot overwrite a mutation completed after it began.
   await expect(page.getByText('Checking for changes')).toBeHidden();
   await hold('stale-tree', 'tree', 'CAN-100');
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await started('stale-tree');
   await edit('Saved after refresh began');
   await saved();
@@ -316,7 +317,7 @@ async function auditMutations() {
 
   // An already-running refresh is also deferred when a draft opens afterward.
   await hold('draft-tree', 'tree', 'CAN-110');
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await started('draft-tree');
   await summaryCell().press('Enter');
   await input().fill('Draft above old refresh');
@@ -398,10 +399,10 @@ async function auditMutations() {
   expect((await fixture('tree', key)).issues[0].summary).toBe(
     'Remote writer wins',
   );
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(summaryCell()).toHaveText('Remote writer wins');
   await fixture('remoteUpdate', key, { summary: baseline });
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(summaryCell()).toHaveText(baseline);
   console.log(
     'Optimistic mutation audit passed: pending, failures, rapid edits, overlapping trees/refreshes, keyboard pickers, and validated undo.',
@@ -475,7 +476,7 @@ async function auditMutationViews() {
   await input().press('Escape');
   await expectIssueBefore('CAN-112', 'CAN-111');
   await fixture('remoteUpdate', key, { summary: original });
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(summary()).toHaveText(original);
 
   // Matching filters and Hide done retain a pending issue and a later draft only.
@@ -501,7 +502,7 @@ async function auditMutationViews() {
     .getByRole('checkbox', { name: 'Hide done', exact: true })
     .uncheck();
   await fixture('remoteUpdate', key, { transitionId: 'progress' });
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(
     issue(key).getByText('In Progress', { exact: true }),
   ).toBeVisible();
@@ -568,7 +569,7 @@ async function auditMutationViews() {
   // must restore its view and ignore the old request's completion.
   await expect(page.getByText('Checking for changes')).toBeHidden();
   await hold('closed-tree', 'tree', 'CAN-110');
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await started('closed-tree');
   await hold('closed-write');
   await summary().press('Enter');
@@ -581,16 +582,30 @@ async function auditMutationViews() {
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(
     page.getByRole('tree', { name: 'CAN-110 issue tree' }),
+  ).toHaveCount(0);
+  await hold('reopened-tree', 'tree', 'CAN-110');
+  await release('closed-write');
+  await started('reopened-tree');
+  await expect(page.getByText('Checking for changes')).toBeVisible();
+  await release('closed-tree');
+  // The older generation cannot resurrect its snapshot or clear the new load.
+  await expect(
+    page.getByRole('tree', { name: 'CAN-110 issue tree' }),
+  ).toHaveCount(0);
+  await expect(page.getByText('Checking for changes')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Refresh', exact: true }),
+  ).toBeDisabled();
+  await release('reopened-tree');
+  await expect(
+    page.getByRole('tree', { name: 'CAN-110 issue tree' }),
   ).toBeVisible();
   await expect(
     page.getByRole('button', { name: 'Sort by Priority', exact: true }),
   ).toHaveCount(0);
   await expect(summary()).toHaveText('Saved after reopening');
-  await release('closed-write');
   await saved();
-  await release('closed-tree');
   await expect(page.getByText('Checking for changes')).toBeHidden();
-  await expect(summary()).toHaveText('Saved after reopening');
   console.log(
     'Mutation/table/workspace integration passed: visible columns, sorted and filtered drafts, rank capability, and pending close/reopen.',
   );
@@ -611,7 +626,7 @@ try {
     });
   });
   await openIssue('CAN-100');
-  await expect(page.getByRole('status')).toContainText(
+  await expect(page.locator('.identity-hint')).toContainText(
     'Temporary identity failure',
   );
   await page.getByRole('button', { name: 'Retry account lookup' }).click();
@@ -1507,6 +1522,18 @@ try {
       .getByRole('tab', { name: /CAN-100/ })
       .click({ button: 'middle' });
     await expect(page.getByRole('tab')).toHaveCount(0);
+    // Native scroll events may be coalesced while restoration is guarded.
+    // Persisting the clamped offset must not depend on receiving that event.
+    await page.evaluate(() => {
+      window.suppressRestoreScroll = (event) => {
+        if (
+          event.target instanceof Element &&
+          event.target.matches('.tree-scroll')
+        )
+          event.stopImmediatePropagation();
+      };
+      window.addEventListener('scroll', window.suppressRestoreScroll, true);
+    });
     await page.keyboard.press(`${modifier}+Shift+t`);
     await expect(
       page.getByRole('tree', { name: 'CAN-100 issue tree' }),
@@ -1539,6 +1566,10 @@ try {
         { message: geometry },
       )
       .toBe(expanded.maximum);
+    await page.evaluate(() => {
+      window.removeEventListener('scroll', window.suppressRestoreScroll, true);
+      delete window.suppressRestoreScroll;
+    });
   }
   await page
     .locator('#smoke-scrollbars')
@@ -1982,6 +2013,27 @@ try {
   }
 
   await auditMutationViews();
+
+  await close();
+  await writeFile(
+    join(userData, 'workspace.json'),
+    JSON.stringify({
+      tabs: ['CAN-100', 'CAN-200'].map((rootKey) => ({
+        id: `refresh-${rootKey}`,
+        connectionId: 'demo',
+        rootKey,
+        expanded: [rootKey],
+        hideDone: false,
+        scrollTop: 0,
+      })),
+      activeTabId: 'refresh-CAN-200',
+      shortcuts: {},
+      theme: 'system',
+      sidebarCollapsed: false,
+    }),
+  );
+  await launch();
+  await auditRefresh(app, page, resizeWindow);
 
   await page.getByTitle('Disconnect Canopy demo').click();
   await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);
