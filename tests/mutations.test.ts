@@ -716,3 +716,37 @@ describe('ranking capability integration', () => {
     });
   }
 });
+
+describe('refresh deferral contract', () => {
+  it('scopes pending writes and inverse writes to their connection until settled', async () => {
+    const write = deferred<Issue>();
+    const inverse = deferred<Issue>();
+    const undoStarted = deferred<void>();
+    let updates = 0;
+    const changed = { ...issue('A-2', 'A-1'), summary: 'Changed' };
+    const h = harness({
+      update: async () => {
+        if (++updates === 1) return write.promise;
+        undoStarted.resolve();
+        return inverse.promise;
+      },
+      tree: async () => ({ ...snapshot(), issues: [changed] }),
+    });
+    const pending = h.mutations.update('jira', 'A-2', { summary: 'Changed' });
+    assert.equal(h.mutations.pending('jira'), true);
+    assert.equal(h.mutations.pending('other'), false);
+    assert.equal(h.current.summary, 'Changed');
+    write.resolve(changed);
+    await pending;
+    assert.equal(h.mutations.pending('jira'), false);
+    const undo = h.mutations.undo();
+    await undoStarted.promise;
+    assert.equal(h.mutations.pending('jira'), true);
+    assert.equal(h.mutations.pending('other'), false);
+    assert.equal(h.current.summary, 'A-2');
+    inverse.resolve(issue('A-2', 'A-1'));
+    await undo;
+    assert.equal(h.mutations.pending('jira'), false);
+    assert.equal(h.view.undoLabel, undefined);
+  });
+});

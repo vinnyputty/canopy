@@ -230,7 +230,8 @@ export function App() {
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = workspace.activeTabId;
   refreshBlocked.current = (connectionId) =>
-    editorRef.current?.connectionId === connectionId || mutations.pending(connectionId);
+    editorRef.current?.connectionId === connectionId ||
+    mutations.pending(connectionId);
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
@@ -569,11 +570,21 @@ export function App() {
   }, [editor, saving, online, workspace.tabs, refreshTab]);
 
   useLayoutEffect(() => {
-    if (activeTab && snapshot && scrollRef.current) {
+    if (activeTab && snapshot && scrollRef.current)
       scrollRef.current.scrollTop = activeTab.scrollTop;
-      pendingScrollRestore.current = null;
-    }
-  }, [activeTab?.id, snapshot, pendingScrollRestore.current]);
+  }, [snapshot]);
+
+  useEffect(() => {
+    if (
+      !activeTab ||
+      !snapshot ||
+      !scrollRef.current ||
+      pendingScrollRestore.current !== activeTab.id
+    )
+      return;
+    scrollRef.current.scrollTop = activeTab.scrollTop;
+    pendingScrollRestore.current = null;
+  }, [activeTab, Boolean(snapshot)]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
     setWorkspace((current) => {
@@ -1963,7 +1974,14 @@ export function App() {
                     errors.app}
                 </span>
                 {errors[activeTab.id] && (
-                  <button onClick={() => void refreshTab(activeTab, true, true)} disabled={!online || refreshing.has(activeTab.id) || loading.has(activeTab.id)}>
+                  <button
+                    onClick={() => void refreshTab(activeTab, true, true)}
+                    disabled={
+                      !online ||
+                      refreshing.has(activeTab.id) ||
+                      loading.has(activeTab.id)
+                    }
+                  >
                     Retry
                   </button>
                 )}

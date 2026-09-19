@@ -90,3 +90,17 @@ it('uses a one-minute first wait when an active request finishes in the backgrou
   assert.deepEqual(schedule.due(679_999), []);
   assert.deepEqual(schedule.due(680_000), ['a']);
 });
+
+it('forgets a closed in-flight tab and gives its reopened identity a fresh schedule', () => {
+  const schedule = new RefreshSchedule();
+  schedule.sync(['closed', 'remaining'], 'closed', 0);
+  assert.equal(schedule.begin('closed', 0), true);
+  schedule.forget('closed');
+  assert.equal(schedule.begin('closed', 1000, true), false);
+  assert.deepEqual(schedule.due(1000), ['remaining']);
+  schedule.sync(['closed', 'remaining'], 'closed', 2000);
+  assert.equal(schedule.begin('closed', 2000), true);
+  schedule.finish('closed', 2000);
+  assert.equal(schedule.due(31_999).includes('closed'), false);
+  assert.equal(schedule.due(32_000).includes('closed'), true);
+});
