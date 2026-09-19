@@ -1522,6 +1522,18 @@ try {
       .getByRole('tab', { name: /CAN-100/ })
       .click({ button: 'middle' });
     await expect(page.getByRole('tab')).toHaveCount(0);
+    // Native scroll events may be coalesced while restoration is guarded.
+    // Persisting the clamped offset must not depend on receiving that event.
+    await page.evaluate(() => {
+      window.suppressRestoreScroll = (event) => {
+        if (
+          event.target instanceof Element &&
+          event.target.matches('.tree-scroll')
+        )
+          event.stopImmediatePropagation();
+      };
+      window.addEventListener('scroll', window.suppressRestoreScroll, true);
+    });
     await page.keyboard.press(`${modifier}+Shift+t`);
     await expect(
       page.getByRole('tree', { name: 'CAN-100 issue tree' }),
@@ -1554,6 +1566,10 @@ try {
         { message: geometry },
       )
       .toBe(expanded.maximum);
+    await page.evaluate(() => {
+      window.removeEventListener('scroll', window.suppressRestoreScroll, true);
+      delete window.suppressRestoreScroll;
+    });
   }
   await page
     .locator('#smoke-scrollbars')

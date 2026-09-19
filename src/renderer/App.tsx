@@ -569,10 +569,33 @@ export function App() {
     }
   }, [editor, saving, online, workspace.tabs, refreshTab]);
 
+  const restoreScroll = useCallback((tab: TabState) => {
+    const element = scrollRef.current;
+    if (!element) return;
+    element.scrollTop = tab.scrollTop;
+    const scrollTop = element.scrollTop;
+    if (scrollTop === tab.scrollTop) return;
+    // Chromium can clamp without emitting another scroll event after a layout
+    // restoration. Save the actual offset even while native events are guarded.
+    setWorkspace((current) => {
+      if (
+        current.activeTabId !== tab.id ||
+        current.tabs.find((item) => item.id === tab.id)?.scrollTop !==
+          tab.scrollTop
+      )
+        return current;
+      return {
+        ...current,
+        tabs: current.tabs.map((item) =>
+          item.id === tab.id ? { ...item, scrollTop } : item,
+        ),
+      };
+    });
+  }, []);
+
   useLayoutEffect(() => {
-    if (activeTab && snapshot && scrollRef.current)
-      scrollRef.current.scrollTop = activeTab.scrollTop;
-  }, [snapshot]);
+    if (activeTab && snapshot) restoreScroll(activeTab);
+  }, [snapshot, restoreScroll]);
 
   useEffect(() => {
     if (
@@ -582,9 +605,9 @@ export function App() {
       pendingScrollRestore.current !== activeTab.id
     )
       return;
-    scrollRef.current.scrollTop = activeTab.scrollTop;
+    restoreScroll(activeTab);
     pendingScrollRestore.current = null;
-  }, [activeTab, Boolean(snapshot)]);
+  }, [activeTab, Boolean(snapshot), restoreScroll]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
     setWorkspace((current) => {
