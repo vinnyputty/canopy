@@ -124,10 +124,18 @@ try {
     const subtitle = label.locator('small');
     await expect(subtitle).toHaveText(rootSummary);
     await expect(subtitle).toHaveCSS('text-overflow', 'ellipsis');
+    await expect(subtitle).toHaveCSS('overflow-x', 'hidden');
+    await expect(subtitle).toHaveCSS('white-space', 'nowrap');
     expect(
-      await subtitle.evaluate(
-        (element) => element.scrollWidth > element.clientWidth,
-      ),
+      await subtitle.evaluate((element) => {
+        const previous = element.style.maxWidth;
+        element.style.maxWidth = '80px';
+        try {
+          return element.scrollWidth > element.clientWidth;
+        } finally {
+          element.style.maxWidth = previous;
+        }
+      }),
     ).toBe(true);
   }
 
