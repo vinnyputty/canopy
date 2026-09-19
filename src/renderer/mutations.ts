@@ -243,7 +243,29 @@ export class Mutations {
     anchor: string,
     position: 'before' | 'after' = 'before',
     record = true,
+    verifiedSnapshot?: TreeSnapshot,
   ) {
+    const rankSnapshot = () =>
+      verifiedSnapshot ??
+      Object.entries(this.bases).find(
+        ([id, snapshot]) =>
+          this.tabs.get(id)?.connectionId === connectionId &&
+          snapshot.issues.some((issue) => issue.key === key) &&
+          snapshot.issues.some((issue) => issue.key === anchor),
+      )?.[1];
+    const allowed = () => {
+      const snapshot = rankSnapshot();
+      return (
+        snapshot?.ranking?.state === 'supported' &&
+        snapshot.ranking.issueKeys.includes(key)
+      );
+    };
+    if (!allowed()) {
+      this.error(
+        `Couldn’t reorder ${key}: Ranking is not available for this issue. Refresh and check its permissions.`,
+      );
+      return Promise.resolve(false);
+    }
     return this.enqueue(
       connectionId,
       { key, anchor, position },
@@ -253,14 +275,11 @@ export class Mutations {
         if (!moving?.parentKey || moving.parentKey !== target?.parentKey)
           throw new Error('Issues can only be reordered among siblings.');
         entry.parentKey = moving.parentKey;
-        const base = Object.entries(this.bases).find(
-          ([id, snapshot]) =>
-            this.tabs.get(id)?.connectionId === connectionId &&
-            snapshot.issues.some(
-              (issue) => issue.key === key && issue.parentKey,
-            ) &&
-            snapshot.issues.some((issue) => issue.key === anchor),
-        )?.[1];
+        const base = rankSnapshot();
+        if (!allowed())
+          throw new Error(
+            'Ranking is not available for this issue. Refresh and check its permissions.',
+          );
         entry.order = base?.issues
           .filter((issue) => issue.parentKey === moving.parentKey)
           .map((issue) => issue.key);
@@ -359,6 +378,13 @@ export class Mutations {
           options = { ...options, assignees: searched.assignees };
         }
       } else {
+        if (
+          fresh.ranking?.state !== 'supported' ||
+          !fresh.ranking.issueKeys.includes(change.key)
+        )
+          throw new UndoUnavailable(
+            'Ranking is no longer available for this issue. Refresh and check its permissions.',
+          );
         const order = entry.order ?? [];
         const expected = applyChange(
           {
@@ -389,7 +415,14 @@ export class Mutations {
       assertCurrent();
       const success = patch
         ? await this.update(connectionId, change.key, patch, options, false)
-        : await this.rank(connectionId, change.key, anchor!, position, false);
+        : await this.rank(
+            connectionId,
+            change.key,
+            anchor!,
+            position,
+            false,
+            fresh,
+          );
       if (success)
         this.history = this.history.filter((value) => value !== entry);
     } catch (error) {

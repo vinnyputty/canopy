@@ -89,6 +89,11 @@ import {
   tableStyle,
 } from './table-view';
 import { Mutations } from './mutations';
+import {
+  nextEditableCell,
+  retainEditingOrder,
+  type EditField,
+} from './edit-navigation';
 
 const PLATFORM_SHORTCUTS = defaultShortcuts();
 const EMPTY_WORKSPACE: Workspace = {
@@ -101,7 +106,6 @@ const EMPTY_WORKSPACE: Workspace = {
   previewWidth: 420,
 };
 
-type EditField = 'summary' | 'priority' | 'assignee' | 'status';
 type Editor = { connectionId: string; key: string; field: EditField } | null;
 
 function cx(...names: Array<string | false | null | undefined>) {
@@ -188,6 +192,7 @@ export function App() {
   const [identityRetry, setIdentityRetry] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const inflightRefreshes = useRef(new Set<string>());
   const refreshSequences = useRef<Record<string, number>>({});
@@ -432,6 +437,7 @@ export function App() {
     setter((current) => new Set(current).add(tab.id));
     try {
       const next = await window.canopy.tree(tab.connectionId, tab.rootKey);
+      if (refreshSequences.current[tab.id] !== sequence) return;
       if (
         refreshSequences.current[tab.id] === sequence &&
         editorRef.current?.connectionId !== tab.connectionId
@@ -444,18 +450,21 @@ export function App() {
         return copy;
       });
     } catch (error) {
+      if (refreshSequences.current[tab.id] !== sequence) return;
       setErrors((current) => ({
         ...current,
         [tab.id]: error instanceof Error ? error.message : String(error),
       }));
     } finally {
       mutations.endRefresh(epoch);
-      inflightRefreshes.current.delete(tab.id);
-      setter((current) => {
-        const copy = new Set(current);
-        copy.delete(tab.id);
-        return copy;
-      });
+      if (refreshSequences.current[tab.id] === sequence) {
+        inflightRefreshes.current.delete(tab.id);
+        setter((current) => {
+          const copy = new Set(current);
+          copy.delete(tab.id);
+          return copy;
+        });
+      }
     }
   }, []);
 
@@ -560,15 +569,41 @@ export function App() {
     [navigate],
   );
 
-  const closeTabIds = useCallback((ids: string[]) => {
-    setQueries((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([id]) => !ids.includes(id)),
-      ),
-    );
-    setWorkspace((current) => closeTabs(current, ids));
-    setTabMenu(null);
-  }, []);
+  const forgetTabs = useCallback(
+    (ids: string[]) => {
+      for (const id of ids) {
+        mutations.forget(id);
+        displayedTrees.current.delete(id);
+        attemptedLoads.current.delete(id);
+        refreshSequences.current[id] = (refreshSequences.current[id] ?? 0) + 1;
+        inflightRefreshes.current.delete(id);
+      }
+      for (const setter of [setLoading, setRefreshing])
+        setter(
+          (current) => new Set([...current].filter((id) => !ids.includes(id))),
+        );
+      setErrors((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(([id]) => !ids.includes(id)),
+        ),
+      );
+    },
+    [mutations],
+  );
+
+  const closeTabIds = useCallback(
+    (ids: string[]) => {
+      forgetTabs(ids);
+      setQueries((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(([id]) => !ids.includes(id)),
+        ),
+      );
+      setWorkspace((current) => closeTabs(current, ids));
+      setTabMenu(null);
+    },
+    [forgetTabs],
+  );
   const closeTab = useCallback(
     (id: string) => closeTabIds([id]),
     [closeTabIds],
@@ -971,7 +1006,13 @@ export function App() {
 
   const rankBefore = useCallback(
     async (key: string, beforeKey: string) => {
-      if (!activeTab || !snapshot || key === beforeKey || !canRank(snapshot, view.sort, key)) return;
+      if (
+        !activeTab ||
+        !snapshot ||
+        key === beforeKey ||
+        !canRank(snapshot, view.sort, key)
+      )
+        return;
       await mutations.rank(activeTab.connectionId, key, beforeKey);
     },
     [activeTab, mutations, snapshot, view.sort],
@@ -1021,6 +1062,20 @@ export function App() {
     () => (snapshot ? buildIssueTree(snapshot.issues, snapshot.rootKey) : null),
     [snapshot],
   );
+  const retainedKeys = new Set(
+    [...saving]
+      .filter(
+        (key) => activeTab && key.startsWith(`${activeTab.connectionId}:`),
+      )
+      .map((key) => key.slice(activeTab!.connectionId.length + 1)),
+  );
+  if (editor?.connectionId === activeTab?.connectionId && editor)
+    retainedKeys.add(editor.key);
+  const retainedPaths = new Set(
+    [...retainedKeys].flatMap((key) =>
+      ancestorPath(tree, key).map((node) => node.issue.key),
+    ),
+  );
   const focusedTree = findNode(tree, activeTab?.focusKey) ?? tree;
   const filteredTree = filterTree(
     focusedTree,
@@ -1029,10 +1084,22 @@ export function App() {
     activeTab?.hideDone ?? false,
     activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
     reveal?.tabId === activeTab?.id ? reveal?.key : undefined,
+    retainedKeys,
   );
-  const shownTree = filteredTree
+  const sortedTree = filteredTree
     ? sortIssueTree(filteredTree, view.sort, priorityOrder)
     : null;
+  const shownTree =
+    view.sort.column === 'rank'
+      ? sortedTree
+      : retainEditingOrder(
+          sortedTree,
+          activeTab ? displayedTrees.current.get(activeTab.id) : null,
+          retainedPaths,
+        );
+  useEffect(() => {
+    if (activeTab) displayedTrees.current.set(activeTab.id, shownTree);
+  });
   const expandedSet = new Set(
     filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
@@ -1087,20 +1154,17 @@ export function App() {
   );
 
   const advanceEdit = (key: string, field: EditField, direction: -1 | 1) => {
-    const fields: EditField[] = ['summary', 'priority', 'assignee', 'status'];
-    const index =
-      flat.findIndex((node) => node.issue.key === key) * fields.length +
-      fields.indexOf(field) +
-      direction;
-    const target = flat[Math.floor(index / fields.length)];
+    const target = nextEditableCell(flat, view.columns, key, field, direction);
     if (!target) {
       setEditor(null);
       return;
     }
-    beginEdit(target.issue.key, fields[index % fields.length]);
+    beginEdit(target.key, target.field);
     requestAnimationFrame(() =>
       document
-        .querySelector<HTMLElement>(`[data-tree-key="${target.issue.key}"]`)
+        .querySelector<HTMLElement>(
+          `[data-tree-key="${target.key}"] > .issue-row`,
+        )
         ?.scrollIntoView({ block: 'nearest' }),
     );
   };
@@ -1238,6 +1302,13 @@ export function App() {
               setConnections(nextConnections);
               const removed = connections.filter(
                 (item) => !nextConnections.some((next) => next.id === item.id),
+              );
+              forgetTabs(
+                workspace.tabs
+                  .filter((tab) =>
+                    removed.some((item) => item.id === tab.connectionId),
+                  )
+                  .map((tab) => tab.id),
               );
               setWorkspace((current) =>
                 removed.reduce(
@@ -2463,7 +2534,12 @@ function TreeRows(props: RowsProps) {
           ) : (
             <button
               className="summary"
-              onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); props.beginEdit(issue.key, 'summary'); } }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  props.beginEdit(issue.key, 'summary');
+                }
+              }}
               onDoubleClick={() => props.beginEdit(issue.key, 'summary')}
               onClick={() => onSelect(issue.key)}
               title="Double-click to edit"

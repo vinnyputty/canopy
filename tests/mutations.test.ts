@@ -38,6 +38,7 @@ const snapshot = (): TreeSnapshot => ({
   ],
   warnings: [],
   fetchedAt: 1,
+  ranking: { state: 'supported', issueKeys: ['A-2', 'A-3', 'A-4'] },
 });
 const options: EditOptions = {
   priorities: [
@@ -650,4 +651,68 @@ describe('undo audit regressions', () => {
     assert.equal(h.current.summary, 'Second');
     assert.equal(h.view.saving.size, 0);
   });
+});
+
+describe('ranking capability integration', () => {
+  for (const state of [
+    'unsupported',
+    'unknown',
+    'missing',
+    'excluded',
+  ] as const) {
+    it(`does not send inverse rank after fresh capability becomes ${state}`, async () => {
+      let calls = 0;
+      let fresh = snapshot();
+      const h = harness({
+        rank: async () => {
+          calls++;
+        },
+        tree: async () => fresh,
+      });
+      await h.mutations.rank('jira', 'A-4', 'A-2');
+      fresh = {
+        ...h.view.snapshots.one,
+        ranking:
+          state === 'missing'
+            ? undefined
+            : {
+                state: state === 'excluded' ? 'supported' : state,
+                issueKeys: [],
+              },
+      };
+      await h.mutations.undo();
+      assert.equal(calls, 1);
+      assert.match(h.errors[0], /Ranking is no longer available/);
+    });
+    it(`does not optimistically reorder or write with ${state} cached capability`, async () => {
+      let calls = 0;
+      const h = harness({
+        rank: async () => {
+          calls++;
+        },
+      });
+      const next = {
+        ...snapshot(),
+        ranking:
+          state === 'missing'
+            ? undefined
+            : {
+                state: state === 'excluded' ? ('supported' as const) : state,
+                issueKeys: [],
+              },
+      };
+      h.mutations.receive(tab(), next, h.mutations.revision);
+      const attempt = h.mutations.rank('jira', 'A-4', 'A-2');
+      assert.deepEqual(
+        h.view.snapshots.one.issues.map((issue) => issue.key),
+        ['A-1', 'A-2', 'A-3', 'A-4'],
+      );
+      await attempt;
+      assert.equal(calls, 0);
+      assert.deepEqual(
+        h.view.snapshots.one.issues.map((issue) => issue.key),
+        ['A-1', 'A-2', 'A-3', 'A-4'],
+      );
+    });
+  }
 });

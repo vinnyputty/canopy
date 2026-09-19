@@ -43,8 +43,17 @@ export class ControlledDemoProvider extends DemoProvider {
       await gate.wait;
     }
   }
+  rankingState?: 'supported' | 'unsupported' | 'unknown';
   override async tree(key: string) {
     const snapshot = await super.tree(key);
+    if (this.rankingState)
+      snapshot.ranking = {
+        state: this.rankingState,
+        issueKeys:
+          this.rankingState === 'supported'
+            ? (snapshot.ranking?.issueKeys ?? [])
+            : [],
+      };
     await this.pause('tree', key);
     return snapshot;
   }

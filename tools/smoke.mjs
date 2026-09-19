@@ -400,8 +400,199 @@ async function auditMutations() {
   );
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await expect(summaryCell()).toHaveText('Remote writer wins');
+  await fixture('remoteUpdate', key, { summary: baseline });
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(summaryCell()).toHaveText(baseline);
   console.log(
     'Optimistic mutation audit passed: pending, failures, rapid edits, overlapping trees/refreshes, keyboard pickers, and validated undo.',
+  );
+}
+
+async function auditMutationViews() {
+  const key = 'CAN-111';
+  const fixture = (method, ...args) =>
+    app.evaluate(
+      (_electron, { method, args }) => globalThis.canopySmoke[method](...args),
+      { method, args },
+    );
+  const hold = (id, operation = 'update', target = key) =>
+    fixture('hold', id, operation, target);
+  const started = (id) => expect.poll(() => fixture('started', id)).toBe(true);
+  const release = (id, error) => fixture('release', id, error);
+  const saved = () =>
+    expect(page.getByLabel(`Saving ${key}`, { exact: true })).toHaveCount(0);
+  const summary = () => issue(key).getByTitle('Double-click to edit');
+  const input = () => page.getByLabel(`Summary for ${key}`);
+  const view = async (fn) => {
+    if (!(await page.getByRole('group', { name: 'Table view' }).isVisible()))
+      await page.locator('.view-settings > summary').click();
+    await fn();
+    await page.locator('.view-settings > summary').click();
+  };
+  await openIssue('CAN-110');
+  await page.getByLabel('Filter status').selectOption('');
+  await page.getByLabel('Filter priority').selectOption('');
+  await page.getByLabel('Filter assignee').selectOption('');
+  await page
+    .getByRole('checkbox', { name: 'Hide done', exact: true })
+    .uncheck();
+  await view(async () => {
+    await page.getByLabel('Show Status column').check();
+    await page.getByLabel('Show Assignee column').check();
+    await page.getByLabel('Show Priority column').uncheck();
+    while (await page.getByLabel('Move Status column left').isEnabled())
+      await page.getByLabel('Move Status column left').click();
+    await page.getByLabel('Sort by', { exact: true }).selectOption('issue');
+  });
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await summary().press('Enter');
+  await input().press('Tab');
+  await expect(issue(key).getByRole('menuitem').first()).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Search assignees')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Summary for CAN-112')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.getByLabel('Search assignees')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByLabel('Choose value')).toHaveCount(0);
+
+  // A sorted row stays put while saving, and its newer draft survives settlement.
+  const original = await summary().innerText();
+  await hold('sorted-edit');
+  await summary().press('Enter');
+  await input().fill('ZZZ moves after its sibling');
+  await input().press('Enter');
+  await started('sorted-edit');
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await summary().press('Enter');
+  await input().fill('Keep this draft');
+  await release('sorted-edit');
+  await saved();
+  await expect(input()).toHaveValue('Keep this draft');
+  await expect(input()).toBeFocused();
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await input().press('Escape');
+  await expectIssueBefore('CAN-112', 'CAN-111');
+  await fixture('remoteUpdate', key, { summary: original });
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(summary()).toHaveText(original);
+
+  // Matching filters and Hide done retain a pending issue and a later draft only.
+  await page.getByLabel('Filter status').selectOption('progress');
+  await page.getByRole('checkbox', { name: 'Hide done', exact: true }).check();
+  await expect(issue('CAN-112')).toHaveCount(0);
+  await hold('filtered-edit');
+  await issue(key).getByLabel(`Edit status for ${key}`).click();
+  await page.getByRole('menuitem', { name: 'Done', exact: true }).click();
+  await started('filtered-edit');
+  await expect(issue(key).getByText('Done', { exact: true })).toBeVisible();
+  await summary().press('Enter');
+  await input().fill('Draft in filtered row');
+  await release('filtered-edit');
+  await saved();
+  await expect(input()).toHaveValue('Draft in filtered row');
+  await expect(input()).toBeFocused();
+  await expect(issue('CAN-112')).toHaveCount(0);
+  await input().press('Escape');
+  await expect(issue(key)).toHaveCount(0);
+  await page.getByLabel('Filter status').selectOption('');
+  await page
+    .getByRole('checkbox', { name: 'Hide done', exact: true })
+    .uncheck();
+  await fixture('remoteUpdate', key, { transitionId: 'progress' });
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(
+    issue(key).getByText('In Progress', { exact: true }),
+  ).toBeVisible();
+
+  // Undo rank remains available while another display sort disables direct ranking.
+  await view(async () =>
+    page.getByLabel('Sort by', { exact: true }).selectOption('rank'),
+  );
+  await expectIssueBefore('CAN-112', 'CAN-111');
+  await page
+    .getByRole('button', { name: /Reorder CAN-111/ })
+    .press('Alt+ArrowUp');
+  await saved();
+  await expectIssueBefore('CAN-111', 'CAN-112');
+  await view(async () =>
+    page.getByLabel('Sort by', { exact: true }).selectOption('issue'),
+  );
+  await expect(
+    page.getByRole('button', { name: /Reorder CAN-111/ }),
+  ).toBeDisabled();
+  await page
+    .getByRole('button', { name: `Undo reorder of ${key}`, exact: true })
+    .click();
+  await saved();
+  expect(
+    (await fixture('tree', 'CAN-110')).issues
+      .filter((value) => value.parentKey === 'CAN-110')
+      .map((value) => value.key),
+  ).toEqual(['CAN-112', 'CAN-111']);
+  await view(async () =>
+    page.getByLabel('Sort by', { exact: true }).selectOption('rank'),
+  );
+  await page
+    .getByRole('button', { name: /Reorder CAN-111/ })
+    .press('Alt+ArrowUp');
+  await saved();
+  const rankCalls = await app.evaluate(
+    () =>
+      globalThis.canopySmoke.calls.filter((call) => call.operation === 'rank')
+        .length,
+  );
+  await app.evaluate(() => {
+    globalThis.canopySmoke.rankingState = 'unknown';
+  });
+  await page
+    .getByRole('button', { name: `Undo reorder of ${key}`, exact: true })
+    .click();
+  await expect(page.getByRole('alert')).toContainText(
+    'Ranking is no longer available',
+  );
+  expect(
+    await app.evaluate(
+      () =>
+        globalThis.canopySmoke.calls.filter((call) => call.operation === 'rank')
+          .length,
+    ),
+  ).toBe(rankCalls);
+  await page.getByRole('alert').getByRole('button').click();
+  await app.evaluate(() => {
+    globalThis.canopySmoke.rankingState = undefined;
+  });
+
+  // Closing and reopening a tab while both a write and older refresh are pending
+  // must restore its view and ignore the old request's completion.
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await hold('closed-tree', 'tree', 'CAN-110');
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await started('closed-tree');
+  await hold('closed-write');
+  await summary().press('Enter');
+  await input().fill('Saved after reopening');
+  await input().press('Enter');
+  await started('closed-write');
+  await page
+    .getByRole('button', { name: 'Close CAN-110', exact: true })
+    .click();
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(
+    page.getByRole('tree', { name: 'CAN-110 issue tree' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Sort by Priority', exact: true }),
+  ).toHaveCount(0);
+  await expect(summary()).toHaveText('Saved after reopening');
+  await release('closed-write');
+  await saved();
+  await release('closed-tree');
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await expect(summary()).toHaveText('Saved after reopening');
+  console.log(
+    'Mutation/table/workspace integration passed: visible columns, sorted and filtered drafts, rank capability, and pending close/reopen.',
   );
 }
 
@@ -1789,6 +1980,8 @@ try {
       JSON.parse(await readFile(join(userData, 'rank-attempts.json'), 'utf8')),
     ).toBe(0);
   }
+
+  await auditMutationViews();
 
   await page.getByTitle('Disconnect Canopy demo').click();
   await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);

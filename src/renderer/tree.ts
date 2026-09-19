@@ -235,11 +235,20 @@ export function filterTree(
   hideDone: boolean,
   accountId?: string,
   revealKey?: string,
+  retainedKeys?: ReadonlySet<string>,
 ): IssueNode | null {
   if (!node) return null;
   const children = node.children
     .map((child) =>
-      filterTree(child, query, filters, hideDone, accountId, revealKey),
+      filterTree(
+        child,
+        query,
+        filters,
+        hideDone,
+        accountId,
+        revealKey,
+        retainedKeys,
+      ),
     )
     .filter((child): child is IssueNode => child !== null);
   const issue = node.issue;
@@ -256,7 +265,10 @@ export function filterTree(
     (!filters.status || filters.status === issue.status.id) &&
     (!filters.priority ||
       filters.priority === (issue.priority?.id ?? '__none__'));
-  return matches || children.length || issue.key === revealKey
+  return matches ||
+    children.length ||
+    issue.key === revealKey ||
+    retainedKeys?.has(issue.key)
     ? { issue, children }
     : null;
 }
