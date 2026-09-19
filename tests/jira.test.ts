@@ -967,3 +967,237 @@ it('checks fresh required fields before submitting a cached transition and inval
   assert.equal((await provider.transitions('ABC-1'))[0].requiresFields, true);
   assert.equal(request.calls.length, 3);
 });
+
+describe('Jira search after writes', () => {
+  function fixture() {
+    let live = rawIssue('A-2', 'A-1');
+    let indexed = structuredClone(live);
+    let order = ['A-2', 'A-3', 'A-4'];
+    let failWrite = false;
+    let failTransition = false;
+    let rejectReconcile = '';
+    const request = recordingRequest((path, init) => {
+      const payload = body(init);
+      if (path === '/rest/api/3/permissions/check')
+        return {
+          projectPermissions: ['SCHEDULE_ISSUES', 'EDIT_ISSUES'].map(
+            (permission) => ({ permission, issues: [2, 3, 4] }),
+          ),
+        };
+      if (path === '/rest/agile/1.0/issue/rank') {
+        if (failWrite) throw new Error('rank denied');
+        return;
+      }
+      if (path === '/rest/api/3/search/jql') {
+        if (payload.reconcileIssues && rejectReconcile)
+          throw new Error(rejectReconcile);
+        return {
+          issues: payload.jql.startsWith('parent in ("A-1")')
+            ? order.map((key) =>
+                key === 'A-2' ? indexed : rawIssue(key, 'A-1'),
+              )
+            : [],
+          isLast: true,
+        };
+      }
+      if (path.includes('/transitions')) {
+        if (init?.method === 'POST') {
+          if (failTransition) throw new Error('transition denied');
+          live.fields.status = {
+            id: '20',
+            name: 'Done',
+            statusCategory: { key: 'done' },
+          };
+          return;
+        }
+        return { transitions: [{ id: 'finish', name: 'Finish', fields: {} }] };
+      }
+      if (init?.method === 'PUT') {
+        if (failWrite) throw new Error('edit denied');
+        Object.assign(live.fields, payload.fields);
+        if (payload.fields.priority) live.fields.priority.name = 'Low';
+        return { id: live.id };
+      }
+      const key = path.match(/\/issue\/([^?]+)/)?.[1];
+      return key === 'A-2'
+        ? structuredClone(live)
+        : rawIssue(key!, key === 'A-1' ? undefined : 'A-1');
+    });
+    const provider = new JiraProvider(request);
+    return {
+      provider,
+      request,
+      live: () => live,
+      indexed: () => indexed,
+      converge: () => {
+        indexed = structuredClone(live);
+      },
+      order: (next: string[]) => {
+        order = next;
+      },
+      fail: () => {
+        failWrite = true;
+      },
+      failTransition: () => {
+        failTransition = true;
+      },
+      reject: (message: string) => {
+        rejectReconcile = message;
+      },
+    };
+  }
+  const child = (tree: Awaited<ReturnType<JiraProvider['tree']>>) =>
+    tree.issues.find((issue) => issue.key === 'A-2')!;
+
+  it('keeps confirmed fields across stale and overlapping tree reads, then accepts genuine remote changes', async () => {
+    const f = fixture();
+    await f.provider.update('A-2', { summary: 'Saved' });
+    const trees = await Promise.all([
+      f.provider.tree('A-1'),
+      f.provider.tree('A-1'),
+    ]);
+    assert.ok(trees.every((tree) => child(tree).summary === 'Saved'));
+    assert.ok(
+      f.request.calls
+        .filter(([path]) => path === '/rest/api/3/search/jql')
+        .every(([, init]) => body(init).reconcileIssues.includes(2)),
+    );
+    f.converge();
+    assert.equal(child(await f.provider.tree('A-1')).summary, 'Saved');
+    f.live().fields.summary = 'Remote';
+    f.indexed().fields.summary = 'Remote';
+    assert.equal(child(await f.provider.tree('A-1')).summary, 'Remote');
+    f.indexed().fields.summary = 'Old indexed value';
+    assert.equal(child(await f.provider.tree('A-1')).summary, 'Remote');
+    const other = fixture();
+    assert.equal(
+      child(await other.provider.tree('A-1')).summary,
+      'A-2 summary',
+    );
+  });
+
+  it('tracks successful fields when a later transition fails and leaves wholly failed edits untracked', async () => {
+    const f = fixture();
+    f.failTransition();
+    await assert.rejects(
+      f.provider.update('A-2', { summary: 'Partial', transitionId: 'finish' }),
+      /transition denied/,
+    );
+    assert.equal(child(await f.provider.tree('A-1')).summary, 'Partial');
+    const failed = fixture();
+    failed.fail();
+    await assert.rejects(
+      failed.provider.update('A-2', { summary: 'Rejected' }),
+      /edit denied/,
+    );
+    assert.equal(
+      child(await failed.provider.tree('A-1')).summary,
+      'A-2 summary',
+    );
+    assert.ok(
+      failed.request.calls
+        .filter(([path]) => path === '/rest/api/3/search/jql')
+        .every(([, init]) => !body(init).reconcileIssues),
+    );
+  });
+
+  it('retains all recently edited fields across successive writes and respects reparenting', async () => {
+    const f = fixture();
+    await f.provider.update('A-2', { summary: 'Saved' });
+    await f.provider.update('A-2', { priorityId: '1' });
+    assert.equal(child(await f.provider.tree('A-1')).summary, 'Saved');
+    assert.equal(child(await f.provider.tree('A-1')).priority?.id, '1');
+    await f.provider.update('A-2', {
+      assigneeId: null,
+      transitionId: 'finish',
+    });
+    const updated = child(await f.provider.tree('A-1'));
+    assert.equal(updated.summary, 'Saved');
+    assert.equal(updated.priority?.id, '1');
+    assert.equal(updated.assignee, null);
+    assert.equal(updated.status.id, '20');
+    f.live().fields.parent = { key: 'OTHER-1' };
+    assert.equal(
+      (await f.provider.tree('A-1')).issues.some(
+        (issue) => issue.key === 'A-2',
+      ),
+      false,
+    );
+  });
+
+  it('keeps partially confirmed fields protected when a rank succeeds afterward', async () => {
+    const f = fixture();
+    await f.provider.update('A-2', { summary: 'Saved' });
+    f.converge();
+    f.failTransition();
+    await assert.rejects(
+      f.provider.update('A-2', { priorityId: '1', transitionId: 'finish' }),
+      /transition denied/,
+    );
+    await f.provider.rank('A-2', 'A-3');
+    assert.equal(child(await f.provider.tree('A-1')).priority?.id, '1');
+  });
+
+  it('falls back only for an explicitly unsupported reconciliation parameter', async () => {
+    const f = fixture();
+    await f.provider.update('A-2', { summary: 'Saved' });
+    f.reject('Unknown field reconcileIssues');
+    assert.equal(child(await f.provider.tree('A-1')).summary, 'Saved');
+    assert.equal(
+      f.request.calls.filter(
+        ([path, init]) =>
+          path === '/rest/api/3/search/jql' && body(init).reconcileIssues,
+      ).length,
+      1,
+    );
+    const denied = fixture();
+    await denied.provider.update('A-2', { summary: 'Saved' });
+    denied.reject('403 Forbidden: unsupported field reconcileIssues');
+    await assert.rejects(denied.provider.tree('A-1'), /403/);
+  });
+
+  it('preserves rank until search catches up, then accepts remote reordering', async () => {
+    const f = fixture();
+    await f.provider.rank('A-4', 'A-2');
+    const stale = await f.provider.tree('A-1');
+    assert.deepEqual(
+      stale.issues.slice(1).map((issue) => issue.key),
+      ['A-4', 'A-2', 'A-3'],
+    );
+    assert.deepEqual(stale.reconcilingRankParents, ['A-1']);
+    f.order(['A-4', 'A-2', 'A-3']);
+    assert.equal(
+      (await f.provider.tree('A-1')).reconcilingRankParents,
+      undefined,
+    );
+    f.order(['A-3', 'A-4', 'A-2']);
+    assert.deepEqual(
+      (await f.provider.tree('A-1')).issues.slice(1).map((issue) => issue.key),
+      ['A-3', 'A-4', 'A-2'],
+    );
+  });
+
+  it('replays successive conflicting ranks together and never preserves failed ranks', async () => {
+    const f = fixture();
+    await f.provider.rank('A-4', 'A-2');
+    await f.provider.rank('A-2', 'A-4');
+    assert.deepEqual(
+      (await f.provider.tree('A-1')).issues.slice(1).map((issue) => issue.key),
+      ['A-2', 'A-4', 'A-3'],
+    );
+    f.order(['A-2', 'A-4', 'A-3']);
+    assert.equal(
+      (await f.provider.tree('A-1')).reconcilingRankParents,
+      undefined,
+    );
+    const failed = fixture();
+    failed.fail();
+    await assert.rejects(failed.provider.rank('A-4', 'A-2'), /rank denied/);
+    assert.deepEqual(
+      (await failed.provider.tree('A-1')).issues
+        .slice(1)
+        .map((issue) => issue.key),
+      ['A-2', 'A-3', 'A-4'],
+    );
+  });
+});
