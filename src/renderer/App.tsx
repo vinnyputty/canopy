@@ -2355,12 +2355,12 @@ export function App() {
                     {!online
                       ? 'Offline'
                       : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
-                      ? 'Rate limited'
-                      : connectionErrors.has(activeTab.id)
-                        ? 'Connection error'
-                        : snapshot
-                          ? 'Connected'
-                          : 'Connecting'}
+                        ? 'Rate limited'
+                        : connectionErrors.has(activeTab.id)
+                          ? 'Connection error'
+                          : snapshot
+                            ? 'Connected'
+                            : 'Connecting'}
                   </span>
                   <span>
                     {foreground ? 'Auto-refresh 30s' : 'Background refresh'}
