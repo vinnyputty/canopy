@@ -1717,11 +1717,15 @@ export function App() {
             <div
               className="tree-scroll"
               ref={scrollRef}
-              onScroll={(event) =>
+              onScroll={(event) => {
+                // Placeholder/layout scrolling must not replace a saved position
+                // before the restored tree has been rendered and positioned.
+                if (!snapshot || pendingScrollRestore.current === activeTab.id)
+                  return;
                 updateTab(activeTab.id, {
                   scrollTop: event.currentTarget.scrollTop,
-                })
-              }
+                });
+              }}
             >
               {loading.has(activeTab.id) && !snapshot ? (
                 <TreeSkeleton />

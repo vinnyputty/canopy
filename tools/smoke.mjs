@@ -847,6 +847,9 @@ try {
       }),
     )
     .toBe(closedScroll);
+  const restoreSnapshot = await page.evaluate(() =>
+    window.canopy.tree('demo', 'CAN-100'),
+  );
   await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'middle' });
   await expect(page.getByRole('tab')).toHaveCount(0);
   await expect
@@ -865,6 +868,21 @@ try {
   await close();
   await launch();
   await expect(page.getByRole('tab')).toHaveCount(0);
+  // Hold the initial tree response to cover restoration into a still-loading favorite.
+  await app.evaluate(({ ipcMain }, snapshot) => {
+    let release;
+    const loaded = new Promise((resolve) => {
+      release = resolve;
+    });
+    globalThis.releaseRestoreTree = release;
+    ipcMain.removeHandler('canopy:tree');
+    ipcMain.handle('canopy:tree', async (_event, connectionId, rootKey) => {
+      if (connectionId !== 'demo' || rootKey !== snapshot.rootKey)
+        throw new Error('Unexpected root in delayed restoration fixture');
+      await loaded;
+      return snapshot;
+    });
+  }, restoreSnapshot);
   // A favorite opens a closed root; reopen restores into that existing tab.
   await page
     .getByRole('navigation', { name: 'Pinned roots' })
@@ -873,6 +891,36 @@ try {
   await expect(page.getByRole('tab')).toHaveCount(1);
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(page.getByRole('tab')).toHaveCount(1);
+  await expect(page.getByRole('tree')).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const workspace = await window.canopy.loadWorkspace();
+        const restored = workspace.tabs.find(
+          (tab) => tab.rootKey === 'CAN-100',
+        );
+        return {
+          selectedKey: restored?.selectedKey,
+          scrollTop: restored?.scrollTop,
+        };
+      }),
+    )
+    .toEqual({ selectedKey: 'CAN-111', scrollTop: closedScroll });
+  // A loading placeholder can emit scroll events while the saved tree is absent.
+  await page.locator('.tree-scroll').dispatchEvent('scroll');
+  // Allow the 180ms persistence debounce to expose any overwrite rather than
+  // accepting a stale saved value from before the placeholder event.
+  await page.waitForTimeout(350);
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const workspace = await window.canopy.loadWorkspace();
+        return workspace.tabs.find((tab) => tab.rootKey === 'CAN-100')
+          ?.scrollTop;
+      }),
+    )
+    .toBe(closedScroll);
+  await app.evaluate(() => globalThis.releaseRestoreTree());
   await expect
     .poll(() =>
       page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
