@@ -61,7 +61,7 @@ function syncViews(workspace: Workspace): Workspace {
     ...workspace,
     tabs: workspace.tabs.map((tab) => {
       const view = rootView(workspace, tab);
-      return { ...tab, hideDone: view.hideDone, filters: view.filters };
+      return { ...tab, view, hideDone: view.hideDone, filters: view.filters };
     }),
   };
 }
@@ -85,9 +85,14 @@ export function defaultRootView(
 export function migrateViews(workspace: Workspace): Workspace {
   if (workspace.rootViews) return syncViews(workspace);
   const rootViews: Record<string, RootView> = {};
-  for (const tab of workspace.tabs) {
-    if (!tab.hideDone || Object.keys(tab.filters ?? {}).length)
-      rootViews[viewKey(tab)] = {
+  const latest = new Map(
+    [...[...(workspace.closedTabs ?? [])].reverse(), ...workspace.tabs].map(
+      (tab) => [viewKey(tab), tab],
+    ),
+  );
+  for (const tab of latest.values()) {
+    if (tab.view || !tab.hideDone || Object.keys(tab.filters ?? {}).length)
+      rootViews[viewKey(tab)] = tab.view ?? {
         ...DEFAULT_VIEW,
         hideDone: tab.hideDone,
         filters: tab.filters ?? {},

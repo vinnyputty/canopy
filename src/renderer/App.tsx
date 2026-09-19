@@ -351,26 +351,26 @@ export function App() {
         );
         setWorkspace(
           migrateViews(
-          saved
-            ? {
-                ...EMPTY_WORKSPACE,
-                ...saved,
-                tabs,
-                pinnedRoots: saved.pinnedRoots?.filter(
-                  (root) => root.connectionId !== 'demo' || hasDemo,
-                ),
-                recentRoots: saved.recentRoots?.filter(
-                  (root) => root.connectionId !== 'demo' || hasDemo,
-                ),
-                closedTabs: saved.closedTabs?.filter(
-                  (root) => root.connectionId !== 'demo' || hasDemo,
-                ),
-                activeTabId: tabs.some((tab) => tab.id === saved.activeTabId)
-                  ? saved.activeTabId
-                  : (tabs[0]?.id ?? null),
-                shortcuts: { ...PLATFORM_SHORTCUTS, ...saved.shortcuts },
-              }
-            : EMPTY_WORKSPACE
+            saved
+              ? {
+                  ...EMPTY_WORKSPACE,
+                  ...saved,
+                  tabs,
+                  pinnedRoots: saved.pinnedRoots?.filter(
+                    (root) => root.connectionId !== 'demo' || hasDemo,
+                  ),
+                  recentRoots: saved.recentRoots?.filter(
+                    (root) => root.connectionId !== 'demo' || hasDemo,
+                  ),
+                  closedTabs: saved.closedTabs?.filter(
+                    (root) => root.connectionId !== 'demo' || hasDemo,
+                  ),
+                  activeTabId: tabs.some((tab) => tab.id === saved.activeTabId)
+                    ? saved.activeTabId
+                    : (tabs[0]?.id ?? null),
+                  shortcuts: { ...PLATFORM_SHORTCUTS, ...saved.shortcuts },
+                }
+              : EMPTY_WORKSPACE,
           ),
         );
       })
@@ -501,7 +501,7 @@ export function App() {
     if (!restoring) setHistory(visit(historyRef.current, from, tab));
     pendingScrollRestore.current =
       current.tabs.find((item) => sameRoot(item, tab))?.id ?? tab.id;
-    setWorkspace((value) => activateTab(value, tab));
+    setWorkspace((value) => activateTab(value, tab, restoring));
   }, []);
 
   const selectTab = useCallback(
@@ -526,8 +526,14 @@ export function App() {
           connectionId,
           rootKey: key,
           expanded: [key],
-          hideDone: rootView(workspaceRef.current, { connectionId, rootKey: key }).hideDone,
-          filters: rootView(workspaceRef.current, { connectionId, rootKey: key }).filters,
+          hideDone: rootView(workspaceRef.current, {
+            connectionId,
+            rootKey: key,
+          }).hideDone,
+          filters: rootView(workspaceRef.current, {
+            connectionId,
+            rootKey: key,
+          }).filters,
           scrollTop: 0,
         },
       );
@@ -1055,7 +1061,9 @@ export function App() {
     activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
     reveal?.tabId === activeTab?.id ? reveal?.key : undefined,
   );
-  const shownTree = filteredTree ? sortIssueTree(filteredTree, view.sort, priorityOrder) : null;
+  const shownTree = filteredTree
+    ? sortIssueTree(filteredTree, view.sort, priorityOrder)
+    : null;
   const expandedSet = new Set(
     filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
@@ -1639,6 +1647,14 @@ export function App() {
                 }
               >
                 <option value="">All statuses</option>
+                {activeTab.filters?.status &&
+                  !snapshot?.issues.some(
+                    (issue) => issue.status.id === activeTab.filters?.status,
+                  ) && (
+                    <option value={activeTab.filters.status}>
+                      Status {activeTab.filters.status} (not in this tree)
+                    </option>
+                  )}
                 {[
                   ...new Map(
                     snapshot?.issues.map((issue) => [
@@ -1666,6 +1682,16 @@ export function App() {
               >
                 <option value="">All priorities</option>
                 <option value="__none__">No priority</option>
+                {activeTab.filters?.priority &&
+                  activeTab.filters.priority !== '__none__' &&
+                  !snapshot?.issues.some(
+                    (issue) =>
+                      issue.priority?.id === activeTab.filters?.priority,
+                  ) && (
+                    <option value={activeTab.filters.priority}>
+                      Priority {activeTab.filters.priority} (not in this tree)
+                    </option>
+                  )}
                 {[
                   ...new Map(
                     snapshot?.issues
@@ -2374,8 +2400,14 @@ function TreeRows(props: RowsProps) {
           aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
           tabIndex={hasChildren ? 0 : -1}
           disabled={props.expansionLocked}
-          title={props.expansionLocked ? 'Matching paths expand automatically' : undefined}
-          onClick={() => hasChildren && !props.expansionLocked && onToggle(issue.key)}
+          title={
+            props.expansionLocked
+              ? 'Matching paths expand automatically'
+              : undefined
+          }
+          onClick={() =>
+            hasChildren && !props.expansionLocked && onToggle(issue.key)
+          }
         >
           {hasChildren &&
             (open ? <ChevronDown size={15} /> : <ChevronRight size={15} />)}
@@ -2423,7 +2455,10 @@ function TreeRows(props: RowsProps) {
           )}
         </div>
         {!open && count && count.total > 0 && (
-          <span className="child-count" title={`${count.open} open / ${count.total} total direct children; ${count.descendants} total descendants`}>
+          <span
+            className="child-count"
+            title={`${count.open} open / ${count.total} total direct children; ${count.descendants} total descendants`}
+          >
             {count.open}/{count.total} children
           </span>
         )}

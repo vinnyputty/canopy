@@ -9,6 +9,14 @@ import type {
 } from '../src/shared/types';
 import { buildIssueTree, flattenVisible } from '../src/renderer/tree';
 import {
+  activateTab,
+  closeTabs,
+  reopenTab,
+  removeConnection,
+  travel,
+  visit,
+} from '../src/renderer/workspace';
+import {
   canRank,
   defaultRootView,
   DEFAULT_VIEW,
@@ -276,5 +284,100 @@ describe('table view persistence validation', () => {
     assert.deepEqual(recovered.viewDefaults, saved.viewDefaults);
     assert.equal(recovered.tabs, current.tabs);
     assert.equal(saved.rootViews!.bad, null);
+  });
+});
+
+describe('table views and navigation snapshots', () => {
+  it('restores a full historical view into overrides and keeps it through unrelated edits and restart', () => {
+    const a = tab('one', 'A-1'),
+      b = tab('one', 'A-2');
+    let current = migrateViews(workspace(a, b));
+    current = setRootView(current, a, {
+      filters: { status: 'progress', priority: '2', assignee: 'me' },
+      hideDone: false,
+      textSize: 'large',
+      columns: ['issue', 'status'],
+      widths: { ...DEFAULT_VIEW.widths, issue: 700 },
+      sort: { column: 'status', direction: 'desc' },
+      spacing: 'comfortable',
+    });
+    const saved = current.tabs[0];
+    const history = visit({ back: [], forward: [] }, saved, b);
+    current = setRootView(current, a, {
+      filters: {},
+      hideDone: true,
+      textSize: 'small',
+    });
+    const restored = travel(history, b, 'back').tab!;
+    current = activateTab(current, restored);
+    assert.deepEqual(rootView(current, a), saved.view);
+    current = setRootView(current, b, { spacing: 'comfortable' });
+    current = migrateViews(JSON.parse(JSON.stringify(current)));
+    assert.deepEqual(current.tabs[0].filters, saved.filters);
+    assert.deepEqual(rootView(current, a), saved.view);
+    current = closeTabs(current, [a.id]);
+    current = setRootView(current, a, { textSize: 'small', filters: {} });
+    current = reopenTab(current);
+    assert.deepEqual(rootView(current, a), saved.view);
+  });
+  it('migrates closed legacy tabs, preferring the open state for a duplicate root', () => {
+    const closed = {
+      ...tab('one', 'A-1'),
+      filters: { status: 'done' },
+      hideDone: false,
+    };
+    let current = migrateViews({ ...workspace(), closedTabs: [closed] });
+    assert.deepEqual(rootView(current, closed).filters, closed.filters);
+    current = reopenTab(current);
+    current = setRootView(current, current.tabs[0], { textSize: 'large' });
+    assert.deepEqual(
+      migrateViews(JSON.parse(JSON.stringify(current))).tabs[0].filters,
+      closed.filters,
+    );
+    const duplicate = migrateViews({
+      ...workspace(tab('one', 'A-1')),
+      closedTabs: [closed],
+    });
+    assert.equal(rootView(duplicate, closed).hideDone, true);
+    assert.deepEqual(rootView(duplicate, closed).filters, {});
+    assert.deepEqual(duplicate.rootViews, {});
+  });
+  it('keeps normal selection inherited and removes only disconnected connection views', () => {
+    const a = tab('one', 'A-1'),
+      b = tab('two', 'A-1');
+    let current = migrateViews(workspace(a, b));
+    current = activateTab(current, a, false);
+    assert.deepEqual(current.rootViews, {});
+    current = setRootView(current, a, { textSize: 'large' });
+    current = defaultRootView(current, a);
+    current = setRootView(current, b, { textSize: 'small' });
+    current = defaultRootView(current, b);
+    current = removeConnection(current, 'one');
+    assert.equal(current.viewDefaults?.one, undefined);
+    assert.equal(Object.keys(current.rootViews!).length, 1);
+    assert.equal(rootView(current, b).textSize, 'small');
+    assert.equal(rootView(current, a).textSize, 'medium');
+  });
+  it('rejects malformed saved tab containers with a workspace error', () => {
+    for (const value of [
+      { tabs: null },
+      { tabs: [null] },
+      { tabs: [], closedTabs: {} },
+      { tabs: [], closedTabs: [null] },
+    ])
+      assert.throws(
+        () => recoverWorkspaceViews(value as unknown as Workspace),
+        /Invalid saved workspace/,
+      );
+  });
+  it('recovers invalid view snapshots in both open and closed tabs', () => {
+    const a = { ...tab('one', 'A-1'), view: { ...DEFAULT_VIEW, columns: [] } };
+    const recovered = recoverWorkspaceViews({
+      ...workspace(a),
+      closedTabs: [a],
+    });
+    assert.equal(recovered.tabs[0].view, undefined);
+    assert.equal(recovered.closedTabs?.[0].view, undefined);
+    assert.equal(recovered.tabs[0].rootKey, 'A-1');
   });
 });

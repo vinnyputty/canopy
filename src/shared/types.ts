@@ -65,6 +65,7 @@ export type TreeFilters = {
   priority?: string;
 };
 export type TabState = {
+  view?: RootView;
   id: string;
   connectionId: string;
   rootKey: string;

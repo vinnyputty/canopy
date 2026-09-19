@@ -13,6 +13,7 @@ import {
   visit,
 } from '../src/renderer/workspace';
 import { restoreWindow, type WindowState } from '../src/main/window-state';
+import { DEFAULT_VIEW } from '../src/renderer/table-view';
 
 const tab = (id: string, connectionId = 'site'): TabState => ({
   id,
@@ -82,7 +83,14 @@ describe('workspace restoration', () => {
     assert.equal(closed.pinnedRoots?.[0].rootKey, 'CAN-2');
     assert.equal(closed.activeTabId, '3');
     const restored = reopenTab(JSON.parse(JSON.stringify(closed)));
-    assert.deepEqual(restored.tabs.at(-1), saved);
+    assert.deepEqual(restored.tabs.at(-1), {
+      ...saved,
+      view: {
+        ...DEFAULT_VIEW,
+        hideDone: saved.hideDone,
+        filters: saved.filters,
+      },
+    });
     assert.equal(restored.activeTabId, '2');
     assert.deepEqual(restored.closedTabs, []);
   });

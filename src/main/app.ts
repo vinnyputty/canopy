@@ -21,7 +21,11 @@ import { JiraProvider } from './jira';
 import { Storage } from './storage';
 import { restoreWindow, type WindowState } from './window-state';
 import { configureLinuxCredentialStore } from './credentials';
-import { recoverWorkspaceViews, validViewMap } from '../shared/views';
+import {
+  recoverWorkspaceViews,
+  validViewMap,
+  validRootView,
+} from '../shared/views';
 
 app.setName('Canopy');
 configureLinuxCredentialStore((store) =>
@@ -105,6 +109,8 @@ function workspace(value: Workspace) {
   )
     throw new Error('Invalid closed tabs.');
   for (const tab of [...value.tabs, ...(value.closedTabs ?? [])]) {
+    if (tab.view !== undefined && !validRootView(tab.view))
+      throw new Error('Invalid saved table view.');
     if (
       tab.linkedExpanded !== undefined &&
       (!Array.isArray(tab.linkedExpanded) ||

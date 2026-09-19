@@ -1,4 +1,5 @@
 import type { RootReference, TabState, Workspace } from '../shared/types';
+import { rootView, setRootView } from './table-view';
 
 export const sameRoot = (a: RootReference, b: RootReference) =>
   a.connectionId === b.connectionId && a.rootKey === b.rootKey;
@@ -20,10 +21,14 @@ export function rememberRoot(
   };
 }
 
-export function activateTab(workspace: Workspace, tab: TabState): Workspace {
+export function activateTab(
+  workspace: Workspace,
+  tab: TabState,
+  restoreView = true,
+): Workspace {
   const existing = workspace.tabs.find((item) => sameRoot(item, tab));
   const restored = { ...tab, id: existing?.id ?? tab.id };
-  return rememberRoot(
+  const next = rememberRoot(
     {
       ...workspace,
       tabs: existing
@@ -35,6 +40,25 @@ export function activateTab(workspace: Workspace, tab: TabState): Workspace {
     },
     restored,
   );
+  if (restoreView)
+    return setRootView(
+      next,
+      restored,
+      tab.view ?? {
+        ...rootView(workspace, tab),
+        hideDone: tab.hideDone,
+        filters: tab.filters ?? {},
+      },
+    );
+  const view = rootView(next, restored);
+  return {
+    ...next,
+    tabs: next.tabs.map((item) =>
+      item.id === restored.id
+        ? { ...item, view, hideDone: view.hideDone, filters: view.filters }
+        : item,
+    ),
+  };
 }
 
 export function closeTabs(workspace: Workspace, ids: string[]): Workspace {
@@ -98,6 +122,17 @@ export function togglePinned(
 export function removeConnection(workspace: Workspace, id: string): Workspace {
   const keep = (root: RootReference) => root.connectionId !== id;
   const tabs = workspace.tabs.filter(keep);
+  const viewDefaults = { ...workspace.viewDefaults };
+  delete viewDefaults[id];
+  const rootViews = Object.fromEntries(
+    Object.entries(workspace.rootViews ?? {}).filter(([key]) => {
+      try {
+        return JSON.parse(key)[0] !== id;
+      } catch {
+        return true;
+      }
+    }),
+  );
   return {
     ...workspace,
     tabs,
@@ -107,6 +142,8 @@ export function removeConnection(workspace: Workspace, id: string): Workspace {
     pinnedRoots: workspace.pinnedRoots?.filter(keep),
     recentRoots: workspace.recentRoots?.filter(keep),
     closedTabs: workspace.closedTabs?.filter(keep),
+    viewDefaults,
+    rootViews,
   };
 }
 

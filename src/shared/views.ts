@@ -1,4 +1,4 @@
-import type { RootView, TableColumn, Workspace } from './types';
+import type { RootView, TableColumn, TabState, Workspace } from './types';
 
 export const COLUMN_BOUNDS: Record<TableColumn, readonly [number, number]> = {
   issue: [240, 1200],
@@ -60,14 +60,35 @@ export function validViewMap(
 }
 /** Retain unrelated workspace state when an old or hand-edited view is invalid. */
 export function recoverWorkspaceViews(workspace: Workspace): Workspace {
+  if (
+    !record(workspace) ||
+    !Array.isArray(workspace.tabs) ||
+    workspace.tabs.some((tab) => !record(tab)) ||
+    (workspace.closedTabs !== undefined &&
+      (!Array.isArray(workspace.closedTabs) ||
+        workspace.closedTabs.some((tab) => !record(tab))))
+  )
+    throw new Error('Invalid saved workspace.');
   const recover = (value: unknown) =>
     Object.fromEntries(
       Object.entries(record(value) ? value : {}).filter(([, view]) =>
         validRootView(view),
       ),
     ) as Record<string, RootView>;
+  const recoverTabs = (tabs: TabState[]) =>
+    tabs.some((tab) => tab.view !== undefined && !validRootView(tab.view))
+      ? tabs.map((tab) =>
+          tab.view !== undefined && !validRootView(tab.view)
+            ? { ...tab, view: undefined }
+            : tab,
+        )
+      : tabs;
   return {
     ...workspace,
+    tabs: recoverTabs(workspace.tabs),
+    ...(workspace.closedTabs
+      ? { closedTabs: recoverTabs(workspace.closedTabs) }
+      : {}),
     ...(workspace.rootViews !== undefined
       ? { rootViews: recover(workspace.rootViews) }
       : {}),
