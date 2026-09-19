@@ -813,6 +813,15 @@ try {
   await expect(rowMenu).toBeHidden();
   await expect(issue('CAN-109')).toBeFocused();
   const title = issue('CAN-109').locator('.summary');
+  // Force truncation independently of platform fonts and window geometry.
+  const previousMaxWidth = await title.evaluate((element) => {
+    const previous = element.style.maxWidth;
+    element.style.maxWidth = '80px';
+    return previous;
+  });
+  await expect(title).toHaveCSS('text-overflow', 'ellipsis');
+  await expect(title).toHaveCSS('overflow', 'hidden');
+  await expect(title).toHaveCSS('white-space', 'nowrap');
   await expect(title).toHaveAttribute(
     'title',
     'Add linked issue references — Double-click to edit',
@@ -826,6 +835,9 @@ try {
       (element) => element.scrollWidth > element.clientWidth,
     ),
   ).toBe(true);
+  await title.evaluate((element, value) => {
+    element.style.maxWidth = value;
+  }, previousMaxWidth);
 
   const resize = page.getByRole('separator', { name: 'Resize issue preview' });
   await resize.focus();
