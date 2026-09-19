@@ -168,7 +168,7 @@ function priorityTone(name?: string) {
 }
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
-  const [connections, setConnections] = useState<Connection[]>([]);
+  const [connections, storeConnections] = useState<Connection[]>([]);
   const [snapshots, setSnapshots] = useState<Record<string, TreeSnapshot>>({});
   const [loading, setLoading] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
@@ -201,6 +201,14 @@ export function App() {
     {},
   );
   const [identityRetry, setIdentityRetry] = useState(0);
+  const identityGeneration = useRef(0);
+  const setConnections = (value: Connection[]) => {
+    identityGeneration.current += 1;
+    setCurrentUsers({});
+    setIdentityErrors({});
+    setIdentityRetry((retry) => retry + 1);
+    storeConnections(value);
+  };
   const searchRef = useRef<HTMLInputElement>(null);
   const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [rowMenu, setRowMenu] = useState<{
@@ -289,10 +297,11 @@ export function App() {
     const id = activeTab?.connectionId;
     if (!id || currentUsers[id]) return;
     let live = true;
+    const generation = identityGeneration.current;
     window.canopy
       .currentUser(id)
       .then((user) => {
-        if (live) {
+        if (live && generation === identityGeneration.current) {
           setCurrentUsers((current) => ({ ...current, [id]: user }));
           setIdentityErrors((current) => {
             const next = { ...current };
@@ -302,7 +311,7 @@ export function App() {
         }
       })
       .catch((error) => {
-        if (live)
+        if (live && generation === identityGeneration.current)
           setIdentityErrors((current) => ({
             ...current,
             [id]: `Couldn’t identify your Jira account: ${String(error)}. Check your connection, then retry.`,
@@ -2197,6 +2206,7 @@ export function App() {
                     >
                       <TreeRows
                         node={shownTree}
+                        currentUser={currentUsers[activeTab.connectionId]}
                         columns={view.columns}
                         rankableKeys={
                           new Set(
@@ -2658,6 +2668,7 @@ function Connections({
 }
 
 type RowsProps = {
+  currentUser?: Choice;
   columns: TableColumn[];
   rankableKeys: Set<string>;
   rankingEnabled: boolean;
@@ -2934,6 +2945,7 @@ function TreeRows(props: RowsProps) {
         onEdit={() => props.beginEdit(issue.key, 'assignee')}
       >
         <AssigneeEditor
+          currentUser={props.currentUser}
           active={
             props.editor?.key === issue.key && props.editor.field === 'assignee'
           }
@@ -3289,6 +3301,7 @@ function navigateChoices(event: React.KeyboardEvent, selector: string) {
 }
 
 function AssigneeEditor({
+  currentUser,
   active,
   issue,
   choices,
@@ -3300,6 +3313,7 @@ function AssigneeEditor({
   save,
   cancel,
 }: {
+  currentUser?: Choice;
   active: boolean;
   issue: Issue;
   choices?: Choice[];
@@ -3370,6 +3384,24 @@ function AssigneeEditor({
         placeholder="Search people…"
         aria-label="Search assignees"
       />
+      <button
+        disabled={
+          !currentUser ||
+          issue.assignee?.id === currentUser.id ||
+          state?.validating
+        }
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => currentUser && save(currentUser.id)}
+      >
+        <AssigneeAvatar assignee={currentUser ?? null} />
+        {currentUser && issue.assignee?.id === currentUser.id ? (
+          <>
+            Assigned to me <Check size={13} />
+          </>
+        ) : (
+          'Assign to me'
+        )}
+      </button>
       <div
         className="choice-list"
         onScroll={(event) => {
