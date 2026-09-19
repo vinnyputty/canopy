@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+tone_instructions: 'Be concise. Focus on actionable bugs, regressions, and security issues.'
+
+reviews:
+  profile: chill
+  auto_review:
+    enabled: true
+    drafts: false
