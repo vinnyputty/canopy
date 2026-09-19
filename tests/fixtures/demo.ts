@@ -125,6 +125,7 @@ export class DemoProvider {
         id: s.id,
         name: s.name,
         requiresFields: false,
+        to: s,
       })),
     };
   }
@@ -153,14 +154,22 @@ export class DemoProvider {
     await this.persist(this.issues);
     return structuredClone(i);
   }
-  async rank(key: string, beforeKey: string) {
+  async rank(
+    key: string,
+    beforeKey: string,
+    position: 'before' | 'after' = 'before',
+  ) {
     const issue = this.get(key),
       before = this.get(beforeKey);
     if (!issue.parentKey || issue.parentKey !== before.parentKey)
       throw new Error('Only siblings can be reordered.');
     if (key === beforeKey) return;
     this.issues.splice(this.issues.indexOf(issue), 1);
-    this.issues.splice(this.issues.indexOf(before), 0, issue);
+    this.issues.splice(
+      this.issues.indexOf(before) + (position === 'after' ? 1 : 0),
+      0,
+      issue,
+    );
     await this.persist(this.issues);
   }
 }

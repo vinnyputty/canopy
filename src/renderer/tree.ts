@@ -95,12 +95,14 @@ export function buildIssueTree(
 export function visibleTree(
   node: IssueNode,
   hideDone: boolean,
+  keepKey?: string,
 ): IssueNode | null {
   const children = node.children
-    .map((child) => visibleTree(child, hideDone))
+    .map((child) => visibleTree(child, hideDone, keepKey))
     .filter((child): child is IssueNode => child !== null);
   if (
     hideDone &&
+    node.issue.key !== keepKey &&
     node.issue.status.category === 'done' &&
     children.length === 0
   )
@@ -233,11 +235,20 @@ export function filterTree(
   hideDone: boolean,
   accountId?: string,
   revealKey?: string,
+  retainedKeys?: ReadonlySet<string>,
 ): IssueNode | null {
   if (!node) return null;
   const children = node.children
     .map((child) =>
-      filterTree(child, query, filters, hideDone, accountId, revealKey),
+      filterTree(
+        child,
+        query,
+        filters,
+        hideDone,
+        accountId,
+        revealKey,
+        retainedKeys,
+      ),
     )
     .filter((child): child is IssueNode => child !== null);
   const issue = node.issue;
@@ -254,7 +265,10 @@ export function filterTree(
     (!filters.status || filters.status === issue.status.id) &&
     (!filters.priority ||
       filters.priority === (issue.priority?.id ?? '__none__'));
-  return matches || children.length || issue.key === revealKey
+  return matches ||
+    children.length ||
+    issue.key === revealKey ||
+    retainedKeys?.has(issue.key)
     ? { issue, children }
     : null;
 }

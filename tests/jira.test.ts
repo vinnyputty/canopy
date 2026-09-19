@@ -227,7 +227,16 @@ describe('JiraProvider search and editing', () => {
       if (path.includes('/transitions?')) {
         return {
           transitions: [
-            { id: '2', name: 'Start', fields: {} },
+            {
+              id: '2',
+              name: 'Start',
+              fields: {},
+              to: {
+                id: '10',
+                name: 'In progress',
+                statusCategory: { key: 'indeterminate' },
+              },
+            },
             {
               id: '3',
               name: 'Resolve',
@@ -245,7 +254,12 @@ describe('JiraProvider search and editing', () => {
         priorities: [{ id: '1', name: 'Highest' }],
         assignees: [{ id: 'user-1', name: 'Ada' }],
         transitions: [
-          { id: '2', name: 'Start', requiresFields: false },
+          {
+            id: '2',
+            name: 'Start',
+            requiresFields: false,
+            to: { id: '10', name: 'In progress', category: 'indeterminate' },
+          },
           { id: '3', name: 'Resolve', requiresFields: true },
         ],
       },
@@ -331,6 +345,21 @@ describe('JiraProvider ranking', () => {
 
     await new JiraProvider(request).rank('ONE-1', 'TWO-2');
     assert.equal(request.calls.length, 3);
+  });
+
+  it('restores a sibling after its former predecessor', async () => {
+    const request = recordingRequest((path, init) => {
+      if (path.startsWith('/rest/api/3/issue/ONE-1?'))
+        return rawIssue('ONE-1', 'PARENT-1');
+      if (path.startsWith('/rest/api/3/issue/TWO-2?'))
+        return rawIssue('TWO-2', 'PARENT-1');
+      assert.deepEqual(body(init), {
+        issues: ['ONE-1'],
+        rankAfterIssue: 'TWO-2',
+      });
+      return {};
+    });
+    await new JiraProvider(request).rank('ONE-1', 'TWO-2', 'after');
   });
 
   it('surfaces partial failures returned by Jira ranking', async () => {

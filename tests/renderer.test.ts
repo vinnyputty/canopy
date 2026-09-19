@@ -78,6 +78,25 @@ describe('renderer tree helpers', () => {
     assert.equal(shown.children[0].children[0].issue.key, 'A-3');
   });
 
+  it('retains the edited done issue and ancestors without revealing unrelated done rows', () => {
+    const tree = buildIssueTree(
+      [
+        issue('A-1'),
+        issue('A-2', 'A-1', 'done'),
+        issue('A-3', 'A-2', 'done'),
+        issue('A-4', 'A-1', 'done'),
+      ],
+      'A-1',
+    )!;
+    const visible = visibleTree(tree, true, 'A-3');
+    assert.deepEqual(
+      flattenVisible(visible, new Set(['A-1', 'A-2'])).map(
+        (node) => node.issue.key,
+      ),
+      ['A-1', 'A-2', 'A-3'],
+    );
+  });
+
   it('keeps object identity for issues unchanged by a refresh', () => {
     const stable = issue('A-1');
     const changed = issue('A-2', 'A-1');
