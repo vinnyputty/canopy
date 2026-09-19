@@ -136,14 +136,18 @@ export class DemoProvider {
       totalComments: 1,
     };
   }
-  async search(query: string) {
-    return structuredClone(
-      this.issues
-        .filter((i) =>
-          `${i.key} ${i.summary}`.toLowerCase().includes(query.toLowerCase()),
-        )
-        .slice(0, 30),
+  async search(query: string, nextPageToken?: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const offset = Number(nextPageToken ?? 0);
+    const matches = this.issues.filter((i) =>
+      `${i.key} ${i.summary}`.toLowerCase().includes(query.toLowerCase()),
     );
+    return {
+      issues: structuredClone(matches.slice(offset, offset + 25)),
+      ...(offset + 25 < matches.length
+        ? { nextPageToken: String(offset + 25) }
+        : {}),
+    };
   }
   async editOptions(_key: string, query = ''): Promise<EditOptions> {
     return {

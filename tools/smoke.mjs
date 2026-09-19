@@ -1,5 +1,6 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { auditRefresh } from './smoke-refresh.mjs';
+import { auditSearch } from './smoke-search.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -531,11 +532,13 @@ async function auditMutationViews() {
     .getByRole('button', { name: `Undo reorder of ${key}`, exact: true })
     .click();
   await saved();
-  expect(
-    (await fixture('tree', 'CAN-110')).issues
-      .filter((value) => value.parentKey === 'CAN-110')
-      .map((value) => value.key),
-  ).toEqual(['CAN-112', 'CAN-111']);
+  await expect
+    .poll(async () =>
+      (await fixture('tree', 'CAN-110')).issues
+        .filter((value) => value.parentKey === 'CAN-110')
+        .map((value) => value.key),
+    )
+    .toEqual(['CAN-112', 'CAN-111']);
   await view(async () =>
     page.getByLabel('Sort by', { exact: true }).selectOption('rank'),
   );
@@ -1554,7 +1557,7 @@ try {
   await pickerInput.fill('');
   await page
     .getByRole('dialog')
-    .getByRole('button', { name: /CAN-100 A calmer/ })
+    .getByRole('option', { name: /CAN-100 A calmer/ })
     .click();
   await expect(firstTab).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tab')).toHaveCount(2);
@@ -2415,6 +2418,7 @@ try {
     }),
   );
   await launch();
+  await auditSearch(app, page);
   await auditRefresh(app, page, resizeWindow);
 
   await page.getByTitle('Disconnect Canopy demo').click();
