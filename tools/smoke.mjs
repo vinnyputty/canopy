@@ -836,8 +836,28 @@ try {
     .locator('.tree-scroll')
     .evaluate((element) => element.scrollTop);
   expect(closedScroll).toBeGreaterThan(0);
+  // Setting scrollTop queues a browser scroll event. Wait for the renderer's
+  // saved view before closing so the fixture does not race that event.
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const workspace = await window.canopy.loadWorkspace();
+        return workspace.tabs.find((tab) => tab.rootKey === 'CAN-100')
+          ?.scrollTop;
+      }),
+    )
+    .toBe(closedScroll);
   await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'middle' });
   await expect(page.getByRole('tab')).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const workspace = await window.canopy.loadWorkspace();
+        return workspace.closedTabs.find((tab) => tab.rootKey === 'CAN-100')
+          ?.scrollTop;
+      }),
+    )
+    .toBe(closedScroll);
   await expect(
     page.getByRole('navigation', { name: 'Pinned roots' }),
   ).toBeVisible();
