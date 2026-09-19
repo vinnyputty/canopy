@@ -18,6 +18,13 @@ export type Issue = {
   status: Status;
   links: { key: string; summary: string; relationship: string }[];
 };
+export type IssuePreview = {
+  issue: Issue;
+  description: string;
+  comments: { id: string; author: string; created: string; body: string }[];
+  totalComments: number;
+  commentsError?: string;
+};
 export type TreeSnapshot = {
   rootKey: string;
   issues: Issue[];
@@ -104,6 +111,8 @@ export interface CanopyAPI {
   connect(input?: TokenConnectionInput): Promise<Connection[]>;
   disconnect(connectionId: string): Promise<void>;
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
+  preview(connectionId: string, key: string): Promise<IssuePreview>;
+  copyText(value: string): Promise<void>;
   search(connectionId: string, query: string): Promise<Issue[]>;
   editOptions(
     connectionId: string,

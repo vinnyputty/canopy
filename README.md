@@ -49,6 +49,8 @@ See [Jira connection setup](docs/connections.md) for token scopes and organizati
 - The active tab refreshes every 30 seconds. Background tabs (including all tabs while the window is unfocused) back off from one minute to one hour. Activating a tab or returning to the window refreshes the active tree and resets its cadence. Refresh preserves your place and waits for active edits and pending writes. The footer shows the last successful update and connection state; failed refreshes retain the tree and offer Retry. Offline polling pauses until connectivity returns.
 - Quit with `⌘Q`, toggle the sidebar with `⌘B`, and select tabs 1–9 with `⌘1`–`⌘9` (`Ctrl` on Windows/Linux).
 - Drag tabs to reorder, right-click for root actions, and pin favorites independently of open tabs. Reopen closed tabs with `⌘⇧T` / `Ctrl+Shift+T`; use Back/Forward to restore visited positions. See [workspace controls](docs/workspace.md) for saved layouts and keyboard controls.
+- Press `Space` on a focused issue row to preview its description, recent comments, and directional links. Resize the preview with its drag handle or arrow keys; `Escape` closes it and restores tree focus.
+- Right-click a row, press `Shift+F10`, or use its actions button to copy its key, title, or Jira link, or open Jira. Hover a truncated title to read it in full.
 - Open the command palette with `⌘K`, an issue with `⌘P`, or keyboard shortcuts with `⌘/` (`Ctrl` on Windows/Linux). The shortcut editor detects conflicts before saving.
 
 Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/jira.md).
@@ -73,4 +75,4 @@ npx pnpm@10.22.0 install --frozen-lockfile
 
 Dependency install scripts are disabled. Use the Bazel launcher to obtain Electron. To update dependencies, update `package.json`, regenerate `pnpm-lock.yaml` with pnpm 10.22.0, and run the Bazel checks. `npm run format` formats TypeScript, CSS, JSON, YAML, and documentation; Bazel files use standard Starlark formatting.
 
-No descriptions, comments, attachments, issue creation/deletion, project moves, or reparenting are included in this version.
+Editing descriptions and comments, attachments, issue creation/deletion, project moves, and reparenting are not supported in this version.

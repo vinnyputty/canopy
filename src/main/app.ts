@@ -158,7 +158,13 @@ type Fixture = {
   connection: Connection;
   provider: Pick<
     JiraProvider,
-    'tree' | 'search' | 'editOptions' | 'update' | 'rank' | 'priorityOrder'
+    | 'preview'
+    | 'tree'
+    | 'search'
+    | 'editOptions'
+    | 'update'
+    | 'rank'
+    | 'priorityOrder'
   >;
 };
 
@@ -224,6 +230,12 @@ async function start(
       if (!Array.isArray(keys) || keys.length > 1000)
         throw new Error('Invalid priority representatives.');
       return provider(id).priorityOrder(keys.map(key));
+    },
+    preview: (id: string, issue: string) => provider(id).preview(key(issue)),
+    copyText: (value: string) => {
+      if (typeof value !== 'string' || value.length > 100_000)
+        throw new Error('Invalid clipboard text.');
+      clipboard.writeText(value);
     },
     search: (id: string, query: string) => provider(id).search(text(query)),
     editOptions: (id: string, issue: string, query?: string) =>
