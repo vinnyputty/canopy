@@ -532,11 +532,13 @@ async function auditMutationViews() {
     .getByRole('button', { name: `Undo reorder of ${key}`, exact: true })
     .click();
   await saved();
-  expect(
-    (await fixture('tree', 'CAN-110')).issues
-      .filter((value) => value.parentKey === 'CAN-110')
-      .map((value) => value.key),
-  ).toEqual(['CAN-112', 'CAN-111']);
+  await expect
+    .poll(async () =>
+      (await fixture('tree', 'CAN-110')).issues
+        .filter((value) => value.parentKey === 'CAN-110')
+        .map((value) => value.key),
+    )
+    .toEqual(['CAN-112', 'CAN-111']);
   await view(async () =>
     page.getByLabel('Sort by', { exact: true }).selectOption('rank'),
   );
