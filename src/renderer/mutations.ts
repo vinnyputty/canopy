@@ -64,24 +64,27 @@ export function applyChange(
   return { ...snapshot, issues };
 }
 
-function optimisticFields(patch: IssuePatch, options?: EditOptions): Fields {
+function optimisticFields(
+  patch: IssuePatch,
+  options?: Partial<EditOptions>,
+): Fields {
   const fields: Fields = {};
   if (patch.summary !== undefined) fields.summary = patch.summary;
   if (patch.priorityId !== undefined) {
-    const priority = options?.priorities.find(
+    const priority = options?.priorities?.find(
       (value) => value.id === patch.priorityId,
     );
     if (priority) fields.priority = priority;
   }
   if (patch.assigneeId !== undefined) {
-    const assignee = options?.assignees.find(
+    const assignee = options?.assignees?.find(
       (value) => value.id === patch.assigneeId,
     );
     if (patch.assigneeId === null || assignee)
       fields.assignee = assignee ?? null;
   }
   if (patch.transitionId !== undefined) {
-    const transition = options?.transitions.find(
+    const transition = options?.transitions?.find(
       (value) => value.id === patch.transitionId,
     );
     if (transition?.to && !transition.requiresFields)
@@ -104,7 +107,15 @@ export class Mutations {
   private refreshes = new Map<number, number>();
   private rendered: Record<string, TreeSnapshot> = {};
   constructor(
-    private api: Pick<CanopyAPI, 'update' | 'rank' | 'tree' | 'editOptions'>,
+    private api: Pick<
+      CanopyAPI,
+      | 'update'
+      | 'rank'
+      | 'tree'
+      | 'priorities'
+      | 'transitions'
+      | 'validateAssignee'
+    >,
     private changed: (view: MutationView) => void,
     private error: (message: string) => void,
   ) {}
@@ -219,7 +230,7 @@ export class Mutations {
     connectionId: string,
     key: string,
     patch: IssuePatch,
-    options?: EditOptions,
+    options?: Partial<EditOptions>,
     record = true,
   ) {
     return this.enqueue(
@@ -335,16 +346,30 @@ export class Mutations {
             );
           patch.priorityId = before.priority.id;
         }
-        options = await this.api.editOptions(connectionId, change.key);
-        assertCurrent();
-        if (
-          'priority' in change.fields &&
-          !options.priorities.some((choice) => choice.id === patch!.priorityId)
-        )
-          throw new UndoUnavailable(
-            'The previous priority is no longer available.',
+        options = { priorities: [], assignees: [], transitions: [] };
+        if ('priority' in change.fields) {
+          options.priorities = await this.api.priorities(
+            connectionId,
+            change.key,
+            true,
           );
+          assertCurrent();
+          if (
+            !options.priorities.some(
+              (choice) => choice.id === patch!.priorityId,
+            )
+          )
+            throw new UndoUnavailable(
+              'The previous priority is no longer available.',
+            );
+        }
         if ('status' in change.fields) {
+          options.transitions = await this.api.transitions(
+            connectionId,
+            change.key,
+            true,
+          );
+          assertCurrent();
           const reverse = options.transitions.find(
             (value) =>
               value.to?.id === before.status.id && !value.requiresFields,
@@ -355,27 +380,19 @@ export class Mutations {
             );
           patch.transitionId = reverse.id;
         }
-        if (
-          'assignee' in change.fields &&
-          before.assignee &&
-          !options.assignees.some((choice) => choice.id === before.assignee!.id)
-        ) {
-          const searched = await this.api.editOptions(
+        if ('assignee' in change.fields && before.assignee) {
+          const user = await this.api.validateAssignee(
             connectionId,
             change.key,
-            before.assignee.name,
+            before.assignee.id,
+            true,
           );
           assertCurrent();
-          if (
-            !searched.assignees.some(
-              (choice) => choice.id === before.assignee!.id,
-            )
-          ) {
+          if (!user)
             throw new UndoUnavailable(
-              'The previous assignee is no longer assignable.',
+              'The previous assignee is no longer assignable, or Jira’s limited user discovery could not confirm eligibility.',
             );
-          }
-          options = { ...options, assignees: searched.assignees };
+          options.assignees = [user];
         }
       } else {
         if (

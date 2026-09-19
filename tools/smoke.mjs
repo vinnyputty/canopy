@@ -1,5 +1,6 @@
 import { _electron as electron, expect } from '@playwright/test';
 import { auditRefresh } from './smoke-refresh.mjs';
+import { auditPickers } from './smoke-pickers.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -209,6 +210,10 @@ async function auditMutations() {
   await expect(issue(key).getByText('Low', { exact: true })).toBeVisible();
   await release('priority', 'Priority permission denied');
   await saved();
+  await expect(issue(key).getByRole('alert')).toContainText(
+    'Jira rejected this selection',
+  );
+  await issue(key).getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(issue(key).getByText('Highest', { exact: true })).toBeVisible();
   await dismissError('Priority permission denied');
 
@@ -225,6 +230,10 @@ async function auditMutations() {
   ).toBeVisible();
   await release('assignee', 'Assignee permission denied');
   await saved();
+  await expect(issue(key).getByRole('alert')).toContainText(
+    'Jira rejected this selection',
+  );
+  await issue(key).getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(
     issue(key).getByText('Sam Rivera', { exact: true }),
   ).toBeVisible();
@@ -245,6 +254,10 @@ async function auditMutations() {
   await expect(issue(key).getByText('Done', { exact: true })).toBeVisible();
   await release('status', 'Workflow changed');
   await saved();
+  await expect(issue(key).getByRole('alert')).toContainText(
+    'Jira rejected this selection',
+  );
+  await issue(key).getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(
     issue(key).getByText('In Progress', { exact: true }),
   ).toBeVisible();
@@ -252,6 +265,9 @@ async function auditMutations() {
 
   // Status undo revalidates the current reverse transition.
   await issue(key).getByLabel(`Edit status for ${key}`).press('Enter');
+  await expect(
+    page.getByRole('menuitem', { name: 'In Progress', exact: true }),
+  ).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
   await saved();
@@ -260,6 +276,22 @@ async function auditMutations() {
   await expect(
     issue(key).getByText('In Progress', { exact: true }),
   ).toBeVisible();
+
+  // A rejection after navigating away must not install an invisible editor that blocks refresh.
+  await hold('navigated-priority');
+  await issue(key).getByLabel(`Edit priority for ${key}`).press('Enter');
+  await page.getByLabel('Choose value').selectOption({ label: 'Low' });
+  await started('navigated-priority');
+  await switchTab('CAN-200');
+  await release('navigated-priority', 'Navigated picker rejection');
+  await saved();
+  await dismissError('Navigated picker rejection');
+  await hold('navigated-refresh', 'tree', 'CAN-200');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await started('navigated-refresh');
+  await release('navigated-refresh');
+  await expect(page.getByText('Checking for changes')).toBeHidden();
+  await switchTab('CAN-110');
 
   // A failed earlier write cannot erase a queued newer edit or its pending UI.
   await hold('first');
@@ -642,6 +674,7 @@ try {
   ).toBeEnabled();
   const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
   await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  await auditPickers(app, page);
   const rootSummary = 'A calmer place to get things done';
   const rootTab = page.getByRole('tab', { name: /CAN-100/ });
   const rootSidebar = page.locator('.side-tab').filter({ hasText: 'CAN-100' });

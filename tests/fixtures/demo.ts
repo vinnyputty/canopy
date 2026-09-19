@@ -145,19 +145,38 @@ export class DemoProvider {
         .slice(0, 30),
     );
   }
-  async editOptions(_key: string, query = ''): Promise<EditOptions> {
+  async priorities(_key: string, _refresh = false) {
+    return priorities;
+  }
+  async cachedUsers() {
+    return assignees;
+  }
+  async assignees(_key: string, query = '', _startAt = 0, _refresh = false) {
     return {
-      priorities,
-      assignees: assignees.filter((a) =>
+      users: assignees.filter((a) =>
         a.name.toLowerCase().includes(query.toLowerCase()),
       ),
-      transitions: statuses.map((s) => ({
-        id: s.id,
-        name: s.name,
-        requiresFields: false,
-        to: s,
-      })),
     };
+  }
+  async validateAssignee(
+    _key: string,
+    id: string,
+    _refresh = false,
+  ): Promise<Choice | null> {
+    const user = assignees.find((user) => user.id === id);
+    if (!user) throw new Error('This person is not assignable to this issue.');
+    return user;
+  }
+  async transitions(
+    _key: string,
+    _refresh = false,
+  ): Promise<EditOptions['transitions']> {
+    return statuses.map((s) => ({
+      id: s.id,
+      name: s.name,
+      requiresFields: false,
+      to: s,
+    }));
   }
   async update(key: string, patch: IssuePatch) {
     const i = this.get(key);

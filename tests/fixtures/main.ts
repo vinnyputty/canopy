@@ -85,7 +85,13 @@ launch(async (storage) => {
       },
       preview: (key) => demo.preview(key),
       search: (query) => demo.search(query),
-      editOptions: (key, query) => demo.editOptions(key, query),
+      priorities: (key, refresh) => demo.priorities(key, refresh),
+      transitions: (key, refresh) => demo.transitions(key, refresh),
+      cachedUsers: () => demo.cachedUsers(),
+      assignees: (key, query, startAt, refresh) =>
+        demo.assignees(key, query, startAt, refresh),
+      validateAssignee: (key, accountId, refresh) =>
+        demo.validateAssignee(key, accountId, refresh),
       update: (key, patch) => demo.update(key, patch),
       rank: async (key, before, position) => {
         await storage.write('rank-attempts', ++rankAttempts);
