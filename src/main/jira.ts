@@ -168,6 +168,9 @@ export class JiraProvider {
         this.pickerCache.delete(entry);
     }
   }
+  invalidateChoices(key: string): void {
+    this.invalidate(key);
+  }
   private cacheKey(key: string, field: string, ...context: unknown[]) {
     return JSON.stringify([key.toUpperCase(), field, ...context]);
   }

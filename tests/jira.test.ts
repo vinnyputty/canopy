@@ -1314,3 +1314,28 @@ describe('Jira search after writes', () => {
     );
   });
 });
+
+it('invalidates cached and pending workflow choices without a status change', async () => {
+  let release!: (value: unknown) => void;
+  let calls = 0;
+  const provider = new JiraProvider(async () => {
+    calls++;
+    if (calls === 1)
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    return {
+      transitions: [{ id: 'new', name: 'Updated workflow', fields: {} }],
+    };
+  });
+  const pending = provider.transitions('ABC-1');
+  provider.invalidateChoices('ABC-1');
+  assert.equal((await provider.transitions('ABC-1'))[0].id, 'new');
+  release({ transitions: [{ id: 'old', name: 'Old workflow', fields: {} }] });
+  await pending;
+  assert.equal((await provider.transitions('ABC-1'))[0].id, 'new');
+  assert.equal(calls, 2);
+  provider.invalidateChoices('ABC-1');
+  await provider.transitions('ABC-1');
+  assert.equal(calls, 3);
+});

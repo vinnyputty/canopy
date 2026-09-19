@@ -2178,3 +2178,14 @@ kbd {
   display: flex;
   flex-direction: column;
 }
+
+.workflow-choice {
+  display: flex;
+  align-items: center;
+}
+.workflow-choice > button {
+  width: auto;
+}
+.workflow-choice > button:first-child {
+  flex: 1;
+}

@@ -233,6 +233,14 @@ export function App() {
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const refreshSchedule = useRef(new RefreshSchedule());
+  const workflowReturn = useRef<{
+    tabId: string;
+    connectionId: string;
+    key: string;
+    left: boolean;
+    returned: boolean;
+    opened: boolean;
+  } | null>(null);
   const deferredRefreshes = useRef(new Set<string>());
   const refreshBlocked = useRef<(connectionId: string) => boolean>(() => false);
   const [online, setOnline] = useState(navigator.onLine);
@@ -573,6 +581,37 @@ export function App() {
     [],
   );
 
+  const finishWorkflowReturn = useCallback(() => {
+    const pending = workflowReturn.current;
+    if (!pending?.opened || !pending.returned) return false;
+    workflowReturn.current = null;
+    const tab = tabsRef.current.find(
+      (tab) =>
+        tab.id === pending.tabId && tab.connectionId === pending.connectionId,
+    );
+    if (!tab) return false;
+    pickers.invalidate(pending.connectionId, pending.key);
+    void window.canopy
+      .invalidateChoices(pending.connectionId, pending.key)
+      .catch((error) => {
+        if (
+          !tabsRef.current.some(
+            (item) =>
+              item.id === tab.id && item.connectionId === tab.connectionId,
+          )
+        )
+          return;
+        setErrors((current) => ({
+          ...current,
+          app: `Couldn’t refresh Jira choices: ${String(error)}`,
+        }));
+      });
+    // Enqueue before attempting: an older in-flight response cannot consume this return.
+    deferredRefreshes.current.add(tab.id);
+    void refreshTab(tab, true);
+    return true;
+  }, [pickers, refreshTab]);
+
   useEffect(() => {
     if (!ready) return;
     const activated = refreshSchedule.current.sync(
@@ -618,9 +657,17 @@ export function App() {
       const visible =
         document.visibilityState === 'visible' && document.hasFocus();
       setForeground(visible);
-      if (visible) refreshActive();
+      const pending = workflowReturn.current;
+      if (pending) {
+        if (!visible) pending.left = true;
+        else if (pending.left) pending.returned = true;
+      }
+      if (visible && !finishWorkflowReturn()) refreshActive();
     };
-    const blur = () => setForeground(false);
+    const blur = () => {
+      if (workflowReturn.current) workflowReturn.current.left = true;
+      setForeground(false);
+    };
     const connectivity = () => {
       setOnline(navigator.onLine);
       if (navigator.onLine) refreshActive();
@@ -638,7 +685,7 @@ export function App() {
       window.removeEventListener('online', connectivity);
       window.removeEventListener('offline', connectivity);
     };
-  }, [ready, refreshTab]);
+  }, [ready, refreshTab, finishWorkflowReturn]);
 
   useEffect(() => {
     for (const tab of workspace.tabs) {
@@ -892,6 +939,60 @@ export function App() {
       return changed ? next : current;
     });
   }, [snapshots]);
+
+  const openWorkflow = useCallback(
+    async (key: string) => {
+      if (!activeTab) return;
+      const pending = {
+        tabId: activeTab.id,
+        connectionId: activeTab.connectionId,
+        key,
+        left: false,
+        returned: false,
+        opened: false,
+      };
+      workflowReturn.current = pending;
+      setEditor(null);
+      restoreTreeFocus(key);
+      try {
+        await window.canopy.openIssue(pending.connectionId, key);
+        if (workflowReturn.current !== pending) return;
+        if (
+          !tabsRef.current.some(
+            (tab) =>
+              tab.id === pending.tabId &&
+              tab.connectionId === pending.connectionId,
+          )
+        ) {
+          workflowReturn.current = null;
+          return;
+        }
+        pending.opened = true;
+        setErrors((current) => {
+          const copy = { ...current };
+          delete copy.app;
+          return copy;
+        });
+        finishWorkflowReturn();
+      } catch (error) {
+        if (workflowReturn.current !== pending) return;
+        workflowReturn.current = null;
+        if (
+          !tabsRef.current.some(
+            (tab) =>
+              tab.id === pending.tabId &&
+              tab.connectionId === pending.connectionId,
+          )
+        )
+          return;
+        setErrors((current) => ({
+          ...current,
+          app: `Couldn’t open ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+      }
+    },
+    [activeTab, restoreTreeFocus, finishWorkflowReturn],
+  );
 
   const openExternal = useCallback(
     async (connectionId: string, key: string) => {
@@ -2272,6 +2373,7 @@ export function App() {
                         }}
                         editor={editor}
                         beginEdit={beginEdit}
+                        onOpenWorkflow={(key) => void openWorkflow(key)}
                         cancelEdit={() => setEditor(null)}
                         options={scopedOptions}
                         loadOptions={loadOptions}
@@ -2686,6 +2788,7 @@ type RowsProps = {
   onSelect: (key: string) => void;
   onOpenTab: (key: string) => void;
   onOpenExternal: (key: string) => void;
+  onOpenWorkflow: (key: string) => void;
   onCopyLink: (key: string) => void;
   onPreview: (key: string) => void;
   onContextMenu: (issue: Issue, x: number, y: number, toggle?: boolean) => void;
@@ -2977,6 +3080,7 @@ function TreeRows(props: RowsProps) {
             props.editor?.key === issue.key && props.editor.field === 'status'
           }
           issue={issue}
+          openWorkflow={() => props.onOpenWorkflow(issue.key)}
           choices={props.options[issue.key]?.transitions}
           state={props.options[issue.key]?.status}
           retry={() =>
@@ -3479,6 +3583,7 @@ function StatusEditor({
   choices,
   save,
   cancel,
+  openWorkflow,
 }: {
   color?: string;
   active: boolean;
@@ -3488,6 +3593,7 @@ function StatusEditor({
   retry: () => void;
   save: (id: string) => void;
   cancel: () => void;
+  openWorkflow: () => void;
 }) {
   if (!active)
     return (
@@ -3510,23 +3616,37 @@ function StatusEditor({
       {!state?.error &&
         !state?.loading &&
         choices?.map((choice) => (
-          <button
-            role="menuitem"
-            autoFocus={
-              choice === choices?.find((value) => !value.requiresFields)
-            }
-            disabled={choice.requiresFields}
-            title={
-              choice.requiresFields
-                ? 'This transition requires fields that Canopy does not edit yet.'
-                : undefined
-            }
-            key={choice.id}
-            onClick={() => save(choice.id)}
-          >
-            {choice.name}
-            {choice.requiresFields && <small>Requires fields</small>}
-          </button>
+          <div className="workflow-choice" key={choice.id}>
+            <button
+              role="menuitem"
+              autoFocus={
+                choice === choices?.find((value) => !value.requiresFields)
+              }
+              disabled={choice.requiresFields}
+              title={
+                choice.requiresFields
+                  ? 'This transition requires fields that Canopy does not edit yet.'
+                  : undefined
+              }
+              onClick={() => save(choice.id)}
+            >
+              {choice.name}
+              {choice.requiresFields && <small>Requires fields</small>}
+            </button>
+            {choice.requiresFields && (
+              <button
+                role="menuitem"
+                autoFocus={
+                  choice === choices?.[0] &&
+                  choices.every((value) => value.requiresFields)
+                }
+                aria-label={`Open ${issue.key} in Jira for ${choice.name}`}
+                onClick={openWorkflow}
+              >
+                Open in Jira
+              </button>
+            )}
+          </div>
         ))}
       <button className="cancel-choice" onClick={cancel}>
         Cancel

@@ -2,6 +2,7 @@ import { _electron as electron, expect } from '@playwright/test';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
+import { auditWorkflow } from './smoke-workflow.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -326,9 +327,18 @@ async function auditMutations() {
 
   await hold('status');
   await issue(key).getByLabel(`Edit status for ${key}`).press('Enter');
-  await expect(page.getByRole('menuitem', { name: /To Do/ })).toBeDisabled();
+  await expect(
+    page.getByRole('menuitem', { name: 'To Do Requires fields', exact: true }),
+  ).toBeDisabled();
   await expect(
     page.getByRole('menuitem', { name: 'In Progress', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(
+    page.getByRole('menuitem', {
+      name: `Open ${key} in Jira for To Do`,
+      exact: true,
+    }),
   ).toBeFocused();
   await page.keyboard.press('ArrowUp');
   await expect(
@@ -2622,6 +2632,8 @@ try {
   ).toHaveCount(0);
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(page.getByRole('tab')).toHaveCount(0);
+
+  await auditWorkflow(app, page);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

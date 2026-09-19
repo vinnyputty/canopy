@@ -134,6 +134,7 @@ export interface CanopyAPI {
     key: string,
     refresh?: boolean,
   ): Promise<EditOptions['transitions']>;
+  invalidateChoices(connectionId: string, key: string): Promise<void>;
   cachedUsers(connectionId: string): Promise<Choice[]>;
   assignees(
     connectionId: string,
