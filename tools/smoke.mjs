@@ -40,6 +40,7 @@ let page;
 const pageErrors = [];
 const recentOutput = [];
 let smokeFailure;
+let cleanupFailure;
 function recordOutput(source, message) {
   recentOutput.push({
     time: new Date().toISOString(),
@@ -2633,7 +2634,6 @@ try {
   } catch (diagnosticError) {
     console.error('Could not capture smoke diagnostics:', diagnosticError);
   }
-  throw error;
 } finally {
   for (const cleanup of [
     close,
@@ -2642,8 +2642,11 @@ try {
     try {
       await cleanup();
     } catch (error) {
-      if (!smokeFailure) throw error;
-      console.error('Smoke cleanup also failed:', error);
+      if (smokeFailure) console.error('Smoke cleanup also failed:', error);
+      else cleanupFailure ??= error;
     }
   }
 }
+
+if (smokeFailure) throw smokeFailure;
+if (cleanupFailure) throw cleanupFailure;
