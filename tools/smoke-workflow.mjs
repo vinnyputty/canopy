@@ -63,7 +63,7 @@ export async function auditWorkflow(app, page) {
         rootKey: 'TEST-1',
         fetchedAt: Date.now(),
         warnings: [],
-        issues: Array.from({ length: 30 }, (_, i) => ({
+        issues: Array.from({ length: 60 }, (_, i) => ({
           id: String(i + 1),
           key: `TEST-${i + 1}`,
           ...(i ? { parentKey: 'TEST-1' } : {}),
@@ -145,10 +145,6 @@ export async function auditWorkflow(app, page) {
   };
   await row.scrollIntoViewIfNeeded();
   await row.focus();
-  const position = await page
-    .locator('.tree-scroll')
-    .evaluate((el) => el.scrollTop);
-  expect(position).toBeGreaterThan(0);
   await expect(
     page.getByRole('button', { name: 'Refresh', exact: true }),
   ).toBeEnabled();
@@ -163,12 +159,29 @@ export async function auditWorkflow(app, page) {
     page.getByRole('menuitem', { name: 'Finish Requires fields', exact: true }),
   ).toBeDisabled();
   await expect(shortcut('Finish')).toBeFocused();
+  // Measure the shortcut itself after picker autofocus/layout. Keep the row
+  // inside a long tree so scrollbar rounding cannot clamp a bottom-edge sample.
+  const position = await page.locator('.tree-scroll').evaluate(
+    (el) =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() =>
+          resolve({
+            top: el.scrollTop,
+            maximum: el.scrollHeight - el.clientHeight,
+          }),
+        ),
+      ),
+  );
+  expect(position.top).toBeGreaterThan(0);
+  expect(position.top).toBeLessThan(position.maximum);
+  await expect(row).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Enter');
   await expect(page.locator('.status-popover')).toHaveCount(0);
   await expect(row).toBeFocused();
   expect(
     await page.locator('.tree-scroll').evaluate((el) => el.scrollTop),
-  ).toBe(position);
+  ).toBe(position.top);
+  await expect(row).toHaveAttribute('aria-selected', 'true');
   await expect
     .poll(async () => (await controls()).opens)
     .toEqual(['https://workflow-first.atlassian.net/browse/TEST-25']);
