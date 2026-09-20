@@ -976,6 +976,7 @@ describe('Jira search after writes', () => {
     let failWrite = false;
     let failTransition = false;
     let rejectReconcile = '';
+    let readError = '';
     const request = recordingRequest((path, init) => {
       const payload = body(init);
       if (path === '/rest/api/3/permissions/check')
@@ -991,6 +992,8 @@ describe('Jira search after writes', () => {
       if (path === '/rest/api/3/search/jql') {
         if (payload.reconcileIssues && rejectReconcile)
           throw new Error(rejectReconcile);
+        if (payload.jql.startsWith('summary ~'))
+          return { issues: [indexed], isLast: true };
         return {
           issues: payload.jql.startsWith('parent in ("A-1")')
             ? order.map((key) =>
@@ -1019,6 +1022,7 @@ describe('Jira search after writes', () => {
         return { id: live.id };
       }
       const key = path.match(/\/issue\/([^?]+)/)?.[1];
+      if (key === 'A-2' && readError) throw new Error(readError);
       return key === 'A-2'
         ? structuredClone(live)
         : rawIssue(key!, key === 'A-1' ? undefined : 'A-1');
@@ -1027,6 +1031,9 @@ describe('Jira search after writes', () => {
     return {
       provider,
       request,
+      readError: (message: string) => {
+        readError = message;
+      },
       live: () => live,
       indexed: () => indexed,
       converge: () => {
@@ -1136,6 +1143,44 @@ describe('Jira search after writes', () => {
     );
     await f.provider.rank('A-2', 'A-3');
     assert.equal(child(await f.provider.tree('A-1')).priority?.id, '1');
+  });
+
+  it('omits a reconciled issue missing from direct reads in both trees and search', async () => {
+    const f = fixture();
+    await f.provider.update('A-2', { summary: 'Saved' });
+    f.readError('Jira returned 404. The issue is unavailable.');
+    assert.deepEqual(
+      (await f.provider.tree('A-1')).issues.map((issue) => issue.key),
+      ['A-1', 'A-3', 'A-4'],
+    );
+    assert.deepEqual(await f.provider.search('Saved'), []);
+    await assert.rejects(f.provider.tree('A-2'), /Jira returned 404/);
+  });
+
+  it('propagates other direct-read failures and preserves normal indexed results without a disagreement', async () => {
+    const f = fixture();
+    await f.provider.update('A-2', { summary: 'Saved' });
+    for (const message of [
+      'Jira returned 401.',
+      'Jira returned 403.',
+      'Jira returned 429.',
+      'Jira returned 500. Detail contains Jira returned 404.',
+      'Network unavailable',
+    ]) {
+      f.readError(message);
+      await assert.rejects(
+        f.provider.tree('A-1'),
+        (error) => error instanceof Error && error.message.endsWith(message),
+      );
+      await assert.rejects(
+        f.provider.search('Saved'),
+        (error) => error instanceof Error && error.message.endsWith(message),
+      );
+    }
+    f.converge();
+    f.readError('Jira returned 404.');
+    assert.equal(child(await f.provider.tree('A-1')).summary, 'Saved');
+    assert.equal((await f.provider.search('Saved'))[0]?.summary, 'Saved');
   });
 
   it('falls back only for an explicitly unsupported reconciliation parameter', async () => {

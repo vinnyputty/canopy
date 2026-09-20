@@ -242,7 +242,7 @@ export class JiraProvider {
 
         for (const raw of children) {
           const child = await this.consistentIssue(raw, recent);
-          if (!child.parentKey || !parents.includes(child.parentKey)) continue;
+          if (!child?.parentKey || !parents.includes(child.parentKey)) continue;
           if (visited.has(child.key)) {
             warnings.push(`Ignored duplicate or cyclic child ${child.key}.`);
             continue;
@@ -441,16 +441,20 @@ export class JiraProvider {
         'Jira search indicated more results but supplied no page token.',
       );
     const issues = await Promise.all(
-      page.issues.map(async (raw: JiraIssue) => ({
-        ...(await this.consistentIssue(raw, recent)),
+      page.issues.map(async (raw: JiraIssue) => {
+        const issue = await this.consistentIssue(raw, recent);
+        if (!issue) return null;
+        return {
+        ...issue,
         ...(typeof raw.fields?.updated === 'string'
           ? { updated: raw.fields.updated }
           : {}),
-      })),
+        };
+      }),
     );
     signal?.throwIfAborted();
     return {
-      issues,
+      issues: issues.filter((issue): issue is NonNullable<typeof issue> => issue !== null),
       ...(token ? { nextPageToken: token } : {}),
     };
   }
@@ -701,9 +705,20 @@ export class JiraProvider {
     recent: ReturnType<JiraConsistency['snapshot']>,
   ) {
     const issue = this.observeIssue(raw);
-    return this.consistency.disagrees(issue, recent)
-      ? this.getIssue(issue.key)
-      : issue;
+    if (!this.consistency.disagrees(issue, recent)) return issue;
+    try {
+      return await this.getIssue(issue.key);
+    } catch (error) {
+      // Auth's status-specific message survives the contextual request wrapper.
+      if (
+        error instanceof Error &&
+        error.message.startsWith(
+          `Unable to load Jira issue ${issue.key}: Jira returned 404.`,
+        )
+      )
+        return null;
+      throw error;
+    }
   }
 
   private async getIssue(key: string): Promise<Issue> {
