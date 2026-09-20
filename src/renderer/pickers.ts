@@ -11,6 +11,7 @@ export type PickerOptions = Partial<EditOptions> & {
   assignee?: FieldLoad;
   status?: FieldLoad;
   query?: string;
+  assigneeResultQuery?: string;
   nextStartAt?: number;
 };
 type API = Pick<
@@ -94,6 +95,7 @@ export class Pickers {
       assignees: undefined,
       assignee: undefined,
       query: undefined,
+      assigneeResultQuery: undefined,
       nextStartAt: undefined,
     });
   }
@@ -109,6 +111,7 @@ export class Pickers {
     this.set(scope, {
       assignee: { loading: true },
       query: '',
+      assigneeResultQuery: undefined,
       assignees: undefined,
       nextStartAt: 0,
     });
@@ -175,6 +178,7 @@ export class Pickers {
               more ? (previous?.assignees ?? []) : [],
               page.users,
             ),
+            assigneeResultQuery: query,
             nextStartAt: page.nextStartAt,
             assignee: {},
           });

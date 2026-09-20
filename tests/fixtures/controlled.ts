@@ -1,4 +1,4 @@
-import type { IssuePatch } from '../../src/shared/types';
+import type { Choice, IssuePatch } from '../../src/shared/types';
 import { DemoProvider } from './demo';
 
 type Operation =
@@ -89,6 +89,7 @@ export class ControlledDemoProvider extends DemoProvider {
     await this.pause('cachedUsers', '');
     return super.cachedUsers();
   }
+  assigneeSearchResults = new Map<string, Choice[]>();
   override async assignees(
     key: string,
     query = '',
@@ -96,6 +97,8 @@ export class ControlledDemoProvider extends DemoProvider {
     refresh = false,
   ) {
     await this.pause('assignees', key);
+    const users = this.assigneeSearchResults.get(query);
+    if (users) return { users };
     return super.assignees(key, query, startAt, refresh);
   }
   override async validateAssignee(

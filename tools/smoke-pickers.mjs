@@ -33,6 +33,45 @@ export async function auditPickers(app, page) {
     page.getByRole('button', { name: 'Load more people', exact: true }),
   ).toBeHidden();
   expect(await count('assignees')).toBe(searches + 1);
+  // Returning to the last searched value before debounce completes must settle loading.
+  await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  const input = page.getByLabel('Search assignees');
+  await input.fill('x');
+  await input.fill('');
+  await page.clock.runFor(300);
+  await expect(page.locator('.assignee-popover .choice-loading')).toHaveCount(
+    0,
+  );
+  expect(await count('assignees')).toBe(searches + 2);
+
+  // Jira can match email while returning a display name without the query text.
+  await app.evaluate(() =>
+    globalThis.canopySmoke.assigneeSearchResults.set('alex@example.invalid', [
+      { id: 'alex', name: 'Alex Morgan' },
+    ]),
+  );
+  await input.fill('alex@example.invalid');
+  await page.clock.runFor(300);
+  await expect(
+    page.getByRole('button', { name: 'Alex Morgan', exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText('No people found in these results')).toBeHidden();
+  await input.fill('alex@example.invalidx');
+  await input.fill('alex@example.invalid');
+  await page.clock.runFor(300);
+  await expect(page.locator('.assignee-popover .choice-loading')).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole('button', { name: 'Alex Morgan', exact: true }),
+  ).toBeVisible();
+  await input.fill('');
+  await page.clock.runFor(300);
+  await expect(page.locator('.assignee-popover .choice-loading')).toHaveCount(
+    0,
+  );
+  await page.clock.resume();
   await app.evaluate(() =>
     globalThis.canopySmoke.unassignableUsers.add('alex'),
   );
