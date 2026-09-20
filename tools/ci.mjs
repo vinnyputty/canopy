@@ -12,7 +12,12 @@ for (const key of Object.keys(env)) {
 function run(command, args) {
   const result = spawnSync(command, args, { cwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.status !== 0) {
+    console.error(
+      `CI command failed on ${process.platform}/${process.arch}: ${command} ${args.join(' ')} (exit ${result.status}, signal ${result.signal ?? 'none'})`,
+    );
+    process.exit(result.status ?? 1);
+  }
 }
 function bazel(...args) {
   run('bazel', [...startupOptions, ...args]);

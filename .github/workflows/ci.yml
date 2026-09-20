@@ -21,3 +21,12 @@ jobs:
         with:
           name: Canopy-${{ runner.os }}
           path: release/*
+      - name: Upload smoke failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: smoke-failure-${{ runner.os }}
+          path: .cache/smoke-failure/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

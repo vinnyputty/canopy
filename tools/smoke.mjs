@@ -38,6 +38,75 @@ const paletteShortcutLabel =
 let app;
 let page;
 const pageErrors = [];
+const recentOutput = [];
+let smokeFailure;
+function recordOutput(source, message) {
+  recentOutput.push({
+    time: new Date().toISOString(),
+    source,
+    message: String(message).slice(-2000),
+  });
+  if (recentOutput.length > 80) recentOutput.shift();
+}
+async function captureFailure(error) {
+  const directory = join(workspace, '.cache', 'smoke-failure');
+  await mkdir(directory, { recursive: true });
+  const diagnostics = {
+    error: error?.stack ?? String(error),
+    platform: process.platform,
+    arch: process.arch,
+    node: process.version,
+    commit: process.env.GITHUB_SHA,
+    pageErrors: pageErrors.map((error) => error.stack ?? String(error)),
+    recentOutput,
+  };
+  if (page && !page.isClosed()) {
+    let timeout;
+    try {
+      diagnostics.window = await Promise.race([
+        page.evaluate(() => ({
+          url: location.href,
+          title: document.title,
+          alerts: [...document.querySelectorAll('[role="alert"]')].map(
+            (element) => element.innerText,
+          ),
+          selectedTabs: [
+            ...document.querySelectorAll('[role="tab"][aria-selected="true"]'),
+          ].map((element) => element.innerText),
+          focusedElement: document.activeElement?.outerHTML.slice(0, 1000),
+          visibleText: document.body.innerText.slice(0, 16000),
+        })),
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Window diagnostics timed out')),
+            3000,
+          );
+        }),
+      ]);
+    } catch (error) {
+      diagnostics.windowError = String(error);
+    } finally {
+      clearTimeout(timeout);
+    }
+    try {
+      await page.screenshot({
+        path: join(directory, 'window.png'),
+        timeout: 3000,
+      });
+    } catch (error) {
+      diagnostics.screenshotError = String(error);
+    }
+  }
+  await writeFile(
+    join(directory, 'failure.json'),
+    JSON.stringify(diagnostics, null, 2),
+  );
+  console.error(
+    'Smoke failure diagnostics:',
+    JSON.stringify(diagnostics, null, 2),
+  );
+  console.error(`Smoke failure artifacts: ${directory}`);
+}
 
 async function launch(production = false, fixtureEnv = {}) {
   app = await electron.launch({
@@ -45,7 +114,17 @@ async function launch(production = false, fixtureEnv = {}) {
     args: [production ? join(appPath, 'dist/main.cjs') : appPath],
     env: { ...env, ...fixtureEnv },
   });
+  recordOutput('launch', production ? 'production' : 'demo');
+  app
+    .process()
+    .stderr?.on('data', (chunk) => recordOutput('main stderr', chunk));
+  app
+    .process()
+    .stdout?.on('data', (chunk) => recordOutput('main stdout', chunk));
   page = await app.firstWindow();
+  page.on('console', (message) =>
+    recordOutput(`renderer ${message.type()}`, message.text()),
+  );
   page.on('pageerror', (error) => pageErrors.push(error));
   await expect(page.getByText('Opening Canopy…')).toBeHidden();
   await expect(
@@ -655,7 +734,21 @@ async function auditMutationViews() {
 }
 
 try {
+  await rm(join(workspace, '.cache', 'smoke-failure'), {
+    recursive: true,
+    force: true,
+  });
   await launch();
+  if (process.env.CANOPY_SMOKE_TEST_DIAGNOSTICS === '1') {
+    await page.evaluate(() => {
+      const alert = document.createElement('div');
+      alert.setAttribute('role', 'alert');
+      alert.textContent = 'Injected smoke diagnostic failure';
+      document.body.append(alert);
+      console.error('Injected renderer diagnostic');
+    });
+    throw new Error('Injected smoke diagnostic failure');
+  }
   await expect(
     page.getByRole('heading', { name: 'See the whole tree.' }),
   ).toBeVisible();
@@ -2533,7 +2626,24 @@ try {
   console.log(
     `Canopy Electron smoke test passed. Screenshot: ${screenshotPath}`,
   );
+} catch (error) {
+  smokeFailure = error;
+  try {
+    await captureFailure(error);
+  } catch (diagnosticError) {
+    console.error('Could not capture smoke diagnostics:', diagnosticError);
+  }
+  throw error;
 } finally {
-  await close();
-  await rm(userData, { recursive: true, force: true });
+  for (const cleanup of [
+    close,
+    () => rm(userData, { recursive: true, force: true }),
+  ]) {
+    try {
+      await cleanup();
+    } catch (error) {
+      if (!smokeFailure) throw error;
+      console.error('Smoke cleanup also failed:', error);
+    }
+  }
 }
