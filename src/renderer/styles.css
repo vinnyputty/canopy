@@ -2154,3 +2154,24 @@ kbd {
 .preview-content .text-button:hover {
   text-decoration: underline;
 }
+
+.picker-error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  white-space: normal;
+  min-width: 180px;
+}
+.picker-note {
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.75;
+  padding: 8px;
+  margin: 0;
+  white-space: normal;
+}
+.priority-editor {
+  display: flex;
+  flex-direction: column;
+}

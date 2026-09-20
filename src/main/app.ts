@@ -1,3 +1,4 @@
+import { Providers } from './providers';
 import {
   app,
   BrowserWindow,
@@ -161,7 +162,11 @@ type Fixture = {
     | 'preview'
     | 'tree'
     | 'search'
-    | 'editOptions'
+    | 'priorities'
+    | 'transitions'
+    | 'cachedUsers'
+    | 'assignees'
+    | 'validateAssignee'
     | 'update'
     | 'rank'
     | 'priorityOrder'
@@ -184,14 +189,20 @@ async function start(
     ...(fixture ? [fixture.connection] : []),
     ...auth.connections(),
   ];
+  const providers = new Providers(
+    () => auth.connections(),
+    (connection, current) =>
+      new JiraProvider(async (path, init) => {
+        current();
+        const result = await auth.request(connection.id, path, init);
+        current();
+        return result;
+      }),
+  );
   const provider = (id: string) => {
     text(id);
     if (fixture?.connection.id === id) return fixture.provider;
-    if (!auth.connections().some((connection) => connection.id === id))
-      throw new Error(
-        'This connection is unavailable. Connect the Jira site again.',
-      );
-    return new JiraProvider((path, init) => auth.request(id, path, init));
+    return providers.get(id);
   };
   const issueUrl = (id: string, issue: string) => {
     const issueKey = key(issue);
@@ -219,7 +230,11 @@ async function start(
     },
     connect: async (input?: TokenConnectionInput) => {
       if (authError) throw new Error(authError);
-      await auth.connect(input);
+      try {
+        await auth.connect(input);
+      } finally {
+        providers.reconcile();
+      }
       return connections();
     },
     disconnect: async (id: string) => {
@@ -235,7 +250,11 @@ async function start(
         fixture = undefined;
         return;
       }
-      return auth.disconnect(id);
+      try {
+        await auth.disconnect(id);
+      } finally {
+        providers.remove(id);
+      }
     },
     tree: (id: string, root: string) => provider(id).tree(key(root)),
     priorityOrder: (id: string, keys: unknown) => {
@@ -273,10 +292,34 @@ async function start(
       }
     },
     cancelSearch,
-    editOptions: (id: string, issue: string, query?: string) =>
-      provider(id).editOptions(
+    priorities: (id: string, issue: string, refresh = false) =>
+      provider(id).priorities(key(issue), refresh === true),
+    transitions: (id: string, issue: string, refresh = false) =>
+      provider(id).transitions(key(issue), refresh === true),
+    cachedUsers: (id: string) => provider(id).cachedUsers(),
+    assignees: (
+      id: string,
+      issue: string,
+      query = '',
+      startAt = 0,
+      refresh = false,
+    ) =>
+      provider(id).assignees(
         key(issue),
-        query === undefined || query === '' ? '' : text(query),
+        typeof query === 'string' && !query.trim() ? '' : text(query),
+        startAt,
+        refresh === true,
+      ),
+    validateAssignee: (
+      id: string,
+      issue: string,
+      accountId: string,
+      refresh = false,
+    ) =>
+      provider(id).validateAssignee(
+        key(issue),
+        text(accountId),
+        refresh === true,
       ),
     update: (id: string, issue: string, value: IssuePatch) =>
       provider(id).update(key(issue), patch(value)),

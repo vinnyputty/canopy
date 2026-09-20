@@ -71,7 +71,13 @@ function harness(overrides: Partial<CanopyAPI> = {}) {
     update: async (_connection: string, key: string) => issue(key, 'A-1'),
     rank: async () => {},
     tree: async () => snapshot(),
-    editOptions: async () => options,
+    priorities: async () => options.priorities,
+    transitions: async () => options.transitions,
+    validateAssignee: async (
+      _connection: string,
+      _key: string,
+      id: string,
+    ) => ({ id, name: id }),
     ...overrides,
   };
   const mutations = new Mutations(
@@ -337,11 +343,10 @@ describe('validated undo', () => {
         return current;
       },
       tree: async () => ({ ...snapshot(), issues: [current] }),
-      editOptions: async (_id, _key, query) => {
-        queries.push(query);
-        return query === prior.name
-          ? { ...options, assignees: [prior] }
-          : options;
+      validateAssignee: async (_id, _key, accountId, refresh) => {
+        queries.push(accountId);
+        assert.equal(refresh, true);
+        return prior;
       },
     });
     const original = snapshot();
@@ -349,7 +354,7 @@ describe('validated undo', () => {
     h.mutations.receive(tab(), original, h.mutations.revision);
     await h.mutations.update('jira', 'A-2', { assigneeId: null }, options);
     await h.mutations.undo();
-    assert.deepEqual(queries, [undefined, 'Sam Rivera']);
+    assert.deepEqual(queries, ['sam']);
     assert.equal(h.current.assignee?.id, 'sam');
     assert.equal(h.view.undoLabel, undefined);
     assert.deepEqual(h.errors, []);
@@ -492,7 +497,7 @@ describe('undo audit regressions', () => {
 
   it('preserves history when another edit completes during workflow-option validation', async () => {
     let current = issue('A-2', 'A-1');
-    const validation = deferred<EditOptions>();
+    const validation = deferred<EditOptions['priorities']>();
     let reads = 0;
     const h = harness({
       update: async (_id, _key, patch) => {
@@ -505,13 +510,14 @@ describe('undo audit regressions', () => {
         return current;
       },
       tree: async () => ({ ...snapshot(), issues: [current] }),
-      editOptions: async () => (++reads === 1 ? validation.promise : options),
+      priorities: async () =>
+        ++reads === 1 ? validation.promise : options.priorities,
     });
     await h.mutations.update('jira', 'A-2', { priorityId: '2' }, options);
     const undo = h.mutations.undo();
     await tick();
     await h.mutations.update('jira', 'A-2', { priorityId: '1' }, options);
-    validation.resolve({ ...options, priorities: [] });
+    validation.resolve([]);
     await undo;
     assert.match(h.errors[0], /Another edit started/);
     await h.mutations.undo();
@@ -564,23 +570,20 @@ describe('undo audit regressions', () => {
         return current;
       },
       tree: async () => ({ ...snapshot(), issues: [current] }),
-      editOptions: async () => ({
-        ...options,
-        transitions: [
-          {
-            id: 'requires-fields',
-            name: 'Reopen with fields',
-            requiresFields: true,
-            to: open,
-          },
-          {
-            id: 'safe-reopen',
-            name: 'Reopen',
-            requiresFields: false,
-            to: open,
-          },
-        ],
-      }),
+      transitions: async () => [
+        {
+          id: 'requires-fields',
+          name: 'Reopen with fields',
+          requiresFields: true,
+          to: open,
+        },
+        {
+          id: 'safe-reopen',
+          name: 'Reopen',
+          requiresFields: false,
+          to: open,
+        },
+      ],
     });
     await h.mutations.update(
       'jira',
@@ -749,4 +752,50 @@ describe('refresh deferral contract', () => {
     assert.equal(h.mutations.pending('jira'), false);
     assert.equal(h.view.undoLabel, undefined);
   });
+});
+
+it('skips an unassignable assignee inverse but retains transient lookup failures for retry', async () => {
+  for (const transient of [false, true]) {
+    const before = { id: 'prior', name: 'Prior' };
+    let current = {
+      ...issue('A-2', 'A-1'),
+      assignee: before as Issue['assignee'],
+    };
+    const h = harness({
+      update: async () => (current = { ...current, assignee: null }),
+      tree: async () => ({ ...snapshot(), issues: [current] }),
+      validateAssignee: async () => {
+        if (transient) throw new Error('Lookup unavailable');
+        return null;
+      },
+    });
+    const original = snapshot();
+    original.issues[1] = current;
+    h.mutations.receive(tab(), original, 0);
+    await h.mutations.update('jira', 'A-2', { assigneeId: null }, options);
+    await h.mutations.undo();
+    assert.equal(Boolean(h.view.undoLabel), transient);
+    assert.match(
+      h.errors[0],
+      transient ? /Lookup unavailable/ : /no longer assignable/,
+    );
+  }
+});
+it('undoes summaries without any picker metadata dependency', async () => {
+  let current = issue('A-2', 'A-1');
+  const unavailable = async () => {
+    throw new Error('Picker lookup must not run');
+  };
+  const h = harness({
+    update: async (_id, _key, patch) =>
+      (current = { ...current, summary: patch.summary! }),
+    tree: async () => ({ ...snapshot(), issues: [current] }),
+    priorities: unavailable,
+    transitions: unavailable,
+    validateAssignee: unavailable,
+  });
+  await h.mutations.update('jira', 'A-2', { summary: 'Changed' });
+  await h.mutations.undo();
+  assert.equal(h.current.summary, 'A-2');
+  assert.deepEqual(h.errors, []);
 });
