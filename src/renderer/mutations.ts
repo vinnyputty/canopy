@@ -395,6 +395,10 @@ export class Mutations {
           options.assignees = [user];
         }
       } else {
+        if (fresh.reconcilingRankParents?.includes(entry.parentKey!))
+          throw new Error(
+            'Jira sibling order is still catching up. Try undo again after a refresh.',
+          );
         if (
           fresh.ranking?.state !== 'supported' ||
           !fresh.ranking.issueKeys.includes(change.key)

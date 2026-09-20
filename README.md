@@ -30,6 +30,8 @@ Use **Connect Jira site** to add a Jira Cloud site, your Atlassian account email
 
 See [Jira connection setup](docs/connections.md) for token scopes and organization policy checks. [Browser OAuth](docs/oauth.md) is an optional alternative and requires the included broker service.
 
+Recently saved Jira fields and sibling placement remain visible while search catches up. Reconciliation covers the last 50 changed issues per connection for up to five minutes; rank undo remains retryable during catch-up. See [Jira consistency limits](docs/jira.md).
+
 ## Workspace
 
 - Open a root issue by key, Jira browse URL, or summary search. Use Up/Down and Enter to open the selected search result; load additional matches on demand. Each tab remembers hierarchy and linked-issue expansion, filters, subtree focus, hide-done setting, selection, and scroll position.

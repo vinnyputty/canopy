@@ -33,6 +33,7 @@ export type TreeSnapshot = {
   issues: Issue[];
   fetchedAt: number;
   warnings: string[];
+  reconcilingRankParents?: string[];
   ranking?: {
     state: 'supported' | 'unsupported' | 'unknown';
     reason?: string;

@@ -1,3 +1,5 @@
+import { JiraConsistency } from './jira-consistency';
+
 import type {
   AssigneePage,
   Choice,
@@ -123,6 +125,8 @@ function uniqueChoices(values: Choice[]): Choice[] {
 
 /** Jira Cloud REST operations scoped to one authenticated Atlassian cloud site. */
 export class JiraProvider {
+  private consistency = new JiraConsistency();
+  private reconcileSupported = true;
   private identities = new Map<string, Choice>();
   private statuses = new Map<string, string>();
   private pickerCache = new Map<
@@ -192,6 +196,7 @@ export class JiraProvider {
     const normalizedRoot = rootKey.trim();
     if (!normalizedRoot) throw new Error('An issue key is required.');
 
+    const recent = this.consistency.snapshot();
     let root: Issue;
     try {
       root = await this.getIssue(normalizedRoot);
@@ -236,7 +241,8 @@ export class JiraProvider {
         }
 
         for (const raw of children) {
-          const child = this.observeIssue(raw);
+          const child = await this.consistentIssue(raw, recent);
+          if (!child?.parentKey || !parents.includes(child.parentKey)) continue;
           if (visited.has(child.key)) {
             warnings.push(`Ignored duplicate or cyclic child ${child.key}.`);
             continue;
@@ -258,9 +264,13 @@ export class JiraProvider {
           reason: 'Jira Rank is unavailable for this tree.',
           issueKeys: [],
         };
+    const reconciled = this.consistency.rank(issues, recent);
     return {
       rootKey: root.key,
-      issues,
+      issues: reconciled.issues,
+      ...(reconciled.parents.length
+        ? { reconcilingRankParents: reconciled.parents }
+        : {}),
       fetchedAt: Date.now(),
       warnings,
       ranking,
@@ -405,19 +415,17 @@ export class JiraProvider {
     const jql = ISSUE_KEY.test(value)
       ? `(key = ${quoteJql(value)} OR ${summaryClause}) ORDER BY updated DESC, key ASC`
       : `${summaryClause} ORDER BY updated DESC, key ASC`;
-    const page = await this.call(
-      '/rest/api/3/search/jql',
+    const recent = this.consistency.snapshot();
+    const page = await this.searchPage(
       {
-        ...jsonInit('POST', {
-          jql,
-          fields: [...ISSUE_FIELDS, 'updated'],
-          maxResults: 25,
-          ...(nextPageToken ? { nextPageToken } : {}),
-        }),
-        signal,
+        jql,
+        fields: [...ISSUE_FIELDS, 'updated'],
+        maxResults: 25,
+        ...(nextPageToken ? { nextPageToken } : {}),
       },
-      'search Jira issues',
+      signal,
     );
+    signal?.throwIfAborted();
     if (!Array.isArray(page?.issues))
       throw new Error('Jira search returned an invalid response.');
     const token =
@@ -432,13 +440,23 @@ export class JiraProvider {
       throw new Error(
         'Jira search indicated more results but supplied no page token.',
       );
+    const issues = await Promise.all(
+      page.issues.map(async (raw: JiraIssue) => {
+        const issue = await this.consistentIssue(raw, recent, signal);
+        if (!issue) return null;
+        return {
+          ...issue,
+          ...(typeof raw.fields?.updated === 'string'
+            ? { updated: raw.fields.updated }
+            : {}),
+        };
+      }),
+    );
+    signal?.throwIfAborted();
     return {
-      issues: page.issues.map((raw: JiraIssue) => ({
-        ...this.observeIssue(raw),
-        ...(typeof raw.fields?.updated === 'string'
-          ? { updated: raw.fields.updated }
-          : {}),
-      })),
+      issues: issues.filter(
+        (issue): issue is NonNullable<typeof issue> => issue !== null,
+      ),
       ...(token ? { nextPageToken: token } : {}),
     };
   }
@@ -600,6 +618,9 @@ export class JiraProvider {
       fields.assignee =
         patch.assigneeId === null ? null : { accountId: patch.assigneeId };
 
+    if (!Object.keys(fields).length && patch.transitionId === undefined)
+      return this.getIssue(key);
+
     if (
       patch.assigneeId &&
       !(await this.validateAssignee(key, patch.assigneeId))
@@ -612,11 +633,12 @@ export class JiraProvider {
       await this.assertTransitionNeedsNoFields(key, patch.transitionId);
 
     if (Object.keys(fields).length > 0) {
-      await this.call(
+      const saved = await this.call(
         `${issuePath(key)}?returnIssue=true`,
         jsonInit('PUT', { fields }),
         `update Jira issue ${key}`,
       );
+      this.consistency.changed(key, saved?.id);
     }
 
     if (patch.transitionId !== undefined) {
@@ -625,10 +647,13 @@ export class JiraProvider {
         jsonInit('POST', { transition: { id: patch.transitionId } }),
         `transition Jira issue ${key}`,
       );
+      this.consistency.changed(key);
     }
 
     if (patch.transitionId !== undefined) this.invalidate(key);
-    return this.getIssue(key);
+    const issue = await this.getIssue(key);
+    this.consistency.confirm(issue, patch);
+    return issue;
   }
 
   async rank(
@@ -674,34 +699,92 @@ export class JiraProvider {
         `Jira could not rank ${failed.map((entry: any) => entry.issueKey ?? key).join(', ')}.${details ? ` ${details}` : ''}`,
       );
     }
+    this.consistency.moved(issue, before.key, position);
   }
 
-  private async getIssue(key: string): Promise<Issue> {
+  private async consistentIssue(
+    raw: JiraIssue,
+    recent: ReturnType<JiraConsistency['snapshot']>,
+    signal?: AbortSignal,
+  ) {
+    const issue = this.observeIssue(raw);
+    if (!this.consistency.disagrees(issue, recent)) return issue;
+    try {
+      return await this.getIssue(issue.key, signal);
+    } catch (error) {
+      // Auth's status-specific message survives the contextual request wrapper.
+      if (
+        error instanceof Error &&
+        error.message.startsWith(
+          `Unable to load Jira issue ${issue.key}: Jira returned 404.`,
+        )
+      )
+        return null;
+      throw error;
+    }
+  }
+
+  private async getIssue(key: string, signal?: AbortSignal): Promise<Issue> {
     const fields = encodeURIComponent(ISSUE_FIELDS.join(','));
     const raw = await this.call(
       `${issuePath(key)}?fields=${fields}`,
-      undefined,
+      signal ? { signal } : undefined,
       `load Jira issue ${key}`,
     );
     return this.observeIssue(raw);
+  }
+
+  private async searchPage(
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) {
+    const reconcileIssues = this.consistency.ids();
+    const load = () =>
+      this.call(
+        '/rest/api/3/search/jql',
+        {
+          ...jsonInit('POST', {
+            ...body,
+            ...(this.reconcileSupported && reconcileIssues.length
+              ? { reconcileIssues }
+              : {}),
+          }),
+          ...(signal ? { signal } : {}),
+        },
+        'search Jira issues',
+      );
+    try {
+      return await load();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        !this.reconcileSupported ||
+        !reconcileIssues.length ||
+        !/reconcileIssues/i.test(message) ||
+        !/(?:unknown|unrecognized|unsupported|not supported|not allowed|unexpected) (?:parameter|field)|(?:parameter|field).*?(?:unknown|unrecognized|unsupported|not supported|not allowed)|reconcileIssues.*?(?:not supported|unsupported)/i.test(
+          message,
+        ) ||
+        /401|403|429|unauthorized|forbidden|permission|rate.limit/i.test(
+          message,
+        )
+      )
+        throw error;
+      this.reconcileSupported = false;
+      return await load();
+    }
   }
 
   private async searchAll(jql: string): Promise<JiraIssue[]> {
     const issues: JiraIssue[] = [];
     const seenTokens = new Set<string>();
     let nextPageToken: string | undefined;
-
     do {
-      const page = await this.call(
-        '/rest/api/3/search/jql',
-        jsonInit('POST', {
-          jql,
-          fields: ISSUE_FIELDS,
-          maxResults: SEARCH_PAGE_SIZE,
-          ...(nextPageToken ? { nextPageToken } : {}),
-        }),
-        'search Jira issues',
-      );
+      const page = await this.searchPage({
+        jql,
+        fields: ISSUE_FIELDS,
+        maxResults: SEARCH_PAGE_SIZE,
+        ...(nextPageToken ? { nextPageToken } : {}),
+      });
       if (!Array.isArray(page?.issues))
         throw new Error('Jira search returned an invalid response.');
       issues.push(...page.issues);

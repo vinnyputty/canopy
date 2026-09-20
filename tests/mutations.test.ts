@@ -799,3 +799,33 @@ it('undoes summaries without any picker metadata dependency', async () => {
   assert.equal(h.current.summary, 'A-2');
   assert.deepEqual(h.errors, []);
 });
+
+it('keeps rank undo retryable while the provider preserves lagging sibling order', async () => {
+  let catchingUp = true;
+  let writes = 0;
+  const h = harness({
+    rank: async () => {
+      writes++;
+    },
+    tree: async () => {
+      const fresh = snapshot();
+      fresh.issues = [
+        fresh.issues[0]!,
+        fresh.issues[3]!,
+        fresh.issues[1]!,
+        fresh.issues[2]!,
+      ];
+      if (catchingUp) fresh.reconcilingRankParents = ['A-1'];
+      return fresh;
+    },
+  });
+  await h.mutations.rank('jira', 'A-4', 'A-2');
+  await h.mutations.undo();
+  assert.equal(writes, 1);
+  assert.match(h.errors.at(-1)!, /still catching up/);
+  assert.ok(h.view.undoLabel);
+  catchingUp = false;
+  await h.mutations.undo();
+  assert.equal(writes, 2);
+  assert.equal(h.view.undoLabel, undefined);
+});
