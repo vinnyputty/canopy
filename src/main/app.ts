@@ -164,6 +164,7 @@ type Fixture = {
     | 'search'
     | 'priorities'
     | 'transitions'
+    | 'invalidateChoices'
     | 'cachedUsers'
     | 'assignees'
     | 'validateAssignee'
@@ -296,6 +297,8 @@ async function start(
       provider(id).priorities(key(issue), refresh === true),
     transitions: (id: string, issue: string, refresh = false) =>
       provider(id).transitions(key(issue), refresh === true),
+    invalidateChoices: (id: string, issue: string) =>
+      provider(id).invalidateChoices(key(issue)),
     cachedUsers: (id: string) => provider(id).cachedUsers(),
     assignees: (
       id: string,

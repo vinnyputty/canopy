@@ -16,6 +16,8 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:priorities', id, key, refresh),
   transitions: (id, key, refresh) =>
     ipcRenderer.invoke('canopy:transitions', id, key, refresh),
+  invalidateChoices: (id, key) =>
+    ipcRenderer.invoke('canopy:invalidateChoices', id, key),
   cachedUsers: (id) => ipcRenderer.invoke('canopy:cachedUsers', id),
   assignees: (id, key, query, startAt, refresh) =>
     ipcRenderer.invoke('canopy:assignees', id, key, query, startAt, refresh),

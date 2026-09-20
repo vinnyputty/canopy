@@ -87,6 +87,7 @@ launch(async (storage) => {
       search: (query, token, signal) => demo.search(query, token, signal),
       priorities: (key, refresh) => demo.priorities(key, refresh),
       transitions: (key, refresh) => demo.transitions(key, refresh),
+      invalidateChoices: () => {},
       cachedUsers: () => demo.cachedUsers(),
       assignees: (key, query, startAt, refresh) =>
         demo.assignees(key, query, startAt, refresh),
