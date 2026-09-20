@@ -4,6 +4,7 @@ tone_instructions: 'Be concise. Focus on actionable bugs, regressions, and secur
 
 reviews:
   profile: chill
+  request_changes_workflow: true
   pre_merge_checks:
     docstrings:
       mode: 'off'
