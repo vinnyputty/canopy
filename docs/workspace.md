@@ -17,3 +17,5 @@ Reopen, Back, and Forward apply the saved filters and table presentation as that
 Drag the sidebar divider to resize it between 180 and 400 pixels (220 by default). When the divider is focused, arrow keys adjust it by ten pixels; Home and End select the limits. The width survives restarts.
 
 Window size, position, and maximized state survive restarts. Saved bounds are clamped to an available monitor's work area when display arrangements change. Fullscreen state is not restored.
+
+Workspace saves replace the previous file atomically. On Windows, temporary file-lock errors retry with bounded backoff; persistent failures remain visible and leave the previous saved file intact.

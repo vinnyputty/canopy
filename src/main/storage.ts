@@ -1,7 +1,8 @@
-import { readFile, mkdir, rename, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { safeStorage } from 'electron';
 import { linuxCredentialStorageError } from './credentials';
+import { replaceFile } from './replace-file';
 
 export class Storage {
   private pending: Promise<void> = Promise.resolve();
@@ -26,7 +27,7 @@ export class Storage {
         await mkdir(this.directory, { recursive: true, mode: 0o700 });
         const file = join(this.directory, `${name}.json`);
         await writeFile(`${file}.tmp`, contents, { mode: 0o600 });
-        await rename(`${file}.tmp`, file);
+        await replaceFile(`${file}.tmp`, file);
       });
     this.pending = task;
     return task;
