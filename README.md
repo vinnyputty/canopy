@@ -14,7 +14,7 @@ bazel test //:test //:typecheck //:format_check --test_output=errors
 bazel run //:dev
 ```
 
-Run `bazel run //:smoke` for an automated Electron demo test covering editing, tree controls, linked tabs, shortcuts, and persistence across restarts. It opens isolated app windows and writes a screenshot to `.cache/tree.png`; it does not use your saved connections.
+Run `bazel run //:smoke` for an automated Electron demo test covering editing, tree controls, linked tabs, shortcuts, and persistence across restarts. Failures print visible app errors and recent process output, and save a screenshot plus `failure.json` under `.cache/smoke-failure/`; CI uploads these as `smoke-failure-<OS>` artifacts. Set `CANOPY_SMOKE_TEST_DIAGNOSTICS=1` to verify capture with an intentional failure. It opens isolated app windows and writes a screenshot to `.cache/tree.png`; it does not use your saved connections.
 
 Run the full CI sequence locally with:
 
