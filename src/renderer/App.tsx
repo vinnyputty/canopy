@@ -2939,6 +2939,7 @@ function TreeRows(props: RowsProps) {
           }
           issue={issue}
           choices={props.options[issue.key]?.assignees}
+          resultQuery={props.options[issue.key]?.assigneeResultQuery}
           state={props.options[issue.key]?.assignee}
           hasMore={props.options[issue.key]?.nextStartAt !== undefined}
           changeQuery={(query) => props.changeAssigneeQuery(issue.key, query)}
@@ -3291,6 +3292,7 @@ function AssigneeEditor({
   active,
   issue,
   choices,
+  resultQuery,
   state,
   hasMore,
   search,
@@ -3301,6 +3303,7 @@ function AssigneeEditor({
   active: boolean;
   issue: Issue;
   choices?: Choice[];
+  resultQuery?: string;
   state?: FieldLoad;
   hasMore: boolean;
   changeQuery: (query: string) => void;
@@ -3310,15 +3313,23 @@ function AssigneeEditor({
 }) {
   const [query, setQuery] = useState('');
   const previousQuery = useRef('');
+  const queryChanged = useRef(false);
   useEffect(() => {
     if (!active) {
       setQuery('');
       previousQuery.current = '';
+      queryChanged.current = false;
     }
   }, [active]);
   useEffect(() => {
-    if (!active || query === previousQuery.current) return;
+    if (!active || !queryChanged.current) return;
+    if (query === previousQuery.current) {
+      queryChanged.current = false;
+      void search(query);
+      return;
+    }
     const timer = window.setTimeout(() => {
+      queryChanged.current = false;
       previousQuery.current = query;
       void search(query);
     }, 250);
@@ -3331,9 +3342,12 @@ function AssigneeEditor({
         <span>{issue.assignee?.name ?? 'Unassigned'}</span>
       </span>
     );
-  const visible = choices?.filter((choice) =>
-    choice.name.toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  const visible =
+    resultQuery === query
+      ? choices
+      : choices?.filter((choice) =>
+          choice.name.toLowerCase().includes(query.trim().toLowerCase()),
+        );
   const more = () => {
     if (hasMore && !state?.loading && !state?.error) void search(query, true);
   };
@@ -3348,6 +3362,7 @@ function AssigneeEditor({
         autoFocus
         value={query}
         onChange={(event) => {
+          queryChanged.current = true;
           setQuery(event.target.value);
           changeQuery(event.target.value);
         }}
