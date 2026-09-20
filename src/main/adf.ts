@@ -45,7 +45,7 @@ export function documentText(value: unknown): string {
       'tableRow',
     ].includes(node.type)
       ? content + '\n\n'
-      : node.type === 'tableCell'
+      : node.type === 'tableCell' || node.type === 'tableHeader'
         ? content.trim() + '\t'
         : content;
   }

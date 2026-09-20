@@ -3,6 +3,7 @@ import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
 import { auditWorkflow } from './smoke-workflow.mjs';
+import { auditPreview } from './smoke-preview.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -2634,6 +2635,8 @@ try {
   await expect(page.getByRole('tab')).toHaveCount(0);
 
   await auditWorkflow(app, page);
+
+  await auditPreview(app, page);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(
