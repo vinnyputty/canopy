@@ -45,6 +45,18 @@ export async function auditPickers(app, page) {
   );
   expect(await count('assignees')).toBe(searches + 2);
 
+  // Blank whitespace queries pass IPC validation and return unfiltered people.
+  await input.fill('   ');
+  await page.clock.runFor(300);
+  await expect(page.locator('.assignee-popover .choice-loading')).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: 'Alex Morgan', exact: true }),
+  ).toBeVisible();
+  expect(await count('assignees')).toBe(searches + 3);
+
   // Jira can match email while returning a display name without the query text.
   await app.evaluate(() =>
     globalThis.canopySmoke.assigneeSearchResults.set('alex@example.invalid', [

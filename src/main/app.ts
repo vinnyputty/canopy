@@ -306,7 +306,7 @@ async function start(
     ) =>
       provider(id).assignees(
         key(issue),
-        query === '' ? '' : text(query),
+        typeof query === 'string' && !query.trim() ? '' : text(query),
         startAt,
         refresh === true,
       ),
