@@ -3532,7 +3532,9 @@ function OpenIssueDialog({
   onOpen: (connectionId: string, key: string) => void;
 }) {
   const [connectionId, setConnectionId] = useState(
-    activeRoot?.connectionId ?? connections[0]?.id ?? '',
+    activeRoot && connections.some(({ id }) => id === activeRoot.connectionId)
+      ? activeRoot.connectionId
+      : (connections[0]?.id ?? ''),
   );
   const [query, setQuery] = useState('');
   const [searchState, setSearchState] = useState<SearchState>({
@@ -3559,9 +3561,9 @@ function OpenIssueDialog({
       ? activeRoot
       : recentRoots.find((root) => root.connectionId === connectionId)
   )?.rootKey.split('-')[0];
-  const recent = recentRoots.filter(
-    (root) => root.connectionId === connectionId,
-  );
+  const recent = recentRoots
+    .filter((root) => root.connectionId === connectionId)
+    .slice(0, 20);
   const options = !query.trim()
     ? recent.map((root) => ({
         key: root.rootKey,
@@ -3682,7 +3684,9 @@ function OpenIssueDialog({
           <button
             className="secondary"
             disabled={busy}
-            onClick={() => void search.load()}
+            onClick={() => {
+              void search.load().finally(() => inputRef.current?.focus());
+            }}
           >
             Retry search
           </button>
@@ -3745,7 +3749,9 @@ function OpenIssueDialog({
           <button
             className="secondary"
             disabled={busy}
-            onClick={() => void search.load()}
+            onClick={() => {
+              void search.load().finally(() => inputRef.current?.focus());
+            }}
           >
             Load more
           </button>

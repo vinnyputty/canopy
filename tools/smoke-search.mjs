@@ -69,12 +69,27 @@ export async function auditSearch(app, page) {
     'Recoverable page failure',
   );
   await expect(dialog.getByRole('option')).toHaveCount(2);
+  await expect(input).toBeFocused();
   await dialog.getByRole('button', { name: 'Retry search' }).click();
   await expect(dialog.getByRole('option')).toHaveCount(3);
   await expect(dialog.getByRole('option', { selected: true })).toContainText(
     'CAN-200',
   );
-  await input.press('Enter');
+  await expect(input).toBeFocused();
+  await input.fill('search again');
+  await expect(dialog.getByRole('option')).toHaveCount(2);
+  await dialog.getByRole('button', { name: 'Load more' }).click();
+  await expect(dialog.getByRole('option')).toHaveCount(3);
+  await expect(dialog.getByRole('button', { name: 'Load more' })).toHaveCount(
+    0,
+  );
+  await expect(input).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await expect(dialog.getByRole('option', { selected: true })).toContainText(
+    'CAN-200',
+  );
+  await page.keyboard.press('Enter');
   await expect(dialog).toBeHidden();
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
@@ -138,6 +153,46 @@ export async function auditSearch(app, page) {
     const demo = globalThis.canopySmoke;
     demo.search = demo.savedSearch;
   });
+  const savedWorkspace = await page.evaluate(() =>
+    window.canopy.loadWorkspace(),
+  );
+  await page.evaluate(async (workspace) => {
+    const tab = {
+      ...workspace.tabs[0],
+      id: 'unavailable-search-tab',
+      connectionId: 'unavailable-site',
+      rootKey: 'MISSING-1',
+    };
+    await window.canopy.saveWorkspace({
+      ...workspace,
+      tabs: [tab],
+      activeTabId: tab.id,
+      recentRoots: Array.from({ length: 25 }, (_, index) => ({
+        connectionId: 'demo',
+        rootKey: `CAN-${100 + index}`,
+        summary: `Recent ${index}`,
+      })),
+    });
+  }, savedWorkspace);
+  await page.reload();
+  await expect(page.getByText('Opening Canopy…')).toBeHidden();
+  dialog = await open();
+  input = dialog.getByRole('combobox');
+  await expect(dialog.getByRole('option')).toHaveCount(20);
+  await expect(dialog.getByRole('option').first()).toContainText('CAN-100');
+  await expect(dialog.getByRole('option').last()).toContainText('CAN-119');
+  await input.fill('calmer');
+  await expect(dialog.getByRole('option')).toHaveCount(1);
+  await expect(dialog.getByRole('option').first()).toContainText('CAN-100');
+  await input.press('Escape');
+  await page.evaluate(
+    (workspace) => window.canopy.saveWorkspace(workspace),
+    savedWorkspace,
+  );
+  await page.reload();
+  await expect(
+    page.getByRole('tree', { name: 'CAN-200 issue tree' }),
+  ).toBeVisible();
   console.log(
     'Search integration passed: keyboard, recent roots, empty/error/retry, pagination, opaque cursors, cancellation, stale results, and direct URLs.',
   );
