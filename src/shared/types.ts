@@ -115,6 +115,7 @@ export interface CanopyAPI {
   currentUser(connectionId: string): Promise<Choice>;
   connect(input?: TokenConnectionInput): Promise<Connection[]>;
   disconnect(connectionId: string): Promise<void>;
+  syncStatus(connectionId: string): Promise<{ retryAt: number | null }>;
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
   preview(connectionId: string, key: string): Promise<IssuePreview>;
   copyText(value: string): Promise<void>;

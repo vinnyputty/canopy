@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Connection, TokenConnectionInput } from '../shared/types';
 import type { Storage } from './storage';
+import { JiraRequests } from './jira-requests';
 
 type Tokens = { accessToken: string; refreshToken: string; expiresAt: number };
 type Grant = {
@@ -66,6 +67,10 @@ export class Auth {
   private grants: Grant[] = [];
   private accounts: TokenAccount[] = [];
   private refreshing = new Map<string, Promise<void>>();
+  private readonly requests = new JiraRequests();
+  syncStatus(id: string) {
+    return this.requests.syncStatus(id);
+  }
   private connecting?: Promise<Connection[]>;
   constructor(
     private storage: Storage,
@@ -170,6 +175,7 @@ export class Auth {
       provider: 'jira',
     };
     const saved = { connection, email, token, apiBase };
+    this.requests.forget(id);
     this.accounts = [
       ...this.accounts.filter((a) => a.connection.id !== id),
       saved,
@@ -257,6 +263,7 @@ export class Auth {
     );
   }
   async disconnect(id: string) {
+    this.requests.forget(id);
     for (const grant of this.grants)
       grant.connections = grant.connections.filter((c) => c.id !== id);
     this.grants = this.grants.filter((g) => g.connections.length);
@@ -278,59 +285,77 @@ export class Auth {
       );
     if (!/^\/rest\/(api\/3|agile\/1\.0)\//.test(path) || path.includes('..'))
       throw new Error('Invalid Jira API path.');
-    if (grant && grant.tokens.expiresAt < Date.now() + 60_000)
-      await this.refresh(grant);
-    const base =
-      account?.apiBase ??
-      `https://api.atlassian.com/ex/jira/${encodeURIComponent(connectionId.slice(grant!.id.length + 1))}`;
-    const send = () =>
-      fetch(`${base}${path}`, {
-        ...init,
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: account
-            ? `Basic ${Buffer.from(`${account.email}:${account.token}`).toString('base64')}`
-            : `Bearer ${grant!.tokens.accessToken}`,
-        },
-        signal: init.signal
-          ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)])
-          : AbortSignal.timeout(30_000),
-        redirect: 'error',
-      });
-    let response = await send();
-    if (response.status === 401 && grant) {
-      await this.refresh(grant);
-      response = await send();
-    }
-    if (!response.ok) {
-      let details = '';
-      try {
-        const body = await response.json();
-        details = [
-          ...(body.errorMessages ?? []),
-          ...Object.values(body.errors ?? {}),
-        ].join(' ');
-      } catch {}
-      if (response.status === 403)
-        throw new Error(
-          `Jira denied access. Check issue permissions and your organization’s app-access policy. ${details}`,
-        );
-      if (response.status === 401)
-        throw new Error(
-          'Jira authorization expired or was revoked. Reconnect this site.',
-        );
+    return this.requests.run(connectionId, path, init, async () => {
+      if (grant && grant.tokens.expiresAt < Date.now() + 60_000)
+        await this.refresh(grant);
+      const base =
+        account?.apiBase ??
+        `https://api.atlassian.com/ex/jira/${encodeURIComponent(connectionId.slice(grant!.id.length + 1))}`;
+      const assertCurrent = () => {
+        if (
+          account
+            ? !this.accounts.includes(account)
+            : !this.grants.includes(grant!) ||
+              !grant!.connections.some((c) => c.id === connectionId)
+        )
+          throw new Error('This Jira connection changed. Try again.');
+      };
+      const send = () => {
+        assertCurrent();
+        this.requests.assertReady(connectionId);
+        return fetch(`${base}${path}`, {
+          ...init,
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Authorization: account
+              ? `Basic ${Buffer.from(`${account.email}:${account.token}`).toString('base64')}`
+              : `Bearer ${grant!.tokens.accessToken}`,
+          },
+          signal: init.signal
+            ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)])
+            : AbortSignal.timeout(30_000),
+          redirect: 'error',
+        });
+      };
+      let response = await send();
+      if (response.status === 401 && grant) {
+        await this.refresh(grant);
+        response = await send();
+      }
+      assertCurrent();
       if (response.status === 429)
-        throw new Error(
-          `Jira rate limit reached. Try again after ${response.headers.get('Retry-After') || 'a short wait'} seconds.`,
+        throw this.requests.rateLimited(
+          connectionId,
+          response.headers.get('Retry-After'),
         );
-      throw new Error(
-        `Jira returned ${response.status}. ${details || 'The issue may be unavailable or this action may not be supported.'}`,
-      );
-    }
-    if (response.status === 204) return undefined;
-    const text = await response.text();
-    return text ? JSON.parse(text) : undefined;
+      if (!response.ok) {
+        let details = '';
+        try {
+          const body = await response.json();
+          details = [
+            ...(body.errorMessages ?? []),
+            ...Object.values(body.errors ?? {}),
+          ].join(' ');
+        } catch {}
+        assertCurrent();
+        if (response.status === 403)
+          throw new Error(
+            `Jira denied access. Check issue permissions and your organization’s app-access policy. ${details}`,
+          );
+        if (response.status === 401)
+          throw new Error(
+            'Jira authorization expired or was revoked. Reconnect this site.',
+          );
+        throw new Error(
+          `Jira returned ${response.status}. ${details || 'The issue may be unavailable or this action may not be supported.'}`,
+        );
+      }
+      if (response.status === 204) return undefined;
+      const text = await response.text();
+      assertCurrent();
+      return text ? JSON.parse(text) : undefined;
+    });
   }
   private async refresh(grant: Grant) {
     if (!this.refreshing.has(grant.id)) {
