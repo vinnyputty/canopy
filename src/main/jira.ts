@@ -442,19 +442,21 @@ export class JiraProvider {
       );
     const issues = await Promise.all(
       page.issues.map(async (raw: JiraIssue) => {
-        const issue = await this.consistentIssue(raw, recent);
+        const issue = await this.consistentIssue(raw, recent, signal);
         if (!issue) return null;
         return {
-        ...issue,
-        ...(typeof raw.fields?.updated === 'string'
-          ? { updated: raw.fields.updated }
-          : {}),
+          ...issue,
+          ...(typeof raw.fields?.updated === 'string'
+            ? { updated: raw.fields.updated }
+            : {}),
         };
       }),
     );
     signal?.throwIfAborted();
     return {
-      issues: issues.filter((issue): issue is NonNullable<typeof issue> => issue !== null),
+      issues: issues.filter(
+        (issue): issue is NonNullable<typeof issue> => issue !== null,
+      ),
       ...(token ? { nextPageToken: token } : {}),
     };
   }
@@ -703,11 +705,12 @@ export class JiraProvider {
   private async consistentIssue(
     raw: JiraIssue,
     recent: ReturnType<JiraConsistency['snapshot']>,
+    signal?: AbortSignal,
   ) {
     const issue = this.observeIssue(raw);
     if (!this.consistency.disagrees(issue, recent)) return issue;
     try {
-      return await this.getIssue(issue.key);
+      return await this.getIssue(issue.key, signal);
     } catch (error) {
       // Auth's status-specific message survives the contextual request wrapper.
       if (
@@ -721,17 +724,20 @@ export class JiraProvider {
     }
   }
 
-  private async getIssue(key: string): Promise<Issue> {
+  private async getIssue(key: string, signal?: AbortSignal): Promise<Issue> {
     const fields = encodeURIComponent(ISSUE_FIELDS.join(','));
     const raw = await this.call(
       `${issuePath(key)}?fields=${fields}`,
-      undefined,
+      signal ? { signal } : undefined,
       `load Jira issue ${key}`,
     );
     return this.observeIssue(raw);
   }
 
-  private async searchPage(body: Record<string, unknown>, signal?: AbortSignal) {
+  private async searchPage(
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) {
     const reconcileIssues = this.consistency.ids();
     const load = () =>
       this.call(
@@ -747,25 +753,25 @@ export class JiraProvider {
         },
         'search Jira issues',
       );
-  try {
-    return await load();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (
-      !this.reconcileSupported ||
-      !reconcileIssues.length ||
-      !/reconcileIssues/i.test(message) ||
-      !/(?:unknown|unrecognized|unsupported|not supported|not allowed|unexpected) (?:parameter|field)|(?:parameter|field).*?(?:unknown|unrecognized|unsupported|not supported|not allowed)|reconcileIssues.*?(?:not supported|unsupported)/i.test(
-        message,
-      ) ||
-      /401|403|429|unauthorized|forbidden|permission|rate.limit/i.test(
-        message,
+    try {
+      return await load();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        !this.reconcileSupported ||
+        !reconcileIssues.length ||
+        !/reconcileIssues/i.test(message) ||
+        !/(?:unknown|unrecognized|unsupported|not supported|not allowed|unexpected) (?:parameter|field)|(?:parameter|field).*?(?:unknown|unrecognized|unsupported|not supported|not allowed)|reconcileIssues.*?(?:not supported|unsupported)/i.test(
+          message,
+        ) ||
+        /401|403|429|unauthorized|forbidden|permission|rate.limit/i.test(
+          message,
+        )
       )
-    )
-      throw error;
-    this.reconcileSupported = false;
-    return await load();
-  }
+        throw error;
+      this.reconcileSupported = false;
+      return await load();
+    }
   }
 
   private async searchAll(jql: string): Promise<JiraIssue[]> {

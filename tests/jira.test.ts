@@ -976,6 +976,7 @@ describe('Jira search after writes', () => {
     let failWrite = false;
     let failTransition = false;
     let rejectReconcile = '';
+    let paginated = false;
     let readError = '';
     const request = recordingRequest((path, init) => {
       const payload = body(init);
@@ -992,8 +993,19 @@ describe('Jira search after writes', () => {
       if (path === '/rest/api/3/search/jql') {
         if (payload.reconcileIssues && rejectReconcile)
           throw new Error(rejectReconcile);
-        if (payload.jql.startsWith('summary ~'))
-          return { issues: [indexed], isLast: true };
+        if (payload.jql.includes('summary ~'))
+          return {
+            issues: [
+              {
+                ...indexed,
+                fields: { ...indexed.fields, updated: '2026-09-19T00:00:00Z' },
+              },
+            ],
+            isLast: !paginated || !!payload.nextPageToken,
+            ...(paginated && !payload.nextPageToken
+              ? { nextPageToken: 'page-2' }
+              : {}),
+          };
         return {
           issues: payload.jql.startsWith('parent in ("A-1")')
             ? order.map((key) =>
@@ -1031,6 +1043,9 @@ describe('Jira search after writes', () => {
     return {
       provider,
       request,
+      paginate: () => {
+        paginated = true;
+      },
       readError: (message: string) => {
         readError = message;
       },
@@ -1145,6 +1160,56 @@ describe('Jira search after writes', () => {
     assert.equal(child(await f.provider.tree('A-1')).priority?.id, '1');
   });
 
+  it('reconciles each search page while preserving cursors, ranking metadata, and cancellation', async () => {
+    const f = fixture();
+    await f.provider.update('A-2', { summary: 'Saved' });
+    f.paginate();
+    const controller = new AbortController();
+    const first = await f.provider.search(
+      'Saved',
+      undefined,
+      controller.signal,
+    );
+    assert.equal(first.issues[0]?.summary, 'Saved');
+    assert.equal(first.issues[0]?.updated, '2026-09-19T00:00:00Z');
+    assert.equal(first.nextPageToken, 'page-2');
+    const second = await f.provider.search(
+      'Saved',
+      first.nextPageToken,
+      controller.signal,
+    );
+    assert.equal(second.issues[0]?.summary, 'Saved');
+    assert.equal(second.nextPageToken, undefined);
+    const searches = f.request.calls.filter(
+      ([path]) => path === '/rest/api/3/search/jql',
+    );
+    assert.equal(searches.length, 2);
+    for (const [, init] of searches) {
+      assert.equal(body(init).maxResults, 25);
+      assert.deepEqual(body(init).reconcileIssues, [2]);
+      assert.equal(init?.signal, controller.signal);
+    }
+    assert.equal(body(searches[1][1]).nextPageToken, 'page-2');
+    assert.ok(
+      f.request.calls.some(
+        ([path, init]) =>
+          path.includes('/issue/A-2?') && init?.signal === controller.signal,
+      ),
+    );
+    controller.abort();
+    await assert.rejects(
+      f.provider.search('Saved', undefined, controller.signal),
+      { name: 'AbortError' },
+    );
+    const fallback = fixture();
+    await fallback.provider.update('A-2', { summary: 'Saved' });
+    fallback.reject('Unknown field reconcileIssues');
+    assert.equal(
+      (await fallback.provider.search('Saved')).issues[0]?.summary,
+      'Saved',
+    );
+  });
+
   it('omits a reconciled issue missing from direct reads in both trees and search', async () => {
     const f = fixture();
     await f.provider.update('A-2', { summary: 'Saved' });
@@ -1153,7 +1218,7 @@ describe('Jira search after writes', () => {
       (await f.provider.tree('A-1')).issues.map((issue) => issue.key),
       ['A-1', 'A-3', 'A-4'],
     );
-    assert.deepEqual(await f.provider.search('Saved'), []);
+    assert.deepEqual((await f.provider.search('Saved')).issues, []);
     await assert.rejects(f.provider.tree('A-2'), /Jira returned 404/);
   });
 
@@ -1180,7 +1245,10 @@ describe('Jira search after writes', () => {
     f.converge();
     f.readError('Jira returned 404.');
     assert.equal(child(await f.provider.tree('A-1')).summary, 'Saved');
-    assert.equal((await f.provider.search('Saved'))[0]?.summary, 'Saved');
+    assert.equal(
+      (await f.provider.search('Saved')).issues[0]?.summary,
+      'Saved',
+    );
   });
 
   it('falls back only for an explicitly unsupported reconciliation parameter', async () => {
