@@ -1,3 +1,4 @@
+import { IssueSearch, type SearchState } from './issue-search';
 import React, {
   useCallback,
   useEffect,
@@ -2505,6 +2506,7 @@ export function App() {
         <OpenIssueDialog
           connections={connections}
           recentRoots={workspace.recentRoots ?? []}
+          activeRoot={activeTab ?? undefined}
           onClose={() => setDialog(null)}
           onOpen={openTab}
         />
@@ -3519,52 +3521,81 @@ function ConnectDialog({
 function OpenIssueDialog({
   connections,
   recentRoots,
+  activeRoot,
   onClose,
   onOpen,
 }: {
   connections: Connection[];
   recentRoots: RootReference[];
+  activeRoot?: RootReference;
   onClose: () => void;
   onOpen: (connectionId: string, key: string) => void;
 }) {
-  const [connectionId, setConnectionId] = useState(connections[0]?.id ?? '');
+  const [connectionId, setConnectionId] = useState(
+    activeRoot && connections.some(({ id }) => id === activeRoot.connectionId)
+      ? activeRoot.connectionId
+      : (connections[0]?.id ?? ''),
+  );
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<Issue[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [searchState, setSearchState] = useState<SearchState>({
+    issues: [],
+    loading: false,
+    searched: false,
+    error: '',
+  });
+  const [selectedKey, setSelectedKey] = useState<string>();
+  const search = useMemo(
+    () =>
+      new IssueSearch(window.canopy, (state) => {
+        setSearchState(state);
+        if (state.issues.length)
+          setSelectedKey((key) => key ?? state.issues[0].key);
+      }),
+    [],
+  );
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const directKey = parseIssueKey(query);
+  const project = (
+    activeRoot?.connectionId === connectionId
+      ? activeRoot
+      : recentRoots.find((root) => root.connectionId === connectionId)
+  )?.rootKey.split('-')[0];
+  const recent = recentRoots
+    .filter((root) => root.connectionId === connectionId)
+    .slice(0, 20);
+  const options = !query.trim()
+    ? recent.map((root) => ({
+        key: root.rootKey,
+        summary: root.summary ?? '',
+        type: '',
+      }))
+    : searchState.issues;
+  const selected =
+    options.find((issue) => issue.key === selectedKey) ?? options[0];
+  const busy = searchState.loading;
   useEffect(() => inputRef.current?.focus(), []);
   useEffect(() => {
-    setResults([]);
+    setSelectedKey(undefined);
     setError('');
-    if (!connectionId || query.trim().length < 2 || parseIssueKey(query)) {
-      setBusy(false);
-      return;
-    }
-    let live = true;
-    const timer = window.setTimeout(() => {
-      setBusy(true);
-      window.canopy
-        .search(connectionId, query.trim())
-        .then((value) => live && setResults(value))
-        .catch(
-          (reason) =>
-            live &&
-            setError(reason instanceof Error ? reason.message : String(reason)),
-        )
-        .finally(() => live && setBusy(false));
-    }, 250);
-    return () => {
-      live = false;
-      window.clearTimeout(timer);
-    };
-  }, [connectionId, query]);
+    search.start(
+      connectionId,
+      query.trim(),
+      project,
+      Boolean(connectionId && query.trim().length >= 2 && !directKey),
+    );
+    return () => search.cancel();
+  }, [connectionId, query, project, directKey, search]);
+  useEffect(() => {
+    if (selected)
+      document
+        .getElementById(`issue-option-${selected.key}`)
+        ?.scrollIntoView({ block: 'nearest' });
+  }, [selected?.key]);
   const submit = () => {
-    const key = parseIssueKey(query);
+    const key = directKey ?? selected?.key;
     if (!connectionId) setError('Choose a connection first.');
-    else if (!key)
-      setError('Enter an issue key, Jira URL, or select a search result.');
-    else onOpen(connectionId, key);
+    else if (key) onOpen(connectionId, key);
   };
   return (
     <Dialog title="Open issue tree" onClose={onClose}>
@@ -3576,7 +3607,7 @@ function OpenIssueDialog({
               value={connectionId}
               onChange={(event) => {
                 setConnectionId(event.target.value);
-                setResults([]);
+                search.start(event.target.value, '', undefined, false);
                 setError('');
               }}
             >
@@ -3594,12 +3625,45 @@ function OpenIssueDialog({
             ref={inputRef}
             value={query}
             onChange={(event) => {
+              search.start(connectionId, '', project, false);
               setQuery(event.target.value);
               setError('');
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') submit();
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                submit();
+              }
+              if (
+                (event.key === 'ArrowDown' || event.key === 'ArrowUp') &&
+                options.length
+              ) {
+                event.preventDefault();
+                const index = Math.max(
+                  0,
+                  options.findIndex((issue) => issue.key === selected?.key),
+                );
+                setSelectedKey(
+                  options[
+                    Math.max(
+                      0,
+                      Math.min(
+                        options.length - 1,
+                        index + (event.key === 'ArrowDown' ? 1 : -1),
+                      ),
+                    )
+                  ].key,
+                );
+              }
             }}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={options.length > 0}
+            aria-controls="issue-search-options"
+            aria-activedescendant={
+              selected ? `issue-option-${selected.key}` : undefined
+            }
             placeholder="Issue key, Jira URL, or summary"
             aria-label="Issue key, Jira URL, or summary"
           />
@@ -3611,36 +3675,61 @@ function OpenIssueDialog({
             Connect a Jira site from the sidebar first.
           </p>
         )}
-        {error && <p className="dialog-error">{error}</p>}
-        <div className="search-results">
-          {!query.trim() &&
-            recentRoots.some((root) => root.connectionId === connectionId) && (
-              <>
-                <p className="dialog-note">Recent roots</p>
-                {recentRoots
-                  .filter((root) => root.connectionId === connectionId)
-                  .map((root) => (
-                    <button
-                      key={root.rootKey}
-                      title={root.summary}
-                      onClick={() => onOpen(root.connectionId, root.rootKey)}
-                    >
-                      <CircleDot size={14} />
-                      <span>
-                        <b>{root.rootKey}</b>
-                        {root.summary}
-                      </span>
-                      <ChevronRight size={14} />
-                    </button>
-                  ))}
-              </>
-            )}
-          {results.map((issue) => (
+        {(error || searchState.error) && (
+          <p className="dialog-error" role="alert">
+            {error || searchState.error}
+          </p>
+        )}
+        {searchState.error && (
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => {
+              void search.load().finally(() => inputRef.current?.focus());
+            }}
+          >
+            Retry search
+          </button>
+        )}
+        {busy && (
+          <p className="dialog-note" role="status">
+            {options.length ? 'Loading more matches…' : 'Searching Jira…'}
+          </p>
+        )}
+        {!busy &&
+          !searchState.error &&
+          searchState.searched &&
+          !options.length && (
+            <p className="dialog-note" role="status">
+              {searchState.nextPageToken
+                ? 'No matches on this page. Load more to continue searching.'
+                : 'No matching issues. Try another summary or enter an issue key.'}
+            </p>
+          )}
+        {!query.trim() && options.length > 0 && (
+          <p className="dialog-note">Recent roots</p>
+        )}
+        <div
+          className="search-results"
+          id="issue-search-options"
+          role="listbox"
+          aria-label="Issue results"
+        >
+          {options.map((issue) => (
             <button
               key={issue.key}
+              id={`issue-option-${issue.key}`}
+              role="option"
+              aria-selected={selected?.key === issue.key}
+              tabIndex={-1}
+              title={issue.summary}
+              onMouseMove={() => setSelectedKey(issue.key)}
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => onOpen(connectionId, issue.key)}
             >
-              <span className="type-icon">{issue.type.slice(0, 1)}</span>
+              <span className="type-icon">
+                {issue.type.slice(0, 1) || <CircleDot size={14} />}
+              </span>
               <span>
                 <b>{issue.key}</b>
                 {issue.summary}
@@ -3649,13 +3738,31 @@ function OpenIssueDialog({
             </button>
           ))}
         </div>
+        {query.trim() && searchState.issues.length > 0 && (
+          <p className="dialog-note" role="status">
+            {searchState.nextPageToken
+              ? `Ranked among ${searchState.issues.length} loaded matches; more matches are available. Later pages may contain better matches.`
+              : `${searchState.issues.length} matches loaded.`}
+          </p>
+        )}
+        {searchState.nextPageToken && !searchState.error && (
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => {
+              void search.load().finally(() => inputRef.current?.focus());
+            }}
+          >
+            Load more
+          </button>
+        )}
         <div className="dialog-footer">
           <span>
             <kbd>↵</kbd> open
           </span>
           <button
             className="primary"
-            disabled={!connectionId || !parseIssueKey(query)}
+            disabled={!connectionId || (!directKey && !selected)}
             onClick={submit}
           >
             Open tree

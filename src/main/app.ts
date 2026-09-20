@@ -199,6 +199,12 @@ async function start(
     if (!connection) throw new Error('This connection is unavailable.');
     return `${connection.url}/browse/${encodeURIComponent(issueKey)}`;
   };
+  const searches = new Map<string, AbortController>();
+  const cancelSearch = (id: string, requestId: string) => {
+    const owner = JSON.stringify([text(id), text(requestId)]);
+    searches.get(owner)?.abort();
+    searches.delete(owner);
+  };
   const handlers: Record<string, (...args: any[]) => unknown> = {
     connections,
     currentUser: async (id: string) => {
@@ -218,6 +224,12 @@ async function start(
     },
     disconnect: async (id: string) => {
       text(id);
+      for (const [owner, controller] of searches) {
+        if (JSON.parse(owner)[0] === id) {
+          controller.abort();
+          searches.delete(owner);
+        }
+      }
       if (id === fixture?.connection.id) {
         await fixture.disconnect();
         fixture = undefined;
@@ -237,7 +249,30 @@ async function start(
         throw new Error('Invalid clipboard text.');
       clipboard.writeText(value);
     },
-    search: (id: string, query: string) => provider(id).search(text(query)),
+    search: async (
+      id: string,
+      query: string,
+      options: { requestId: string; nextPageToken?: string },
+    ) => {
+      const client = provider(id);
+      const requestId = text(options?.requestId);
+      const token = options.nextPageToken;
+      if (
+        token !== undefined &&
+        (typeof token !== 'string' || !token.length || token.length > 16_384)
+      )
+        throw new Error('Invalid search page token.');
+      const owner = JSON.stringify([id, requestId]);
+      cancelSearch(id, requestId);
+      const controller = new AbortController();
+      searches.set(owner, controller);
+      try {
+        return await client.search(text(query), token, controller.signal);
+      } finally {
+        if (searches.get(owner) === controller) searches.delete(owner);
+      }
+    },
+    cancelSearch,
     editOptions: (id: string, issue: string, query?: string) =>
       provider(id).editOptions(
         key(issue),
@@ -305,6 +340,10 @@ async function start(
       },
     });
     const created = window;
+    created.webContents.on('destroyed', () => {
+      for (const controller of searches.values()) controller.abort();
+      searches.clear();
+    });
     if (saved?.maximized) created.maximize();
     let savingWindow: Promise<void> = Promise.resolve();
     let closeApproved = false;
