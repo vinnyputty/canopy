@@ -132,7 +132,9 @@ export async function auditRefresh(app, page, resizeWindow) {
   await expect(checking).toBeVisible();
   await release('refresh-retry');
   await idle();
-  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect
+    .poll(() => page.getByRole('alert').allTextContents())
+    .toEqual([]);
   await expect(status).toHaveText('Connected');
 
   // Editing blocks focus, background, and reconnect refreshes on this connection.
