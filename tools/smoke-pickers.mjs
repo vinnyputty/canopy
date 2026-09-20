@@ -27,17 +27,32 @@ export async function auditPickers(app, page) {
   await page.getByRole('button', { name: 'Unassigned', exact: true }).click();
   await expect(field('assignee')).toHaveText('—Unassigned');
   await field('assignee').click();
+  await page.clock.install();
+  await page.clock.pauseAt(
+    new Date(await page.evaluate(() => Date.now() + 1000)),
+  );
   await page.getByLabel('Search assignees').fill('Nobody matches');
   await expect(mine()).toBeVisible();
   await app.evaluate(() =>
     globalThis.canopySmoke.unassignableUsers.add('alex'),
   );
   const beforeSelf = await count('update');
+  const beforeSearch = await count('assignees');
+  await fixture('hold', 'self-validation', 'validateAssignee', 'CAN-100');
   await mine().click();
+  await expect.poll(() => fixture('started', 'self-validation')).toBe(true);
+  await page.clock.runFor(300);
+  expect(await count('assignees')).toBe(beforeSearch);
+  await fixture('release', 'self-validation');
   await expect(
     page.getByRole('alert').filter({ hasText: 'could not confirm' }),
   ).toBeVisible();
   expect(await count('update')).toBe(beforeSelf);
+  await page.clock.runFor(300);
+  await expect(
+    page.getByRole('alert').filter({ hasText: 'could not confirm' }),
+  ).toBeVisible();
+  await page.clock.resume();
   await app.evaluate(() => globalThis.canopySmoke.unassignableUsers.clear());
   await cancel();
   await field('assignee').click();
@@ -93,8 +108,9 @@ export async function auditPickers(app, page) {
   ).toBeHidden();
   expect(await count('assignees')).toBe(searches + 1);
   // Returning to the last searched value before debounce completes must settle loading.
-  await page.clock.install();
-  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await page.clock.pauseAt(
+    new Date(await page.evaluate(() => Date.now() + 1000)),
+  );
   const input = page.getByLabel('Search assignees');
   await input.fill('x');
   await input.fill('');

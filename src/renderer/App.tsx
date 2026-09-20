@@ -3328,6 +3328,7 @@ function AssigneeEditor({
   const [query, setQuery] = useState('');
   const previousQuery = useRef('');
   const queryChanged = useRef(false);
+  const searchTimer = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (!active) {
       setQuery('');
@@ -3347,8 +3348,14 @@ function AssigneeEditor({
       previousQuery.current = query;
       void search(query);
     }, 250);
+    searchTimer.current = timer;
     return () => window.clearTimeout(timer);
   }, [active, query]);
+  const choose = (id: string | null) => {
+    window.clearTimeout(searchTimer.current);
+    queryChanged.current = false;
+    save(id);
+  };
   if (!active)
     return (
       <span className="assignee">
@@ -3390,8 +3397,13 @@ function AssigneeEditor({
           issue.assignee?.id === currentUser.id ||
           state?.validating
         }
+        title={
+          !currentUser
+            ? 'Your Jira account is not available yet. Retry the account lookup.'
+            : undefined
+        }
         onMouseDown={(event) => event.preventDefault()}
-        onClick={() => currentUser && save(currentUser.id)}
+        onClick={() => currentUser && choose(currentUser.id)}
       >
         <AssigneeAvatar assignee={currentUser ?? null} />
         {currentUser && issue.assignee?.id === currentUser.id ? (
@@ -3413,7 +3425,7 @@ function AssigneeEditor({
         <button
           disabled={state?.validating}
           onMouseDown={(event) => event.preventDefault()}
-          onClick={() => save(null)}
+          onClick={() => choose(null)}
         >
           <AssigneeAvatar assignee={null} />
           Unassigned
@@ -3423,7 +3435,7 @@ function AssigneeEditor({
             key={choice.id}
             disabled={state?.validating}
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => save(choice.id)}
+            onClick={() => choose(choice.id)}
           >
             <AssigneeAvatar assignee={choice} />
             {choice.name}
