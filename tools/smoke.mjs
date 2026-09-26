@@ -1088,6 +1088,23 @@ try {
   await page.getByRole('button', { name: 'Expand', exact: true }).click();
   await expect(tree.getByRole('treeitem')).toHaveCount(15);
 
+  await page.getByRole('button', { name: 'Next tasks' }).click();
+  const nextTasks = page.getByRole('region', { name: 'Next tasks' });
+  await expect(nextTasks).toBeVisible();
+  await expect(
+    nextTasks.getByRole('button', { name: 'Show CAN-102 in tree' }),
+  ).toHaveCount(0);
+  await nextTasks.getByLabel('Order next tasks by').selectOption('priority');
+  await expect(nextTasks).toContainText('Jira priority');
+  await nextTasks.getByRole('checkbox', { name: 'Assigned to me' }).check();
+  await expect(
+    nextTasks.getByRole('button', { name: 'Show CAN-108 in tree' }),
+  ).toHaveCount(0);
+  await nextTasks.getByRole('checkbox', { name: 'Assigned to me' }).uncheck();
+  await nextTasks.getByRole('button', { name: 'Show CAN-108 in tree' }).click();
+  await expect(issue('CAN-108')).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('button', { name: 'Next tasks' }).click();
+
   expect(
     await app.evaluate(() => globalThis.canopyPreviewTest.requests),
   ).toEqual([]);
@@ -2841,6 +2858,19 @@ try {
         ),
       ).toBe(0);
     }
+    await close();
+    await launch(false, { CANOPY_SMOKE_PRIORITY_FAILURES: '1' });
+    await page.getByRole('button', { name: 'Next tasks' }).click();
+    const priorityNextTasks = page.getByRole('region', { name: 'Next tasks' });
+    await priorityNextTasks
+      .getByLabel('Order next tasks by')
+      .selectOption('priority');
+    await priorityNextTasks
+      .getByRole('button', { name: 'Retry priority order' })
+      .click();
+    await expect(
+      priorityNextTasks.getByRole('button', { name: 'Retry priority order' }),
+    ).toHaveCount(0);
     await close();
     await launch(false, { CANOPY_SMOKE_PRIORITY_FAILURES: '1' });
     await expect(

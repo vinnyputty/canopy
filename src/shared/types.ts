@@ -19,7 +19,13 @@ export type Issue = {
   priority: Choice | null;
   assignee: Choice | null;
   status: Status;
-  links: { key: string; summary: string; relationship: string }[];
+  links: {
+    key: string;
+    summary: string;
+    relationship: string;
+    statusCategory?: Status['category'];
+  }[];
+  linksAvailable?: boolean;
   labels?: Choice[];
 };
 export type IssuePreview = {

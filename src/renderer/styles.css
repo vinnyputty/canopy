@@ -2399,6 +2399,79 @@ kbd {
   min-width: 0;
   min-height: 0;
 }
+.next-tasks {
+  flex: 0 1 auto;
+  max-height: 42%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-raised);
+}
+.next-tasks-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+}
+.next-tasks-controls select {
+  margin-left: 5px;
+  color: inherit;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px;
+}
+.next-tasks-explanation {
+  margin: 5px 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.next-tasks-list {
+  overflow: auto;
+  min-height: 0;
+}
+.next-task-group {
+  padding: 8px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.next-task {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.next-task-number {
+  color: var(--muted);
+  width: 20px;
+  text-align: right;
+  flex: 0 0 auto;
+}
+.next-task-detail {
+  flex: 1;
+  min-width: 0;
+}
+.next-task-title,
+.next-task-context {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.next-task-context {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .issue-preview {
   position: relative;
   flex: 0 0 auto;
