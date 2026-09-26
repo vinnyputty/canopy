@@ -54,9 +54,10 @@ export class JiraRequests {
     const read =
       method === 'GET' ||
       (method === 'POST' &&
-        ['/rest/api/3/search/jql', '/rest/api/3/permissions/check'].includes(
+        (['/rest/api/3/search/jql', '/rest/api/3/permissions/check'].includes(
           path,
-        ));
+        ) ||
+          path.startsWith('/rest/api/3/workflows?')));
     const key =
       read && !init.signal
         ? JSON.stringify([method, path, init.body ?? null])

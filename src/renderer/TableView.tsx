@@ -128,6 +128,20 @@ export function ViewSettings({
             <option value="comfortable">Comfortable</option>
           </select>
         </label>
+        {provider === 'jira' && (
+          <label>
+            <span>Assume matching status transitions for this root</span>
+            <input
+              type="checkbox"
+              checked={view.assumeMatchingStatusTransitions}
+              onChange={(event) =>
+                update({
+                  assumeMatchingStatusTransitions: event.target.checked,
+                })
+              }
+            />
+          </label>
+        )}
         <fieldset>
           <legend>Columns</legend>
           {[

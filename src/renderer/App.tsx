@@ -191,8 +191,10 @@ export function App() {
   const [history, setHistory] = useState<Navigation>({ back: [], forward: [] });
   const historyRef = useRef(history);
   const workspaceRef = useRef(workspace);
+  const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
   workspaceRef.current = workspace;
+  connectionsRef.current = connections;
   historyRef.current = history;
   const [queries, setQueries] = useState<Record<string, string>>({});
   const [reveal, setReveal] = useState<{ tabId: string; key: string } | null>(
@@ -431,10 +433,18 @@ export function App() {
     (patch: Partial<RootView>) => {
       if (!activeTab) return;
       setWorkspace((current) => setRootView(current, activeTab, patch));
+      if (patch.assumeMatchingStatusTransitions && snapshot)
+        void pickers.prime(
+          activeTab.connectionId,
+          activeTab.rootKey,
+          snapshot.issues,
+        );
+      if (patch.assumeMatchingStatusTransitions === false && snapshot)
+        pickers.clearStatusChoices(activeTab.connectionId, snapshot.issues);
       setDragKey(null);
       setEditor(null);
     },
-    [activeTab],
+    [activeTab, snapshot, pickers],
   );
   const statusRegistries = useRef(new Map<string, StatusColors>());
   const statusColors = useMemo(() => {
@@ -597,6 +607,14 @@ export function App() {
         const next = await window.canopy.tree(tab.connectionId, tab.rootKey);
         if (
           refreshSequences.current[tab.id] === sequence &&
+          !refreshBlocked.current(tab.connectionId) &&
+          connectionsRef.current.find((item) => item.id === tab.connectionId)
+            ?.provider === 'jira' &&
+          rootView(workspaceRef.current, tab).assumeMatchingStatusTransitions
+        )
+          await pickers.prime(tab.connectionId, tab.rootKey, next.issues);
+        if (
+          refreshSequences.current[tab.id] === sequence &&
           !refreshBlocked.current(tab.connectionId)
         ) {
           mutations.receive(tab, next, epoch);
@@ -653,7 +671,7 @@ export function App() {
         tab.id === pending.tabId && tab.connectionId === pending.connectionId,
     );
     if (!tab) return false;
-    pickers.invalidate(pending.connectionId, pending.key);
+    pickers.revalidateStatus(pending.connectionId, pending.key);
     void window.canopy
       .invalidateChoices(pending.connectionId, pending.key)
       .catch((error) => {
@@ -1373,9 +1391,23 @@ export function App() {
       editSession.current++;
       setEditor({ connectionId: activeTab.connectionId, key, field });
       if (field !== 'summary')
-        void pickers.open(activeTab.connectionId, key, field);
+        void pickers.open(
+          activeTab.connectionId,
+          key,
+          field,
+          activeTab.rootKey,
+          activeConnection?.provider === 'jira' &&
+            view.assumeMatchingStatusTransitions,
+          snapshot?.issues.find((issue) => issue.key === key),
+        );
     },
-    [activeTab, pickers],
+    [
+      activeTab,
+      activeConnection?.provider,
+      view.assumeMatchingStatusTransitions,
+      snapshot,
+      pickers,
+    ],
   );
 
   useEffect(() => {

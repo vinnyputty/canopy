@@ -11,7 +11,16 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 export function validRootView(value: unknown): value is RootView {
   if (!record(value)) return false;
-  const { columns, widths, sort, textSize, spacing, hideDone, filters } = value;
+  const {
+    columns,
+    widths,
+    sort,
+    textSize,
+    spacing,
+    hideDone,
+    assumeMatchingStatusTransitions,
+    filters,
+  } = value;
   return (
     Array.isArray(columns) &&
     columns[0] === 'issue' &&
@@ -37,6 +46,7 @@ export function validRootView(value: unknown): value is RootView {
     ['small', 'medium', 'large'].includes(String(textSize)) &&
     ['compact', 'comfortable'].includes(String(spacing)) &&
     typeof hideDone === 'boolean' &&
+    typeof assumeMatchingStatusTransitions === 'boolean' &&
     record(filters) &&
     Object.keys(filters).every((key) =>
       ['assignee', 'status', 'priority'].includes(key),
@@ -58,6 +68,13 @@ export function validViewMap(
 ): value is Record<string, RootView> {
   return record(value) && Object.values(value).every(validRootView);
 }
+function restoredRootView(value: unknown): RootView | undefined {
+  const candidate =
+    record(value) && !Object.hasOwn(value, 'assumeMatchingStatusTransitions')
+      ? { ...value, assumeMatchingStatusTransitions: true }
+      : value;
+  return validRootView(candidate) ? candidate : undefined;
+}
 /** Retain unrelated workspace state when an old or hand-edited view is invalid. */
 export function recoverWorkspaceViews(workspace: Workspace): Workspace {
   if (
@@ -71,17 +88,21 @@ export function recoverWorkspaceViews(workspace: Workspace): Workspace {
     throw new Error('Invalid saved workspace.');
   const recover = (value: unknown) =>
     Object.fromEntries(
-      Object.entries(record(value) ? value : {}).filter(([, view]) =>
-        validRootView(view),
-      ),
+      Object.entries(record(value) ? value : {}).flatMap(([key, value]) => {
+        const view = restoredRootView(value);
+        return view ? [[key, view]] : [];
+      }),
     ) as Record<string, RootView>;
   const recoverTabs = (tabs: TabState[]) =>
-    tabs.some((tab) => tab.view !== undefined && !validRootView(tab.view))
-      ? tabs.map((tab) =>
-          tab.view !== undefined && !validRootView(tab.view)
-            ? { ...tab, view: undefined }
-            : tab,
-        )
+    tabs.some(
+      (tab) =>
+        tab.view !== undefined && restoredRootView(tab.view) !== tab.view,
+    )
+      ? tabs.map((tab) => {
+          if (tab.view === undefined) return tab;
+          const view = restoredRootView(tab.view);
+          return view === tab.view ? tab : { ...tab, view };
+        })
       : tabs;
   return {
     ...workspace,

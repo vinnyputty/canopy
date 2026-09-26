@@ -21,7 +21,8 @@ type API = Pick<
   | 'cachedUsers'
   | 'assignees'
   | 'validateAssignee'
->;
+> &
+  Partial<Pick<CanopyAPI, 'workflowGraph'>>;
 const message = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 const merge = (users: Choice[], added: Choice[]) => [
@@ -33,13 +34,28 @@ export class Pickers {
   values: Record<string, PickerOptions> = {};
   private sequences = new Map<string, number>();
   private statuses = new Map<string, string>();
+  private issueTypes = new Map<string, string>();
   private pendingStatuses = new Map<string, Promise<void>>();
+  private statusChoiceContexts = new Map<string, string>();
+  private freshStatuses = new Set<string>();
+  private statusTrees = new Map<
+    string,
+    Map<string, EditOptions['transitions']>
+  >();
+  private pendingTreeStatuses = new Map<string, Promise<void>>();
+  private workflowGraphAttempted = new Set<string>();
+  private verifiedTreeStatuses = new Set<string>();
   constructor(
     private api: API,
     private changed: (values: Record<string, PickerOptions>) => void,
   ) {}
   private scoped(connection: string, key: string) {
     return `${connection}:${key}`;
+  }
+  private typeKey(issue: Issue) {
+    return issue.projectId && issue.typeId
+      ? JSON.stringify([issue.projectId, issue.typeId])
+      : issue.type;
   }
   private set(scope: string, patch: Partial<PickerOptions>) {
     this.values = {
@@ -59,14 +75,89 @@ export class Pickers {
     for (const [key, value] of this.sequences)
       this.sequences.set(key, value + 1);
     this.statuses.clear();
+    this.issueTypes.clear();
     this.pendingStatuses.clear();
+    this.statusChoiceContexts.clear();
+    this.freshStatuses.clear();
+    this.statusTrees.clear();
+    this.pendingTreeStatuses.clear();
+    this.workflowGraphAttempted.clear();
+    this.verifiedTreeStatuses.clear();
     this.changed(this.values);
+  }
+  async prime(connection: string, rootKey: string, issues: Issue[]) {
+    this.observe(connection, issues);
+    const root = JSON.stringify([connection, rootKey]);
+    let tree = this.statusTrees.get(root);
+    if (!tree) {
+      tree = new Map();
+      this.statusTrees.set(root, tree);
+    }
+    const workflowTypes = new Map<string, Issue>();
+    for (const issue of issues)
+      if (issue.projectId && issue.typeId)
+        workflowTypes.set(this.typeKey(issue), issue);
+    await Promise.all(
+      [...workflowTypes].map(async ([type, issue]) => {
+        const scope = JSON.stringify([root, type]);
+        if (this.workflowGraphAttempted.has(scope)) return;
+        this.workflowGraphAttempted.add(scope);
+        try {
+          const graph = await this.api.workflowGraph?.(
+            connection,
+            issue.projectId!,
+            issue.typeId!,
+          );
+          if (this.statusTrees.get(root) !== tree || !graph) return;
+          for (const [status, choices] of Object.entries(graph)) {
+            const pair = JSON.stringify([type, status]);
+            if (!tree!.has(pair)) tree!.set(pair, choices);
+          }
+        } catch {
+          this.workflowGraphAttempted.delete(scope);
+          // Ordinary issue transitions still prefill statuses in this tree.
+        }
+      }),
+    );
+    const representatives = new Map<string, string>();
+    for (const issue of issues)
+      if (issue.status.id) {
+        const pair = JSON.stringify([this.typeKey(issue), issue.status.id]);
+        if (!representatives.has(pair)) representatives.set(pair, issue.key);
+      }
+    await Promise.all(
+      [...representatives].map(async ([pair, key]) => {
+        const scope = JSON.stringify([root, pair]);
+        if (this.verifiedTreeStatuses.has(scope)) return;
+        let pending = this.pendingTreeStatuses.get(scope);
+        if (!pending) {
+          pending = this.api.transitions(connection, key).then(
+            (choices) => {
+              if (this.statusTrees.get(root) === tree) {
+                tree!.set(pair, choices);
+                this.verifiedTreeStatuses.add(scope);
+              }
+            },
+            () => {
+              // A failed prefetch falls back to the issue's normal load.
+            },
+          );
+          this.pendingTreeStatuses.set(scope, pending);
+          void pending.finally(() => {
+            if (this.pendingTreeStatuses.get(scope) === pending)
+              this.pendingTreeStatuses.delete(scope);
+          });
+        }
+        await pending;
+      }),
+    );
   }
   observe(connection: string, issues: Issue[]) {
     for (const issue of issues) {
       const scope = this.scoped(connection, issue.key);
       const previous = this.statuses.get(scope);
       this.statuses.set(scope, issue.status.id);
+      this.issueTypes.set(scope, this.typeKey(issue));
       if (previous !== undefined && previous !== issue.status.id) {
         const errors = Object.fromEntries(
           (['priority', 'assignee', 'status'] as const).flatMap((field) =>
@@ -83,12 +174,27 @@ export class Pickers {
   invalidate(connection: string, key: string) {
     const scope = this.scoped(connection, key);
     this.pendingStatuses.delete(scope);
+    this.statusChoiceContexts.delete(scope);
     for (const field of ['priority', 'assignee', 'status'] as const)
       this.sequence(scope, field);
     const values = { ...this.values };
     delete values[scope];
     this.values = values;
     this.changed(values);
+  }
+  revalidateStatus(connection: string, key: string) {
+    this.invalidate(connection, key);
+    this.freshStatuses.add(this.scoped(connection, key));
+  }
+  clearStatusChoices(connection: string, issues: Issue[]) {
+    for (const issue of issues) {
+      const scope = this.scoped(connection, issue.key);
+      this.sequence(scope, 'status');
+      this.pendingStatuses.delete(scope);
+      this.statusChoiceContexts.delete(scope);
+      if (this.values[scope])
+        this.set(scope, { transitions: undefined, status: undefined });
+    }
   }
   close(connection: string, key: string, field: PickerField) {
     if (field !== 'assignee') return;
@@ -107,27 +213,58 @@ export class Pickers {
     this.sequence(scope, 'assignee');
     this.set(scope, { query, nextStartAt: 0, assignee: { loading: true } });
   }
-  async open(connection: string, key: string, field: PickerField) {
+  async open(
+    connection: string,
+    key: string,
+    field: PickerField,
+    rootKey?: string,
+    assumeMatchingStatusTransitions = false,
+    issue?: Issue,
+  ) {
     if (field === 'status') {
       const scope = this.scoped(connection, key);
       const previous = this.values[scope];
-      if (previous?.transitions && !previous.status?.error) return;
+      const fresh =
+        this.freshStatuses.has(scope) || Boolean(previous?.status?.error);
+      const status = issue?.status.id ?? this.statuses.get(scope);
+      const type = issue ? this.typeKey(issue) : this.issueTypes.get(scope);
+      const context = JSON.stringify([rootKey, type, status]);
+      if (
+        previous?.transitions &&
+        !fresh &&
+        (!this.statusChoiceContexts.has(scope) ||
+          this.statusChoiceContexts.get(scope) === context)
+      )
+        return;
+      if (rootKey && assumeMatchingStatusTransitions && !fresh) {
+        const root = JSON.stringify([connection, rootKey]);
+        const pair = JSON.stringify([type, status]);
+        const shared = this.statusTrees.get(root)?.get(pair);
+        if (
+          shared &&
+          (shared.length ||
+            this.verifiedTreeStatuses.has(JSON.stringify([root, pair])))
+        ) {
+          this.set(scope, { transitions: shared, status: {} });
+          this.statusChoiceContexts.set(scope, context);
+          return;
+        }
+      }
       const pending = this.pendingStatuses.get(scope);
       if (pending) return pending;
-      const load = this.load(
-        connection,
-        key,
-        field,
-        '',
-        false,
-        Boolean(previous?.status?.error),
-      );
+      const load = this.load(connection, key, field, '', false, fresh);
       this.pendingStatuses.set(scope, load);
       try {
         await load;
       } finally {
-        if (this.pendingStatuses.get(scope) === load)
+        if (this.pendingStatuses.get(scope) === load) {
           this.pendingStatuses.delete(scope);
+          if (!this.values[scope]?.status?.error) {
+            this.freshStatuses.delete(scope);
+            if (this.values[scope]?.transitions)
+              this.statusChoiceContexts.set(scope, context);
+          }
+        }
       }
       return;
     }
@@ -184,6 +321,7 @@ export class Pickers {
         const priorities = await this.api.priorities(connection, key, refresh);
         if (current()) this.set(scope, { priorities, priority: {} });
       } else if (field === 'status') {
+        this.statusChoiceContexts.delete(scope);
         const transitions = await this.api.transitions(
           connection,
           key,
@@ -248,6 +386,7 @@ export class Pickers {
     if (field === 'status') {
       this.sequence(scope, field);
       this.pendingStatuses.delete(scope);
+      this.statusChoiceContexts.delete(scope);
     }
     this.set(scope, {
       ...(field === 'status' ? { transitions: undefined } : {}),

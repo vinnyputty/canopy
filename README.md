@@ -62,6 +62,8 @@ Recently saved Jira fields and sibling placement remain visible while search cat
 
 Priority, assignee, and status pickers load independently with field-specific Retry actions. Assignee suggestions use the last 100 people seen on the connection; selection checks issue eligibility, and search or Load more fetches additional results within Jira’s 1,000-user discovery limit.
 
+Jira roots prefetch status choices by issue type so child menus open with cached transitions. The View menu’s default-on sharing setting can be disabled per root. Full workflow prefetch needs Jira workflow-view or admin permission; otherwise Canopy prefills statuses represented in the open tree.
+
 Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/jira.md).
 
 ## Packaging

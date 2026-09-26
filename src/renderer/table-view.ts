@@ -23,6 +23,7 @@ export const DEFAULT_VIEW: RootView = {
   textSize: 'medium',
   spacing: 'compact',
   hideDone: true,
+  assumeMatchingStatusTransitions: true,
   filters: {},
 };
 export function viewKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {

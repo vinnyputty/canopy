@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { Pickers } from '../src/renderer/pickers';
-import type { CanopyAPI, Choice } from '../src/shared/types';
+import type { CanopyAPI, Choice, Issue } from '../src/shared/types';
 const ada = { id: 'ada', name: 'Ada' };
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -39,6 +39,16 @@ function harness(overrides: Partial<CanopyAPI> = {}) {
   );
   return { pickers, calls };
 }
+const issue = (key: string, statusId: string, type = 'Task'): Issue => ({
+  id: key,
+  key,
+  summary: key,
+  type,
+  priority: null,
+  assignee: null,
+  links: [],
+  status: { id: statusId, name: statusId, category: 'new' },
+});
 it('shows cached suggestions on opening without loading unrelated fields or directory search', async () => {
   const { pickers, calls } = harness();
   await pickers.open('a', 'ABC-1', 'assignee');
@@ -297,4 +307,137 @@ it('keeps status choices for the same issue key separate by connection', async (
   assert.deepEqual(pickers.values['jira:team/a#1'].transitions, [
     { id: 'jira-42', name: 'Complete', requiresFields: false },
   ]);
+});
+
+it('prefetches one Jira transition set per issue type and current status', async () => {
+  const requests: string[] = [];
+  let loadingRenders = 0;
+  const pickers = new Pickers(
+    {
+      priorities: async () => [],
+      transitions: async (_connection, key) => {
+        requests.push(key);
+        return [{ id: `${key}-next`, name: 'Next', requiresFields: false }];
+      },
+      cachedUsers: async () => [],
+      assignees: async () => ({ users: [] }),
+      validateAssignee: async () => null,
+    },
+    (values) => {
+      if (values['jira:ABC-2']?.status?.loading) loadingRenders++;
+    },
+  );
+  await pickers.prime('jira', 'ABC-1', [
+    issue('ABC-1', 'open'),
+    issue('ABC-2', 'open'),
+    issue('ABC-3', 'done'),
+    issue('ABC-4', 'open', 'Bug'),
+  ]);
+  assert.deepEqual(requests, ['ABC-1', 'ABC-3', 'ABC-4']);
+  await pickers.open('jira', 'ABC-2', 'status', 'ABC-1', true);
+  assert.deepEqual(requests, ['ABC-1', 'ABC-3', 'ABC-4']);
+  assert.equal(loadingRenders, 0);
+  assert.equal(pickers.values['jira:ABC-2'].transitions?.[0].id, 'ABC-1-next');
+  pickers.observe('jira', [issue('ABC-2', 'done')]);
+  await pickers.open('jira', 'ABC-2', 'status', 'ABC-1', true);
+  assert.deepEqual(requests, ['ABC-1', 'ABC-3', 'ABC-4']);
+  assert.equal(pickers.values['jira:ABC-2'].transitions?.[0].id, 'ABC-3-next');
+});
+
+it('refreshes only the rejected issue and allows sharing to be disabled', async () => {
+  const requests: { key: string; refresh: boolean }[] = [];
+  const { pickers } = harness({
+    transitions: async (_connection, key, refresh) => {
+      requests.push({ key, refresh: Boolean(refresh) });
+      return [
+        {
+          id: refresh ? `${key}-fresh` : `${key}-shared`,
+          name: 'Next',
+          requiresFields: false,
+        },
+      ];
+    },
+  });
+  await pickers.prime('jira', 'ABC-1', [
+    issue('ABC-1', 'open'),
+    issue('ABC-2', 'open'),
+    issue('ABC-3', 'open'),
+  ]);
+  await pickers.open('jira', 'ABC-2', 'status', 'ABC-1', true);
+  pickers.rejected('jira', 'ABC-2', 'status');
+  await pickers.open('jira', 'ABC-2', 'status', 'ABC-1', true);
+  await pickers.open('jira', 'ABC-3', 'status', 'ABC-1', true);
+  assert.deepEqual(requests, [
+    { key: 'ABC-1', refresh: false },
+    { key: 'ABC-2', refresh: true },
+  ]);
+  assert.equal(pickers.values['jira:ABC-2'].transitions?.[0].id, 'ABC-2-fresh');
+  assert.equal(
+    pickers.values['jira:ABC-3'].transitions?.[0].id,
+    'ABC-1-shared',
+  );
+  pickers.clearStatusChoices('jira', [issue('ABC-3', 'open')]);
+  await pickers.open('jira', 'ABC-3', 'status', 'ABC-1', false);
+  assert.deepEqual(requests.at(-1), { key: 'ABC-3', refresh: false });
+});
+
+it('keeps prefetched status choices separate across root trees', async () => {
+  const requests: string[] = [];
+  const { pickers } = harness({
+    transitions: async (_connection, key) => {
+      requests.push(key);
+      return [{ id: key, name: 'Next', requiresFields: false }];
+    },
+  });
+  await pickers.prime('jira', 'ABC-1', [issue('ABC-1', 'open')]);
+  await pickers.prime('jira', 'ABC-10', [
+    issue('ABC-10', 'open'),
+    issue('ABC-11', 'open'),
+  ]);
+  await pickers.open('jira', 'ABC-11', 'status', 'ABC-10', true);
+  assert.deepEqual(requests, ['ABC-1', 'ABC-10']);
+  assert.equal(pickers.values['jira:ABC-11'].transitions?.[0].id, 'ABC-10');
+});
+
+it('uses the active root when one issue appears in overlapping trees', async () => {
+  const { pickers } = harness({
+    transitions: async (_connection, key) => [
+      { id: key, name: 'Next', requiresFields: false },
+    ],
+  });
+  const shared = issue('ABC-2', 'open');
+  await pickers.prime('jira', 'ABC-1', [issue('ABC-1', 'open'), shared]);
+  await pickers.prime('jira', 'ABC-10', [issue('ABC-10', 'open'), shared]);
+  await pickers.open('jira', shared.key, 'status', 'ABC-1', true, shared);
+  assert.equal(pickers.values['jira:ABC-2'].transitions?.[0].id, 'ABC-1');
+  await pickers.open('jira', shared.key, 'status', 'ABC-10', true, shared);
+  assert.equal(pickers.values['jira:ABC-2'].transitions?.[0].id, 'ABC-10');
+});
+
+it('uses workflow metadata for statuses absent from the opened tree', async () => {
+  const requests: string[] = [];
+  const { pickers } = harness({
+    workflowGraph: async () => ({
+      open: [{ id: 'metadata-open', name: 'Start', requiresFields: false }],
+      done: [{ id: 'reopen', name: 'Reopen', requiresFields: false }],
+    }),
+    transitions: async (_connection, key) => {
+      requests.push(key);
+      return [{ id: 'verified-open', name: 'Start', requiresFields: false }];
+    },
+  });
+  const root = { ...issue('ABC-1', 'open'), projectId: '100', typeId: '200' };
+  await pickers.prime('jira', root.key, [root]);
+  assert.deepEqual(requests, ['ABC-1']);
+  await pickers.open('jira', root.key, 'status', root.key, true);
+  assert.equal(
+    pickers.values['jira:ABC-1'].transitions?.[0].id,
+    'verified-open',
+  );
+  pickers.observe('jira', [
+    { ...root, status: { ...root.status, id: 'done' } },
+  ]);
+  await pickers.open('jira', root.key, 'status', root.key, true);
+  assert.deepEqual(requests, ['ABC-1']);
+  assert.equal(pickers.values['jira:ABC-1'].transitions?.[0].id, 'reopen');
 });
