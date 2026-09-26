@@ -11,6 +11,9 @@ export async function auditBulk(app, page, modifier) {
   await expect(bulk).toBeHidden();
 
   await row('CAN-101').getByRole('button', { name: 'Expand CAN-101' }).click();
+  await row('CAN-101').locator(':scope > .issue-row').dispatchEvent('click');
+  await expect(row('CAN-101')).toHaveAttribute('aria-selected', 'true');
+  await expect(row('CAN-100')).toHaveAttribute('aria-selected', 'false');
   await row('CAN-100')
     .getByRole('button', { name: 'A calmer place to get things done' })
     .click();

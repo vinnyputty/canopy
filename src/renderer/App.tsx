@@ -4853,6 +4853,7 @@ function TreeRows(props: RowsProps) {
           props.suppressFocus.current = true;
       }}
       onClick={(event) => {
+        event.stopPropagation();
         const target = event.target as HTMLElement;
         if (!target.closest('input,button,select,[role="button"]')) {
           if (event.metaKey || event.ctrlKey || event.shiftKey)
