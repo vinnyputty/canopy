@@ -1303,10 +1303,23 @@ select:focus-visible,
   color: var(--muted);
 }
 .status-popover {
-  min-width: 185px;
+  left: auto;
+  right: 0;
+  box-sizing: border-box;
+  width: min(360px, calc(100vw - 24px));
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.status-popover.above {
+  top: auto;
+  bottom: calc(100% + 3px);
 }
 .status-popover button {
   justify-content: space-between;
+}
+.status-popover button > span {
+  min-width: 0;
 }
 .status-popover button:disabled {
   color: var(--faint);
@@ -1314,6 +1327,31 @@ select:focus-visible,
 .status-popover small {
   color: var(--faint);
   font-size: 9px;
+}
+.status-popover .status-section {
+  display: block;
+  padding: 8px 7px 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.status-popover .status-path {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.status-popover .status-destination {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.status-popover .picker-note {
+  max-width: 260px;
+  margin: 6px 7px;
 }
 .linked-panel {
   display: flex;

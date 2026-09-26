@@ -1,4 +1,5 @@
 import type { CanopyAPI, Choice, EditOptions, Issue } from '../shared/types';
+import { statusPaths, type StatusRoutes } from './status-paths';
 
 export type PickerField = 'priority' | 'assignee' | 'status';
 export type FieldLoad = {
@@ -42,6 +43,10 @@ export class Pickers {
     string,
     Map<string, EditOptions['transitions']>
   >();
+  private workflowTrees = new Map<
+    string,
+    Map<string, EditOptions['transitions']>
+  >();
   private pendingTreeStatuses = new Map<string, Promise<void>>();
   private workflowGraphAttempted = new Set<string>();
   private verifiedTreeStatuses = new Set<string>();
@@ -56,6 +61,61 @@ export class Pickers {
     return issue.projectId && issue.typeId
       ? JSON.stringify([issue.projectId, issue.typeId])
       : issue.type;
+  }
+  paths(connection: string, rootKey: string, issue: Issue): StatusRoutes {
+    const root = JSON.stringify([connection, rootKey]);
+    const type = this.typeKey(issue);
+    const graph: Record<string, EditOptions['transitions']> = {};
+    for (const tree of [
+      this.statusTrees.get(root),
+      this.workflowTrees.get(root),
+    ])
+      for (const [pair, choices] of tree ?? []) {
+        const [choiceType, status] = JSON.parse(pair) as [string, string];
+        if (choiceType !== type) continue;
+        const existing = graph[status] ?? [];
+        const ids = new Set(existing.map((choice) => choice.id));
+        graph[status] = [
+          ...existing,
+          ...choices.filter((choice) => !ids.has(choice.id)),
+        ];
+      }
+    const direct = this.values[this.scoped(connection, issue.key)]?.transitions;
+    return direct
+      ? statusPaths(issue.status, direct, graph)
+      : { routes: [], truncated: false };
+  }
+  private async loadPathGraph(
+    connection: string,
+    rootKey: string,
+    issue: Issue,
+  ) {
+    if (!issue.projectId || !issue.typeId || !this.api.workflowGraph) return;
+    const root = JSON.stringify([connection, rootKey]);
+    let tree = this.workflowTrees.get(root);
+    if (!tree) {
+      tree = new Map();
+      this.workflowTrees.set(root, tree);
+    }
+    const type = this.typeKey(issue);
+    const scope = JSON.stringify([root, type]);
+    if (this.workflowGraphAttempted.has(scope)) return;
+    this.workflowGraphAttempted.add(scope);
+    try {
+      const graph = await this.api.workflowGraph(
+        connection,
+        issue.projectId,
+        issue.typeId,
+      );
+      if (!graph || this.workflowTrees.get(root) !== tree) return;
+      for (const [status, choices] of Object.entries(graph)) {
+        const pair = JSON.stringify([type, status]);
+        tree.set(pair, choices);
+      }
+      this.changed({ ...this.values });
+    } catch {
+      this.workflowGraphAttempted.delete(scope);
+    }
   }
   private set(scope: string, patch: Partial<PickerOptions>) {
     this.values = {
@@ -80,6 +140,7 @@ export class Pickers {
     this.statusChoiceContexts.clear();
     this.freshStatuses.clear();
     this.statusTrees.clear();
+    this.workflowTrees.clear();
     this.pendingTreeStatuses.clear();
     this.workflowGraphAttempted.clear();
     this.verifiedTreeStatuses.clear();
@@ -98,26 +159,9 @@ export class Pickers {
       if (issue.projectId && issue.typeId)
         workflowTypes.set(this.typeKey(issue), issue);
     await Promise.all(
-      [...workflowTypes].map(async ([type, issue]) => {
-        const scope = JSON.stringify([root, type]);
-        if (this.workflowGraphAttempted.has(scope)) return;
-        this.workflowGraphAttempted.add(scope);
-        try {
-          const graph = await this.api.workflowGraph?.(
-            connection,
-            issue.projectId!,
-            issue.typeId!,
-          );
-          if (this.statusTrees.get(root) !== tree || !graph) return;
-          for (const [status, choices] of Object.entries(graph)) {
-            const pair = JSON.stringify([type, status]);
-            if (!tree!.has(pair)) tree!.set(pair, choices);
-          }
-        } catch {
-          this.workflowGraphAttempted.delete(scope);
-          // Ordinary issue transitions still prefill statuses in this tree.
-        }
-      }),
+      [...workflowTypes.values()].map((issue) =>
+        this.loadPathGraph(connection, rootKey, issue),
+      ),
     );
     const representatives = new Map<string, string>();
     for (const issue of issues)
@@ -222,6 +266,7 @@ export class Pickers {
     issue?: Issue,
   ) {
     if (field === 'status') {
+      if (rootKey && issue) void this.loadPathGraph(connection, rootKey, issue);
       const scope = this.scoped(connection, key);
       const previous = this.values[scope];
       const fresh =

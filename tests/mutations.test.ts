@@ -105,6 +105,330 @@ function harness(
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
+describe('multi-step status transitions', () => {
+  const started = {
+    id: 'started',
+    name: 'Started',
+    category: 'indeterminate' as const,
+  };
+  const done = { id: 'done', name: 'Done', category: 'done' as const };
+  const path = {
+    destination: done,
+    steps: [
+      { id: 'start', to: started },
+      { id: 'finish', to: done },
+    ],
+  };
+
+  it('checks each live step, keeps the destination unrendered until success, and reverses in order', async () => {
+    let current = issue('A-2', 'A-1');
+    const writes: string[] = [];
+    const h = harness({
+      update: async (_connection, _key, patch) => {
+        if (patch.transitionId) {
+          writes.push(patch.transitionId);
+          current = {
+            ...current,
+            status:
+              patch.transitionId === 'start' ||
+              patch.transitionId === 'back-started'
+                ? started
+                : patch.transitionId === 'finish'
+                  ? done
+                  : issue('A-2').status,
+          };
+        }
+        return current;
+      },
+      transitions: async () =>
+        current.status.id === 'open'
+          ? [{ id: 'start', name: 'Start', to: started, requiresFields: false }]
+          : current.status.id === 'started'
+            ? [
+                {
+                  id: 'finish',
+                  name: 'Finish',
+                  to: done,
+                  requiresFields: false,
+                },
+                {
+                  id: 'back-open',
+                  name: 'Back',
+                  to: issue('A-2').status,
+                  requiresFields: false,
+                },
+              ]
+            : [
+                {
+                  id: 'back-started',
+                  name: 'Back',
+                  to: started,
+                  requiresFields: false,
+                },
+              ],
+      tree: async () => ({ ...snapshot(), issues: [issue('A-1'), current] }),
+    });
+    const pending = h.mutations.transitionPath(
+      'jira',
+      'A-2',
+      issue('A-2').status,
+      path,
+    );
+    assert.equal(h.current.status.id, 'open');
+    assert.equal(await pending, true);
+    assert.equal(h.current.status.id, 'done');
+    assert.deepEqual(writes, ['start', 'finish']);
+    const undoing = h.mutations.undo('jira', 'A-2');
+    assert.equal(h.mutations.pending('jira'), true);
+    assert.equal(await undoing, true);
+    assert.equal(h.current.status.id, 'open');
+    assert.deepEqual(writes, ['start', 'finish', 'back-started', 'back-open']);
+  });
+
+  it('stops when the next transition changes and reports the completed status', async () => {
+    let current = issue('A-2', 'A-1');
+    const writes: string[] = [];
+    const h = harness({
+      update: async (_connection, _key, patch) => {
+        if (patch.transitionId) {
+          writes.push(patch.transitionId);
+          current = { ...current, status: started };
+        }
+        return current;
+      },
+      transitions: async () =>
+        current.status.id === 'open'
+          ? [{ id: 'start', name: 'Start', to: started, requiresFields: false }]
+          : [{ id: 'finish', name: 'Finish', to: done, requiresFields: true }],
+    });
+    assert.equal(
+      await h.mutations.transitionPath(
+        'jira',
+        'A-2',
+        issue('A-2').status,
+        path,
+      ),
+      true,
+    );
+    assert.deepEqual(writes, ['start']);
+    assert.equal(h.current.status.id, 'started');
+    assert.match(
+      h.errors[0],
+      /after 1 of 2 planned transitions.*Actual status: Started/,
+    );
+  });
+
+  it('stops Undo at an unsupported reverse step and reports partial reversal', async () => {
+    let current = issue('A-2', 'A-1');
+    const writes: string[] = [];
+    const h = harness({
+      update: async (_connection, _key, patch) => {
+        if (patch.transitionId) {
+          writes.push(patch.transitionId);
+          current = {
+            ...current,
+            status:
+              patch.transitionId === 'start' ||
+              patch.transitionId === 'back-started'
+                ? started
+                : done,
+          };
+        }
+        return current;
+      },
+      transitions: async () =>
+        current.status.id === 'open'
+          ? [{ id: 'start', name: 'Start', to: started, requiresFields: false }]
+          : current.status.id === 'started'
+            ? [
+                {
+                  id: 'finish',
+                  name: 'Finish',
+                  to: done,
+                  requiresFields: false,
+                },
+              ]
+            : [
+                {
+                  id: 'back-started',
+                  name: 'Back',
+                  to: started,
+                  requiresFields: false,
+                },
+              ],
+      tree: async () => ({ ...snapshot(), issues: [issue('A-1'), current] }),
+    });
+    await h.mutations.transitionPath('jira', 'A-2', issue('A-2').status, path);
+    assert.equal(await h.mutations.undo('jira', 'A-2'), false);
+    assert.deepEqual(writes, ['start', 'finish', 'back-started']);
+    assert.equal(h.current.status.id, 'started');
+    assert.match(
+      h.errors[0],
+      /Undo stopped after 1 of 2 reverse transitions.*Actual status: Started/,
+    );
+  });
+
+  for (const failure of ['throw', 'unexpected'] as const) {
+    it(`reports the fresh status after ${failure} without reversing an ambiguous write`, async () => {
+      const review = {
+        id: 'review',
+        name: 'In review',
+        category: 'indeterminate' as const,
+      };
+      const observed = failure === 'throw' ? done : review;
+      let current = issue('A-2', 'A-1');
+      let initialFinished = false;
+      const writes: string[] = [];
+      const h = harness({
+        update: async (_connection, _key, patch) => {
+          if (patch.transitionId) {
+            writes.push(patch.transitionId);
+            if (patch.transitionId === 'start')
+              current = { ...current, status: started };
+            else if (patch.transitionId === 'finish') {
+              current = { ...current, status: observed };
+              initialFinished = true;
+              if (failure === 'throw')
+                throw new Error('Read after write failed');
+            } else if (patch.transitionId === 'back-started')
+              current = { ...current, status: started };
+            else current = { ...current, status: issue('A-2').status };
+          }
+          return current;
+        },
+        transitions: async () =>
+          current.status.id === 'open'
+            ? [
+                {
+                  id: 'start',
+                  name: 'Start',
+                  to: started,
+                  requiresFields: false,
+                },
+              ]
+            : current.status.id === 'started'
+              ? initialFinished
+                ? [
+                    {
+                      id: 'back-open',
+                      name: 'Back',
+                      to: issue('A-2').status,
+                      requiresFields: false,
+                    },
+                  ]
+                : [
+                    {
+                      id: 'finish',
+                      name: 'Finish',
+                      to: done,
+                      requiresFields: false,
+                    },
+                  ]
+              : [
+                  {
+                    id: 'back-started',
+                    name: 'Back',
+                    to: started,
+                    requiresFields: false,
+                  },
+                ],
+        tree: async () => ({ ...snapshot(), issues: [issue('A-1'), current] }),
+      });
+      assert.equal(
+        await h.mutations.transitionPath(
+          'jira',
+          'A-2',
+          issue('A-2').status,
+          path,
+        ),
+        true,
+      );
+      assert.equal(h.current.status.id, observed.id);
+      assert.match(h.errors[0], new RegExp(`Actual status: ${observed.name}`));
+      assert.match(h.errors[0], /after 1 of 2 planned transitions/);
+      if (failure === 'throw') {
+        assert.equal(h.view.undoLabel, undefined);
+        await h.mutations.undo();
+        assert.deepEqual(writes, ['start', 'finish']);
+        assert.equal(h.current.status.id, done.id);
+        return;
+      }
+      await h.mutations.undo();
+      assert.equal(h.current.status.id, 'open');
+      assert.deepEqual(writes, [
+        'start',
+        'finish',
+        'back-started',
+        'back-open',
+      ]);
+    });
+  }
+
+  it('does not offer Undo when a failed step cannot be read back', async () => {
+    let current = issue('A-2', 'A-1');
+    let readFails = false;
+    const h = harness({
+      update: async (_connection, _key, patch) => {
+        if (patch.transitionId === 'start')
+          current = { ...current, status: started };
+        if (patch.transitionId === 'finish') {
+          readFails = true;
+          throw new Error('Read after write failed');
+        }
+        if (!patch.transitionId && readFails)
+          throw new Error('Read unavailable');
+        return current;
+      },
+      transitions: async () =>
+        current.status.id === 'open'
+          ? [{ id: 'start', name: 'Start', to: started, requiresFields: false }]
+          : [{ id: 'finish', name: 'Finish', to: done, requiresFields: false }],
+    });
+    assert.equal(
+      await h.mutations.transitionPath(
+        'jira',
+        'A-2',
+        issue('A-2').status,
+        path,
+      ),
+      true,
+    );
+    assert.equal(h.view.undoLabel, undefined);
+    assert.match(
+      h.errors[0],
+      /Last confirmed status \(fresh read unavailable\): Started/,
+    );
+  });
+
+  it('shows a changed status after an ambiguous first step without recording Undo', async () => {
+    let current = issue('A-2', 'A-1');
+    const h = harness({
+      update: async (_connection, _key, patch) => {
+        if (patch.transitionId === 'start') {
+          current = { ...current, status: started };
+          throw new Error('Transition response lost');
+        }
+        return current;
+      },
+      transitions: async () => [
+        { id: 'start', name: 'Start', to: started, requiresFields: false },
+      ],
+    });
+    assert.equal(
+      await h.mutations.transitionPath(
+        'jira',
+        'A-2',
+        issue('A-2').status,
+        path,
+      ),
+      true,
+    );
+    assert.equal(h.current.status.id, 'started');
+    assert.equal(h.view.undoLabel, undefined);
+    assert.match(h.errors[0], /Actual status: Started/);
+  });
+});
+
 describe('optimistic mutation reconciliation', () => {
   it('skips a queued restoration when a manual edit saved first', async () => {
     const manual = deferred<Issue>();
