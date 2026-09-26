@@ -63,6 +63,7 @@ export function IssuePreview({
   const developmentOpen = developmentFor === developmentIdentity;
   const [development, setDevelopment] = useState<DevelopmentLinks>();
   const [developmentError, setDevelopmentError] = useState('');
+  const [developmentLinkError, setDevelopmentLinkError] = useState('');
   const [developmentAttempt, setDevelopmentAttempt] = useState(0);
   const identity = useRef('');
   const currentIssue = useRef('');
@@ -105,6 +106,7 @@ export function IssuePreview({
     setDevelopmentFor(null);
     setDevelopment(undefined);
     setDevelopmentError('');
+    setDevelopmentLinkError('');
   }, [connectionId, issueKey]);
   useEffect(() => {
     if (!developmentOpen) return;
@@ -126,6 +128,17 @@ export function IssuePreview({
       live = false;
     };
   }, [connectionId, issueKey, developmentOpen, developmentAttempt]);
+  const openDevelopmentLink = async (url: string) => {
+    setDevelopmentLinkError('');
+    try {
+      await window.canopy.openDevelopmentLink(url);
+    } catch (reason) {
+      if (identity.current === developmentIdentity)
+        setDevelopmentLinkError(
+          reason instanceof Error ? reason.message : String(reason),
+        );
+    }
+  };
   useEffect(() => {
     if (provider !== 'github' || !editingLabels) return;
     let live = true;
@@ -445,6 +458,9 @@ export function IssuePreview({
                     <p className="preview-hint">
                       Associations shown from the GitHub issue timeline.
                     </p>
+                    {developmentLinkError && (
+                      <p role="alert">{developmentLinkError}</p>
+                    )}
                     <h4>Branches</h4>
                     <p>{development.branches.reason}</p>
                     <h4>Pull requests</h4>
@@ -455,9 +471,7 @@ export function IssuePreview({
                       <div className="preview-development-link" key={item.url}>
                         <button
                           className="text-button"
-                          onClick={() =>
-                            void window.canopy.openDevelopmentLink(item.url)
-                          }
+                          onClick={() => void openDevelopmentLink(item.url)}
                         >
                           {item.title}
                         </button>
@@ -472,9 +486,7 @@ export function IssuePreview({
                       <div className="preview-development-link" key={item.url}>
                         <button
                           className="text-button"
-                          onClick={() =>
-                            void window.canopy.openDevelopmentLink(item.url)
-                          }
+                          onClick={() => void openDevelopmentLink(item.url)}
                         >
                           {item.title}
                         </button>
