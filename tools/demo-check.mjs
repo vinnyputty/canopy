@@ -115,6 +115,9 @@ try {
   ).toHaveCount(0);
   await actions.getByRole('menuitem', { name: 'Copy work brief' }).click();
   const brief = page.getByRole('dialog', { name: 'Work brief for CAN-111' });
+  await expect(
+    brief.getByRole('button', { name: 'Close dialog' }),
+  ).toBeFocused();
   await expect(brief.getByLabel('Work brief Markdown')).toContainText(
     '- Issue: Demo CAN-111',
   );

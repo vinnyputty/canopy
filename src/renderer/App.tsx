@@ -5920,7 +5920,12 @@ function WorkBriefDialog({
     }
   };
   return (
-    <Dialog title={`Work brief for ${issueKey}`} onClose={onClose} wide>
+    <Dialog
+      title={`Work brief for ${issueKey}`}
+      onClose={onClose}
+      wide
+      initialFocus
+    >
       <div className="work-brief-dialog">
         <p className="dialog-note">
           Review the exact Markdown before copying it.
@@ -5963,12 +5968,14 @@ function Dialog({
   children,
   compact,
   wide,
+  initialFocus,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   compact?: boolean;
   wide?: boolean;
+  initialFocus?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -6017,6 +6024,7 @@ function Dialog({
             className="icon-button"
             onClick={onClose}
             aria-label="Close dialog"
+            autoFocus={initialFocus}
           >
             <X size={16} />
           </button>

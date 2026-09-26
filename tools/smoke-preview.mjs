@@ -273,12 +273,17 @@ export async function auditPreview(app, page) {
   expect(await page.evaluate(() => window.previewExecuted)).toBeUndefined();
   await pane.getByRole('button', { name: 'Copy work brief' }).click();
   const brief = page.getByRole('dialog', { name: 'Work brief for TEST-1' });
+  await expect(
+    brief.getByRole('button', { name: 'Close dialog' }),
+  ).toBeFocused();
   await expect(brief.getByLabel('Work brief Markdown')).toContainText(
     '- Issue: Jira TEST-1',
   );
   await expect(brief.getByLabel('Work brief Markdown')).toContainText(
     'https://second.example.invalid/browse/TEST-1',
   );
+  await page.keyboard.press('Tab');
+  await expect(brief.getByLabel('Work brief Markdown')).toBeFocused();
   await brief.getByRole('button', { name: 'Copy work brief' }).click();
   await expect(brief.getByRole('status')).toHaveText('Copied');
   expect(
@@ -292,6 +297,9 @@ export async function auditPreview(app, page) {
     .getByRole('menu', { name: 'Actions for TEST-1' })
     .getByRole('menuitem', { name: 'Copy work brief' })
     .click();
+  await expect(
+    brief.getByRole('button', { name: 'Close dialog' }),
+  ).toBeFocused();
   await expect(brief.getByLabel('Work brief Markdown')).toContainText(
     '- Issue: Jira TEST-1',
   );
