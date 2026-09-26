@@ -622,19 +622,26 @@ export function App() {
       setter((current) => new Set(current).add(tab.id));
       try {
         const next = await load.promise;
-        if (
-          refreshSequences.current[tab.id] === sequence &&
-          !refreshBlocked.current(tab.connectionId) &&
-          connectionsRef.current.find((item) => item.id === tab.connectionId)
-            ?.provider === 'jira' &&
-          rootView(workspaceRef.current, tab).assumeMatchingStatusTransitions
-        )
-          await pickers.prime(tab.connectionId, tab.rootKey, next.issues);
-        if (
-          refreshSequences.current[tab.id] === sequence &&
-          !refreshBlocked.current(tab.connectionId)
-        ) {
-          mutations.receive(tab, next, epoch);
+        const currentRoot = rootRefreshes.current.isCurrent(
+          rootKey,
+          load.generation,
+        );
+        if (currentRoot && !refreshBlocked.current(tab.connectionId)) {
+          const targets = load.started
+            ? tabsRef.current.filter(
+                (item) =>
+                  item.connectionId === tab.connectionId &&
+                  item.rootKey === tab.rootKey,
+              )
+            : [tab];
+          for (const target of targets) {
+            if (
+              target.id === tab.id &&
+              refreshSequences.current[tab.id] !== sequence
+              )
+              continue;
+            mutations.receive(target, next, epoch);
+          }
         } else if (refreshSequences.current[tab.id] === sequence) {
           deferredRefreshes.current.add(tab.id);
         }
@@ -650,7 +657,11 @@ export function App() {
           return copy;
         });
       } catch (error) {
-        if (refreshSequences.current[tab.id] !== sequence) return;
+        if (
+          refreshSequences.current[tab.id] !== sequence ||
+          !rootRefreshes.current.isCurrent(rootKey, load.generation)
+        )
+          return;
         const status = await window.canopy
           .syncStatus(tab.connectionId)
           .catch(() => null);

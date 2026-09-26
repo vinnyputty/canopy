@@ -198,3 +198,36 @@ it('starts a new read after the last tab for a root closes during an old read', 
   completeOld('old');
   assert.equal(await old.promise, 'old');
 });
+
+it('queues one explicit read behind an automatic read and discards the older generation', async () => {
+  let completeOld!: (value: string) => void;
+  let completeNew!: (value: string) => void;
+  let requests = 0;
+  const gate = new RootRefreshGate<string>(() => 0);
+  const automatic = gate.load('connection/root', false, true, () => {
+    requests++;
+    return new Promise((resolve) => (completeOld = resolve));
+  });
+  assert.ok('promise' in automatic);
+  const fresh = () => {
+    requests++;
+    return new Promise<string>((resolve) => (completeNew = resolve));
+  };
+  const explicit = gate.load('connection/root', true, false, fresh);
+  const secondExplicit = gate.load('connection/root', true, false, fresh);
+  assert.ok('promise' in explicit && 'promise' in secondExplicit);
+  assert.equal(explicit.promise, secondExplicit.promise);
+  assert.equal(requests, 1);
+  assert.equal(gate.isCurrent('connection/root', automatic.generation), false);
+  completeOld('old tree');
+  assert.equal(await automatic.promise, 'old tree');
+  await Promise.resolve();
+  assert.equal(requests, 2);
+  completeNew('fresh tree');
+  assert.equal(await explicit.promise, 'fresh tree');
+  assert.equal(gate.isCurrent('connection/root', explicit.generation), true);
+  const latest = gate.load('connection/root', false, true, fresh);
+  assert.ok('promise' in latest);
+  assert.equal(await latest.promise, 'fresh tree');
+  assert.equal(requests, 2);
+});

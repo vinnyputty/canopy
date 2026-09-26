@@ -3,14 +3,22 @@ export const MAX_BACKGROUND_REFRESH_MS = 60 * 60_000;
 
 type RootLoad<T> = {
   promise: Promise<T>;
+  generation: number;
+  started: boolean;
+};
+
+type RootEntry<T> = {
+  inflight?: Promise<T>;
+  inflightExplicit?: boolean;
+  generation: number;
+  lastSuccess?: number;
+  snapshot?: T;
 };
 
 /** Shares tree reads and their minimum automatic interval across duplicate tabs. */
 export class RootRefreshGate<T> {
-  private roots = new Map<
-    string,
-    { inflight?: Promise<T>; lastSuccess?: number; snapshot?: T }
-  >();
+  private roots = new Map<string, RootEntry<T>>();
+  private nextGeneration = 0;
 
   constructor(private now: () => number = Date.now) {}
 
@@ -20,34 +28,57 @@ export class RootRefreshGate<T> {
     needsSnapshot: boolean,
     fetch: () => Promise<T>,
   ): RootLoad<T> | { due: number } {
-    const root = this.roots.get(key) ?? {};
-    if (root.inflight) return { promise: root.inflight };
+    const root = this.roots.get(key) ?? { generation: 0 };
+    if (root.inflight && (!explicit || root.inflightExplicit))
+      return {
+        promise: root.inflight,
+        generation: root.generation,
+        started: false,
+      };
     const due = (root.lastSuccess ?? -Infinity) + ACTIVE_REFRESH_MS;
-    if (!explicit && this.now() < due) {
+    if (!root.inflight && !explicit && this.now() < due) {
       if (needsSnapshot && root.snapshot !== undefined)
-        return { promise: Promise.resolve(root.snapshot) };
+        return {
+          promise: Promise.resolve(root.snapshot),
+          generation: root.generation,
+          started: false,
+        };
       return { due };
     }
-    let promise: Promise<T>;
-    try {
-      promise = fetch();
-    } catch (error) {
-      promise = Promise.reject(error);
-    }
+    const request = () => {
+      try {
+        return fetch();
+      } catch (error) {
+        return Promise.reject<T>(error);
+      }
+    };
+    const previous = root.inflight;
+    const promise = previous ? previous.then(request, request) : request();
+    const generation = ++this.nextGeneration;
     root.inflight = promise;
+    root.inflightExplicit = explicit;
+    root.generation = generation;
     this.roots.set(key, root);
     void promise
       .then(
         (snapshot) => {
+          if (root.generation !== generation) return;
           root.snapshot = snapshot;
           root.lastSuccess = this.now();
         },
         () => {},
       )
       .finally(() => {
-        if (root.inflight === promise) root.inflight = undefined;
+        if (root.inflight === promise) {
+          root.inflight = undefined;
+          root.inflightExplicit = undefined;
+        }
       });
-    return { promise };
+    return { promise, generation, started: true };
+  }
+
+  isCurrent(key: string, generation: number): boolean {
+    return this.roots.get(key)?.generation === generation;
   }
 
   retain(keys: string[]): void {

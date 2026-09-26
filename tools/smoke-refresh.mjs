@@ -346,6 +346,47 @@ export async function auditRefresh(app, page, resizeWindow) {
   await idle();
   await expect(status).toHaveText('Connected');
   await page.clock.resume();
+
+  // Restored duplicate tabs share their first request and receive manual updates.
+  const beforeDuplicate = await calls('CAN-100');
+  await hold('duplicate-initial', 'tree', 'CAN-100');
+  await page.evaluate(async () => {
+    const workspace = await window.canopy.loadWorkspace();
+    const first = workspace.tabs.find((tab) => tab.rootKey === 'CAN-100');
+    await window.canopy.saveWorkspace({
+      ...workspace,
+      tabs: [first, { ...first, id: 'refresh-duplicate-CAN-100' }],
+      activeTabId: first.id,
+    });
+  });
+  await page.reload();
+  await started('duplicate-initial');
+  expect(await calls('CAN-100')).toBe(beforeDuplicate + 1);
+  await release('duplicate-initial');
+  await expect(
+    page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+  ).toBeVisible();
+  await idle();
+  await page.getByRole('tab').nth(1).click();
+  await expect(page.locator('.statusbar')).toContainText('Last updated');
+  expect(await calls('CAN-100')).toBe(beforeDuplicate + 1);
+  await page.waitForTimeout(1100);
+  await hold('duplicate-manual', 'tree', 'CAN-100');
+  await refresh.click();
+  await started('duplicate-manual');
+  await release('duplicate-manual');
+  await idle();
+  const updated = await page
+    .locator('.statusbar [title]')
+    .first()
+    .getAttribute('title');
+  await page.getByRole('tab').nth(0).click();
+  await expect(page.locator('.statusbar [title]').first()).toHaveAttribute(
+    'title',
+    updated,
+  );
+  expect(await calls('CAN-100')).toBe(beforeDuplicate + 2);
+
   console.log(
     'Adaptive refresh integration passed: preserved views, pending edits/undo, offline recovery, background cadence, and coalesced activation.',
   );
