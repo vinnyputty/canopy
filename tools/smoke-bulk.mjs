@@ -86,7 +86,8 @@ export async function auditBulk(app, page, modifier) {
   await expect(
     results.locator('li').filter({ hasText: 'CAN-106' }),
   ).toContainText('rejected');
-  await page.getByRole('tab', { name: /CAN-106/ }).click({ button: 'middle' });
+  await page.getByRole('button', { name: 'Close CAN-106' }).click();
+  await expect(page.getByRole('tab')).toHaveCount(1);
   await results
     .locator('li')
     .filter({ hasText: 'CAN-106' })
