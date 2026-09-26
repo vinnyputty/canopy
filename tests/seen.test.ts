@@ -143,6 +143,16 @@ describe('last-seen issue baselines', () => {
     const bounded = boundRoots(roots);
     assert.ok(Object.keys(bounded['0'].issues).length > 0);
     assert.ok(Object.keys(bounded['11'].issues).length > 0);
+    const retainedBytes = Object.values(bounded).reduce(
+      (total, root) =>
+        total +
+        Object.entries(root.issues).reduce(
+          (sum, entry) => sum + JSON.stringify(entry).length,
+          0,
+        ),
+      0,
+    );
+    assert.ok(retainedBytes <= 2_000_000);
   });
 
   it('uses Jira last activity to flag comment-only changes without tree comment bodies', () => {
@@ -167,7 +177,31 @@ describe('last-seen issue baselines', () => {
     );
     assert.deepEqual(
       unseenChanges(reconciled['jira:ONE-1'].issues['ONE-1'], changed),
-      { fields: [], comments: 0 },
+      {
+        fields: [
+          {
+            name: 'Last activity',
+            before: initial.updated,
+            after: changed.updated,
+          },
+        ],
+        comments: 0,
+      },
     );
+  });
+
+  it('retains unavailable field and comment baselines when marked seen', () => {
+    const original = issue('Original', 2);
+    const baseline = markRootSeen(tree(original));
+    const partial = {
+      ...issue('Unavailable'),
+      unavailableFields: ['summary'],
+    };
+    const markedIssue = markIssueSeen(baseline, partial, 200);
+    assert.equal(markedIssue.issues['ONE-1'].fields.Summary, 'Original');
+    assert.equal(markedIssue.issues['ONE-1'].commentCount, 2);
+    const markedRoot = markRootSeen(tree(partial), baseline, 200);
+    assert.equal(markedRoot.issues['ONE-1'].fields.Summary, 'Original');
+    assert.equal(markedRoot.issues['ONE-1'].commentCount, 2);
   });
 });

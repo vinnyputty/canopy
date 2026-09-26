@@ -45,15 +45,17 @@ export function issueFields(issue: Issue): Record<string, SeenValue> {
   return fields;
 }
 
-function capture(issue: Issue, now: number): SeenIssue {
+function capture(issue: Issue, now: number, previous?: SeenIssue): SeenIssue {
   return {
     seenAt: now,
-    fields: issueFields(issue),
+    fields: { ...previous?.fields, ...issueFields(issue) },
     ...(issue.commentCount !== undefined &&
     Number.isSafeInteger(issue.commentCount) &&
     issue.commentCount >= 0
       ? { commentCount: issue.commentCount }
-      : {}),
+      : previous?.commentCount !== undefined
+        ? { commentCount: previous.commentCount }
+        : {}),
   };
 }
 
@@ -93,7 +95,7 @@ export function boundRoots(
       .sort((a, b) => b[1].seenAt - a[1].seenAt)
       .slice(0, MAX_SEEN_ISSUES)) {
       const size = JSON.stringify([issueKey, issue]).length;
-      if (bytes + size > MAX_SEEN_BYTES) break;
+      if (bytes + size > bytesPerRoot) break;
       issues[issueKey] = issue;
       bytes += size;
     }
@@ -110,7 +112,10 @@ export function markIssueSeen(
   return {
     ...root,
     touchedAt: now,
-    issues: { ...root.issues, [issue.key]: capture(issue, now) },
+    issues: {
+      ...root.issues,
+      [issue.key]: capture(issue, now, root.issues[issue.key]),
+    },
   };
 }
 
@@ -126,7 +131,10 @@ export function markRootSeen(
       ...Object.fromEntries(
         snapshot.issues
           .slice(0, MAX_SEEN_ISSUES)
-          .map((issue) => [issue.key, capture(issue, now)]),
+          .map((issue) => [
+            issue.key,
+            capture(issue, now, previous?.issues[issue.key]),
+          ]),
       ),
     },
   };
@@ -147,8 +155,6 @@ export function reconcileOwnEdit(
     const updated = { ...previous.fields };
     for (const name of written)
       if (name in fields) updated[name] = fields[name];
-    if (written.length && 'Last activity' in fields)
-      updated['Last activity'] = fields['Last activity'];
     next[rootKey] = {
       ...root,
       issues: { ...root.issues, [issue.key]: { ...previous, fields: updated } },

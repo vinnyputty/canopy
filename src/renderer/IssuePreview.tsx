@@ -155,7 +155,13 @@ export function IssuePreview({
     ? unseenChanges(
         baseline,
         data && !data.commentsError
-          ? { ...observedIssue, commentCount: data.totalComments }
+          ? {
+              ...observedIssue,
+              commentCount: Math.max(
+                observedIssue.commentCount ?? 0,
+                data.totalComments,
+              ),
+            }
           : observedIssue,
       )
     : { fields: [], comments: 0 };

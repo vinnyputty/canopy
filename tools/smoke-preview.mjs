@@ -55,6 +55,9 @@ export async function installPreviewHandlers(
         saveWorkspace: (_event, value) => {
           controls.savedWorkspace = structuredClone(value);
         },
+        openComment: () => {
+          throw new Error('Comment link unavailable');
+        },
         currentUser: () => null,
         priorityOrder: () => [],
         tree: () => ({
@@ -394,6 +397,17 @@ export async function auditPreview(app, page, restart) {
   ).toBeVisible();
   await expect(
     pane.getByRole('button', { name: /New comment by Ada/ }),
+  ).toBeVisible();
+  await pane.getByRole('button', { name: /New comment by Ada/ }).click();
+  await expect(page.getByRole('alert')).toContainText(
+    'Comment link unavailable',
+  );
+  await app.evaluate(() => {
+    globalThis.previewRecovery.currentIssue.commentCount = 3;
+  });
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(
+    pane.getByText('2 more comments than at the last view.'),
   ).toBeVisible();
   await expect
     .poll(() =>

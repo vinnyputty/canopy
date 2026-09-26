@@ -4170,6 +4170,20 @@ export function App() {
                       commentId,
                     )
                   }
+                  onOpenComment={(commentId) => {
+                    void window.canopy
+                      .openComment(
+                        activeTab.connectionId,
+                        previewKey,
+                        commentId,
+                      )
+                      .catch((error: unknown) =>
+                        setErrors((current) => ({
+                          ...current,
+                          app: `Couldn’t open comment: ${error instanceof Error ? error.message : String(error)}`,
+                        })),
+                      );
+                  }}
                 />
               )}
             </div>
