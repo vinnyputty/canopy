@@ -4484,12 +4484,12 @@ function OpenIssueDialog({
             placeholder={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, Jira URL, or summary'
+                : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
             aria-label={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, Jira URL, or summary'
+                : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
           />
           {busy && <Loader2 className="spin" size={14} />}

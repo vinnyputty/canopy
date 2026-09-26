@@ -245,6 +245,13 @@ describe('JiraProvider search and editing', () => {
         '(key = "abc-12" OR key ~ "ABC-12*" OR (summary ~ ',
       ),
     );
+    await new JiraProvider(request).search('CAN');
+    assert.ok(
+      body(request.calls[3][1]).jql.startsWith('(key ~ "CAN*" OR (summary ~ '),
+    );
+    await new JiraProvider(request).search('can');
+    assert.ok(body(request.calls[4][1]).jql.startsWith('(summary ~ '));
+    assert.equal(body(request.calls[4][1]).jql.includes('key ~'), false);
   });
 
   it('adds only a generated suffix wildcard and forwards request cancellation', async () => {

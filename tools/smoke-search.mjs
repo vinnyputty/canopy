@@ -90,6 +90,8 @@ export async function auditSearch(app, page) {
   await expect(
     dialog.getByRole('button', { name: 'Open tree' }),
   ).toBeDisabled();
+  await input.fill('CAN');
+  await expect(dialog.getByRole('option')).toHaveCount(2);
   await input.fill('search');
   await expect(dialog.getByRole('option')).toHaveCount(2);
   await expect(dialog.getByRole('option').first()).toHaveAttribute(
