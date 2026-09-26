@@ -321,7 +321,7 @@ async function auditMutations() {
   await expect(issue(key).getByRole('alert')).toContainText(
     'Jira rejected this selection',
   );
-  await issue(key).getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByLabel('Search assignees').press('Escape');
   await expect(
     issue(key).getByText('Sam Rivera', { exact: true }),
   ).toBeVisible();
@@ -354,7 +354,7 @@ async function auditMutations() {
   await expect(issue(key).getByRole('alert')).toContainText(
     'Jira rejected this selection',
   );
-  await issue(key).getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.keyboard.press('Escape');
   await expect(
     issue(key).getByText('In Progress', { exact: true }),
   ).toBeVisible();
@@ -1006,7 +1006,11 @@ try {
   ).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(rowMenu).toBeHidden();
-  await expect(issue('CAN-109')).toBeFocused();
+  await expect(rowTrigger).toBeFocused();
+  await rowTrigger.press('Enter');
+  await rowMenu.getByRole('menuitem', { name: 'Copy key' }).press('Escape');
+  await expect(rowMenu).toBeHidden();
+  await expect(rowTrigger).toBeFocused();
   const title = issue('CAN-109').locator('.summary');
   // Force truncation independently of platform fonts and window geometry.
   const previousMaxWidth = await title.evaluate((element) => {
@@ -1223,6 +1227,9 @@ try {
   await page.getByRole('button', { name: 'Collapse', exact: true }).click();
   await expect(tree.getByRole('treeitem')).toHaveCount(1);
   await page.locator('.tree-view-menu summary').click();
+  await page.locator('.tree-view-menu summary').press('Escape');
+  await expect(page.locator('.tree-view-menu summary')).toBeFocused();
+  await page.locator('.tree-view-menu summary').click();
   await page
     .getByRole('button', { name: 'Expand two levels', exact: true })
     .click();
@@ -1234,6 +1241,7 @@ try {
   await issue('CAN-108')
     .getByTitle(/Double-click to edit/)
     .click();
+  await page.locator('.tree-view-menu summary').click();
   await page.getByRole('button', { name: 'Focus selected subtree' }).click();
   await expect(tree.getByRole('treeitem')).toHaveCount(1);
   await expect(
@@ -1249,6 +1257,7 @@ try {
   await expect(
     page.getByRole('heading', { name: 'No matching issues' }),
   ).toBeVisible();
+  await page.locator('.tree-view-menu summary').click();
   await page
     .getByRole('button', { name: 'Reveal selection', exact: true })
     .click();
@@ -1424,6 +1433,7 @@ try {
     element.scrollTop = 0;
   });
   await expect.poll(selectionInViewport).toBe(false);
+  await page.locator('.tree-view-menu summary').click();
   await page
     .getByRole('button', { name: 'Reveal selection', exact: true })
     .click();
@@ -1452,6 +1462,7 @@ try {
   await expect(revealedDraft).toBeFocused();
   await expect(revealedDraft).toHaveValue('Unsaved revealed issue draft');
   await revealedDraft.press('Escape');
+  await page.locator('.tree-view-menu summary').click();
   await page.getByRole('button', { name: 'Back to root', exact: true }).click();
   await expect(issue('CAN-114').locator(':scope > .issue-row')).not.toHaveClass(
     /revealed/,
@@ -1752,6 +1763,7 @@ try {
   await secondTab.click();
   await page.getByLabel('Filter status').selectOption('');
   await page.getByLabel('Filter priority').selectOption('');
+  await page.locator('.tree-view-menu summary').click();
   await page.getByRole('button', { name: 'Back to root', exact: true }).click();
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await page.getByRole('button', { name: 'Back', exact: true }).click();

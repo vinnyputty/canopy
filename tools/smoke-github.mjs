@@ -25,6 +25,7 @@ export async function auditGithub(app, page) {
       'team/a#4': issue('team/a', 4),
       'team/b#2': issue('team/b', 2),
     };
+    globalThis.githubSmokePatches = [];
     globalThis.fetch = async (url, init = {}) => {
       const parsed = new URL(String(url));
       if (parsed.hostname !== 'api.github.com')
@@ -59,6 +60,7 @@ export async function auditGithub(app, page) {
       if (path === '/repos/team/a/issues/1') {
         if (init.method === 'PATCH') {
           const patch = JSON.parse(String(init.body));
+          globalThis.githubSmokePatches.push(patch);
           const current = globalThis.githubSmokeIssues['team/a#1'];
           globalThis.githubSmokeIssues['team/a#1'] = {
             ...current,
@@ -192,6 +194,42 @@ export async function auditGithub(app, page) {
     await statusResize.press('ArrowRight');
     await expect(statusResize).toHaveAttribute('aria-valuenow', '138');
     const root = tree.locator('[data-tree-key="team/a#1"]');
+    const assignee = root.getByRole('button', {
+      name: 'Edit assignee for team/a#1',
+    });
+    const status = root.getByRole('button', {
+      name: 'Edit status for team/a#1',
+    });
+    const action = root.getByRole('button', { name: 'Actions for team/a#1' });
+    const patchCount = () =>
+      app.evaluate(() => globalThis.githubSmokePatches.length);
+    const beforeDismiss = await patchCount();
+    await assignee.click();
+    await page.getByLabel('Search assignees').fill('tester');
+    await page.getByLabel('Search assignees').press('Escape');
+    await expect(assignee).toBeFocused();
+    await expect(page.getByLabel('Search assignees')).toHaveCount(0);
+    await assignee.click();
+    await status.click();
+    await expect(page.getByLabel('Search assignees')).toHaveCount(0);
+    const closed = root.getByRole('menuitem', { name: 'Closed' });
+    await expect(closed).toBeVisible();
+    await closed.press('Escape');
+    await expect(status).toBeFocused();
+    await expect(closed).toHaveCount(0);
+    await action.click();
+    const rowMenu = page.getByRole('menu', { name: 'Actions for team/a#1' });
+    await rowMenu.getByRole('menuitem', { name: 'Copy key' }).press('Escape');
+    await expect(rowMenu).toHaveCount(0);
+    await expect(action).toBeFocused();
+    await action.click();
+    await assignee.click();
+    await expect(rowMenu).toHaveCount(0);
+    await expect(page.getByLabel('Search assignees')).toBeFocused();
+    await page.locator('.view-settings > summary').click();
+    await expect(page.getByLabel('Search assignees')).toHaveCount(0);
+    expect(await patchCount()).toBe(beforeDismiss);
+    await page.locator('.view-settings > summary').press('Escape');
     await root
       .getByRole('button', { name: 'team/a issue 1', exact: true })
       .dblclick();
@@ -202,14 +240,10 @@ export async function auditGithub(app, page) {
       .getByRole('textbox', { name: 'Title for team/a#1' })
       .press('Enter');
     await expect(root).toContainText('Updated GitHub title');
-    await root
-      .getByRole('button', { name: 'Edit assignee for team/a#1' })
-      .click();
+    await assignee.click();
     await root.getByRole('button', { name: 'Assign to me' }).click();
     await expect(root).toContainText('tester');
-    await root
-      .getByRole('button', { name: 'Edit status for team/a#1' })
-      .click();
+    await status.click();
     await root.getByRole('menuitem', { name: 'Closed' }).click();
     await expect(root).toContainText('Closed');
     await tree.getByRole('treeitem', { name: /team\/a#1/ }).press('Space');
@@ -297,6 +331,27 @@ export async function auditGithub(app, page) {
     await expect(
       repositoryTree.getByRole('treeitem', { name: /team\/a#4/ }),
     ).toBeVisible();
+    const repositoryRoot = repositoryTree.locator(
+      '[data-tree-key="team/a"] > .issue-row',
+    );
+    await expect(
+      repositoryRoot.getByRole('button', { name: /Edit (assignee|status)/ }),
+    ).toHaveCount(0);
+    const repositoryAction = repositoryRoot.getByRole('button', {
+      name: 'Actions for team/a',
+    });
+    await repositoryAction.click();
+    await page
+      .getByRole('menu', { name: 'Actions for team/a' })
+      .getByRole('menuitem', { name: 'Copy key' })
+      .press('Escape');
+    await expect(repositoryAction).toBeFocused();
+    await repositoryAction.click();
+    await page.locator('.view-settings > summary').click();
+    await expect(
+      page.getByRole('menu', { name: 'Actions for team/a' }),
+    ).toHaveCount(0);
+    await page.locator('.view-settings > summary').press('Escape');
     await expect(
       repositoryTree.getByRole('treeitem', { name: /team\/a#3/ }),
     ).toHaveCount(0);

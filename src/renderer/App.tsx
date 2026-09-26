@@ -217,6 +217,7 @@ export function App() {
     issue: Issue;
     x: number;
     y: number;
+    trigger?: boolean;
   } | null>(null);
   const restoreTreeFocus = useCallback((key?: string) => {
     const row = key
@@ -226,7 +227,16 @@ export function App() {
   }, []);
   const closeRowMenu = useCallback(
     (restore = true) => {
-      if (restore) restoreTreeFocus(rowMenu?.issue.key);
+      if (restore) {
+        const key = rowMenu?.issue.key;
+        const trigger = key
+          ? document.querySelector<HTMLElement>(
+              `[data-tree-key="${key}"] [data-row-menu-trigger]`,
+            )
+          : null;
+        if (rowMenu?.trigger && trigger) trigger.focus({ preventScroll: true });
+        else restoreTreeFocus(key);
+      }
       setRowMenu(null);
     },
     [restoreTreeFocus, rowMenu],
@@ -477,7 +487,7 @@ export function App() {
     restoreTreeFocus(activeTab?.selectedKey ?? activeTab?.rootKey);
   }, [activeTab?.selectedKey, activeTab?.rootKey, restoreTreeFocus]);
   useEffect(() => {
-    if (!previewKey || dialog || editor || rowMenu) return;
+    if (!previewKey || dialog || editor || rowMenu || tabMenu) return;
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented) {
         event.preventDefault();
@@ -486,7 +496,21 @@ export function App() {
     };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
-  }, [previewKey, dialog, editor, rowMenu, closePreview]);
+  }, [previewKey, dialog, editor, rowMenu, tabMenu, closePreview]);
+
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => {
+      document
+        .querySelectorAll<HTMLDetailsElement>(
+          '.view-settings[open], .tree-view-menu[open]',
+        )
+        .forEach((menu) => {
+          if (!menu.contains(event.target as Node)) menu.open = false;
+        });
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -963,6 +987,7 @@ export function App() {
     const close = () => setTabMenu(null);
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         close();
         document
           .querySelector<HTMLElement>(
@@ -1352,6 +1377,17 @@ export function App() {
     },
     [activeTab, pickers],
   );
+
+  useEffect(() => {
+    if (!editor || editor.field === 'summary') return;
+    const dismiss = (event: PointerEvent) => {
+      const activeCell = document.querySelector('.field-cell.editing');
+      if (activeCell && !activeCell.contains(event.target as Node))
+        setEditor(null);
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, [editor]);
 
   const updateIssue = useCallback(
     async (key: string, patch: IssuePatch) => {
@@ -2165,7 +2201,16 @@ export function App() {
                   ))}
                 </select>
               )}
-              <details className="tree-view-menu">
+              <details
+                className="tree-view-menu"
+                onKeyDown={(event) => {
+                  if (event.key !== 'Escape') return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.currentTarget.open = false;
+                  event.currentTarget.querySelector('summary')?.focus();
+                }}
+              >
                 <summary>Tree actions</summary>
                 <div>
                   <button disabled={filtering} onClick={() => expandDepth(1)}>
@@ -2472,7 +2517,7 @@ export function App() {
                           setRowMenu((current) =>
                             toggle && current?.issue.key === issue.key
                               ? null
-                              : { issue, x, y },
+                              : { issue, x, y, trigger: toggle },
                           );
                         }}
                         editor={editor}
@@ -3220,7 +3265,6 @@ function TreeRows(props: RowsProps) {
             props.loadOptions(issue.key, 'assignee', query, more, refresh)
           }
           save={(id) => void props.updateIssue(issue.key, { assigneeId: id })}
-          cancel={props.cancelEdit}
         />
       </FieldCell>
     ),
@@ -3245,7 +3289,6 @@ function TreeRows(props: RowsProps) {
             void props.loadOptions(issue.key, 'status', '', false, true)
           }
           save={(id) => void props.updateIssue(issue.key, { transitionId: id })}
-          cancel={props.cancelEdit}
         />
       </FieldCell>
     ),
@@ -3276,7 +3319,9 @@ function TreeRows(props: RowsProps) {
           event.preventDefault();
           event.stopPropagation();
           props.cancelEdit();
-          event.currentTarget.focus();
+          (event.target as HTMLElement)
+            .closest<HTMLElement>('.field-cell')
+            ?.focus();
         }
         if (event.key === 'Tab') {
           event.preventDefault();
@@ -3576,7 +3621,6 @@ function AssigneeEditor({
   search,
   changeQuery,
   save,
-  cancel,
 }: {
   provider: Connection['provider'];
   currentUser?: Choice;
@@ -3589,7 +3633,6 @@ function AssigneeEditor({
   changeQuery: (query: string) => void;
   search: (query: string, more?: boolean, refresh?: boolean) => Promise<void>;
   save: (id: string | null) => void;
-  cancel: () => void;
 }) {
   const [query, setQuery] = useState('');
   const previousQuery = useRef('');
@@ -3653,7 +3696,6 @@ function AssigneeEditor({
           setQuery(event.target.value);
           changeQuery(event.target.value);
         }}
-        onKeyDown={(event) => event.key === 'Escape' && cancel()}
         placeholder="Search people…"
         aria-label="Search assignees"
       />
@@ -3729,9 +3771,6 @@ function AssigneeEditor({
           ? 'GitHub checks assignment eligibility for this repository when selected. Load more to browse additional assignees.'
           : 'Recent people are suggestions; Jira checks assignment for this issue when selected. Search covers only Jira’s first 1,000 users and may be incomplete.'}
       </p>
-      <button className="cancel-choice" onClick={cancel}>
-        Cancel
-      </button>
     </div>
   );
 }
@@ -3744,7 +3783,6 @@ function StatusEditor({
   issue,
   choices,
   save,
-  cancel,
   openWorkflow,
 }: {
   color?: string;
@@ -3754,7 +3792,6 @@ function StatusEditor({
   state?: FieldLoad;
   retry: () => void;
   save: (id: string) => void;
-  cancel: () => void;
   openWorkflow: () => void;
 }) {
   if (!active)
@@ -3810,9 +3847,6 @@ function StatusEditor({
             )}
           </div>
         ))}
-      <button className="cancel-choice" onClick={cancel}>
-        Cancel
-      </button>
     </div>
   );
 }
