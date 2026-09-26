@@ -14,11 +14,19 @@ export function RowMenu({
   position: { x: number; y: number };
   onClose: (restore?: boolean) => void;
   onAction: (
-    action: 'key' | 'title' | 'key-summary' | 'brief' | 'link' | 'open',
+    action:
+      | 'key'
+      | 'title'
+      | 'key-summary'
+      | 'brief'
+      | 'link'
+      | 'open'
+      | 'createChild',
   ) => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
-  const above = position.y + 200 > window.innerHeight;
+  const menuHeight = provider === 'jira' ? 228 : 200;
+  const above = position.y + menuHeight > window.innerHeight;
   useEffect(() => {
     menu.current?.querySelector<HTMLElement>('button')?.focus();
     const click = (event: PointerEvent) => {
@@ -43,7 +51,7 @@ export function RowMenu({
             window.innerWidth - 190,
           ),
         ),
-        top: Math.max(4, above ? position.y - 200 : position.y),
+        top: Math.max(4, above ? position.y - menuHeight : position.y),
       }}
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -85,6 +93,9 @@ export function RowMenu({
                   `Open in ${provider === 'github' ? 'GitHub' : 'Jira'}`,
                 ],
               ] as const)),
+          ...(provider === 'jira'
+            ? ([['createChild', 'Create child issue']] as const)
+            : []),
         ] as const
       ).map(([action, label]) => (
         <button

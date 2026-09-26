@@ -63,6 +63,7 @@ Recently saved Jira fields and sibling placement remain visible while search cat
 - Drag tabs to reorder, right-click for root actions, and pin favorites independently of open tabs. Reopen closed tabs with `⌘⇧T` / `Ctrl+Shift+T`; use Back/Forward to restore visited positions. See [workspace controls](docs/workspace.md) for saved layouts and keyboard controls.
 - Press `Space` on a focused issue row to preview its description, recent comments, and directional links. Resize the preview with its drag handle or arrow keys; `Escape` closes it and restores tree focus.
 - Right-click a row, press `Shift+F10`, or use its actions button to copy its key, title, link, or Markdown work brief, or open the issue in its provider. The preview also offers **Copy work brief**. Review the exact text before copying; the brief includes identity, source, status, priority, parent path, description, and dependency links when available. Hover a truncated title to read it in full.
+- On a Jira row, choose **Create child issue** to add a child using the issue types and fields available for that parent. Jira screens requiring other fields offer a link to the parent in Jira.
 - Open the command palette with `⌘K`, an issue with `⌘P`, or keyboard shortcuts with `⌘/` (`Ctrl` on Windows/Linux). The shortcut editor detects conflicts before saving.
 
 Priority, assignee, and status pickers load independently with field-specific Retry actions. Assignee suggestions use the last 100 people seen on the connection; selection checks issue eligibility, and search or Load more fetches additional results within Jira’s 1,000-user discovery limit.
@@ -91,4 +92,4 @@ npx pnpm@10.22.0 install --frozen-lockfile
 
 Dependency install scripts are disabled. Use the Bazel launcher to obtain Electron. To update dependencies, update `package.json`, regenerate `pnpm-lock.yaml` with pnpm 10.22.0, and run the Bazel checks. `npm run format` formats TypeScript, CSS, JSON, YAML, and documentation; Bazel files use standard Starlark formatting.
 
-Editing descriptions and comments, attachments, issue creation/deletion, project moves, and reparenting are not supported in this version.
+Editing descriptions and comments, attachments, issue deletion, creating issues outside Jira child rows, project moves, and reparenting are not supported in this version.

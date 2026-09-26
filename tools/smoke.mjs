@@ -6,6 +6,7 @@ import { auditWorkflow } from './smoke-workflow.mjs';
 import { auditPreview, installPreviewHandlers } from './smoke-preview.mjs';
 import { auditGithub } from './smoke-github.mjs';
 import { auditBulk } from './smoke-bulk.mjs';
+import { auditChildCreation } from './smoke-child.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1287,11 +1288,15 @@ try {
   ).toBeFocused();
   await page.keyboard.press('End');
   await expect(
-    rowMenu.getByRole('menuitem', { name: 'Open in Jira', exact: true }),
+    rowMenu.getByRole('menuitem', { name: 'Create child issue', exact: true }),
   ).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(
     rowMenu.getByRole('menuitem', { name: 'Copy key', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(
+    rowMenu.getByRole('menuitem', { name: 'Create child issue', exact: true }),
   ).toBeFocused();
   await page.keyboard.press('ArrowUp');
   await page.keyboard.press('Enter');
@@ -3056,6 +3061,8 @@ try {
 
   await auditAppearanceSaveOrdering();
   await auditAppearanceSaveFailure();
+
+  await auditChildCreation(appPath, executablePath, env);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

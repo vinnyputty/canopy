@@ -1798,6 +1798,48 @@ kbd {
 .connect-dialog {
   padding: 15px 17px 17px;
 }
+.create-child-form {
+  padding: 14px 17px 17px;
+  max-height: min(590px, calc(100vh - 130px));
+  overflow: auto;
+}
+.create-child-form > label {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.create-child-form input,
+.create-child-form select,
+.create-child-form textarea {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  user-select: text;
+}
+.create-child-form textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+.create-child-people {
+  max-height: 120px;
+  overflow: auto;
+  border: 1px solid var(--border);
+}
+.create-child-people button {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  text-align: left;
+}
+.create-child-people button:hover {
+  background: var(--hover);
+}
 .connect-lead {
   margin: 0 0 15px;
   color: var(--muted);

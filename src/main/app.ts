@@ -21,6 +21,7 @@ import type {
   Workspace,
   TokenConnectionInput,
   GithubConnectionInput,
+  ChildIssueInput,
 } from '../shared/types';
 import { Auth } from './auth';
 import { JiraProvider } from './jira';
@@ -108,6 +109,43 @@ function patch(value: unknown): IssuePatch {
     result.labels = input.labels.map((label: unknown) => text(label, 100));
   }
   return result;
+}
+function childInput(value: unknown): ChildIssueInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid child issue.');
+  const input = value as Record<string, unknown>;
+  if (
+    Object.keys(input).some(
+      (name) =>
+        ![
+          'typeId',
+          'summary',
+          'description',
+          'assigneeId',
+          'priorityId',
+        ].includes(name),
+    )
+  )
+    throw new Error('Unsupported child issue field.');
+  if (
+    input.description !== undefined &&
+    (typeof input.description !== 'string' ||
+      input.description.length > 100_000)
+  )
+    throw new Error('Invalid description.');
+  return {
+    typeId: text(input.typeId),
+    summary: text(input.summary, 255),
+    ...(input.description !== undefined
+      ? { description: (input.description as string).trim() }
+      : {}),
+    ...(input.assigneeId !== undefined
+      ? { assigneeId: text(input.assigneeId) }
+      : {}),
+    ...(input.priorityId !== undefined
+      ? { priorityId: text(input.priorityId) }
+      : {}),
+  };
 }
 function workspace(value: Workspace) {
   if (
@@ -552,6 +590,24 @@ async function start(
       ),
     update: (id: string, issue: string, value: IssuePatch) =>
       provider(id).update(normalized(id, issue), patch(value)),
+    childCreateOptions: (id: string, issue: string, refresh = false) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider))
+        throw new Error('Child creation is available for Jira issues.');
+      return client.childCreateOptions(normalized(id, issue), refresh === true);
+    },
+    childCreateFields: (id: string, issue: string, typeId: string) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider))
+        throw new Error('Child creation is available for Jira issues.');
+      return client.childCreateFields(normalized(id, issue), text(typeId));
+    },
+    createChild: (id: string, issue: string, value: ChildIssueInput) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider))
+        throw new Error('Child creation is available for Jira issues.');
+      return client.createChild(normalized(id, issue), childInput(value));
+    },
     rank: (
       id: string,
       issue: string,

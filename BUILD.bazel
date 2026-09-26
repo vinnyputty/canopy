@@ -77,7 +77,7 @@ js_binary(
 js_binary(
     name = "smoke",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs"],
+    data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-child.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs"],
     args = ["smoke"],
     patch_node_fs = False,
     tags = ["manual"],
