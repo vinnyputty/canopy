@@ -13,6 +13,7 @@ export function IssuePreview({
   onPreview,
   onOpenTab,
   onOpenExternal,
+  onCopyKeySummary,
 }: {
   connectionId: string;
   provider: 'jira' | 'github' | 'demo';
@@ -24,6 +25,7 @@ export function IssuePreview({
   onPreview: (key: string) => void;
   onOpenTab: (key: string) => void;
   onOpenExternal: (key: string) => void;
+  onCopyKeySummary: (issue: Preview['issue']) => void;
 }) {
   const [data, setData] = useState<Preview>();
   const [error, setError] = useState('');
@@ -199,6 +201,12 @@ export function IssuePreview({
               onClick={() => onOpenExternal(issueKey)}
             >
               Open in {provider === 'github' ? 'GitHub' : 'Jira'}
+            </button>
+            <button
+              className="tool-button"
+              onClick={() => onCopyKeySummary(data.issue)}
+            >
+              Copy key and summary
             </button>
             {provider === 'github' && (
               <section>

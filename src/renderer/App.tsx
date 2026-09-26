@@ -73,6 +73,7 @@ import {
 } from './tree';
 import { IssuePreview } from './IssuePreview';
 import { RowMenu } from './RowMenu';
+import { issueKeyAndSummary } from './copy-issue';
 import { StatusColors } from './status-colors';
 import {
   activateTab,
@@ -1086,6 +1087,26 @@ export function App() {
         setErrors((current) => ({
           ...current,
           app: `Couldn’t copy link for ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+      }
+    },
+    [],
+  );
+
+  const copyIssueText = useCallback(
+    async (issue: Issue, action: 'key' | 'title' | 'key-summary') => {
+      const value =
+        action === 'key'
+          ? issue.key
+          : action === 'title'
+            ? issue.summary
+            : issueKeyAndSummary(issue);
+      try {
+        await window.canopy.copyText(value);
+      } catch (error) {
+        setErrors((current) => ({
+          ...current,
+          app: `Couldn’t copy ${action}: ${error instanceof Error ? error.message : String(error)}`,
         }));
       }
     },
@@ -2602,6 +2623,9 @@ export function App() {
                   onOpenExternal={(key) =>
                     void openExternal(activeTab.connectionId, key)
                   }
+                  onCopyKeySummary={(issue) =>
+                    void copyIssueText(issue, 'key-summary')
+                  }
                 />
               )}
             </div>
@@ -2758,17 +2782,7 @@ export function App() {
               void copyIssueLink(activeTab.connectionId, rowMenu.issue.key);
             else if (action === 'open')
               void openExternal(activeTab.connectionId, rowMenu.issue.key);
-            else
-              void window.canopy
-                .copyText(
-                  action === 'key' ? rowMenu.issue.key : rowMenu.issue.summary,
-                )
-                .catch((error: unknown) =>
-                  setErrors((current) => ({
-                    ...current,
-                    app: `Couldn’t copy ${action}: ${error instanceof Error ? error.message : String(error)}`,
-                  })),
-                );
+            else void copyIssueText(rowMenu.issue, action);
           }}
         />
       )}
