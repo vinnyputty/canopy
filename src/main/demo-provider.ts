@@ -1,5 +1,6 @@
 import type {
   Choice,
+  DevelopmentLinks,
   EditOptions,
   Issue,
   IssuePatch,
@@ -162,6 +163,18 @@ export class DemoProvider {
         },
       ],
       totalComments: 1,
+    };
+  }
+  async development(_key: string): Promise<DevelopmentLinks> {
+    return {
+      state: 'unavailable',
+      reason: 'Development links are unavailable in the demo workspace.',
+      branches: {
+        state: 'unavailable',
+        reason: 'Development integration is unavailable.',
+      },
+      pullRequests: [],
+      commits: [],
     };
   }
   async search(query: string, nextPageToken?: string, signal?: AbortSignal) {

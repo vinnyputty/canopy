@@ -27,6 +27,7 @@ export async function installPreviewHandlers(
         currentIssue: currentIssue ?? issue,
         created: created ?? null,
         clipboard: '',
+        developmentCalls: 0,
       };
       globalThis.previewRecovery = controls;
       const handlers = {
@@ -86,7 +87,26 @@ export async function installPreviewHandlers(
               'Cannot load preview for TEST-1: Jira 403: Permission denied.',
             );
           return {
-            issue: { ...issue, summary: `${connection} issue` },
+            issue: {
+              ...issue,
+              summary: `${connection} issue`,
+              ...(mode === 'metadata-permission'
+                ? {
+                    type: 'Issue',
+                    status: {
+                      id: '',
+                      name: 'Unknown',
+                      category: 'indeterminate',
+                    },
+                    unavailableFields: ['type', 'status', 'priority', 'assignee'],
+                  }
+                : {}),
+            },
+            metadata: {
+              reporter: 'Ada',
+              created: '2026-01-01T12:00:00Z',
+              updated: null,
+            },
             description: '<img src=x onerror="window.previewExecuted=true">',
             ...(mode === 'success'
               ? {
@@ -218,6 +238,19 @@ export async function installPreviewHandlers(
             throw new Error('URL unavailable');
           return `https://${connection}.example.invalid/browse/${key}`;
         },
+        development: () => {
+          controls.developmentCalls++;
+          return {
+            state: 'unavailable',
+            reason: 'Development links are unavailable for this Jira connection.',
+            branches: {
+              state: 'unavailable',
+              reason: 'Development integration is unavailable.',
+            },
+            pullRequests: [],
+            commits: [],
+          };
+        },
         copyText: (_event, value) => {
           controls.clipboard = value;
         },
@@ -298,6 +331,30 @@ export async function auditPreview(app, page, restart) {
   await mode('success');
   await pane.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(pane.getByRole('alert')).toHaveCount(0);
+  await expect(pane).toContainText('Ada');
+  await expect(pane).toContainText('None');
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.developmentCalls),
+  ).toBe(0);
+  await pane.getByRole('button', { name: 'Show development' }).click();
+  await expect(pane).toContainText(
+    'Development links are unavailable for this Jira connection.',
+  );
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.developmentCalls),
+  ).toBe(1);
+  await mode('metadata-permission');
+  await page.keyboard.press('Escape');
+  await open();
+  await expect(pane.locator('.preview-metadata dd')).toHaveText([
+    'Ada',
+    /2026/,
+    'None',
+    'Unavailable',
+    'Unavailable',
+    'Unavailable',
+    'Unavailable',
+  ]);
   await expect(pane).toContainText(
     '<script>window.previewExecuted=true</script>',
   );

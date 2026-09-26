@@ -7,6 +7,7 @@ import type {
   ChildCreateOptions,
   ChildIssueInput,
   Choice,
+  DevelopmentLinks,
   EditOptions,
   StatusTransitionTree,
   Issue,
@@ -455,7 +456,7 @@ export class JiraProvider {
   async preview(key: string): Promise<IssuePreview> {
     const [raw, comments] = await Promise.all([
       this.call(
-        `${issuePath(key)}?fields=${encodeURIComponent([...ISSUE_FIELDS, 'description', 'comment'].join(','))}`,
+        `${issuePath(key)}?fields=${encodeURIComponent([...ISSUE_FIELDS, 'description', 'comment', 'reporter', 'created', 'updated'].join(','))}`,
         undefined,
         `load preview for ${key}`,
       ),
@@ -482,6 +483,13 @@ export class JiraProvider {
           ? { commentCount: comments.page.total }
           : {}),
       },
+      metadata: {
+        reporter:
+          raw.fields?.reporter?.displayName ??
+          (raw.fields?.reporter === null ? null : undefined),
+        created: raw.fields?.created,
+        updated: raw.fields?.updated,
+      },
       description: documentText(raw.fields?.description),
       descriptionMarkdown: documentMarkdown(raw.fields?.description),
       ...(raw.fields?.description && typeof raw.fields.description === 'object'
@@ -500,6 +508,18 @@ export class JiraProvider {
         })),
       totalComments: Number(comments.page?.total ?? 0),
       ...(comments.error ? { commentsError: comments.error } : {}),
+    };
+  }
+  async development(_key: string): Promise<DevelopmentLinks> {
+    return {
+      state: 'unavailable',
+      reason: 'Development links are unavailable for this Jira connection.',
+      branches: {
+        state: 'unavailable',
+        reason: 'Development integration is unavailable.',
+      },
+      pullRequests: [],
+      commits: [],
     };
   }
 

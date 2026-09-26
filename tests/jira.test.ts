@@ -904,6 +904,9 @@ describe('JiraProvider preview', () => {
             { type: 'paragraph', content: [{ type: 'text', text: 'Details' }] },
           ],
         },
+        reporter: { displayName: 'Ada' },
+        created: '2026-01-01T00:00:00Z',
+        updated: '2026-01-02T00:00:00Z',
         issuelinks: [
           {
             type: { outward: 'blocks', inward: 'is blocked by' },
@@ -924,6 +927,11 @@ describe('JiraProvider preview', () => {
         { type: 'paragraph', content: [{ type: 'text', text: 'Details' }] },
       ],
     });
+    assert.deepEqual(result.metadata, {
+      reporter: 'Ada',
+      created: '2026-01-01T00:00:00Z',
+      updated: '2026-01-02T00:00:00Z',
+    });
     assert.equal(result.comments[0].body, 'Recent comment');
     assert.deepEqual(result.comments[0].bodyDocument, {
       type: 'doc',
@@ -940,6 +948,10 @@ describe('JiraProvider preview', () => {
       ['blocks', 'is blocked by'],
     );
     assert.equal(result.issue.parentKey, 'PARENT-1');
+    assert.equal(
+      (await new JiraProvider(request).development('TEST-1')).state,
+      'unavailable',
+    );
   });
   it('retains issue details when comments fail and can retry', async () => {
     let fails = true;
@@ -1002,6 +1014,24 @@ it('isolates malformed comment responses and rejects inaccessible preview issues
     inaccessible.preview('TEST-1'),
     /load preview for TEST-1.*Issue not accessible/,
   );
+});
+
+it('distinguishes unavailable Jira preview fields from empty values', async () => {
+  const provider = new JiraProvider(async (path) => {
+    if (path.includes('/comment?')) return { total: 0, comments: [] };
+    const raw = rawIssue('TEST-1', undefined, { assignee: null });
+    delete raw.fields.issuetype;
+    delete raw.fields.status;
+    delete raw.fields.priority;
+    return raw;
+  });
+  const preview = await provider.preview('TEST-1');
+  assert.deepEqual(preview.issue.unavailableFields, [
+    'type',
+    'status',
+    'priority',
+  ]);
+  assert.equal(preview.issue.assignee, null);
 });
 
 describe('connection picker caches', () => {

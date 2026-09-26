@@ -33,6 +33,12 @@ export type Issue = {
 };
 export type IssuePreview = {
   issue: Issue;
+  metadata?: {
+    reporter?: string | null;
+    created?: string | null;
+    updated?: string | null;
+    milestone?: string | null;
+  };
   description: string;
   descriptionMarkdown?: string;
   descriptionDocument?: unknown;
@@ -46,6 +52,13 @@ export type IssuePreview = {
   totalComments: number;
   commentsError?: string;
   linksError?: string;
+};
+export type DevelopmentLinks = {
+  state: 'available' | 'unavailable';
+  reason?: string;
+  branches: { state: 'unavailable'; reason: string };
+  pullRequests: { title: string; url: string; state: string }[];
+  commits: { title: string; url: string; state: string }[];
 };
 export type SearchIssue = Issue & { updated?: string };
 export type SearchPage = {
@@ -204,6 +217,8 @@ export interface CanopyAPI {
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
   preview(connectionId: string, key: string): Promise<IssuePreview>;
   issueUrl(connectionId: string, key: string): Promise<string>;
+  development(connectionId: string, key: string): Promise<DevelopmentLinks>;
+  openDevelopmentLink(url: string): Promise<void>;
   copyText(value: string): Promise<void>;
   search(
     connectionId: string,

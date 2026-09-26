@@ -1,18 +1,20 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import type {
-  Choice,
-  Issue,
-  IssuePreview as Preview,
-  SeenIssue,
-  SeenValue,
-} from '../shared/types';
+import type { Choice, DevelopmentLinks, Issue, IssuePreview as Preview, SeenIssue, SeenValue } from '../shared/types';
 import { unseenChanges } from './seen';
 
 function displayValue(value: SeenValue) {
   return Array.isArray(value) ? value.join(', ') || 'None' : (value ?? 'None');
 }
 import { PreviewText } from './PreviewText';
+
+function metadataValue(value: string | null | undefined, date = false) {
+  if (value === undefined) return 'Unavailable';
+  if (value === null || value === '') return 'None';
+  return date && Number.isFinite(Date.parse(value))
+    ? new Date(value).toLocaleString()
+    : value;
+}
 
 export function IssuePreview({
   connectionId,
@@ -56,6 +58,12 @@ export function IssuePreview({
   const [labels, setLabels] = useState<Choice[]>([]);
   const [editingLabels, setEditingLabels] = useState(false);
   const [savingLabels, setSavingLabels] = useState(false);
+  const [developmentFor, setDevelopmentFor] = useState<string | null>(null);
+  const developmentIdentity = `${connectionId}:${issueKey}`;
+  const developmentOpen = developmentFor === developmentIdentity;
+  const [development, setDevelopment] = useState<DevelopmentLinks>();
+  const [developmentError, setDevelopmentError] = useState('');
+  const [developmentAttempt, setDevelopmentAttempt] = useState(0);
   const identity = useRef('');
   const currentIssue = useRef('');
   useLayoutEffect(() => {
@@ -93,6 +101,31 @@ export function IssuePreview({
       live = false;
     };
   }, [connectionId, issueKey, attempt]);
+  useEffect(() => {
+    setDevelopmentFor(null);
+    setDevelopment(undefined);
+    setDevelopmentError('');
+  }, [connectionId, issueKey]);
+  useEffect(() => {
+    if (!developmentOpen) return;
+    let live = true;
+    setDevelopment(undefined);
+    setDevelopmentError('');
+    window.canopy.development(connectionId, issueKey).then(
+      (result) => {
+        if (live) setDevelopment(result);
+      },
+      (reason: unknown) => {
+        if (live)
+          setDevelopmentError(
+            reason instanceof Error ? reason.message : String(reason),
+          );
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [connectionId, issueKey, developmentOpen, developmentAttempt]);
   useEffect(() => {
     if (provider !== 'github' || !editingLabels) return;
     let live = true;
@@ -331,6 +364,126 @@ export function IssuePreview({
             <button className="tool-button" onClick={() => onWorkBrief(data)}>
               Copy work brief
             </button>
+            <section>
+              <h3>Metadata</h3>
+              <dl className="preview-metadata">
+                {(
+                  [
+                    ['Reporter', metadataValue(data.metadata?.reporter)],
+                    ['Created', metadataValue(data.metadata?.created, true)],
+                    ['Updated', metadataValue(data.metadata?.updated, true)],
+                    [
+                      'Type',
+                      data.issue.unavailableFields?.includes('type')
+                        ? 'Unavailable'
+                        : data.issue.type,
+                    ],
+                    [
+                      'Status',
+                      data.issue.unavailableFields?.includes('status')
+                        ? 'Unavailable'
+                        : data.issue.status.name,
+                    ],
+                    [
+                      'Priority',
+                      provider === 'github'
+                        ? 'Unavailable in GitHub Issues'
+                        : data.issue.unavailableFields?.includes('priority')
+                          ? 'Unavailable'
+                          : (data.issue.priority?.name ?? 'None'),
+                    ],
+                    [
+                      'Assignee',
+                      data.issue.unavailableFields?.includes('assignee')
+                        ? 'Unavailable'
+                        : (data.issue.assignee?.name ?? 'None'),
+                    ],
+                    ...(provider === 'github'
+                      ? [['Milestone', metadataValue(data.metadata?.milestone)]]
+                      : []),
+                  ] as [string, string][]
+                ).map(([label, value]) => (
+                  <React.Fragment key={label}>
+                    <dt>{label}</dt>
+                    <dd>{value}</dd>
+                  </React.Fragment>
+                ))}
+              </dl>
+            </section>
+            <section>
+              <h3>Development</h3>
+              <button
+                className="tool-button"
+                aria-expanded={developmentOpen}
+                onClick={() =>
+                  setDevelopmentFor(
+                    developmentOpen ? null : developmentIdentity,
+                  )
+                }
+              >
+                {developmentOpen ? 'Hide development' : 'Show development'}
+              </button>
+              {developmentOpen &&
+                (developmentError ? (
+                  <div role="alert">
+                    {developmentError}{' '}
+                    <button
+                      className="tool-button"
+                      onClick={() =>
+                        setDevelopmentAttempt((value) => value + 1)
+                      }
+                    >
+                      Retry development
+                    </button>
+                  </div>
+                ) : !development ? (
+                  <p role="status">Loading development links…</p>
+                ) : development.state === 'unavailable' ? (
+                  <p>{development.reason}</p>
+                ) : (
+                  <div>
+                    <p className="preview-hint">
+                      Associations shown from the GitHub issue timeline.
+                    </p>
+                    <h4>Branches</h4>
+                    <p>{development.branches.reason}</p>
+                    <h4>Pull requests</h4>
+                    {development.pullRequests.length === 0 && (
+                      <p>No associated pull requests found.</p>
+                    )}
+                    {development.pullRequests.map((item) => (
+                      <div className="preview-development-link" key={item.url}>
+                        <button
+                          className="text-button"
+                          onClick={() =>
+                            void window.canopy.openDevelopmentLink(item.url)
+                          }
+                        >
+                          {item.title}
+                        </button>
+                        <span>{item.state}</span>
+                      </div>
+                    ))}
+                    <h4>Commits</h4>
+                    {development.commits.length === 0 && (
+                      <p>No associated commits found.</p>
+                    )}
+                    {development.commits.map((item) => (
+                      <div className="preview-development-link" key={item.url}>
+                        <button
+                          className="text-button"
+                          onClick={() =>
+                            void window.canopy.openDevelopmentLink(item.url)
+                          }
+                        >
+                          {item.title}
+                        </button>
+                        <span>{item.state}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+            </section>
             {provider === 'github' && (
               <section>
                 <h3>Labels</h3>

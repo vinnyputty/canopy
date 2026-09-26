@@ -14,6 +14,9 @@ const api: CanopyAPI = {
   tree: (id, key) => ipcRenderer.invoke('canopy:tree', id, key),
   preview: (id, key) => ipcRenderer.invoke('canopy:preview', id, key),
   issueUrl: (id, key) => ipcRenderer.invoke('canopy:issueUrl', id, key),
+  development: (id, key) => ipcRenderer.invoke('canopy:development', id, key),
+  openDevelopmentLink: (url) =>
+    ipcRenderer.invoke('canopy:openDevelopmentLink', url),
   copyText: (value) => ipcRenderer.invoke('canopy:copyText', value),
   search: (id, query, options) =>
     ipcRenderer.invoke('canopy:search', id, query, options),

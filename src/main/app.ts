@@ -27,6 +27,7 @@ import { Auth } from './auth';
 import { JiraProvider } from './jira';
 import {
   GithubProvider,
+  githubDevelopmentUrl,
   githubKey,
   githubRootKey,
   githubRootUrl,
@@ -297,6 +298,7 @@ type Fixture = {
   provider: Pick<
     JiraProvider,
     | 'preview'
+    | 'development'
     | 'tree'
     | 'search'
     | 'priorities'
@@ -517,6 +519,10 @@ async function start(
     preview: (id: string, issue: string) =>
       provider(id).preview(normalized(id, issue)),
     issueUrl: (id: string, issue: string) => issueUrl(id, issue),
+    development: (id: string, issue: string) =>
+      provider(id).development(normalized(id, issue)),
+    openDevelopmentLink: (url: string) =>
+      shell.openExternal(githubDevelopmentUrl(url)),
     copyText: (value: string) => {
       if (typeof value !== 'string' || value.length > 100_000)
         throw new Error('Invalid clipboard text.');

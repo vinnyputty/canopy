@@ -85,6 +85,7 @@ launch(async (storage) => {
         return snapshot;
       },
       preview: (key) => demo.preview(key),
+      development: (key) => demo.development(key),
       search: (query, token, signal) => demo.search(query, token, signal),
       priorities: (key, refresh) => demo.priorities(key, refresh),
       transitions: (key, refresh) => demo.transitions(key, refresh),
