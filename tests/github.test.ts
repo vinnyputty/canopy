@@ -18,6 +18,7 @@ const raw = (
   extra: Record<string, unknown> = {},
 ) => ({
   id: `${repo}-${number}`,
+  node_id: `${repo}-${number}`,
   html_url: `https://github.com/${repo}/issues/${number}`,
   number,
   title: `${repo} ${number}`,
@@ -43,7 +44,7 @@ test('GitHub references accept only issue URLs and owner/repo numbers', () => {
 
 test('GitHub tree follows paginated sub-issues across selected repositories and warns about inaccessible children', async () => {
   const paths: string[] = [];
-  const provider = new GithubProvider(connection, async (path) => {
+  const provider = new GithubProvider(connection, async (path, init) => {
     paths.push(path);
     if (path === '/repos/team/a/issues/1') return raw('team/a', 1);
     if (path === '/repos/team/a/issues/1/sub_issues?per_page=100&page=1')
@@ -52,8 +53,16 @@ test('GitHub tree follows paginated sub-issues across selected repositories and 
       return [
         raw('team/b', 4, { state: 'closed', labels: [{ name: 'ready' }] }),
       ];
-    if (path === '/repos/team/b/issues/4/sub_issues?per_page=100&page=1')
-      return [];
+    if (path === '/graphql')
+      return {
+        data: {
+          nodes: JSON.parse(String(init?.body)).variables.ids.map(
+            (id: string) => ({
+              subIssuesSummary: { total: id === 'team/b-2' ? 1 : 0 },
+            }),
+          ),
+        },
+      };
     throw new Error(path);
   });
   const tree = await provider.tree('team/a#1');
@@ -70,6 +79,10 @@ test('GitHub tree follows paginated sub-issues across selected repositories and 
   assert.match(tree.warnings[0], /outside the selected repositories/);
   assert.equal(
     paths.some((path) => path.includes('other/hidden')),
+    false,
+  );
+  assert.equal(
+    paths.some((path) => path.includes('/issues/4/sub_issues')),
     false,
   );
 });
@@ -125,7 +138,7 @@ test('GitHub writes map title, assignee, labels, and state without Jira fields',
   );
 });
 
-test('GitHub connection verifies issue access before saving and rate limits requests', async () => {
+test('GitHub connection verifies issue access and honors secondary rate-limit retry time', async () => {
   const original = globalThis.fetch;
   const saved: unknown[] = [];
   const auth = new Auth(
@@ -142,11 +155,14 @@ test('GitHub connection verifies issue access before saving and rate limits requ
     if (path === '/user') return Response.json({ login: 'alex' });
     if (path.endsWith('/issues')) return Response.json([]);
     if (path.endsWith('/issues/1'))
-      return new Response('{}', {
+      return new Response('{"message":"secondary rate limit"}', {
         status: 403,
         headers: {
-          'x-ratelimit-remaining': '0',
-          'x-ratelimit-reset': String(Math.ceil((Date.now() + 60_000) / 1000)),
+          'x-ratelimit-remaining': '5',
+          'x-ratelimit-reset': String(
+            Math.ceil((Date.now() + 3_600_000) / 1000),
+          ),
+          'retry-after': '2',
         },
       });
     throw new Error(path);
@@ -163,7 +179,9 @@ test('GitHub connection verifies issue access before saving and rate limits requ
       auth.githubRequest(connected[0].id, '/repos/team/a/issues/1'),
       /rate limit/,
     );
-    assert.ok(auth.githubSyncStatus(connected[0].id).retryAt);
+    const retryAt = auth.githubSyncStatus(connected[0].id).retryAt;
+    assert.ok(retryAt && retryAt > Date.now());
+    assert.ok(retryAt < Date.now() + 3_000);
     await assert.rejects(
       auth.githubRequest(connected[0].id, '/repos/team/a/issues/1'),
       /rate limit/,

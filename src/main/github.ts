@@ -125,6 +125,7 @@ export class GithubProvider {
     let frontier = [root];
     while (frontier.length) {
       const next: string[] = [];
+      const candidates: { key: string; nodeId: string }[] = [];
       for (const parent of frontier) {
         const children = await this.all(this.path(parent, '/sub_issues'));
         for (const child of children) {
@@ -141,7 +142,30 @@ export class GithubProvider {
             continue;
           }
           issues.push(parseIssue(child, parent));
-          next.push(key);
+          if (typeof child.node_id === 'string')
+            candidates.push({ key, nodeId: child.node_id });
+          else next.push(key);
+        }
+      }
+      for (let start = 0; start < candidates.length; start += 100) {
+        const batch = candidates.slice(start, start + 100);
+        const result = await this.request('/graphql', {
+          method: 'POST',
+          body: JSON.stringify({
+            query:
+              'query($ids:[ID!]!){nodes(ids:$ids){... on Issue{subIssuesSummary{total}}}}',
+            variables: { ids: batch.map((item) => item.nodeId) },
+          }),
+        });
+        if (result.errors?.length || !Array.isArray(result.data?.nodes))
+          throw new Error('GitHub could not load sub-issue counts.');
+        if (result.data.nodes.length !== batch.length)
+          throw new Error('GitHub returned incomplete sub-issue counts.');
+        for (let index = 0; index < batch.length; index++) {
+          const count = result.data.nodes[index]?.subIssuesSummary?.total;
+          if (!Number.isSafeInteger(count) || count < 0)
+            throw new Error('GitHub returned invalid sub-issue counts.');
+          if (count > 0) next.push(batch[index].key);
         }
       }
       frontier = next;

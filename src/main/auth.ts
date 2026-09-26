@@ -182,8 +182,11 @@ export class Auth {
     if (
       !path.startsWith('/') ||
       path.includes('..') ||
-      !/^\/(repos\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(issues|labels|assignees)|search\/issues|user)([/?].*)?$/i.test(
-        path,
+      !(
+        path === '/graphql' ||
+        /^\/(repos\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(issues|labels|assignees)|search\/issues|user)([/?].*)?$/i.test(
+          path,
+        )
       )
     )
       throw new Error('Invalid GitHub API path.');
@@ -227,9 +230,11 @@ export class Auth {
       const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
       const retry = Number(response.headers.get('retry-after')) * 1000;
       const until =
-        Number.isFinite(reset) && reset > Date.now()
-          ? reset
-          : Date.now() + (retry > 0 ? retry : 60_000);
+        retry > 0
+          ? Date.now() + retry
+          : remaining === '0' && Number.isFinite(reset) && reset > Date.now()
+            ? reset
+            : Date.now() + 60_000;
       this.githubRetry.set(id, until);
       throw new Error(
         `GitHub rate limit reached. Retry after ${new Date(until).toLocaleTimeString()}.`,

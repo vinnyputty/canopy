@@ -99,7 +99,7 @@ export function IssuePreview({
       const issue = await window.canopy.update(connectionId, issueKey, {
         labels: next,
       });
-      setData({ ...data, issue });
+      setData({ ...data, issue: { ...issue, links: data.issue.links } });
       onChanged();
     } catch (reason) {
       setData(data);

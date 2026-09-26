@@ -10,6 +10,7 @@ export async function auditGithub(app, page) {
     globalThis.githubSmokeFetch = globalThis.fetch;
     const issue = (repo, number, extra = {}) => ({
       id: number + (repo === 'team/b' ? 100 : 0),
+      node_id: `${repo}-${number}`,
       number,
       html_url: `https://github.com/${repo}/issues/${number}`,
       title: `${repo} issue ${number}`,
@@ -28,6 +29,10 @@ export async function auditGithub(app, page) {
         return globalThis.githubSmokeFetch(url, init);
       const path = parsed.pathname;
       if (path === '/user') return Response.json({ login: 'tester' });
+      if (path === '/graphql')
+        return Response.json({
+          data: { nodes: [{ subIssuesSummary: { total: 0 } }] },
+        });
       if (/^\/repos\/team\/[ab]\/issues$/.test(path)) return Response.json([]);
       if (path === '/repos/team/a/issues/1/sub_issues')
         return Response.json([globalThis.githubSmokeIssues['team/b#2']]);
@@ -52,11 +57,9 @@ export async function auditGithub(app, page) {
         return Response.json(globalThis.githubSmokeIssues['team/a#1']);
       }
       if (path === '/repos/team/a/issues/1/comments') return Response.json([]);
-      if (
-        path.endsWith('/dependencies/blocked_by') ||
-        path.endsWith('/dependencies/blocking')
-      )
-        return Response.json([]);
+      if (path.endsWith('/dependencies/blocked_by'))
+        return Response.json([globalThis.githubSmokeIssues['team/b#2']]);
+      if (path.endsWith('/dependencies/blocking')) return Response.json([]);
       if (path === '/repos/team/a/labels')
         return Response.json([{ name: 'ready' }]);
       if (path === '/repos/team/a/assignees')
@@ -145,11 +148,13 @@ export async function auditGithub(app, page) {
       name: 'Preview team/a#1',
     });
     await expect(preview.getByText('No labels.')).toBeVisible();
+    await expect(preview.getByText('team/b#2')).toBeVisible();
     await preview.getByRole('button', { name: 'Edit labels' }).click();
     await preview.getByRole('checkbox', { name: 'ready' }).click();
     await expect(
       preview.getByRole('checkbox', { name: 'ready' }),
     ).toBeChecked();
+    await expect(preview.getByText('team/b#2')).toBeVisible();
     await preview.getByRole('button', { name: 'Close issue preview' }).click();
     await page
       .getByRole('button', { name: 'Open issue', exact: true })
