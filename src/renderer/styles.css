@@ -110,6 +110,42 @@ select:focus-visible,
 .app.sidebar-is-collapsed {
   grid-template-columns: 0 minmax(0, 1fr);
 }
+.demo-tour {
+  position: fixed;
+  z-index: 30;
+  left: max(16px, calc(var(--sidebar-width, 220px) + 16px));
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--selected-border);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: var(--shadow);
+}
+.demo-tour-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.demo-tour-copy strong {
+  color: var(--accent);
+}
+.demo-tour-progress {
+  color: var(--muted);
+  font-size: 11px;
+}
+@media (max-width: 900px) {
+  .demo-tour {
+    left: 12px;
+    right: 12px;
+    flex-wrap: wrap;
+  }
+}
 .app.sidebar-is-collapsed .sidebar {
   transform: translateX(calc(-1 * var(--sidebar-width, 220px)));
 }

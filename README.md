@@ -14,6 +14,8 @@ bazel test //:test //:typecheck //:format_check --test_output=errors
 bazel run //:dev
 ```
 
+Choose **Try demo** on the welcome screen or from the sidebar or app menu to open a separate local sample workspace. The guided tour starts automatically; **Stop demo** leaves the sample tree available, and **Reset and replay** restores its starting data. Closing the demo returns to the original Canopy window. No account or network connection is needed, and demo changes last only for that launch. From a source checkout, `bazel run //:demo` opens the same experience and `bazel run //:demo_check` runs its Electron interaction checks.
+
 Run `bazel run //:smoke` for an automated Electron demo test covering editing, tree controls, linked tabs, shortcuts, and persistence across restarts. Failures print visible app errors and recent process output, and save a screenshot plus `failure.json` under `.cache/smoke-failure/`; CI uploads these as `smoke-failure-<OS>` artifacts. Set `CANOPY_SMOKE_TEST_DIAGNOSTICS=1` to verify capture with an intentional failure. It opens isolated app windows and writes a screenshot to `.cache/tree.png`; it does not use your saved connections.
 
 Run `bazel run //:smoke_github` for a focused Electron test with mocked GitHub API responses covering connection, cross-repository sub-issues, edits, labels, and grouped search. It uses isolated app data and does not use your saved credentials.
@@ -24,9 +26,9 @@ Run the full CI sequence locally with:
 bazel run //:ci
 ```
 
-This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke test, and packages Canopy. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
+This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke and guided demo checks, and packages Canopy. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
 
-Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. Normal builds start with your saved Jira connections. The local demo provider is included only in the smoke-test entry point and is excluded from release packages.
+Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. Normal builds start with your saved Jira connections. The local sample provider powers both the guided demo and the smoke-test entry point; smoke-only failure controls stay in the test fixture.
 
 Use **Connect Jira site** to add a Jira Cloud site, your Atlassian account email, and a personal API token. Select **Scoped** for a token created with scopes, or **Classic** for a token created without scopes. Canopy checks `/myself` before saving the connection and uses the operating system credential store to encrypt credentials. Tokens stay in the Electron main process. Each connection is associated with a site and account.
 

@@ -179,6 +179,15 @@ export function App() {
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [ready, setReady] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
+  const [tour, setTour] = useState<{
+    phase: 'playing' | 'stopped' | 'complete' | 'failed';
+    step: number;
+    caption: string;
+  } | null>(null);
+  const tourStarted = useRef(false);
+  const stopTourRef = useRef<(() => void) | null>(null);
+  const tourEditor = useRef(false);
   const [dialog, setDialog] = useState<
     'open' | 'commands' | 'shortcuts' | 'connect' | null
   >(null);
@@ -532,9 +541,15 @@ export function App() {
 
   useEffect(() => {
     let live = true;
-    Promise.all([window.canopy.connections(), window.canopy.loadWorkspace()])
-      .then(([nextConnections, saved]) => {
+    Promise.all([
+      window.canopy.connections(),
+      window.canopy.loadWorkspace(),
+      window.canopy.demoMode(),
+    ])
+      .then(([nextConnections, saved, isDemo]) => {
         if (!live) return;
+        setDemoMode(isDemo);
+        document.title = isDemo ? 'Canopy — Demo' : 'Canopy';
         setConnections(nextConnections);
         // Remove the retired demo without dropping Jira tabs if a keyring is locked.
         const hasDemo = nextConnections.some(
@@ -600,7 +615,10 @@ export function App() {
     async (tab: TabState, quiet = false, explicit = false) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       explicit ||= forcedRefreshes.current.has(tab.id);
-      if (!navigator.onLine || refreshBlocked.current(tab.connectionId)) {
+      if (
+        (!navigator.onLine && !demoMode) ||
+        refreshBlocked.current(tab.connectionId)
+      ) {
         if (explicit) forcedRefreshes.current.add(tab.id);
         deferredRefreshes.current.add(tab.id);
         return;
@@ -710,7 +728,7 @@ export function App() {
         }
       }
     },
-    [],
+    [demoMode],
   );
 
   const finishWorkflowReturn = useCallback(() => {
@@ -788,7 +806,7 @@ export function App() {
       if (Object.keys(cooldowns.current).length || recovered.size)
         setSyncNow(now);
       if (recovered.size) setCooldownTimes({ ...cooldowns.current });
-      if (!navigator.onLine) return;
+      if (!navigator.onLine && !demoMode) return;
       const due = new Set(refreshSchedule.current.due(Date.now()));
       for (const tab of [...tabsRef.current].sort(
         (a, b) =>
@@ -844,7 +862,7 @@ export function App() {
       window.removeEventListener('online', connectivity);
       window.removeEventListener('offline', connectivity);
     };
-  }, [ready, refreshTab, finishWorkflowReturn]);
+  }, [ready, refreshTab, finishWorkflowReturn, demoMode]);
 
   useEffect(() => {
     for (const tab of workspace.tabs) {
@@ -1704,6 +1722,228 @@ export function App() {
         ?.focus();
   };
 
+  const launchDemo = () =>
+    void window.canopy.launchDemo().catch((error: unknown) =>
+      setErrors((current) => ({
+        ...current,
+        app: `Couldn’t open demo: ${error instanceof Error ? error.message : String(error)}`,
+      })),
+    );
+
+  useEffect(() => {
+    if (
+      !demoMode ||
+      !ready ||
+      !snapshots['demo-can-100'] ||
+      tourStarted.current
+    )
+      return;
+    tourStarted.current = true;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    let finished = false;
+    const pause = (ms: number) =>
+      new Promise<void>((resolve, reject) => {
+        signal.throwIfAborted();
+        const timer = window.setTimeout(resolve, ms);
+        signal.addEventListener(
+          'abort',
+          () => {
+            window.clearTimeout(timer);
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      });
+    const waitFor = async (check: () => boolean, label: string) => {
+      const deadline = Date.now() + 8000;
+      while (!check()) {
+        signal.throwIfAborted();
+        if (Date.now() > deadline) throw new Error(`${label} did not appear.`);
+        await pause(100);
+      }
+    };
+    const row = (key: string) =>
+      document.querySelector<HTMLElement>(`[data-tree-key="${key}"]`);
+    const show = (step: number, caption: string) =>
+      setTour({ phase: 'playing', step, caption });
+    const stop = (manual = false, target?: EventTarget | null) => {
+      if (finished || signal.aborted) return;
+      controller.abort(new Error('Demo stopped.'));
+      finished = true;
+      if (
+        tourEditor.current &&
+        !(target instanceof Element && target.closest('.priority-editor'))
+      ) {
+        setEditor(null);
+        tourEditor.current = false;
+      }
+      setTour({
+        phase: 'stopped',
+        step: 0,
+        caption: manual
+          ? 'Playback stopped because you took control. Explore the sample workspace freely.'
+          : 'Playback stopped. Explore the sample workspace freely.',
+      });
+    };
+    stopTourRef.current = () => stop();
+    const manual = (event: Event) => {
+      if (!event.isTrusted || !(event.target instanceof Element)) return;
+      if (event.target.closest('.demo-tour')) return;
+      stop(true, event.target);
+    };
+    for (const name of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+      document.addEventListener(name, manual, true);
+    const run = async () => {
+      try {
+        show(
+          0,
+          'This is a local sample workspace. We’ll follow one issue tree, then leave it ready for you.',
+        );
+        await pause(2800);
+        show(
+          1,
+          'Expand CAN-100 to see stories, tasks, and an unfinished descendant.',
+        );
+        updateTab('demo-can-100', {
+          expanded: ['CAN-100', 'CAN-106', 'CAN-107'],
+        });
+        await waitFor(() => Boolean(row('CAN-108')), 'CAN-108');
+        row('CAN-108')?.scrollIntoView({ block: 'center' });
+        await pause(3000);
+
+        show(
+          2,
+          'Hide done narrows the tree. Turning it off restores the full hierarchy.',
+        );
+        updateTab('demo-can-100', { hideDone: true });
+        await waitFor(() => !row('CAN-113'), 'Filtered tree');
+        await pause(2000);
+        signal.throwIfAborted();
+        updateTab('demo-can-100', { hideDone: false });
+        await waitFor(() => Boolean(row('CAN-113')), 'Restored tree');
+        await pause(1800);
+
+        show(
+          3,
+          'Preview CAN-108 for its description, comment, and related work.',
+        );
+        setPreviewKey('CAN-108');
+        await waitFor(
+          () =>
+            Boolean(
+              document.querySelector('[aria-label="Preview CAN-108"] h2'),
+            ),
+          'CAN-108 preview',
+        );
+        await pause(3500);
+
+        show(4, 'The linked CAN-200 issue opens in a separate tab.');
+        openTab('demo', 'CAN-200');
+        await waitFor(
+          () =>
+            Boolean(
+              document.querySelector(
+                '[role="tree"][aria-label="CAN-200 issue tree"]',
+              ),
+            ),
+          'CAN-200 tree',
+        );
+        await pause(2900);
+
+        show(5, 'Return to CAN-100 without losing its place.');
+        selectTab('demo-can-100');
+        await waitFor(() => Boolean(row('CAN-108')), 'CAN-100 tree');
+        updateTab('demo-can-100', { expanded: ['CAN-100', 'CAN-110'] });
+        await waitFor(() => Boolean(row('CAN-111')), 'CAN-111');
+        row('CAN-111')?.scrollIntoView({ block: 'center' });
+        await pause(2600);
+
+        show(6, 'Raise CAN-111’s priority, then use Undo to restore it.');
+        setEditor({ connectionId: 'demo', key: 'CAN-111', field: 'priority' });
+        tourEditor.current = true;
+        await pickers.open('demo', 'CAN-111', 'priority');
+        await waitFor(
+          () =>
+            Boolean(row('CAN-111')?.querySelector('.priority-editor select')),
+          'Priority editor',
+        );
+        await pause(1300);
+        signal.throwIfAborted();
+        setEditor(null);
+        tourEditor.current = false;
+        const choices = await window.canopy.priorities('demo', 'CAN-111');
+        signal.throwIfAborted();
+        if (
+          !(await mutations.update(
+            'demo',
+            'CAN-111',
+            { priorityId: '1' },
+            { priorities: choices },
+          ))
+        )
+          throw new Error('The priority edit failed.');
+        await waitFor(
+          () =>
+            row('CAN-111')?.querySelector('.priority')?.textContent ===
+            'Highest',
+          'Updated priority',
+        );
+        await pause(1900);
+        signal.throwIfAborted();
+        await mutations.undo();
+        signal.throwIfAborted();
+        await waitFor(
+          () =>
+            row('CAN-111')?.querySelector('.priority')?.textContent === 'High',
+          'Restored priority',
+        );
+        await pause(1900);
+
+        show(
+          7,
+          'Move CAN-112 above its sibling CAN-111. You can keep editing after the tour.',
+        );
+        if (!(await mutations.rank('demo', 'CAN-112', 'CAN-111')))
+          throw new Error('The sibling reorder failed.');
+        signal.throwIfAborted();
+        await waitFor(() => {
+          const first = row('CAN-112')?.getBoundingClientRect().top;
+          const second = row('CAN-111')?.getBoundingClientRect().top;
+          return first !== undefined && second !== undefined && first < second;
+        }, 'Reordered siblings');
+        await pause(2600);
+        signal.throwIfAborted();
+        setPreviewKey(null);
+        setEditor(null);
+        setDialog(null);
+        finished = true;
+        setTour({
+          phase: 'complete',
+          step: 7,
+          caption: 'Tour complete. The sample tree is yours to explore.',
+        });
+      } catch (error) {
+        if (signal.aborted) return;
+        finished = true;
+        setEditor(null);
+        setDialog(null);
+        setTour({
+          phase: 'failed',
+          step: 0,
+          caption: `The tour stopped: ${error instanceof Error ? error.message : String(error)} The sample workspace is still available.`,
+        });
+      }
+    };
+    void run();
+    return () => {
+      controller.abort();
+      stopTourRef.current = null;
+      for (const name of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+        document.removeEventListener(name, manual, true);
+    };
+  }, [demoMode, ready, Boolean(snapshots['demo-can-100'])]);
+
   if (!ready)
     return (
       <div className="boot">
@@ -1824,6 +2064,7 @@ export function App() {
           </nav>
           <Connections
             connections={connections}
+            demoMode={demoMode}
             setConnections={(nextConnections) => {
               setConnections(nextConnections);
               const removed = connections.filter(
@@ -1869,6 +2110,12 @@ export function App() {
           <Settings2 size={16} />
           <span>Keyboard shortcuts</span>
         </button>
+        {!demoMode && (
+          <button className="sidebar-settings" onClick={launchDemo}>
+            <CircleDot size={16} />
+            <span>Try demo</span>
+          </button>
+        )}
         <div
           className="sidebar-resizer"
           role="separator"
@@ -2444,7 +2691,7 @@ export function App() {
                   <button
                     onClick={() => void refreshTab(activeTab, true, true)}
                     disabled={
-                      !online ||
+                      (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
                       refreshing.has(activeTab.id) ||
                       loading.has(activeTab.id)
@@ -2734,15 +2981,17 @@ export function App() {
                   )}
                   <span className="status-spacer" />
                   <span role="status" aria-label="Connection status">
-                    {!online
-                      ? 'Offline'
-                      : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
-                        ? 'Rate limited'
-                        : connectionErrors.has(activeTab.id)
-                          ? 'Connection error'
-                          : snapshot
-                            ? 'Connected'
-                            : 'Connecting'}
+                    {demoMode
+                      ? 'Local sample'
+                      : !online
+                        ? 'Offline'
+                        : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                          ? 'Rate limited'
+                          : connectionErrors.has(activeTab.id)
+                            ? 'Connection error'
+                            : snapshot
+                              ? 'Connected'
+                              : 'Connecting'}
                   </span>
                   <span>
                     {foreground ? 'Auto-refresh 30s' : 'Background refresh'}
@@ -2804,11 +3053,58 @@ export function App() {
           <Welcome
             onOpen={() => setDialog('open')}
             onConnect={() => setDialog('connect')}
+            onDemo={launchDemo}
+            demoMode={demoMode}
             hasConnections={connections.length > 0}
             error={errors.app ?? errors.workspace}
           />
         )}
       </main>
+
+      {demoMode && (
+        <section className="demo-tour" aria-label="Canopy demo">
+          <div className="demo-tour-copy">
+            <strong>Canopy demo</strong>
+            <span role="status" aria-live="polite">
+              {tour?.caption ?? 'Loading the sample workspace…'}
+            </span>
+            {tour?.phase === 'playing' && (
+              <span className="demo-tour-progress">
+                {tour.step === 0 ? 'Starting tour' : `Step ${tour.step} of 7`}
+              </span>
+            )}
+          </div>
+          {tour?.phase === 'playing' && (
+            <button
+              className="secondary"
+              onClick={() => stopTourRef.current?.()}
+            >
+              Stop demo
+            </button>
+          )}
+          <button
+            className="secondary"
+            onClick={() => {
+              stopTourRef.current?.();
+              void window.canopy.resetDemo().catch((error: unknown) =>
+                setTour({
+                  phase: 'failed',
+                  step: 0,
+                  caption: `Couldn’t reset the demo: ${error instanceof Error ? error.message : String(error)}`,
+                }),
+              );
+            }}
+          >
+            Reset and replay
+          </button>
+          <button
+            className="secondary"
+            onClick={() => void window.canopy.closeDemo()}
+          >
+            Close demo
+          </button>
+        </section>
+      )}
 
       {tabMenu &&
         (() => {
@@ -2892,28 +3188,34 @@ export function App() {
               >
                 {pinned ? 'Unpin root' : 'Pin root'}
               </button>
-              <button
-                role="menuitem"
-                onClick={() =>
-                  action(
-                    () => void copyIssueLink(tab.connectionId, tab.rootKey),
-                  )
-                }
-              >
-                Copy root link
-              </button>
-              <button
-                role="menuitem"
-                onClick={() =>
-                  action(() => void openExternal(tab.connectionId, tab.rootKey))
-                }
-              >
-                Open in{' '}
-                {connections.find((item) => item.id === tab.connectionId)
-                  ?.provider === 'github'
-                  ? 'GitHub'
-                  : 'Jira'}
-              </button>
+              {!demoMode && (
+                <button
+                  role="menuitem"
+                  onClick={() =>
+                    action(
+                      () => void copyIssueLink(tab.connectionId, tab.rootKey),
+                    )
+                  }
+                >
+                  Copy root link
+                </button>
+              )}
+              {!demoMode && (
+                <button
+                  role="menuitem"
+                  onClick={() =>
+                    action(
+                      () => void openExternal(tab.connectionId, tab.rootKey),
+                    )
+                  }
+                >
+                  Open in{' '}
+                  {connections.find((item) => item.id === tab.connectionId)
+                    ?.provider === 'github'
+                    ? 'GitHub'
+                    : 'Jira'}
+                </button>
+              )}
             </div>
           );
         })()}
@@ -3000,11 +3302,13 @@ export function App() {
 
 function Connections({
   connections,
+  demoMode,
   setConnections,
   onConnect,
   onError,
 }: {
   connections: Connection[];
+  demoMode: boolean;
   setConnections: (value: Connection[]) => void;
   onConnect: () => void;
   onError: (value: string) => void;
@@ -3025,14 +3329,16 @@ function Connections({
     <section className="connections">
       <div className="side-heading">
         <span>CONNECTIONS</span>
-        <button
-          className="icon-button"
-          onClick={onConnect}
-          disabled={busy}
-          aria-label="Connect Jira or GitHub"
-        >
-          {busy ? <Loader2 className="spin" size={14} /> : <Plus size={15} />}
-        </button>
+        {!demoMode && (
+          <button
+            className="icon-button"
+            onClick={onConnect}
+            disabled={busy}
+            aria-label="Connect Jira or GitHub"
+          >
+            {busy ? <Loader2 className="spin" size={14} /> : <Plus size={15} />}
+          </button>
+        )}
       </div>
       {connections.map((connection) => (
         <div className="connection" key={connection.id}>
@@ -3045,16 +3351,18 @@ function Connections({
                 : (connection.accountName ?? connection.url)}
             </small>
           </span>
-          <button
-            className="icon-button disconnect"
-            title={`Disconnect ${connection.name}`}
-            onClick={() => void disconnect(connection.id)}
-          >
-            <LogOut size={14} />
-          </button>
+          {!demoMode && (
+            <button
+              className="icon-button disconnect"
+              title={`Disconnect ${connection.name}`}
+              onClick={() => void disconnect(connection.id)}
+            >
+              <LogOut size={14} />
+            </button>
+          )}
         </div>
       ))}
-      {connections.length === 0 && (
+      {!demoMode && connections.length === 0 && (
         <button className="connect-quiet" onClick={onConnect}>
           <LogIn size={15} />
           Connect Jira or GitHub
@@ -3255,21 +3563,27 @@ function TreeRows(props: RowsProps) {
           {issue.type.slice(0, 1).toUpperCase()}
         </span>
         <div className="issue-title">
-          <button
-            className="key"
-            onClick={() => props.onOpenExternal(issue.key)}
-            title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
-          >
-            {issue.key}
-          </button>
-          <button
-            className="copy-key"
-            onClick={() => props.onCopyLink(issue.key)}
-            title={`Copy link to ${issue.key}`}
-            aria-label={`Copy link to ${issue.key}`}
-          >
-            <Copy size={11} />
-          </button>
+          {props.provider === 'demo' ? (
+            <span className="key">{issue.key}</span>
+          ) : (
+            <button
+              className="key"
+              onClick={() => props.onOpenExternal(issue.key)}
+              title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
+            >
+              {issue.key}
+            </button>
+          )}
+          {props.provider !== 'demo' && (
+            <button
+              className="copy-key"
+              onClick={() => props.onCopyLink(issue.key)}
+              title={`Copy link to ${issue.key}`}
+              aria-label={`Copy link to ${issue.key}`}
+            >
+              <Copy size={11} />
+            </button>
+          )}
           {repositoryRoot ? (
             <span className="summary">{issue.summary}</span>
           ) : props.editor?.key === issue.key &&
@@ -3280,7 +3594,7 @@ function TreeRows(props: RowsProps) {
               save={props.updateIssue}
               cancel={props.cancelEdit}
             />
-          ) : (
+          ) : props.provider !== 'demo' ? (
             <button
               className="summary"
               onKeyDown={(event) => {
@@ -3296,7 +3610,7 @@ function TreeRows(props: RowsProps) {
             >
               {issue.summary}
             </button>
-          )}
+          ) : null}
         </div>
         {!open && count && count.total > 0 && (
           <span
@@ -3485,7 +3799,7 @@ function TreeRows(props: RowsProps) {
               size={14}
               aria-label={`Saving ${issue.key}`}
             />
-          ) : (
+          ) : props.provider !== 'demo' ? (
             <button
               className="icon-button"
               title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
@@ -3493,7 +3807,7 @@ function TreeRows(props: RowsProps) {
             >
               <ExternalLink size={14} />
             </button>
-          )}
+          ) : null}
         </div>
       </div>
       {linksOpen && (
@@ -3502,6 +3816,7 @@ function TreeRows(props: RowsProps) {
           depth={depth}
           openTab={props.onOpenTab}
           openExternal={props.onOpenExternal}
+          provider={props.provider}
         />
       )}
       {hasChildren && open && (
@@ -3959,11 +4274,13 @@ function LinkedIssues({
   depth,
   openTab,
   openExternal,
+  provider,
 }: {
   issue: Issue;
   depth: number;
   openTab: (key: string) => void;
   openExternal: (key: string) => void;
+  provider: Connection['provider'];
 }) {
   const groups = issue.links.reduce<Record<string, typeof issue.links>>(
     (all, link) => {
@@ -3988,9 +4305,16 @@ function LinkedIssues({
             {(links ?? []).map((link) => (
               <div className="linked-row" key={`${relationship}-${link.key}`}>
                 <Link2 size={12} />
-                <button className="key" onClick={() => openExternal(link.key)}>
-                  {link.key}
-                </button>
+                {provider === 'demo' ? (
+                  <span className="key">{link.key}</span>
+                ) : (
+                  <button
+                    className="key"
+                    onClick={() => openExternal(link.key)}
+                  >
+                    {link.key}
+                  </button>
+                )}
                 <span title={link.summary}>{link.summary}</span>
                 <button
                   className="open-linked"
@@ -4899,11 +5223,15 @@ function EmptyState({
 function Welcome({
   onOpen,
   onConnect,
+  onDemo,
+  demoMode,
   hasConnections,
   error,
 }: {
   onOpen: () => void;
   onConnect: () => void;
+  onDemo: () => void;
+  demoMode: boolean;
   hasConnections: boolean;
   error?: string;
 }) {
@@ -4936,12 +5264,23 @@ function Welcome({
         <div className="welcome-actions">
           <button
             className="primary"
-            onClick={hasConnections ? onOpen : onConnect}
+            onClick={hasConnections || demoMode ? onOpen : onConnect}
           >
-            {hasConnections ? <Search size={16} /> : <LogIn size={16} />}
-            {hasConnections ? 'Open an issue' : 'Connect Jira or GitHub'}
+            {hasConnections || demoMode ? (
+              <Search size={16} />
+            ) : (
+              <LogIn size={16} />
+            )}
+            {hasConnections || demoMode
+              ? 'Open an issue'
+              : 'Connect Jira or GitHub'}
           </button>
-          {hasConnections && (
+          {!demoMode && (
+            <button className="secondary" onClick={onDemo}>
+              Try demo
+            </button>
+          )}
+          {hasConnections && !demoMode && (
             <button className="secondary" onClick={onConnect}>
               <Plus size={15} />
               Add connection

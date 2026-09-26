@@ -73,8 +73,15 @@ export function RowMenu({
           ['key', 'Copy key'],
           ['title', 'Copy title'],
           ['key-summary', 'Copy key and summary'],
-          ['link', 'Copy link'],
-          ['open', `Open in ${provider === 'github' ? 'GitHub' : 'Jira'}`],
+          ...(provider === 'demo'
+            ? []
+            : ([
+                ['link', 'Copy link'],
+                [
+                  'open',
+                  `Open in ${provider === 'github' ? 'GitHub' : 'Jira'}`,
+                ],
+              ] as const)),
         ] as const
       ).map(([action, label]) => (
         <button

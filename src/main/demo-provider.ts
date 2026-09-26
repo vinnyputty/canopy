@@ -5,7 +5,7 @@ import type {
   IssuePatch,
   IssuePreview,
   TreeSnapshot,
-} from '../../src/shared/types';
+} from '../shared/types';
 
 const priorities: Choice[] = ['Highest', 'High', 'Medium', 'Low', 'Lowest'].map(
   (name, i) => ({ id: String(i + 1), name }),
@@ -20,6 +20,30 @@ const statuses: Issue['status'][] = [
   { id: 'progress', name: 'In Progress', category: 'indeterminate' },
   { id: 'done', name: 'Done', category: 'done' },
 ];
+const details: Record<number, { description: string; comment: string }> = {
+  100: {
+    description:
+      'A focused desktop workspace for planning work across an issue hierarchy. Follow the stories below from navigation through editing and release.',
+    comment: 'The first release is ready for a guided walkthrough.',
+  },
+  108: {
+    description:
+      'A completed parent can still contain work in progress. Keep the path to unfinished descendants visible when Hide done is on, so the next task stays easy to find.',
+    comment:
+      'The tree now retains the parent path while hiding completed sibling work.',
+  },
+  111: {
+    description:
+      'Edit priority, owner, status, and title directly in the tree. The latest change can be undone after it is saved.',
+    comment:
+      'Try raising the priority, then use Undo to restore the original value.',
+  },
+  200: {
+    description:
+      'Keyboard navigation and linked trees help you move between related work without losing the original tab.',
+    comment: 'The shortcut guide is available from the sidebar.',
+  },
+};
 function issue(
   n: number,
   summary: string,
@@ -124,13 +148,17 @@ export class DemoProvider {
     return {
       ...(commentsError ? { commentsError } : {}),
       issue: structuredClone(this.get(key)),
-      description: `Details for ${key}.\n\nExplore this issue without leaving the tree.`,
+      description:
+        details[Number(key.split('-')[1])]?.description ??
+        `${this.get(key).summary}. This work belongs to the Canopy desktop workspace.`,
       comments: [
         {
           id: 'demo-comment',
           author: 'Alex Morgan',
           created: '2026-01-01T12:00:00Z',
-          body: 'Ready for review.',
+          body:
+            details[Number(key.split('-')[1])]?.comment ??
+            'The team is tracking this work in the issue tree.',
         },
       ],
       totalComments: 1,

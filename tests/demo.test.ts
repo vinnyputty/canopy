@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DemoProvider } from './fixtures/demo';
+import { DemoProvider } from '../src/main/demo-provider';
 
 test('demo supports edits and sibling ranking without crossing tree boundaries', async () => {
   const provider = new DemoProvider();

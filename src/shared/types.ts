@@ -124,6 +124,10 @@ export type TokenConnectionInput = {
 };
 export type GithubConnectionInput = { token: string; repositories: string[] };
 export interface CanopyAPI {
+  demoMode(): Promise<boolean>;
+  launchDemo(): Promise<void>;
+  closeDemo(): Promise<void>;
+  resetDemo(): Promise<void>;
   connections(): Promise<Connection[]>;
   currentUser(connectionId: string): Promise<Choice>;
   connect(input?: TokenConnectionInput): Promise<Connection[]>;
