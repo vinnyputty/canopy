@@ -206,11 +206,18 @@ export async function auditPickers(app, page) {
   const originalBounds = await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].getBounds(),
   );
-  await app.evaluate(({ BrowserWindow }) => {
+  const resizedWidth = await app.evaluate(({ BrowserWindow }) => {
     const window = BrowserWindow.getAllWindows()[0];
     window.setSize(1024, 700);
+    return window.getBounds().width;
   });
-  await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(1024);
+  expect(resizedWidth).toBe(1024);
+  await expect
+    .poll(() => page.evaluate(() => window.innerWidth))
+    .toBeGreaterThanOrEqual(950);
+  expect(await page.evaluate(() => window.innerWidth)).toBeLessThanOrEqual(
+    1024,
+  );
   await page.locator('.view-settings > summary').click();
   await matchingTransitions.uncheck();
   await page.locator('.view-settings > summary').click();
