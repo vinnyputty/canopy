@@ -105,6 +105,16 @@ export async function auditChildCreation(appPath, executablePath, baseEnv) {
     await open.getByRole('button', { name: 'Open tree' }).click();
     const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
     await expect(tree).toBeVisible();
+    const edited = tree.locator('[data-tree-key="CAN-101"]');
+    const summary = edited.getByTitle(/Double-click to edit/);
+    const originalSummary = await summary.innerText();
+    await summary.press('Enter');
+    await page.getByLabel('Summary for CAN-101').fill('Pending undo');
+    await page.getByLabel('Summary for CAN-101').press('Enter');
+    await expect(summary).toHaveText('Pending undo');
+    await expect(
+      page.getByRole('button', { name: 'Undo edit to CAN-101' }),
+    ).toBeEnabled();
     await tree
       .locator('[data-tree-key="CAN-100"]')
       .getByRole('button', { name: 'Actions for CAN-100' })
@@ -117,6 +127,11 @@ export async function auditChildCreation(appPath, executablePath, baseEnv) {
       name: 'Create child issue of CAN-100',
     });
     await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Close' }).focus();
+    await page.keyboard.press(
+      process.platform === 'darwin' ? 'Meta+z' : 'Control+z',
+    );
+    await expect(summary).toHaveText('Pending undo');
     await expect(dialog.getByText('Canopy project')).toBeVisible();
     await expect(dialog.getByLabel('Issue type')).toHaveValue('11');
     await dialog.getByLabel('Issue type').selectOption('12');
@@ -173,6 +188,8 @@ export async function auditChildCreation(appPath, executablePath, baseEnv) {
       assigneeId: 'alex',
       priorityId: '2',
     });
+    await page.getByRole('button', { name: 'Undo edit to CAN-101' }).click();
+    await expect(summary).toHaveText(originalSummary);
     expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
     console.log(
       'Jira child creation integration passed: metadata, unsupported fields, one submit, selection, and scroll.',

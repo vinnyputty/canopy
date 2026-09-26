@@ -1983,7 +1983,7 @@ export function App() {
     };
     window.addEventListener('keydown', undo);
     return () => window.removeEventListener('keydown', undo);
-  }, [mutations, undoState.label, dialog, workBrief]);
+  }, [mutations, undoState.label, dialog, workBrief, childParent]);
 
   const keyboardRank = useCallback(
     (node: IssueNode, direction: -1 | 1) => {
