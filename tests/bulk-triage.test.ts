@@ -199,6 +199,9 @@ describe('bulk triage eligibility', () => {
     assert.match(results[0].reason ?? '', /Metadata unavailable/);
     assert.match(results[1].reason ?? '', /Write failed/);
     assert.deepEqual(calls, ['A-2', 'A-3']);
+    assert.equal(results[0].token, undefined);
+    assert.equal(results[1].token, undefined);
+    assert.equal(typeof results[2].token, 'symbol');
   });
 
   it('copies selected identities with success or a handled error', async () => {

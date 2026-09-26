@@ -19,6 +19,7 @@ export type BulkResult = {
   issue: Issue;
   state: 'pending' | 'saved' | 'failed' | 'undoing' | 'undo-failed' | 'undone';
   reason?: string;
+  token?: symbol;
 };
 
 const message = (error: unknown) =>
@@ -159,6 +160,7 @@ export async function executeBulkIssue(
     key: string,
     patch: IssuePatch,
     choice: BulkChoice | null,
+    token: symbol,
   ) => Promise<boolean>,
 ): Promise<BulkResult> {
   try {
@@ -175,10 +177,12 @@ export async function executeBulkIssue(
         state: 'failed',
         reason: candidate?.reason ?? 'This action is unavailable.',
       };
-    const saved = await update(issue.key, candidate.patch, choice);
+    const token = Symbol('bulk edit');
+    const saved = await update(issue.key, candidate.patch, choice, token);
     return {
       issue,
       state: saved ? 'saved' : 'failed',
+      token: saved ? token : undefined,
       reason: saved
         ? undefined
         : 'The update was rejected. Review the issue and retry.',

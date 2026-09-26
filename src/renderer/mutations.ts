@@ -103,7 +103,7 @@ export class Mutations {
   private entries: Entry[] = [];
   private completed: Completed[] = [];
   private history: Entry[] = [];
-  canUndo(connectionId: string, key: string) {
+  canUndo(connectionId: string, key: string, token?: symbol) {
     const entry = [...this.history]
       .reverse()
       .find(
@@ -112,6 +112,7 @@ export class Mutations {
       );
     return Boolean(
       entry?.before &&
+      (!token || entry.token === token) &&
       (!entry.change.fields ||
         !('priority' in entry.change.fields) ||
         entry.before.priority),
@@ -324,7 +325,11 @@ export class Mutations {
       record,
     );
   }
-  async undo(connectionId?: string, key?: string): Promise<boolean> {
+  async undo(
+    connectionId?: string,
+    key?: string,
+    token?: symbol,
+  ): Promise<boolean> {
     const entry =
       connectionId && key
         ? [...this.history]
@@ -334,7 +339,13 @@ export class Mutations {
                 value.connectionId === connectionId && value.change.key === key,
             )
         : this.history.at(-1);
-    if (!entry || this.checkingUndo || this.entries.length) return false;
+    if (
+      !entry ||
+      (token && entry.token !== token) ||
+      this.checkingUndo ||
+      this.entries.length
+    )
+      return false;
     this.checkingUndo = true;
     this.publish();
     const revision = this.revision;

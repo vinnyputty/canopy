@@ -3546,9 +3546,13 @@ export function App() {
                       }));
                     return result.ok;
                   }}
-                  canUndo={(key) => mutations.canUndo(activeConnection.id, key)}
-                  undo={(key) => mutations.undo(activeConnection.id, key)}
-                  update={async (key, patch, choice) => {
+                  canUndo={(key, token) =>
+                    mutations.canUndo(activeConnection.id, key, token)
+                  }
+                  undo={(key, token) =>
+                    mutations.undo(activeConnection.id, key, token)
+                  }
+                  update={async (key, patch, choice, token) => {
                     const options = patch.priorityId
                       ? { priorities: choice ? [choice] : [] }
                       : patch.assigneeId
@@ -3576,6 +3580,8 @@ export function App() {
                       key,
                       patch,
                       options,
+                      true,
+                      token,
                     );
                     if (success && patch.transitionId)
                       pickers.invalidate(activeConnection.id, key);

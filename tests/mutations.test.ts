@@ -172,6 +172,48 @@ describe('optimistic mutation reconciliation', () => {
     assert.equal(h.mutations.canUndo('jira', 'A-2'), false);
     assert.equal(h.mutations.canUndo('jira', 'A-3'), true);
   });
+  it('keeps a bulk Undo bound to its saved edit when the issue is edited again', async () => {
+    const remote = snapshot();
+    const writes: string[] = [];
+    const h = harness({
+      update: async (_connection, key, patch) => {
+        writes.push(patch.summary!);
+        const current = remote.issues.find((value) => value.key === key)!;
+        const changed = { ...current, summary: patch.summary! };
+        remote.issues = remote.issues.map((value) =>
+          value.key === key ? changed : value,
+        );
+        return changed;
+      },
+      tree: async () => remote,
+    });
+    const bulk = Symbol('bulk edit');
+    assert.equal(
+      await h.mutations.update(
+        'jira',
+        'A-2',
+        { summary: 'Bulk' },
+        undefined,
+        true,
+        bulk,
+      ),
+      true,
+    );
+    assert.equal(h.mutations.canUndo('jira', 'A-2', bulk), true);
+    assert.equal(
+      await h.mutations.update('jira', 'A-2', { summary: 'Manual' }),
+      true,
+    );
+    assert.equal(h.mutations.canUndo('jira', 'A-2', bulk), false);
+    assert.equal(await h.mutations.undo('jira', 'A-2', bulk), false);
+    assert.equal(h.current.summary, 'Manual');
+    assert.deepEqual(writes, ['Bulk', 'Manual']);
+    assert.equal(await h.mutations.undo('jira', 'A-2'), true);
+    assert.equal(h.mutations.canUndo('jira', 'A-2', bulk), true);
+    assert.equal(await h.mutations.undo('jira', 'A-2', bulk), true);
+    assert.equal(h.current.summary, 'A-2');
+    assert.deepEqual(writes, ['Bulk', 'Manual', 'Bulk', 'A-2']);
+  });
   it('applies fields to every matching tab, scopes pending by connection, and restores a failed edit', async () => {
     const request = deferred<Issue>();
     const h = harness({ update: () => request.promise });

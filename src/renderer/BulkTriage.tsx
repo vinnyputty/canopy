@@ -41,9 +41,10 @@ export function BulkTriage({
     key: string,
     patch: NonNullable<BulkCandidate['patch']>,
     choice: BulkChoice | null,
+    token: symbol,
   ) => Promise<boolean>;
-  undo: (key: string) => Promise<boolean>;
-  canUndo: (key: string) => boolean;
+  undo: (key: string, token: symbol) => Promise<boolean>;
+  canUndo: (key: string, token: symbol) => boolean;
   onClear: () => void;
   operation: BulkOperation | null;
   onOperation: ChangeOperation;
@@ -218,7 +219,7 @@ export function BulkTriage({
       );
     }
   };
-  const undoOne = async (issue: Issue) => {
+  const undoOne = async (issue: Issue, token: symbol) => {
     onOperation((current) =>
       current
         ? {
@@ -233,7 +234,7 @@ export function BulkTriage({
         : null,
     );
     try {
-      const success = await undo(issue.key);
+      const success = await undo(issue.key, token);
       onOperation((current) =>
         current
           ? {
@@ -243,6 +244,7 @@ export function BulkTriage({
                   ? {
                       issue,
                       state: success ? 'undone' : 'undo-failed',
+                      token,
                       reason: success
                         ? undefined
                         : 'Undo failed. Refresh and review this issue.',
@@ -262,6 +264,7 @@ export function BulkTriage({
                   ? {
                       issue,
                       state: 'undo-failed',
+                      token,
                       reason:
                         failure instanceof Error
                           ? `Undo failed: ${failure.message}`
@@ -442,7 +445,7 @@ export function BulkTriage({
         <div className="bulk-results" aria-live="polite">
           <strong>Results</strong>
           <ul>
-            {operation.results.map(({ issue, state, reason }) => (
+            {operation.results.map(({ issue, state, reason, token }) => (
               <li key={issue.key}>
                 <b>{issue.key}</b> —{' '}
                 {state === 'saved'
@@ -464,10 +467,11 @@ export function BulkTriage({
                     </button>
                   )}
                   {(state === 'saved' || state === 'undo-failed') &&
-                    canUndo(issue.key) && (
+                    token &&
+                    canUndo(issue.key, token) && (
                       <button
                         disabled={working}
-                        onClick={() => void undoOne(issue)}
+                        onClick={() => void undoOne(issue, token)}
                       >
                         Undo
                       </button>
