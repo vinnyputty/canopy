@@ -4,11 +4,13 @@ import type { Issue } from '../shared/types';
 
 export function RowMenu({
   issue,
+  provider,
   position,
   onClose,
   onAction,
 }: {
   issue: Issue;
+  provider: 'jira' | 'github' | 'demo';
   position: { x: number; y: number };
   onClose: (restore?: boolean) => void;
   onAction: (action: 'key' | 'title' | 'link' | 'open') => void;
@@ -64,7 +66,7 @@ export function RowMenu({
           ['key', 'Copy key'],
           ['title', 'Copy title'],
           ['link', 'Copy link'],
-          ['open', 'Open in Jira'],
+          ['open', `Open in ${provider === 'github' ? 'GitHub' : 'Jira'}`],
         ] as const
       ).map(([action, label]) => (
         <button

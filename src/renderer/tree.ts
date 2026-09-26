@@ -147,6 +147,18 @@ export function reconcileSnapshot(
 
 export function parseIssueKey(input: string): string | null {
   const trimmed = input.trim();
+  const github = trimmed.match(/^([\w.-]+\/[\w.-]+)#([1-9]\d*)$/i);
+  if (github) return `${github[1].toLowerCase()}#${github[2]}`;
+  try {
+    const url = new URL(trimmed);
+    if (url.origin === 'https://github.com') {
+      const match = url.pathname.match(
+        /^\/([\w.-]+)\/([\w.-]+)\/issues\/([1-9]\d*)\/?$/i,
+      );
+      if (match)
+        return `${match[1].toLowerCase()}/${match[2].toLowerCase()}#${match[3]}`;
+    }
+  } catch {}
   const fromUrl = trimmed.match(
     /\/browse\/([A-Z][A-Z0-9_]*-\d+)(?:[/?#]|$)/i,
   )?.[1];

@@ -327,7 +327,7 @@ export function App() {
         if (live && generation === identityGeneration.current)
           setIdentityErrors((current) => ({
             ...current,
-            [id]: `Couldn’t identify your Jira account: ${String(error)}. Check your connection, then retry.`,
+            [id]: `Couldn’t identify your account: ${String(error)}. Check your connection, then retry.`,
           }));
       });
     return () => {
@@ -342,7 +342,21 @@ export function App() {
       current?.key === activeTab?.selectedKey ? current : null,
     );
   }, [activeTab?.selectedKey]);
-  const view = activeTab ? rootView(workspace, activeTab) : DEFAULT_VIEW;
+  const activeConnection = connections.find(
+    (item) => item.id === activeTab?.connectionId,
+  );
+  const storedView = activeTab ? rootView(workspace, activeTab) : DEFAULT_VIEW;
+  const view =
+    activeConnection?.provider === 'github'
+      ? {
+          ...storedView,
+          columns: storedView.columns.filter((column) => column !== 'priority'),
+          sort:
+            storedView.sort.column === 'priority'
+              ? { column: 'rank' as const, direction: 'asc' as const }
+              : storedView.sort,
+        }
+      : storedView;
   const [priorityOrders, setPriorityOrders] = useState<
     Record<string, string[]>
   >({});
@@ -617,7 +631,7 @@ export function App() {
           return;
         setErrors((current) => ({
           ...current,
-          app: `Couldn’t refresh Jira choices: ${String(error)}`,
+          app: `Couldn’t refresh issue choices: ${String(error)}`,
         }));
       });
     // Enqueue before attempting: an older in-flight response cannot consume this return.
@@ -808,7 +822,11 @@ export function App() {
 
   const openTab = useCallback(
     (connectionId: string, rootKey: string) => {
-      const key = rootKey.toUpperCase();
+      const key =
+        connections.find((item) => item.id === connectionId)?.provider ===
+        'github'
+          ? rootKey.toLowerCase()
+          : rootKey.toUpperCase();
       const existing = workspaceRef.current.tabs.find(
         (tab) => tab.connectionId === connectionId && tab.rootKey === key,
       );
@@ -833,7 +851,7 @@ export function App() {
       );
       setDialog(null);
     },
-    [navigate],
+    [navigate, connections],
   );
 
   const forgetTabs = useCallback(
@@ -1903,6 +1921,7 @@ export function App() {
               <div className="toolbar-actions">
                 <ViewSettings
                   view={view}
+                  provider={activeConnection?.provider}
                   update={updateView}
                   useDefault={() =>
                     setWorkspace((current) =>
@@ -2073,42 +2092,44 @@ export function App() {
                   </option>
                 ))}
               </select>
-              <select
-                aria-label="Filter priority"
-                value={activeTab.filters?.priority ?? ''}
-                onChange={(event) =>
-                  updateTab(activeTab.id, {
-                    filters: {
-                      ...activeTab.filters,
-                      priority: event.target.value || undefined,
-                    },
-                  })
-                }
-              >
-                <option value="">All priorities</option>
-                <option value="__none__">No priority</option>
-                {activeTab.filters?.priority &&
-                  activeTab.filters.priority !== '__none__' &&
-                  !snapshot?.issues.some(
-                    (issue) =>
-                      issue.priority?.id === activeTab.filters?.priority,
-                  ) && (
-                    <option value={activeTab.filters.priority}>
-                      Priority {activeTab.filters.priority} (not in this tree)
+              {activeConnection?.provider !== 'github' && (
+                <select
+                  aria-label="Filter priority"
+                  value={activeTab.filters?.priority ?? ''}
+                  onChange={(event) =>
+                    updateTab(activeTab.id, {
+                      filters: {
+                        ...activeTab.filters,
+                        priority: event.target.value || undefined,
+                      },
+                    })
+                  }
+                >
+                  <option value="">All priorities</option>
+                  <option value="__none__">No priority</option>
+                  {activeTab.filters?.priority &&
+                    activeTab.filters.priority !== '__none__' &&
+                    !snapshot?.issues.some(
+                      (issue) =>
+                        issue.priority?.id === activeTab.filters?.priority,
+                    ) && (
+                      <option value={activeTab.filters.priority}>
+                        Priority {activeTab.filters.priority} (not in this tree)
+                      </option>
+                    )}
+                  {[
+                    ...new Map(
+                      snapshot?.issues
+                        .filter((issue) => issue.priority)
+                        .map((issue) => [issue.priority!.id, issue.priority!]),
+                    ).values(),
+                  ].map((priority) => (
+                    <option key={priority.id} value={priority.id}>
+                      {priority.name}
                     </option>
-                  )}
-                {[
-                  ...new Map(
-                    snapshot?.issues
-                      .filter((issue) => issue.priority)
-                      .map((issue) => [issue.priority!.id, issue.priority!]),
-                  ).values(),
-                ].map((priority) => (
-                  <option key={priority.id} value={priority.id}>
-                    {priority.name}
-                  </option>
-                ))}
-              </select>
+                  ))}
+                </select>
+              )}
               <details className="tree-view-menu">
                 <summary>Tree actions</summary>
                 <div>
@@ -2232,7 +2253,7 @@ export function App() {
                 <AlertCircle size={15} />
                 <span>
                   {(cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
-                    ? `Jira rate limit reached. Refresh resumes after ${new Date(cooldownTimes[activeTab.connectionId]).toLocaleTimeString()}.`
+                    ? `${activeConnection?.provider === 'github' ? 'GitHub' : 'Jira'} rate limit reached. Refresh resumes after ${new Date(cooldownTimes[activeTab.connectionId]).toLocaleTimeString()}.`
                     : (errors.edit ??
                       errors[activeTab.id] ??
                       errors.workspace ??
@@ -2285,7 +2306,7 @@ export function App() {
                 {warning}
               </div>
             ))}
-            {snapshot && (
+            {snapshot && activeConnection?.provider !== 'github' && (
               <div className="ranking-note" role="status">
                 {view.sort.column !== 'rank'
                   ? 'Ranking is disabled while a column sort is active. Select Jira rank in View to reorder.'
@@ -2353,6 +2374,7 @@ export function App() {
                       className="issue-tree"
                     >
                       <TreeRows
+                        provider={activeConnection?.provider ?? 'jira'}
                         node={shownTree}
                         currentUser={currentUsers[activeTab.connectionId]}
                         columns={view.columns}
@@ -2480,7 +2502,11 @@ export function App() {
                     <EmptyState
                       icon={Search}
                       title="No issue tree yet"
-                      detail="Open an issue key or Jira URL to see its full hierarchy."
+                      detail={
+                        activeConnection?.provider === 'github'
+                          ? 'Open a GitHub issue URL or owner/repo#number to see its sub-issues.'
+                          : 'Open an issue key or Jira URL to see its full hierarchy.'
+                      }
                       action="Open issue"
                       onAction={() => setDialog('open')}
                     />
@@ -2532,6 +2558,7 @@ export function App() {
               </div>
               {previewKey && (
                 <IssuePreview
+                  provider={activeConnection?.provider ?? 'jira'}
                   connectionId={activeTab.connectionId}
                   issueKey={previewKey}
                   width={
@@ -2543,6 +2570,7 @@ export function App() {
                     setWorkspace((current) => ({ ...current, previewWidth }))
                   }
                   onClose={closePreview}
+                  onChanged={() => void refreshTab(activeTab)}
                   onPreview={setPreviewKey}
                   onOpenTab={(key) => openTab(activeTab.connectionId, key)}
                   onOpenExternal={(key) =>
@@ -2684,13 +2712,18 @@ export function App() {
                   action(() => void openExternal(tab.connectionId, tab.rootKey))
                 }
               >
-                Open in Jira
+                Open in{' '}
+                {connections.find((item) => item.id === tab.connectionId)
+                  ?.provider === 'github'
+                  ? 'GitHub'
+                  : 'Jira'}
               </button>
             </div>
           );
         })()}
       {rowMenu && activeTab && (
         <RowMenu
+          provider={activeConnection?.provider ?? 'jira'}
           issue={rowMenu.issue}
           position={rowMenu}
           onClose={closeRowMenu}
@@ -2808,7 +2841,7 @@ function Connections({
           className="icon-button"
           onClick={onConnect}
           disabled={busy}
-          aria-label="Connect Jira site"
+          aria-label="Connect Jira or GitHub"
         >
           {busy ? <Loader2 className="spin" size={14} /> : <Plus size={15} />}
         </button>
@@ -2818,7 +2851,11 @@ function Connections({
           <div className={cx('connection-dot', connection.provider)} />
           <span>
             <b>{connection.name}</b>
-            <small>{connection.accountName ?? connection.url}</small>
+            <small>
+              {connection.provider === 'github'
+                ? connection.repositories?.join(', ')
+                : (connection.accountName ?? connection.url)}
+            </small>
           </span>
           <button
             className="icon-button disconnect"
@@ -2832,7 +2869,7 @@ function Connections({
       {connections.length === 0 && (
         <button className="connect-quiet" onClick={onConnect}>
           <LogIn size={15} />
-          Connect Jira
+          Connect Jira or GitHub
         </button>
       )}
     </section>
@@ -2840,6 +2877,7 @@ function Connections({
 }
 
 type RowsProps = {
+  provider: Connection['provider'];
   currentUser?: Choice;
   columns: TableColumn[];
   rankableKeys: Set<string>;
@@ -3026,7 +3064,7 @@ function TreeRows(props: RowsProps) {
           <button
             className="key"
             onClick={() => props.onOpenExternal(issue.key)}
-            title="Open in Jira"
+            title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
           >
             {issue.key}
           </button>
@@ -3041,6 +3079,7 @@ function TreeRows(props: RowsProps) {
           {props.editor?.key === issue.key &&
           props.editor.field === 'summary' ? (
             <SummaryEditor
+              provider={props.provider}
               issue={issue}
               save={props.updateIssue}
               cancel={props.cancelEdit}
@@ -3118,6 +3157,7 @@ function TreeRows(props: RowsProps) {
         onEdit={() => props.beginEdit(issue.key, 'assignee')}
       >
         <AssigneeEditor
+          provider={props.provider}
           currentUser={props.currentUser}
           active={
             props.editor?.key === issue.key && props.editor.field === 'assignee'
@@ -3252,7 +3292,7 @@ function TreeRows(props: RowsProps) {
           ) : (
             <button
               className="icon-button"
-              title="Open in Jira"
+              title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
               onClick={() => props.onOpenExternal(issue.key)}
             >
               <ExternalLink size={14} />
@@ -3339,10 +3379,12 @@ function FieldCell({
 }
 
 function SummaryEditor({
+  provider,
   issue,
   save,
   cancel,
 }: {
+  provider: Connection['provider'];
   issue: Issue;
   save: (key: string, patch: IssuePatch) => Promise<void>;
   cancel: () => void;
@@ -3373,7 +3415,7 @@ function SummaryEditor({
           cancel();
         }
       }}
-      aria-label={`Summary for ${issue.key}`}
+      aria-label={`${provider === 'github' ? 'Title' : 'Summary'} for ${issue.key}`}
     />
   );
 }
@@ -3475,6 +3517,7 @@ function navigateChoices(event: React.KeyboardEvent, selector: string) {
 }
 
 function AssigneeEditor({
+  provider,
   currentUser,
   active,
   issue,
@@ -3487,6 +3530,7 @@ function AssigneeEditor({
   save,
   cancel,
 }: {
+  provider: Connection['provider'];
   currentUser?: Choice;
   active: boolean;
   issue: Issue;
@@ -3573,7 +3617,7 @@ function AssigneeEditor({
         }
         title={
           !currentUser
-            ? 'Your Jira account is not available yet. Retry the account lookup.'
+            ? 'Your account is not available yet. Retry the account lookup.'
             : undefined
         }
         onMouseDown={(event) => event.preventDefault()}
@@ -3633,9 +3677,9 @@ function AssigneeEditor({
         )}
       </div>
       <p className="picker-note">
-        Recent people are suggestions; Jira checks assignment for this issue
-        when selected. Search covers only Jira’s first 1,000 users and may be
-        incomplete.
+        {provider === 'github'
+          ? 'GitHub checks assignment eligibility for this repository when selected. Load more to browse additional assignees.'
+          : 'Recent people are suggestions; Jira checks assignment for this issue when selected. Search covers only Jira’s first 1,000 users and may be incomplete.'}
       </p>
       <button className="cancel-choice" onClick={cancel}>
         Cancel
@@ -3788,6 +3832,9 @@ function ConnectDialog({
   onConnected: (connections: Connection[]) => void;
 }) {
   const [siteUrl, setSiteUrl] = useState('');
+  const [provider, setProvider] = useState<'jira' | 'github'>('jira');
+  const [repositories, setRepositories] = useState('');
+  const [githubToken, setGithubToken] = useState('');
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
   const [scoped, setScoped] = useState(true);
@@ -3826,129 +3873,219 @@ function ConnectDialog({
       setBusy(null);
     }
   };
+  const connectGithub = async () => {
+    setBusy('token');
+    setError('');
+    try {
+      onConnected(
+        await window.canopy.connectGithub({
+          token: githubToken,
+          repositories: repositories.split(/[\s,]+/).filter(Boolean),
+        }),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
   return (
-    <Dialog title="Connect Jira" onClose={onClose} wide>
+    <Dialog
+      title={`Connect ${provider === 'github' ? 'GitHub' : 'Jira'}`}
+      onClose={onClose}
+      wide
+    >
       <div className="connect-dialog">
-        <p className="connect-lead">
-          Use an Atlassian API token for a direct connection to your Jira Cloud
-          site.
-        </p>
-        <label>
-          <span>Jira site URL</span>
-          <input
-            autoFocus
-            inputMode="url"
-            autoComplete="url"
-            placeholder="https://your-team.atlassian.net"
-            value={siteUrl}
-            onChange={(event) => {
-              setSiteUrl(event.target.value);
-              clearError();
-            }}
-          />
-          <small>The address you use to open Jira.</small>
-        </label>
-        <label>
-          <span>Atlassian email</span>
-          <input
-            type="email"
-            autoComplete="username"
-            placeholder="you@company.com"
-            value={email}
-            onChange={(event) => {
-              setEmail(event.target.value);
-              clearError();
-            }}
-          />
-          <small>
-            The email for the Atlassian account that created the token.
-          </small>
-        </label>
-        <label>
-          <span>API token</span>
-          <input
-            type="password"
-            autoComplete="off"
-            placeholder="Paste your token"
-            value={token}
-            onChange={(event) => {
-              setToken(event.target.value);
-              clearError();
-            }}
-          />
-          <small>
-            Verified before saving, then stored in your operating system
-            keychain.
-          </small>
-        </label>
-        <fieldset>
-          <legend>Token type</legend>
-          <label className="radio">
-            <input
-              type="radio"
-              name="token-type"
-              checked={scoped}
-              onChange={() => {
-                setScoped(true);
-                clearError();
-              }}
-            />
-            <span>
-              <b>Scoped token</b>
-              <small>Recommended for new tokens</small>
-            </span>
-          </label>
-          <label className="radio">
-            <input
-              type="radio"
-              name="token-type"
-              checked={!scoped}
-              onChange={() => {
-                setScoped(false);
-                clearError();
-              }}
-            />
-            <span>
-              <b>Classic token</b>
-              <small>Use for an existing unscoped token</small>
-            </span>
-          </label>
-        </fieldset>
-        {error && (
-          <p className="dialog-error" role="alert">
-            <AlertCircle size={14} />
-            {error}
-          </p>
-        )}
-        <div className="connect-actions">
+        <div className="connect-provider">
           <button
-            className="primary"
-            disabled={
-              Boolean(busy) || !siteUrl.trim() || !email.trim() || !token
-            }
-            onClick={() => void connectToken()}
+            className={provider === 'jira' ? 'primary' : 'secondary'}
+            onClick={() => {
+              setProvider('jira');
+              setError('');
+            }}
           >
-            {busy === 'token' ? (
-              <Loader2 className="spin" size={15} />
-            ) : (
-              <LogIn size={15} />
-            )}
-            Connect with token
+            Jira
           </button>
-          <span>or</span>
           <button
-            className="secondary"
-            disabled={Boolean(busy)}
-            onClick={() => void connectOauth()}
+            className={provider === 'github' ? 'primary' : 'secondary'}
+            onClick={() => {
+              setProvider('github');
+              setError('');
+            }}
           >
-            {busy === 'oauth' ? (
-              <Loader2 className="spin" size={15} />
-            ) : (
-              <ExternalLink size={14} />
-            )}
-            Sign in with browser
+            GitHub
           </button>
         </div>
+        {provider === 'github' ? (
+          <>
+            <p className="connect-lead">
+              Use a fine-grained personal access token with Issues read and
+              write permission on the selected repositories.
+            </p>
+            <label>
+              <span>Repositories</span>
+              <textarea
+                value={repositories}
+                onChange={(event) => setRepositories(event.target.value)}
+                placeholder="owner/repo-one, owner/repo-two"
+              />
+              <small>
+                Enter the repositories selected for this connection, separated
+                by commas or spaces. Canopy verifies issue access before saving.
+              </small>
+            </label>
+            <label>
+              <span>Fine-grained token</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={githubToken}
+                onChange={(event) => setGithubToken(event.target.value)}
+                placeholder="Paste your token"
+              />
+              <small>Stored in your operating system keychain.</small>
+            </label>
+            {error && (
+              <p className="dialog-error" role="alert">
+                {error}
+              </p>
+            )}
+            <div className="connect-actions">
+              <button
+                className="primary"
+                disabled={
+                  Boolean(busy) || !repositories.trim() || !githubToken.trim()
+                }
+                onClick={() => void connectGithub()}
+              >
+                {busy ? 'Connecting…' : 'Connect GitHub'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="connect-lead">
+              Use an Atlassian API token for a direct connection to your Jira
+              Cloud site.
+            </p>
+            <label>
+              <span>Jira site URL</span>
+              <input
+                autoFocus
+                inputMode="url"
+                autoComplete="url"
+                placeholder="https://your-team.atlassian.net"
+                value={siteUrl}
+                onChange={(event) => {
+                  setSiteUrl(event.target.value);
+                  clearError();
+                }}
+              />
+              <small>The address you use to open Jira.</small>
+            </label>
+            <label>
+              <span>Atlassian email</span>
+              <input
+                type="email"
+                autoComplete="username"
+                placeholder="you@company.com"
+                value={email}
+                onChange={(event) => {
+                  setEmail(event.target.value);
+                  clearError();
+                }}
+              />
+              <small>
+                The email for the Atlassian account that created the token.
+              </small>
+            </label>
+            <label>
+              <span>API token</span>
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder="Paste your token"
+                value={token}
+                onChange={(event) => {
+                  setToken(event.target.value);
+                  clearError();
+                }}
+              />
+              <small>
+                Verified before saving, then stored in your operating system
+                keychain.
+              </small>
+            </label>
+            <fieldset>
+              <legend>Token type</legend>
+              <label className="radio">
+                <input
+                  type="radio"
+                  name="token-type"
+                  checked={scoped}
+                  onChange={() => {
+                    setScoped(true);
+                    clearError();
+                  }}
+                />
+                <span>
+                  <b>Scoped token</b>
+                  <small>Recommended for new tokens</small>
+                </span>
+              </label>
+              <label className="radio">
+                <input
+                  type="radio"
+                  name="token-type"
+                  checked={!scoped}
+                  onChange={() => {
+                    setScoped(false);
+                    clearError();
+                  }}
+                />
+                <span>
+                  <b>Classic token</b>
+                  <small>Use for an existing unscoped token</small>
+                </span>
+              </label>
+            </fieldset>
+            {error && (
+              <p className="dialog-error" role="alert">
+                <AlertCircle size={14} />
+                {error}
+              </p>
+            )}
+            <div className="connect-actions">
+              <button
+                className="primary"
+                disabled={
+                  Boolean(busy) || !siteUrl.trim() || !email.trim() || !token
+                }
+                onClick={() => void connectToken()}
+              >
+                {busy === 'token' ? (
+                  <Loader2 className="spin" size={15} />
+                ) : (
+                  <LogIn size={15} />
+                )}
+                Connect with token
+              </button>
+              <span>or</span>
+              <button
+                className="secondary"
+                disabled={Boolean(busy)}
+                onClick={() => void connectOauth()}
+              >
+                {busy === 'oauth' ? (
+                  <Loader2 className="spin" size={15} />
+                ) : (
+                  <ExternalLink size={14} />
+                )}
+                Sign in with browser
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </Dialog>
   );
@@ -3973,6 +4110,7 @@ function OpenIssueDialog({
       : (connections[0]?.id ?? ''),
   );
   const [query, setQuery] = useState('');
+  const [groupRepositories, setGroupRepositories] = useState(false);
   const [searchState, setSearchState] = useState<SearchState>({
     issues: [],
     loading: false,
@@ -3991,7 +4129,18 @@ function OpenIssueDialog({
   );
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
-  const directKey = parseIssueKey(query);
+  const selectedConnection = connections.find(
+    (item) => item.id === connectionId,
+  );
+  const parsedKey = parseIssueKey(query);
+  const directKey =
+    selectedConnection?.provider === 'github'
+      ? parsedKey?.includes('#')
+        ? parsedKey
+        : null
+      : parsedKey && !parsedKey.includes('#')
+        ? parsedKey
+        : null;
   const project = (
     activeRoot?.connectionId === connectionId
       ? activeRoot
@@ -4007,6 +4156,14 @@ function OpenIssueDialog({
         type: '',
       }))
     : searchState.issues;
+  const displayedOptions =
+    groupRepositories && selectedConnection?.provider === 'github'
+      ? [...options].sort(
+          (a, b) =>
+            a.key.split('#')[0].localeCompare(b.key.split('#')[0]) ||
+            a.key.localeCompare(b.key),
+        )
+      : options;
   const selected =
     options.find((issue) => issue.key === selectedKey) ?? options[0];
   const busy = searchState.loading;
@@ -4100,15 +4257,23 @@ function OpenIssueDialog({
             aria-activedescendant={
               selected ? `issue-option-${selected.key}` : undefined
             }
-            placeholder="Issue key, Jira URL, or summary"
-            aria-label="Issue key, Jira URL, or summary"
+            placeholder={
+              selectedConnection?.provider === 'github'
+                ? 'GitHub URL, owner/repo#number, or title'
+                : 'Issue key, Jira URL, or summary'
+            }
+            aria-label={
+              selectedConnection?.provider === 'github'
+                ? 'GitHub URL, owner/repo#number, or title'
+                : 'Issue key, Jira URL, or summary'
+            }
           />
           {busy && <Loader2 className="spin" size={14} />}
         </div>
         {connections.length === 0 && (
           <p className="dialog-note">
             <AlertCircle size={14} />
-            Connect a Jira site from the sidebar first.
+            Connect Jira or GitHub from the sidebar first.
           </p>
         )}
         {(error || searchState.error) && (
@@ -4129,7 +4294,9 @@ function OpenIssueDialog({
         )}
         {busy && (
           <p className="dialog-note" role="status">
-            {options.length ? 'Loading more matches…' : 'Searching Jira…'}
+            {options.length
+              ? 'Loading more matches…'
+              : `Searching ${selectedConnection?.provider === 'github' ? 'GitHub' : 'Jira'}…`}
           </p>
         )}
         {!busy &&
@@ -4145,33 +4312,57 @@ function OpenIssueDialog({
         {!query.trim() && options.length > 0 && (
           <p className="dialog-note">Recent roots</p>
         )}
+        {selectedConnection?.provider === 'github' && (
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={groupRepositories}
+              onChange={(event) => setGroupRepositories(event.target.checked)}
+            />
+            Group by repository
+          </label>
+        )}
         <div
-          className="search-results"
+          className={
+            selectedConnection?.provider === 'github'
+              ? 'search-results github-results'
+              : 'search-results'
+          }
           id="issue-search-options"
           role="listbox"
           aria-label="Issue results"
         >
-          {options.map((issue) => (
-            <button
-              key={issue.key}
-              id={`issue-option-${issue.key}`}
-              role="option"
-              aria-selected={selected?.key === issue.key}
-              tabIndex={-1}
-              title={issue.summary}
-              onMouseMove={() => setSelectedKey(issue.key)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onOpen(connectionId, issue.key)}
-            >
-              <span className="type-icon">
-                {issue.type.slice(0, 1) || <CircleDot size={14} />}
-              </span>
-              <span>
-                <b>{issue.key}</b>
-                {issue.summary}
-              </span>
-              <ChevronRight size={14} />
-            </button>
+          {displayedOptions.map((issue, index) => (
+            <React.Fragment key={issue.key}>
+              {groupRepositories &&
+                selectedConnection?.provider === 'github' &&
+                (index === 0 ||
+                  displayedOptions[index - 1].key.split('#')[0] !==
+                    issue.key.split('#')[0]) && (
+                  <div className="search-repo-group" role="presentation">
+                    {issue.key.split('#')[0]}
+                  </div>
+                )}
+              <button
+                id={`issue-option-${issue.key}`}
+                role="option"
+                aria-selected={selected?.key === issue.key}
+                tabIndex={-1}
+                title={issue.summary}
+                onMouseMove={() => setSelectedKey(issue.key)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onOpen(connectionId, issue.key)}
+              >
+                <span className="type-icon">
+                  {issue.type.slice(0, 1) || <CircleDot size={14} />}
+                </span>
+                <span>
+                  <b>{issue.key}</b>
+                  {issue.summary}
+                </span>
+                <ChevronRight size={14} />
+              </button>
+            </React.Fragment>
           ))}
         </div>
         {query.trim() && searchState.issues.length > 0 && (
@@ -4513,7 +4704,7 @@ function Welcome({
             onClick={hasConnections ? onOpen : onConnect}
           >
             {hasConnections ? <Search size={16} /> : <LogIn size={16} />}
-            {hasConnections ? 'Open an issue' : 'Connect Jira'}
+            {hasConnections ? 'Open an issue' : 'Connect Jira or GitHub'}
           </button>
           {hasConnections && (
             <button className="secondary" onClick={onConnect}>

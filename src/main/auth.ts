@@ -1,6 +1,10 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Connection, TokenConnectionInput } from '../shared/types';
+import type {
+  Connection,
+  TokenConnectionInput,
+  GithubConnectionInput,
+} from '../shared/types';
 import type { Storage } from './storage';
 import { JiraRequests } from './jira-requests';
 
@@ -17,6 +21,7 @@ type TokenAccount = {
   token: string;
   apiBase: string;
 };
+type GithubAccount = { connection: Connection; token: string };
 export function brokerOrigin(value: string) {
   if (!value)
     throw new Error(
@@ -66,6 +71,8 @@ function tokens(value: Tokens): Tokens {
 export class Auth {
   private grants: Grant[] = [];
   private accounts: TokenAccount[] = [];
+  private githubAccounts: GithubAccount[] = [];
+  private githubRetry = new Map<string, number>();
   private refreshing = new Map<string, Promise<void>>();
   private readonly requests = new JiraRequests();
   syncStatus(id: string) {
@@ -80,21 +87,180 @@ export class Auth {
     const saved = await this.storage.readSecrets<{
       grants: Grant[];
       accounts: TokenAccount[];
+      githubAccounts?: GithubAccount[];
     }>();
     this.grants = saved?.grants ?? [];
     this.accounts = saved?.accounts ?? [];
+    this.githubAccounts = saved?.githubAccounts ?? [];
   }
   private save() {
     return this.storage.writeSecrets({
       grants: this.grants,
       accounts: this.accounts,
+      githubAccounts: this.githubAccounts,
     });
   }
   connections() {
     return [
       ...this.accounts.map((a) => a.connection),
+      ...this.githubAccounts.map((a) => a.connection),
       ...this.grants.flatMap((g) => g.connections),
     ];
+  }
+  async connectGithub(input: GithubConnectionInput): Promise<Connection[]> {
+    this.storage.assertSecure();
+    const token = input?.token?.trim();
+    const repositories = [
+      ...new Set(
+        input?.repositories?.map((repo) => repo.trim().toLowerCase()) ?? [],
+      ),
+    ];
+    if (
+      !token ||
+      token.length < 8 ||
+      token.length > 16384 ||
+      !repositories.length ||
+      repositories.length > 100 ||
+      repositories.some((repo) => !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repo))
+    )
+      throw new Error(
+        'Enter a fine-grained token and up to 100 owner/repository names.',
+      );
+    const owners = new Set(repositories.map((repo) => repo.split('/')[0]));
+    if (owners.size !== 1)
+      throw new Error('Use one GitHub repository owner per connection.');
+    const call = async (path: string) => {
+      const response = await fetch(`https://api.github.com${path}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2026-03-10',
+        },
+        redirect: 'error',
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!response.ok)
+        throw new Error(
+          `GitHub returned ${response.status} while verifying ${path}. Check token permissions and selected repositories.`,
+        );
+      return response.json();
+    };
+    const user = await call('/user');
+    if (typeof user.login !== 'string')
+      throw new Error('GitHub did not return an account.');
+    for (const repo of repositories)
+      await call(`/repos/${repo}/issues?per_page=1`);
+    const id = `github:${createHash('sha256')
+      .update(`${user.login}:${repositories[0].split('/')[0]}`)
+      .digest('hex')
+      .slice(0, 24)}`;
+    const connection: Connection = {
+      id,
+      provider: 'github',
+      name: `GitHub · ${user.login}`,
+      accountName: user.login,
+      url: 'https://github.com',
+      repositories,
+    };
+    this.githubAccounts = [
+      ...this.githubAccounts.filter((account) => account.connection.id !== id),
+      { connection, token },
+    ];
+    await this.save();
+    return this.connections();
+  }
+  async githubRequest(
+    id: string,
+    path: string,
+    init: RequestInit = {},
+  ): Promise<any> {
+    const account = this.githubAccounts.find(
+      (item) => item.connection.id === id,
+    );
+    if (!account)
+      throw new Error('This GitHub connection is unavailable. Connect again.');
+    if (
+      !path.startsWith('/') ||
+      path.includes('..') ||
+      !/^\/(repos\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(issues|labels|assignees)|search\/issues|user)([/?].*)?$/i.test(
+        path,
+      )
+    )
+      throw new Error('Invalid GitHub API path.');
+    const retryAt = this.githubRetry.get(id) ?? 0;
+    if (retryAt > Date.now())
+      throw new Error(
+        `GitHub rate limit reached. Retry after ${new Date(retryAt).toLocaleTimeString()}.`,
+      );
+    const response = await fetch(`https://api.github.com${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${account.token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2026-03-10',
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      signal: init.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)])
+        : AbortSignal.timeout(30_000),
+      redirect: 'error',
+    });
+    if (
+      this.githubAccounts.find((item) => item.connection.id === id) !== account
+    )
+      throw new Error('This GitHub connection changed. Try again.');
+    const remaining = response.headers.get('x-ratelimit-remaining');
+    let detail = '';
+    if (!response.ok) {
+      try {
+        detail = String((await response.clone().json()).message ?? '').slice(
+          0,
+          300,
+        );
+      } catch {}
+    }
+    if (
+      response.status === 429 ||
+      (response.status === 403 &&
+        (remaining === '0' || /rate limit/i.test(detail)))
+    ) {
+      const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+      const retry = Number(response.headers.get('retry-after')) * 1000;
+      const until =
+        Number.isFinite(reset) && reset > Date.now()
+          ? reset
+          : Date.now() + (retry > 0 ? retry : 60_000);
+      this.githubRetry.set(id, until);
+      throw new Error(
+        `GitHub rate limit reached. Retry after ${new Date(until).toLocaleTimeString()}.`,
+      );
+    }
+    if (!response.ok) {
+      if (response.status === 401)
+        throw new Error(
+          'GitHub authorization expired or was revoked. Reconnect this account.',
+        );
+      if (response.status === 403 || response.status === 404)
+        throw new Error(
+          `GitHub denied access to ${path}. Check that the repository is selected and the token has Issues permission.${detail ? ` ${detail}` : ''}`,
+        );
+      throw new Error(
+        `GitHub returned ${response.status} for ${path}.${detail ? ` ${detail}` : ''}`,
+      );
+    }
+    if (response.status === 204) return undefined;
+    return response.json();
+  }
+  githubUser(id: string) {
+    return this.githubRequest(id, '/user');
+  }
+  githubSyncStatus(id: string) {
+    return {
+      retryAt:
+        (this.githubRetry.get(id) ?? 0) > Date.now()
+          ? this.githubRetry.get(id)!
+          : null,
+    };
   }
   connect(input?: TokenConnectionInput) {
     if (input) return this.connectToken(input);
@@ -264,6 +430,10 @@ export class Auth {
   }
   async disconnect(id: string) {
     this.requests.forget(id);
+    this.githubRetry.delete(id);
+    this.githubAccounts = this.githubAccounts.filter(
+      (a) => a.connection.id !== id,
+    );
     for (const grant of this.grants)
       grant.connections = grant.connections.filter((c) => c.id !== id);
     this.grants = this.grants.filter((g) => g.connections.length);

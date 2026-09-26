@@ -1,22 +1,26 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import type { IssuePreview as Preview } from '../shared/types';
+import type { Choice, IssuePreview as Preview } from '../shared/types';
 
 export function IssuePreview({
   connectionId,
+  provider,
   issueKey,
   width,
   onWidth,
   onClose,
+  onChanged,
   onPreview,
   onOpenTab,
   onOpenExternal,
 }: {
   connectionId: string;
+  provider: 'jira' | 'github' | 'demo';
   issueKey: string;
   width: number;
   onWidth: (width: number) => void;
   onClose: () => void;
+  onChanged: () => void;
   onPreview: (key: string) => void;
   onOpenTab: (key: string) => void;
   onOpenExternal: (key: string) => void;
@@ -25,6 +29,9 @@ export function IssuePreview({
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const [labels, setLabels] = useState<Choice[]>([]);
+  const [editingLabels, setEditingLabels] = useState(false);
+  const [savingLabels, setSavingLabels] = useState(false);
   const identity = useRef('');
   const [dragWidth, setDragWidth] = useState<number>();
   const pane = useRef<HTMLElement>(null);
@@ -58,6 +65,49 @@ export function IssuePreview({
       live = false;
     };
   }, [connectionId, issueKey, attempt]);
+  useEffect(() => {
+    if (provider !== 'github' || !editingLabels) return;
+    let live = true;
+    window.canopy.labels(connectionId, issueKey).then(
+      (values) => {
+        if (live) setLabels(values);
+      },
+      (reason: unknown) => {
+        if (live) setError(String(reason));
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [provider, editingLabels, connectionId, issueKey]);
+  const toggleLabel = async (name: string) => {
+    if (!data || savingLabels) return;
+    setSavingLabels(true);
+    setError('');
+    const current = data.issue.labels?.map((item) => item.name) ?? [];
+    const next = current.includes(name)
+      ? current.filter((item) => item !== name)
+      : [...current, name];
+    setData({
+      ...data,
+      issue: {
+        ...data.issue,
+        labels: next.map((value) => ({ id: value, name: value })),
+      },
+    });
+    try {
+      const issue = await window.canopy.update(connectionId, issueKey, {
+        labels: next,
+      });
+      setData({ ...data, issue });
+      onChanged();
+    } catch (reason) {
+      setData(data);
+      setError(String(reason));
+    } finally {
+      setSavingLabels(false);
+    }
+  };
   const clamp = (next: number) => Math.max(300, Math.min(720, next));
   const retry = (
     <button
@@ -148,8 +198,42 @@ export function IssuePreview({
               className="tool-button"
               onClick={() => onOpenExternal(issueKey)}
             >
-              Open in Jira
+              Open in {provider === 'github' ? 'GitHub' : 'Jira'}
             </button>
+            {provider === 'github' && (
+              <section>
+                <h3>Labels</h3>
+                <p>
+                  {data.issue.labels?.map((label) => label.name).join(', ') ||
+                    'No labels.'}
+                </p>
+                <button
+                  className="tool-button"
+                  onClick={() => setEditingLabels((value) => !value)}
+                >
+                  Edit labels
+                </button>
+                {editingLabels && (
+                  <div className="github-labels">
+                    {labels.map((label) => (
+                      <label key={label.id}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(
+                            data.issue.labels?.some(
+                              (item) => item.name === label.name,
+                            ),
+                          )}
+                          disabled={savingLabels}
+                          onChange={() => void toggleLabel(label.name)}
+                        />
+                        {label.name}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
             <section>
               <h3>Description</h3>
               <div className="preview-text">
@@ -188,7 +272,7 @@ export function IssuePreview({
                         className="text-button"
                         onClick={() => onOpenExternal(issueKey)}
                       >
-                        View all in Jira
+                        View all in {provider === 'github' ? 'GitHub' : 'Jira'}
                       </button>
                     </p>
                   )}
@@ -201,6 +285,7 @@ export function IssuePreview({
                 Relationships from {issueKey}; these references are separate
                 from hierarchy children.
               </p>
+              {data.linksError && <p role="alert">{data.linksError}</p>}
               {data.issue.links.length === 0 && (
                 <p>No linked issue references.</p>
               )}
@@ -230,7 +315,7 @@ export function IssuePreview({
                       className="tool-button"
                       onClick={() => onOpenExternal(link.key)}
                     >
-                      Open in Jira
+                      Open in {provider === 'github' ? 'GitHub' : 'Jira'}
                     </button>
                   </div>
                 </article>

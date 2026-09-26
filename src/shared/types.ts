@@ -4,8 +4,9 @@ export type Connection = {
   id: string;
   name: string;
   url: string;
-  provider: 'jira' | 'demo';
+  provider: 'jira' | 'github' | 'demo';
   accountName?: string;
+  repositories?: string[];
 };
 export type Issue = {
   id: string;
@@ -17,6 +18,7 @@ export type Issue = {
   assignee: Choice | null;
   status: Status;
   links: { key: string; summary: string; relationship: string }[];
+  labels?: Choice[];
 };
 export type IssuePreview = {
   issue: Issue;
@@ -24,6 +26,7 @@ export type IssuePreview = {
   comments: { id: string; author: string; created: string; body: string }[];
   totalComments: number;
   commentsError?: string;
+  linksError?: string;
 };
 export type SearchIssue = Issue & { updated?: string };
 export type SearchPage = { issues: SearchIssue[]; nextPageToken?: string };
@@ -59,6 +62,7 @@ export type IssuePatch = {
   priorityId?: string;
   assigneeId?: string | null;
   transitionId?: string;
+  labels?: string[];
 };
 export type AssigneePage = { users: Choice[]; nextStartAt?: number };
 export type EditOptions = {
@@ -110,10 +114,12 @@ export type TokenConnectionInput = {
   token: string;
   scoped: boolean;
 };
+export type GithubConnectionInput = { token: string; repositories: string[] };
 export interface CanopyAPI {
   connections(): Promise<Connection[]>;
   currentUser(connectionId: string): Promise<Choice>;
   connect(input?: TokenConnectionInput): Promise<Connection[]>;
+  connectGithub(input: GithubConnectionInput): Promise<Connection[]>;
   disconnect(connectionId: string): Promise<void>;
   syncStatus(connectionId: string): Promise<{ retryAt: number | null }>;
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
@@ -130,6 +136,7 @@ export interface CanopyAPI {
     key: string,
     refresh?: boolean,
   ): Promise<Choice[]>;
+  labels(connectionId: string, key: string): Promise<Choice[]>;
   transitions(
     connectionId: string,
     key: string,

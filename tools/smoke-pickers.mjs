@@ -338,7 +338,7 @@ export async function auditSelfConnections(app, page) {
     await page.getByLabel('Search assignees').press('Escape');
     const replaceAccount = async () => {
       await page
-        .getByRole('button', { name: 'Connect Jira site', exact: true })
+        .getByRole('button', { name: 'Connect Jira or GitHub', exact: true })
         .click();
       await page
         .getByPlaceholder('https://your-team.atlassian.net')

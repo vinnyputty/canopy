@@ -16,9 +16,11 @@ export function ViewSettings({
   update,
   useDefault,
   reset,
+  provider = 'jira',
 }: ViewProps & {
   useDefault: () => void;
   reset: () => void;
+  provider?: 'jira' | 'github' | 'demo';
 }) {
   const details = useRef<HTMLDetailsElement>(null);
   const move = (column: TableColumn, offset: number) => {
@@ -58,13 +60,17 @@ export function ViewSettings({
               })
             }
           >
-            <option value="rank">Jira rank</option>
-            {Object.entries(COLUMN_LABELS).map(([id, label]) => (
-              <option key={id} value={id}>
-                {label}
-                {id === 'issue' ? ' summary' : ''}
-              </option>
-            ))}
+            <option value="rank">
+              {provider === 'github' ? 'GitHub order' : 'Jira rank'}
+            </option>
+            {Object.entries(COLUMN_LABELS)
+              .filter(([id]) => provider !== 'github' || id !== 'priority')
+              .map(([id, label]) => (
+                <option key={id} value={id}>
+                  {label}
+                  {id === 'issue' ? ' summary' : ''}
+                </option>
+              ))}
           </select>
         </label>
         {view.sort.column !== 'rank' && (
@@ -129,46 +135,48 @@ export function ViewSettings({
             ...DEFAULT_VIEW.columns.filter(
               (column) => !view.columns.includes(column),
             ),
-          ].map((column) => (
-            <div className="column-setting" key={column}>
-              <label>
-                <input
-                  type="checkbox"
-                  aria-label={`Show ${COLUMN_LABELS[column]} column`}
-                  checked={view.columns.includes(column)}
-                  disabled={column === 'issue'}
-                  onChange={(event) =>
-                    update({
-                      columns: event.target.checked
-                        ? [...view.columns, column]
-                        : view.columns.filter((id) => id !== column),
-                    })
-                  }
-                />
-                {COLUMN_LABELS[column]}
-              </label>
-              {column !== 'issue' && view.columns.includes(column) && (
-                <>
-                  <button
-                    aria-label={`Move ${COLUMN_LABELS[column]} column left`}
-                    disabled={view.columns.indexOf(column) === 1}
-                    onClick={() => move(column, -1)}
-                  >
-                    ←
-                  </button>
-                  <button
-                    aria-label={`Move ${COLUMN_LABELS[column]} column right`}
-                    disabled={
-                      view.columns.indexOf(column) === view.columns.length - 1
+          ]
+            .filter((column) => provider !== 'github' || column !== 'priority')
+            .map((column) => (
+              <div className="column-setting" key={column}>
+                <label>
+                  <input
+                    type="checkbox"
+                    aria-label={`Show ${COLUMN_LABELS[column]} column`}
+                    checked={view.columns.includes(column)}
+                    disabled={column === 'issue'}
+                    onChange={(event) =>
+                      update({
+                        columns: event.target.checked
+                          ? [...view.columns, column]
+                          : view.columns.filter((id) => id !== column),
+                      })
                     }
-                    onClick={() => move(column, 1)}
-                  >
-                    →
-                  </button>
-                </>
-              )}
-            </div>
-          ))}
+                  />
+                  {COLUMN_LABELS[column]}
+                </label>
+                {column !== 'issue' && view.columns.includes(column) && (
+                  <>
+                    <button
+                      aria-label={`Move ${COLUMN_LABELS[column]} column left`}
+                      disabled={view.columns.indexOf(column) === 1}
+                      onClick={() => move(column, -1)}
+                    >
+                      ←
+                    </button>
+                    <button
+                      aria-label={`Move ${COLUMN_LABELS[column]} column right`}
+                      disabled={
+                        view.columns.indexOf(column) === view.columns.length - 1
+                      }
+                      onClick={() => move(column, 1)}
+                    >
+                      →
+                    </button>
+                  </>
+                )}
+              </div>
+            ))}
         </fieldset>
         <button className="view-action" onClick={useDefault}>
           Use as connection default
@@ -177,7 +185,8 @@ export function ViewSettings({
           Reset this root to default
         </button>
         <p>
-          Defaults include filters and apply to this Jira connection. Customized
+          Defaults include filters and apply to this{' '}
+          {provider === 'github' ? 'GitHub' : 'Jira'} connection. Customized
           roots keep their own view.
         </p>
       </div>

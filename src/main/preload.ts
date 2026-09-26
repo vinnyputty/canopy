@@ -4,6 +4,7 @@ const api: CanopyAPI = {
   currentUser: (id) => ipcRenderer.invoke('canopy:currentUser', id),
   connections: () => ipcRenderer.invoke('canopy:connections'),
   connect: (input) => ipcRenderer.invoke('canopy:connect', input),
+  connectGithub: (input) => ipcRenderer.invoke('canopy:connectGithub', input),
   disconnect: (id) => ipcRenderer.invoke('canopy:disconnect', id),
   syncStatus: (id) => ipcRenderer.invoke('canopy:syncStatus', id),
   tree: (id, key) => ipcRenderer.invoke('canopy:tree', id, key),
@@ -15,6 +16,7 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:cancelSearch', id, requestId),
   priorities: (id, key, refresh) =>
     ipcRenderer.invoke('canopy:priorities', id, key, refresh),
+  labels: (id, key) => ipcRenderer.invoke('canopy:labels', id, key),
   transitions: (id, key, refresh) =>
     ipcRenderer.invoke('canopy:transitions', id, key, refresh),
   invalidateChoices: (id, key) =>
