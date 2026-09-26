@@ -486,6 +486,26 @@ export async function auditGithub(app, page) {
     await expect.poll(reads, { timeout: 10_000 }).toBe(beforeDuplicate + 4);
     await expect(connectionStatus).toHaveText('Connected');
 
+    await page
+      .getByRole('button', { name: 'Open issue', exact: true })
+      .first()
+      .click();
+    const crossProviderDialog = page.getByRole('dialog', {
+      name: 'Open issue tree',
+    });
+    const crossProviderInput = crossProviderDialog.getByRole('combobox', {
+      name: 'GitHub URL, owner/repo, issue number, or title',
+    });
+    await crossProviderInput.fill('CAN-123');
+    await expect(
+      crossProviderDialog.getByRole('option', { name: /team\/a#1/ }),
+    ).toBeVisible();
+    await crossProviderInput.fill('team/a#1');
+    await crossProviderInput.press('Enter');
+    await expect(crossProviderDialog).toHaveCount(0);
+    await expect(
+      page.getByRole('tree', { name: 'team/a#1 issue tree' }),
+    ).toBeVisible();
     await page.getByTitle('Disconnect GitHub · tester').click();
     await expect(
       page.getByText('GitHub · tester', { exact: true }),
