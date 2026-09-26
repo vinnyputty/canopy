@@ -322,10 +322,13 @@ export async function auditPreview(app, page) {
   await expect(brief.getByLabel('Work brief Markdown')).toContainText(
     'Unavailable: some dependency links could not be loaded.',
   );
+  await brief.getByRole('button', { name: 'Copy work brief' }).click();
+  await expect(brief.getByText('Copied', { exact: true })).toBeVisible();
   await app.evaluate(() => {
     globalThis.previewRecovery.mode = 'success';
   });
   await brief.getByRole('button', { name: 'Retry' }).click();
+  await expect(brief.getByText('Copied', { exact: true })).toHaveCount(0);
   await expect(brief.getByLabel('Work brief Markdown')).toContainText(
     'https://second.example.invalid/browse/TEST-1',
   );

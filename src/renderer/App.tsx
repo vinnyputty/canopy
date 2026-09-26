@@ -5885,8 +5885,9 @@ function WorkBriefDialog({
     setBrief('');
     setError('');
     setPartial(false);
+    setCopied(false);
     Promise.allSettled([
-      preview
+      preview && attempt === 0
         ? Promise.resolve(preview)
         : window.canopy.preview(connectionId, issueKey),
       provider === 'demo'
@@ -5906,7 +5907,9 @@ function WorkBriefDialog({
           }),
         );
         setPartial(
-          details.status === 'rejected' || sourceUrl.status === 'rejected',
+          details.status === 'rejected' ||
+            sourceUrl.status === 'rejected' ||
+            Boolean(details.status === 'fulfilled' && details.value.linksError),
         );
       } catch (reason) {
         setError(`Couldn’t load work brief: ${String(reason)}`);
