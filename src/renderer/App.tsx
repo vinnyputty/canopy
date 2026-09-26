@@ -389,15 +389,35 @@ export function App() {
         .filter((tab) => savedSources.some((source) => sameRoot(source, tab)))
         .map((tab) => tab.id)
     : [];
-  const viewSnapshots = Object.fromEntries(
-    savedSources.map((source) => [
-      source.id,
-      snapshots[sourceTabId(source, workspace.tabs)],
+  const sourceTabKeys = JSON.stringify(
+    workspace.tabs.map(({ id, connectionId, rootKey }) => [
+      id,
+      connectionId,
+      rootKey,
     ]),
   );
-  const savedResults = activeSavedView
-    ? viewResults(activeSavedView, savedSources, viewSnapshots, currentUsers)
-    : [];
+  const viewSnapshots = useMemo(
+    () =>
+      Object.fromEntries(
+        savedSources.map((source) => [
+          source.id,
+          snapshots[sourceTabId(source, workspace.tabs)],
+        ]),
+      ),
+    [savedSources, snapshots, sourceTabKeys],
+  );
+  const savedResults = useMemo(
+    () =>
+      activeSavedView
+        ? viewResults(
+            activeSavedView,
+            savedSources,
+            viewSnapshots,
+            currentUsers,
+          )
+        : [],
+    [activeSavedView, savedSources, viewSnapshots, currentUsers],
+  );
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
   const query = activeTab ? (queries[activeTab.id] ?? '') : '';
   const filtering = Boolean(
@@ -1139,12 +1159,14 @@ export function App() {
             result.issue.key,
           ).map((node) => node.issue.key)
         : [result.source.rootKey];
+      const savedRootView = rootView(current, result.source);
       const tab: TabState = existing ?? {
         id: crypto.randomUUID(),
         connectionId: result.source.connectionId,
         rootKey: result.source.rootKey,
         expanded: [],
-        hideDone: false,
+        hideDone: savedRootView.hideDone,
+        filters: savedRootView.filters,
         scrollTop: 0,
       };
       const next = {
