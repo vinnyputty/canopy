@@ -18,6 +18,12 @@ export async function auditSearch(app, page) {
         key: 'CAN-200',
         summary: 'Other search match',
       };
+      if (query === 'CAN-100') return { issues: [second] };
+      if (query === 'CAN-10')
+        return {
+          issues: [first, { ...first, key: 'CAN-101', summary: 'Next key' }],
+        };
+      if (query === 'CAN-') return { issues: [] };
       if (query === 'empty') return { issues: [] };
       if (query === 'empty-page') return { issues: [], nextPageToken: 'more' };
       if (query === 'error' && !demo.searchRetried) {
@@ -50,6 +56,42 @@ export async function auditSearch(app, page) {
   };
   let dialog = await open();
   let input = dialog.getByRole('combobox');
+  await input.fill('CAN-100');
+  await expect(dialog.getByRole('option')).toHaveCount(1);
+  await expect(dialog.getByRole('option').first()).toContainText('CAN-200');
+  await input.press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(
+    page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+  ).toBeVisible();
+  dialog = await open();
+  input = dialog.getByRole('combobox');
+  await input.fill('CAN-10');
+  await expect(dialog.getByRole('option')).toHaveCount(2);
+  await input.press('ArrowDown');
+  await expect(dialog.getByRole('option').first()).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await input.press('ArrowDown');
+  await expect(dialog.getByRole('option').last()).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await input.press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(
+    page.getByRole('tree', { name: 'CAN-101 issue tree' }),
+  ).toBeVisible();
+  dialog = await open();
+  input = dialog.getByRole('combobox');
+  await input.fill('CAN-');
+  await expect(dialog.getByRole('option')).toHaveCount(0);
+  await expect(
+    dialog.getByRole('button', { name: 'Open tree' }),
+  ).toBeDisabled();
+  await input.fill('CAN');
+  await expect(dialog.getByRole('option')).toHaveCount(2);
   await input.fill('search');
   await expect(dialog.getByRole('option')).toHaveCount(2);
   await expect(dialog.getByRole('option').first()).toHaveAttribute(
@@ -193,7 +235,21 @@ export async function auditSearch(app, page) {
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
   ).toBeVisible();
+  dialog = await open();
+  input = dialog.getByRole('combobox');
+  await input.fill('https://example.atlassian.net/browse/CAN-100');
+  await dialog.getByRole('button', { name: 'Open tree' }).click();
+  await expect(
+    page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+  ).toBeVisible();
+  dialog = await open();
+  input = dialog.getByRole('combobox');
+  await input.fill('CAN-999');
+  await input.press('Enter');
+  await expect(page.getByRole('alert')).toContainText(
+    'Issue not found. Try CAN-100 or CAN-200',
+  );
   console.log(
-    'Search integration passed: keyboard, recent roots, empty/error/retry, pagination, opaque cursors, cancellation, stale results, and direct URLs.',
+    'Search integration passed: key prefixes, exact keys, URLs, missing keys, keyboard, recent roots, empty/error/retry, pagination, opaque cursors, cancellation, and stale results.',
   );
 }

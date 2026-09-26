@@ -29,6 +29,21 @@ test('summary relevance precedes project context and recency, with stable dedupl
     ['OTH-1', 'CAN-2', 'CAN-1', 'OTH-2', 'CAN-3'],
   );
 });
+test('issue key matches rank before summary matches for prefix searches', () => {
+  const ranked = rankSearchIssues(
+    [
+      issue('OTHER-9', 'CAN-12 exact summary'),
+      issue('CAN-123', 'Unrelated'),
+      issue('CAN-12', 'Older exact issue'),
+      issue('CAN-124', 'Unrelated'),
+    ],
+    'can-12',
+  );
+  assert.deepEqual(
+    ranked.map((item) => item.key),
+    ['CAN-12', 'CAN-123', 'CAN-124', 'OTHER-9'],
+  );
+});
 test('obsolete responses and errors cannot replace a current query, even if cancellation is ignored', async () => {
   const pending: {
     resolve: (page: SearchPage) => void;

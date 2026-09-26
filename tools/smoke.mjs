@@ -207,7 +207,9 @@ async function openIssue(key, expectTree = true) {
   await page.getByRole('button', { name: 'Open issue' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel('Issue key, Jira URL, or summary').fill(key);
+  await dialog
+    .getByLabel('Issue key, uppercase project prefix, Jira URL, or summary')
+    .fill(key);
   await dialog.getByRole('button', { name: 'Open tree' }).click();
   await expect(
     expectTree
@@ -1728,7 +1730,7 @@ try {
   ).toBeVisible();
   const pickerInput = page
     .getByRole('dialog')
-    .getByLabel('Issue key, Jira URL, or summary');
+    .getByLabel('Issue key, uppercase project prefix, Jira URL, or summary');
   await pickerInput.fill('CAN-100');
   await pickerInput.press('Alt+ArrowLeft');
   await expect(secondTab).toHaveAttribute('aria-selected', 'true');

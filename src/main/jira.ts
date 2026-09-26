@@ -32,6 +32,8 @@ const SEARCH_PAGE_SIZE = 100;
 const PARENT_BATCH_SIZE = 50;
 const ASSIGNEE_PAGE_SIZE = 100;
 const ISSUE_KEY = /^[A-Z][A-Z0-9_]*-\d+$/i;
+const ISSUE_KEY_PREFIX = /^[A-Z][A-Z0-9_]*-\d*$/i;
+const PROJECT_KEY_PREFIX = /^[A-Z][A-Z0-9_]*$/;
 
 type JiraFields = Record<string, any>;
 type JiraIssue = { id?: string; key?: string; fields?: JiraFields };
@@ -422,8 +424,12 @@ export class JiraProvider {
     const summaryClause = /[\p{L}\p{N}]$/u.test(value)
       ? `(${literal} OR summary ~ ${quoteTextJql(value).slice(0, -1)}*")`
       : literal;
-    const jql = ISSUE_KEY.test(value)
-      ? `(key = ${quoteJql(value)} OR ${summaryClause}) ORDER BY updated DESC, key ASC`
+    const keyClause =
+      ISSUE_KEY_PREFIX.test(value) || PROJECT_KEY_PREFIX.test(value)
+        ? `key ~ ${quoteJql(`${value.toUpperCase()}*`)}`
+        : undefined;
+    const jql = keyClause
+      ? `(${ISSUE_KEY.test(value) ? `key = ${quoteJql(value)} OR ` : ''}${keyClause} OR ${summaryClause}) ORDER BY updated DESC, key ASC`
       : `${summaryClause} ORDER BY updated DESC, key ASC`;
     const recent = this.consistency.snapshot();
     const page = await this.searchPage(

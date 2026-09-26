@@ -4303,6 +4303,7 @@ function OpenIssueDialog({
     error: '',
   });
   const [selectedKey, setSelectedKey] = useState<string>();
+  const [explicitSelection, setExplicitSelection] = useState(false);
   const search = useMemo(
     () =>
       new IssueSearch(window.canopy, (state) => {
@@ -4381,12 +4382,19 @@ function OpenIssueDialog({
   useEffect(() => inputRef.current?.focus(), []);
   useEffect(() => {
     setSelectedKey(matchingRepositories[0]?.key);
+    setExplicitSelection(false);
     setError('');
     search.start(
       connectionId,
       query.trim(),
       project,
-      Boolean(connectionId && query.trim().length >= 2 && !directKey),
+      Boolean(
+        connectionId &&
+        query.trim().length >= 2 &&
+        (selectedConnection?.provider === 'github'
+          ? !directKey
+          : !(directKey && /\/browse\//i.test(query))),
+      ),
     );
     return () => search.cancel();
   }, [connectionId, query, project, directKey, search]);
@@ -4397,7 +4405,7 @@ function OpenIssueDialog({
         ?.scrollIntoView({ block: 'nearest' });
   }, [selected?.key]);
   const submit = () => {
-    const key = directKey ?? selected?.key;
+    const key = directKey && !explicitSelection ? directKey : selected?.key;
     if (!connectionId) setError('Choose a connection first.');
     else if (key) onOpen(connectionId, key);
   };
@@ -4444,6 +4452,7 @@ function OpenIssueDialog({
                 displayedOptions.length
               ) {
                 event.preventDefault();
+                setExplicitSelection(true);
                 const index = Math.max(
                   0,
                   displayedOptions.findIndex(
@@ -4452,13 +4461,15 @@ function OpenIssueDialog({
                 );
                 setSelectedKey(
                   displayedOptions[
-                    Math.max(
-                      0,
-                      Math.min(
-                        displayedOptions.length - 1,
-                        index + (event.key === 'ArrowDown' ? 1 : -1),
-                      ),
-                    )
+                    directKey && !explicitSelection
+                      ? 0
+                      : Math.max(
+                          0,
+                          Math.min(
+                            displayedOptions.length - 1,
+                            index + (event.key === 'ArrowDown' ? 1 : -1),
+                          ),
+                        )
                   ].key,
                 );
               }
@@ -4473,12 +4484,12 @@ function OpenIssueDialog({
             placeholder={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, Jira URL, or summary'
+                : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
             aria-label={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, Jira URL, or summary'
+                : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
           />
           {busy && <Loader2 className="spin" size={14} />}

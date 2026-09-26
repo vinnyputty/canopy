@@ -227,12 +227,31 @@ describe('JiraProvider search and editing', () => {
     assert.equal(body(request.calls[1][1]).nextPageToken, 'next');
   });
 
-  it('adds exact-key matching only for issue-key-shaped searches', async () => {
+  it('searches exact and partial key prefixes alongside summary matches', async () => {
     const request = recordingRequest(() => ({ issues: [], isLast: true }));
     await new JiraProvider(request).search('ABC-123');
     const jql = body(request.calls[0][1]).jql;
-    assert.ok(jql.startsWith('(key = "ABC-123" OR (summary ~ '));
+    assert.ok(
+      jql.startsWith('(key = "ABC-123" OR key ~ "ABC-123*" OR (summary ~ '),
+    );
     assert.ok(jql.includes('123*"'));
+    await new JiraProvider(request).search('abc-');
+    assert.ok(
+      body(request.calls[1][1]).jql.startsWith('(key ~ "ABC-*" OR summary ~ '),
+    );
+    await new JiraProvider(request).search('abc-12');
+    assert.ok(
+      body(request.calls[2][1]).jql.startsWith(
+        '(key = "abc-12" OR key ~ "ABC-12*" OR (summary ~ ',
+      ),
+    );
+    await new JiraProvider(request).search('CAN');
+    assert.ok(
+      body(request.calls[3][1]).jql.startsWith('(key ~ "CAN*" OR (summary ~ '),
+    );
+    await new JiraProvider(request).search('can');
+    assert.ok(body(request.calls[4][1]).jql.startsWith('(summary ~ '));
+    assert.equal(body(request.calls[4][1]).jql.includes('key ~'), false);
   });
 
   it('adds only a generated suffix wildcard and forwards request cancellation', async () => {

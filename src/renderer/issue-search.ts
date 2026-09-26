@@ -7,14 +7,19 @@ export function rankSearchIssues(
 ): SearchIssue[] {
   const value = query.trim().toLocaleLowerCase();
   const score = (issue: SearchIssue) => {
+    const key = issue.key.toLocaleLowerCase();
     const summary = issue.summary.trim().toLocaleLowerCase();
-    return summary === value
+    return key === value
       ? 0
-      : summary.startsWith(value)
+      : key.startsWith(value)
         ? 1
-        : summary.includes(value)
+        : summary === value
           ? 2
-          : 3;
+          : summary.startsWith(value)
+            ? 3
+            : summary.includes(value)
+              ? 4
+              : 5;
   };
   const updated = (issue: SearchIssue) => Date.parse(issue.updated ?? '') || 0;
   return [...new Map(issues.map((issue) => [issue.key, issue])).values()].sort(
