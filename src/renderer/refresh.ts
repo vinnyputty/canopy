@@ -104,13 +104,19 @@ type Entry = {
 export class RefreshSchedule {
   private entries = new Map<string, Entry>();
 
-  sync(ids: string[], activeId: string | null, now: number): string[] {
+  sync(
+    ids: string[],
+    activeId: string | null | readonly string[],
+    now: number,
+  ): string[] {
     const activated: string[] = [];
     for (const id of this.entries.keys()) {
       if (!ids.includes(id)) this.entries.delete(id);
     }
     for (const id of ids) {
-      const active = id === activeId;
+      const active = Array.isArray(activeId)
+        ? activeId.includes(id)
+        : id === activeId;
       const entry = this.entries.get(id);
       if (!entry) {
         this.entries.set(id, {

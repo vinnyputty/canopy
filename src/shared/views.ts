@@ -1,4 +1,10 @@
-import type { RootView, TableColumn, TabState, Workspace } from './types';
+import type {
+  RootView,
+  SavedIssueView,
+  TableColumn,
+  TabState,
+  Workspace,
+} from './types';
 
 export const COLUMN_BOUNDS: Record<TableColumn, readonly [number, number]> = {
   issue: [240, 1200],
@@ -75,6 +81,59 @@ function restoredRootView(value: unknown): RootView | undefined {
       : value;
   return validRootView(candidate) ? candidate : undefined;
 }
+export function validSavedViews(value: unknown): value is SavedIssueView[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 100 &&
+    value.every(
+      (view) =>
+        record(view) &&
+        typeof view.id === 'string' &&
+        view.id.length > 0 &&
+        view.id.length <= 100 &&
+        typeof view.name === 'string' &&
+        view.name.trim().length > 0 &&
+        view.name.length <= 100 &&
+        Array.isArray(view.roots) &&
+        view.roots.length <= 1000 &&
+        view.roots.every(
+          (root: unknown) =>
+            record(root) &&
+            typeof root.connectionId === 'string' &&
+            root.connectionId.length > 0 &&
+            root.connectionId.length <= 500 &&
+            typeof root.rootKey === 'string' &&
+            root.rootKey.length > 0 &&
+            root.rootKey.length <= 500 &&
+            (root.summary === undefined ||
+              (typeof root.summary === 'string' &&
+                root.summary.length <= 10000)),
+        ) &&
+        Array.isArray(view.connectionIds) &&
+        view.connectionIds.length <= 100 &&
+        view.connectionIds.every(
+          (id: unknown) => typeof id === 'string' && id.length <= 500,
+        ) &&
+        record(view.filters) &&
+        ['any', 'me', 'unassigned'].includes(String(view.filters.assignee)) &&
+        Array.isArray(view.filters.statuses) &&
+        view.filters.statuses.length <= 50 &&
+        view.filters.statuses.every(
+          (status: unknown) =>
+            typeof status === 'string' && status.length <= 100,
+        ) &&
+        typeof view.filters.priority === 'string' &&
+        view.filters.priority.length <= 100 &&
+        typeof view.filters.hideDone === 'boolean' &&
+        record(view.sort) &&
+        ['key', 'summary', 'status', 'priority', 'assignee'].includes(
+          String(view.sort.column),
+        ) &&
+        ['asc', 'desc'].includes(String(view.sort.direction)),
+    ) &&
+    new Set(value.map((view) => view.id)).size === value.length
+  );
+}
 /** Retain unrelated workspace state when an old or hand-edited view is invalid. */
 export function recoverWorkspaceViews(workspace: Workspace): Workspace {
   if (
@@ -115,6 +174,13 @@ export function recoverWorkspaceViews(workspace: Workspace): Workspace {
       : {}),
     ...(workspace.viewDefaults !== undefined
       ? { viewDefaults: recover(workspace.viewDefaults) }
+      : {}),
+    ...(workspace.savedViews !== undefined
+      ? {
+          savedViews: validSavedViews(workspace.savedViews)
+            ? workspace.savedViews
+            : [],
+        }
       : {}),
   };
 }

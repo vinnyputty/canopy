@@ -798,6 +798,18 @@ try {
   ).toBeEnabled();
   const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
   await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  await page
+    .getByRole('button', { name: 'Saved view: Assigned to me' })
+    .click();
+  const savedList = page.getByRole('listbox', {
+    name: 'Assigned to me results',
+  });
+  const savedRoot = savedList.getByRole('option', { name: /^CAN-100 / });
+  await expect(savedRoot).toContainText('Canopy demo · CAN-100');
+  await savedRoot.getByText('Open in tree').click();
+  await expect(
+    tree.getByRole('treeitem', { name: /CAN-100:/ }),
+  ).toHaveAttribute('aria-selected', 'true');
   await auditPickers(app, page);
   await auditSelfConnections(app, page);
   const rootSummary = 'A calmer place to get things done';

@@ -144,6 +144,13 @@ export function removeConnection(workspace: Workspace, id: string): Workspace {
     closedTabs: workspace.closedTabs?.filter(keep),
     viewDefaults,
     rootViews,
+    savedViews: workspace.savedViews?.map((view) => ({
+      ...view,
+      roots: view.roots.filter(keep),
+      connectionIds: view.connectionIds.filter(
+        (connectionId) => connectionId !== id,
+      ),
+    })),
   };
 }
 
