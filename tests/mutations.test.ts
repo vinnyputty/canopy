@@ -249,6 +249,13 @@ describe('optimistic mutation reconciliation', () => {
       h.view.snapshots.other.issues.some((value) => value.key === 'A-5'),
       false,
     );
+    const sameKeyElsewhere = snapshot();
+    sameKeyElsewhere.issues.push(issue('A-5', 'A-1'));
+    h.mutations.receive(
+      tab('other', 'other'),
+      sameKeyElsewhere,
+      h.mutations.revision,
+    );
     h.mutations.receive(tab(), snapshot(), h.mutations.revision);
     assert.ok(h.view.snapshots.one.issues.some((value) => value.key === 'A-5'));
     const current = snapshot();

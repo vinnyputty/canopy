@@ -168,6 +168,7 @@ export class Mutations {
         this.created.delete(owner);
         continue;
       }
+      if (!owner.startsWith(`${tab.connectionId}:`)) continue;
       const remote = snapshot.issues.find(
         (issue) => issue.key === entry.issue.key,
       );
@@ -176,7 +177,6 @@ export class Mutations {
         continue;
       }
       if (
-        owner.startsWith(`${tab.connectionId}:`) &&
         snapshot.issues.some((issue) => issue.key === entry.issue.parentKey) &&
         !snapshot.issues.some((issue) => issue.key === entry.issue.key)
       )

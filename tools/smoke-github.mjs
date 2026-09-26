@@ -188,9 +188,9 @@ export async function auditGithub(app, page) {
       .getByRole('menu', { name: 'Actions for team/b#2' })
       .getByRole('menuitem', { name: 'Copy key and summary' })
       .click();
-    expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
-      'team/b#2 team/b issue 2',
-    );
+    await expect
+      .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
+      .toBe('team/b#2 team/b issue 2');
     await expect(page.getByLabel('Filter priority')).toHaveCount(0);
     const statusResize = page.getByRole('separator', {
       name: 'Resize Status column',
@@ -332,9 +332,9 @@ export async function auditGithub(app, page) {
       name: 'Preview team/a#1',
     });
     await preview.getByRole('button', { name: 'Copy key and summary' }).click();
-    expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
-      'team/a#1 Updated GitHub title',
-    );
+    await expect
+      .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
+      .toBe('team/a#1 Updated GitHub title');
     await expect(preview.getByText('No labels.')).toBeVisible();
     await expect(preview.getByText('team/b#2')).toBeVisible();
     await preview.getByRole('button', { name: 'Edit labels' }).click();
