@@ -11,13 +11,17 @@ export function issueWorkBrief({
   provider,
   sourceUrl,
   knownIssues,
+  issueKey,
 }: {
-  preview: IssuePreview;
+  preview?: IssuePreview;
   provider: 'jira' | 'github' | 'demo';
-  sourceUrl: string;
+  sourceUrl?: string;
   knownIssues: Issue[];
+  issueKey?: string;
 }): string {
-  const { issue } = preview;
+  const issue =
+    preview?.issue ?? knownIssues.find((item) => item.key === issueKey);
+  if (!issue) throw new Error('Issue details are unavailable.');
   const byKey = new Map(knownIssues.map((item) => [item.key, item]));
   const parents: string[] = [];
   const visited = new Set([issue.key]);
@@ -38,28 +42,32 @@ export function issueWorkBrief({
       const [repo, number] = key.split('#');
       return `https://github.com/${repo}/issues/${number}`;
     }
-    if (provider !== 'github' && /^[A-Z][A-Z0-9_]*-\d+$/i.test(key)) {
+    if (
+      provider !== 'github' &&
+      sourceUrl &&
+      /^[A-Z][A-Z0-9_]*-\d+$/i.test(key)
+    ) {
       const url = new URL(sourceUrl);
       url.pathname = url.pathname.replace(/[^/]+$/, encodeURIComponent(key));
       return url.toString();
     }
     return '';
   };
-  const availableLinks = issue.links.map((link) => {
+  const availableLinks = (preview?.issue.links ?? []).map((link) => {
     const url = issueLink(link.key);
     return `- ${link.relationship}: ${url ? `[${link.key}](${url})` : link.key} — ${link.summary}`;
   });
   const links = [
     ...(availableLinks.length
       ? availableLinks
-      : preview.linksError
+      : preview?.linksError || !preview
         ? []
         : ['None']),
-    ...(preview.linksError
+    ...(preview?.linksError || !preview
       ? ['Unavailable: some dependency links could not be loaded.']
       : []),
   ].join('\n');
-  const body = preview.descriptionMarkdown ?? preview.description;
+  const body = preview?.descriptionMarkdown ?? preview?.description;
   const description =
     body === undefined
       ? 'Unavailable: description could not be loaded.'
@@ -74,7 +82,7 @@ export function issueWorkBrief({
     `# ${issue.summary.trim()}`,
     '',
     `- Issue: ${identity}`,
-    `- Source: ${sourceUrl}`,
+    `- Source: ${sourceUrl || 'Unavailable: source URL could not be loaded.'}`,
     `- Status: ${issue.status?.name ?? 'Unavailable'}`,
     `- Priority: ${provider === 'github' ? 'Not available in GitHub issues' : (issue.priority?.name ?? 'None')}`,
     `- Parent path: ${parents.length ? parents.join(' → ') : 'None'}`,

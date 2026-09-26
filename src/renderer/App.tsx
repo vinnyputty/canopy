@@ -5877,35 +5877,41 @@ function WorkBriefDialog({
 }) {
   const [brief, setBrief] = useState('');
   const [error, setError] = useState('');
+  const [partial, setPartial] = useState(false);
   const [copied, setCopied] = useState(false);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let live = true;
     setBrief('');
     setError('');
-    Promise.all([
+    setPartial(false);
+    Promise.allSettled([
       preview
         ? Promise.resolve(preview)
         : window.canopy.preview(connectionId, issueKey),
       provider === 'demo'
         ? Promise.resolve('Local sample workspace')
         : window.canopy.issueUrl(connectionId, issueKey),
-    ]).then(
-      ([details, sourceUrl]) => {
-        if (live)
-          setBrief(
-            issueWorkBrief({
-              preview: details,
-              provider,
-              sourceUrl,
-              knownIssues,
-            }),
-          );
-      },
-      (reason: unknown) => {
-        if (live) setError(`Couldn’t load work brief: ${String(reason)}`);
-      },
-    );
+    ]).then(([details, sourceUrl]) => {
+      if (!live) return;
+      try {
+        setBrief(
+          issueWorkBrief({
+            preview: details.status === 'fulfilled' ? details.value : undefined,
+            provider,
+            sourceUrl:
+              sourceUrl.status === 'fulfilled' ? sourceUrl.value : undefined,
+            knownIssues,
+            issueKey,
+          }),
+        );
+        setPartial(
+          details.status === 'rejected' || sourceUrl.status === 'rejected',
+        );
+      } catch (reason) {
+        setError(`Couldn’t load work brief: ${String(reason)}`);
+      }
+    });
     return () => {
       live = false;
     };
@@ -5935,6 +5941,11 @@ function WorkBriefDialog({
             {error}
           </p>
         )}
+        {partial && (
+          <p role="status" className="dialog-note">
+            Some work brief details are unavailable. Retry to load them.
+          </p>
+        )}
         {brief ? (
           <pre aria-label="Work brief Markdown" tabIndex={0}>
             {brief}
@@ -5943,7 +5954,7 @@ function WorkBriefDialog({
           <p role="status">Loading work brief…</p>
         ) : null}
         <div className="dialog-footer">
-          {error && (
+          {(error || partial) && (
             <button onClick={() => setAttempt((value) => value + 1)}>
               Retry
             </button>

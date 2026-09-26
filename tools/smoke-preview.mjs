@@ -55,6 +55,7 @@ export async function auditPreview(app, page) {
       }),
       preview: async (_event, connection) => {
         const mode = controls.mode;
+        if (mode === 'brief-fail') throw new Error('Preview unavailable');
         if (
           connection === 'first' &&
           (mode === 'hold' || mode === 'hold-error')
@@ -182,8 +183,10 @@ export async function auditPreview(app, page) {
             : {}),
         };
       },
-      issueUrl: (_event, connection, key) =>
-        `https://${connection}.example.invalid/browse/${key}`,
+      issueUrl: (_event, connection, key) => {
+        if (controls.mode === 'brief-fail') throw new Error('URL unavailable');
+        return `https://${connection}.example.invalid/browse/${key}`;
+      },
       copyText: (_event, value) => {
         controls.clipboard = value;
       },
@@ -302,6 +305,29 @@ export async function auditPreview(app, page) {
   ).toBeFocused();
   await expect(brief.getByLabel('Work brief Markdown')).toContainText(
     '- Issue: Jira TEST-1',
+  );
+  await brief.getByRole('button', { name: 'Close dialog' }).click();
+  await app.evaluate(() => {
+    globalThis.previewRecovery.mode = 'brief-fail';
+  });
+  await row.focus();
+  await page.keyboard.press('Shift+F10');
+  await page
+    .getByRole('menu', { name: 'Actions for TEST-1' })
+    .getByRole('menuitem', { name: 'Copy work brief' })
+    .click();
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'Unavailable: source URL could not be loaded.',
+  );
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'Unavailable: some dependency links could not be loaded.',
+  );
+  await app.evaluate(() => {
+    globalThis.previewRecovery.mode = 'success';
+  });
+  await brief.getByRole('button', { name: 'Retry' }).click();
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'https://second.example.invalid/browse/TEST-1',
   );
   await brief.getByRole('button', { name: 'Close dialog' }).click();
 }

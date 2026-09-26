@@ -101,6 +101,23 @@ it('marks unavailable Jira parents, description, and dependencies without copyin
   assert.doesNotMatch(brief, /token=secret/);
 });
 
+it('builds a partial brief when preview and source URL cannot load', () => {
+  const brief = issueWorkBrief({
+    issueKey: issue.key,
+    provider: 'github',
+    knownIssues: [
+      issue,
+      { ...issue, key: 'team/repo#7', parentKey: undefined },
+    ],
+  });
+  assert.match(brief, /# Preserve criteria/);
+  assert.match(brief, /- Parent path: team\/repo#7/);
+  assert.match(brief, /- Source: Unavailable: source URL could not be loaded/);
+  assert.match(brief, /Unavailable: description could not be loaded/);
+  assert.match(brief, /Unavailable: some dependency links could not be loaded/);
+  assert.doesNotMatch(brief, /Blocked work/);
+});
+
 it('identifies demo issues without inventing external links', () => {
   const brief = issueWorkBrief({
     preview: {
