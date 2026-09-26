@@ -218,6 +218,7 @@ export function App() {
   const workspaceRef = useRef(workspace);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
+  const appearanceSaving = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
   workspaceRef.current = workspace;
@@ -1435,6 +1436,10 @@ export function App() {
         return;
       }
       if (!command) return;
+      if (appearanceSaving.current) {
+        event.preventDefault();
+        return;
+      }
       if (command === 'commandPalette') {
         event.preventDefault();
         setDialog('commands');
@@ -3619,19 +3624,26 @@ export function App() {
             setDialog(null);
           }}
           onSave={async (theme, palette) => {
-            if (workspaceSaveTimer.current !== null) {
-              window.clearTimeout(workspaceSaveTimer.current);
-              workspaceSaveTimer.current = null;
-              void saveWorkspace(workspaceRef.current).catch(() => {});
+            appearanceSaving.current = true;
+            try {
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+                void saveWorkspace(workspaceRef.current).catch(() => {});
+              }
+              await saveWorkspace({
+                ...workspaceRef.current,
+                theme,
+                palette,
+              });
+              setWorkspace((current) => ({ ...current, theme, palette }));
+              setAppearancePreview(null);
+              setDialog((current) =>
+                current === 'appearance' ? null : current,
+              );
+            } finally {
+              appearanceSaving.current = false;
             }
-            await saveWorkspace({
-              ...workspaceRef.current,
-              theme,
-              palette,
-            });
-            setWorkspace((current) => ({ ...current, theme, palette }));
-            setAppearancePreview(null);
-            setDialog(null);
           }}
           onShortcuts={() => {
             setAppearancePreview(null);

@@ -336,10 +336,16 @@ async function auditAppearance() {
 
 async function auditAppearanceSaveFailure() {
   await app.evaluate(({ ipcMain }) => {
+    globalThis.releaseAppearanceFailure = null;
     ipcMain.removeHandler('canopy:saveWorkspace');
-    ipcMain.handle('canopy:saveWorkspace', () => {
-      throw new Error('Injected appearance write failure');
-    });
+    ipcMain.handle(
+      'canopy:saveWorkspace',
+      () =>
+        new Promise((_resolve, reject) => {
+          globalThis.releaseAppearanceFailure = () =>
+            reject(new Error('Injected appearance write failure'));
+        }),
+    );
   });
   const root = page.locator('html');
   const originalPalette = await root.getAttribute('data-palette');
@@ -347,6 +353,15 @@ async function auditAppearanceSaveFailure() {
   const dialog = page.getByRole('dialog', { name: 'Appearance' });
   await dialog.getByRole('radio', { name: 'Forest' }).check();
   await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect
+    .poll(() => app.evaluate(() => !!globalThis.releaseAppearanceFailure))
+    .toBe(true);
+  await page.keyboard.press(`${modifier}+/`);
+  await expect(dialog).toBeVisible();
+  await expect(
+    page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
+  ).toHaveCount(0);
+  await app.evaluate(() => globalThis.releaseAppearanceFailure());
   await expect(dialog.getByRole('alert')).toContainText(
     'Injected appearance write failure',
   );
@@ -379,6 +394,11 @@ async function auditAppearanceSaveOrdering() {
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
   try {
+    await page.keyboard.press(`${modifier}+/`);
+    await expect(dialog).toBeVisible();
+    await expect(
+      page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
+    ).toHaveCount(0);
     await page.waitForTimeout(250);
     expect(
       await app.evaluate(() => globalThis.appearanceSaveRace.calls.length),
