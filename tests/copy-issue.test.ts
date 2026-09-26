@@ -10,6 +10,13 @@ describe('issue key and summary clipboard text', () => {
     );
   });
 
+  it('retains the repository in a GitHub issue identity', () => {
+    assert.equal(
+      issueKeyAndSummary({ key: 'team/repo#123', summary: 'Fix search' }),
+      'team/repo#123 Fix search',
+    );
+  });
+
   it('turns line breaks into spaces and trims the summary edges', () => {
     assert.equal(
       issueKeyAndSummary({
