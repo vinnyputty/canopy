@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import { documentText } from '../src/main/adf';
+import { documentMarkdown, documentText } from '../src/main/adf';
 
 it('renders readable ADF paragraphs, lists, mentions, and safe link text', () => {
   assert.equal(
@@ -53,6 +53,102 @@ it('renders readable ADF paragraphs, lists, mentions, and safe link text', () =>
       marks: [{ type: 'link', attrs: { href: 'javascript:alert(1)' } }],
     }),
     'Unsafe',
+  );
+});
+
+it('preserves Jira acceptance criteria, links, and code fences in Markdown', () => {
+  const text = (value: string, marks?: unknown[]) => ({
+    type: 'text',
+    text: value,
+    marks,
+  });
+  assert.equal(
+    documentMarkdown({
+      type: 'doc',
+      content: [
+        {
+          type: 'heading',
+          attrs: { level: 2 },
+          content: [text('Acceptance criteria')],
+        },
+        {
+          type: 'bulletList',
+          content: [
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [
+                    text('Keep ', undefined),
+                    text('formatting', [{ type: 'strong' }]),
+                  ],
+                },
+              ],
+            },
+            {
+              type: 'listItem',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [
+                    text('Read docs', [
+                      {
+                        type: 'link',
+                        attrs: { href: 'https://example.com/docs' },
+                      },
+                    ]),
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: 'codeBlock',
+          attrs: { language: 'ts' },
+          content: [text('const fence = "```";')],
+        },
+      ],
+    }),
+    '## Acceptance criteria\n\n- Keep **formatting**\n- [Read docs](https://example.com/docs)\n\n````ts\nconst fence = "```";\n````',
+  );
+  assert.equal(
+    documentMarkdown('## Existing Markdown\n\n```ts\nconst x = 1;\n```'),
+    '## Existing Markdown\n\n```ts\nconst x = 1;\n```',
+  );
+});
+
+it('keeps unsupported Jira leaves visible and encodes only valid public web links', () => {
+  const linked = (label: string, href: string) => ({
+    type: 'text',
+    text: label,
+    marks: [{ type: 'link', attrs: { href } }],
+  });
+  assert.equal(
+    documentMarkdown({
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'unsupportedWidget' }] },
+        { type: 'blockCard' },
+        {
+          type: 'paragraph',
+          content: [linked('Valid', 'https://example.com/a(b) c')],
+        },
+        { type: 'paragraph', content: [linked('Malformed', 'https://')] },
+        {
+          type: 'paragraph',
+          content: [linked('Unsafe', 'javascript:alert(1)')],
+        },
+        {
+          type: 'paragraph',
+          content: [
+            linked('Credentials', 'https://user:secret@example.com/path'),
+          ],
+        },
+      ],
+    }),
+    '[unsupported Jira content]\n\n[embedded Jira content]\n\n[Valid](https://example.com/a%28b%29%20c)\n\nMalformed\n\nUnsafe\n\nCredentials',
   );
 });
 

@@ -445,6 +445,7 @@ async function start(
     },
     preview: (id: string, issue: string) =>
       provider(id).preview(normalized(id, issue)),
+    issueUrl: (id: string, issue: string) => issueUrl(id, issue),
     copyText: (value: string) => {
       if (typeof value !== 'string' || value.length > 100_000)
         throw new Error('Invalid clipboard text.');

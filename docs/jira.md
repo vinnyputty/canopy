@@ -34,7 +34,7 @@ Space on a focused tree row opens a read-only preview with its description, the 
 
 Permission failures remain visible with a Retry action. Responses for a previously selected issue or connection cannot replace the current preview, even when two connections use the same issue key. Unsupported formatting remains plain text; the preview does not support editing descriptions and comments.
 
-Relationship labels describe the selected issue's direction (for example, “blocks” or “is blocked by”). References can be previewed or opened as a separate tree and are never traversed as hierarchy children. Each row's context menu supports copying its key, title, or Jira link and opening Jira. Right-click, the row actions button, or Shift+F10 opens that menu.
+Relationship labels describe the selected issue's direction (for example, “blocks” or “is blocked by”). References can be previewed or opened as a separate tree and are never traversed as hierarchy children. Each row's context menu supports copying its key, title, Jira link, or Markdown work brief and opening Jira. Right-click, the row actions button, or Shift+F10 opens that menu. The preview also offers **Copy work brief**; review the exact Markdown before copying. Jira descriptions are converted from their document structure, retaining headings, lists, links, and code blocks. Unavailable parent paths or dependency links are marked in the brief.
 
 The preview's resize handle supports dragging, Left/Right arrows, and Home/End. Its preferred width is saved across launches; the pane fits within the window. Escape closes a row menu before closing the preview. Preview visibility is temporary and resets on a tab change.
 

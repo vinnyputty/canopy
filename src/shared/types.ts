@@ -31,6 +31,7 @@ export type Issue = {
 export type IssuePreview = {
   issue: Issue;
   description: string;
+  descriptionMarkdown?: string;
   descriptionDocument?: unknown;
   comments: {
     id: string;
@@ -150,6 +151,7 @@ export interface CanopyAPI {
   syncStatus(connectionId: string): Promise<{ retryAt: number | null }>;
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
   preview(connectionId: string, key: string): Promise<IssuePreview>;
+  issueUrl(connectionId: string, key: string): Promise<string>;
   copyText(value: string): Promise<void>;
   search(
     connectionId: string,

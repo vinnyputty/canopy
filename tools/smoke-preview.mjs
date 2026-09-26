@@ -18,6 +18,7 @@ export async function auditPreview(app, page) {
       completed: false,
       started: false,
       release: null,
+      clipboard: '',
     };
     globalThis.previewRecovery = controls;
     const handlers = {
@@ -181,6 +182,11 @@ export async function auditPreview(app, page) {
             : {}),
         };
       },
+      issueUrl: (_event, connection, key) =>
+        `https://${connection}.example.invalid/browse/${key}`,
+      copyText: (_event, value) => {
+        controls.clipboard = value;
+      },
     };
     for (const [method, handler] of Object.entries(handlers)) {
       ipcMain.removeHandler(`canopy:${method}`);
@@ -265,6 +271,29 @@ export async function auditPreview(app, page) {
     pane.locator('script, img, a, input, textarea, [contenteditable=true]'),
   ).toHaveCount(0);
   expect(await page.evaluate(() => window.previewExecuted)).toBeUndefined();
+  await pane.getByRole('button', { name: 'Copy work brief' }).click();
+  const brief = page.getByRole('dialog', { name: 'Work brief for TEST-1' });
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    '- Issue: Jira TEST-1',
+  );
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'https://second.example.invalid/browse/TEST-1',
+  );
+  await brief.getByRole('button', { name: 'Copy work brief' }).click();
+  await expect(brief.getByRole('status')).toHaveText('Copied');
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.clipboard),
+  ).toContain('<img src=x onerror="window.previewExecuted=true">');
+  await brief.getByRole('button', { name: 'Close dialog' }).click();
   await page.keyboard.press('Escape');
   await expect(row).toBeFocused();
+  await page.keyboard.press('Shift+F10');
+  await page
+    .getByRole('menu', { name: 'Actions for TEST-1' })
+    .getByRole('menuitem', { name: 'Copy work brief' })
+    .click();
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    '- Issue: Jira TEST-1',
+  );
+  await brief.getByRole('button', { name: 'Close dialog' }).click();
 }

@@ -13,6 +13,7 @@ const api: CanopyAPI = {
   syncStatus: (id) => ipcRenderer.invoke('canopy:syncStatus', id),
   tree: (id, key) => ipcRenderer.invoke('canopy:tree', id, key),
   preview: (id, key) => ipcRenderer.invoke('canopy:preview', id, key),
+  issueUrl: (id, key) => ipcRenderer.invoke('canopy:issueUrl', id, key),
   copyText: (value) => ipcRenderer.invoke('canopy:copyText', value),
   search: (id, query, options) =>
     ipcRenderer.invoke('canopy:search', id, query, options),
