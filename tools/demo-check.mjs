@@ -42,6 +42,9 @@ const first = await openDemo();
 try {
   const { page } = first;
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
+  await expect(page.locator('[data-tree-key="CAN-100"] .summary')).toHaveText(
+    'A calmer place to get things done',
+  );
   const progress = page.getByRole('progressbar', { name: 'Step progress' });
   await expect(progress).toBeVisible();
   await expect(

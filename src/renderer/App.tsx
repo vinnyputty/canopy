@@ -3888,7 +3888,9 @@ function TreeRows(props: RowsProps) {
             >
               {issue.summary}
             </button>
-          ) : null}
+          ) : (
+            <span className="summary">{issue.summary}</span>
+          )}
         </div>
         {!open && count && count.total > 0 && (
           <span
