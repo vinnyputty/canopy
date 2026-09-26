@@ -99,7 +99,12 @@ export async function installPreviewHandlers(
                       name: 'Unknown',
                       category: 'indeterminate',
                     },
-                    unavailableFields: ['type', 'status', 'priority', 'assignee'],
+                    unavailableFields: [
+                      'type',
+                      'status',
+                      'priority',
+                      'assignee',
+                    ],
                   }
                 : {}),
             },

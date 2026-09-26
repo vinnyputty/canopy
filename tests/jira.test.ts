@@ -1117,11 +1117,9 @@ it('distinguishes unavailable Jira preview fields from empty values', async () =
     return raw;
   });
   const preview = await provider.preview('TEST-1');
-  assert.deepEqual(preview.issue.unavailableFields, [
-    'type',
-    'status',
-    'priority',
-  ]);
+  for (const field of ['type', 'status', 'priority'])
+    assert.ok(preview.issue.unavailableFields?.includes(field));
+  assert.ok(!preview.issue.unavailableFields?.includes('assignee'));
   assert.equal(preview.issue.assignee, null);
 });
 

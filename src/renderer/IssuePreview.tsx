@@ -1,6 +1,14 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import type { Choice, DevelopmentLink, DevelopmentLinks, Issue, IssuePreview as Preview, SeenIssue, SeenValue } from '../shared/types';
+import type {
+  Choice,
+  DevelopmentLink,
+  DevelopmentLinks,
+  Issue,
+  IssuePreview as Preview,
+  SeenIssue,
+  SeenValue,
+} from '../shared/types';
 import { unseenChanges } from './seen';
 
 function displayValue(value: SeenValue) {

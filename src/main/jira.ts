@@ -208,7 +208,12 @@ function parseIssue(raw: JiraIssue): Issue {
           'status',
         ] as const
       )
-        .filter((field) => !(field in fields))
+        .filter(
+          (field) =>
+            !(field in fields) ||
+            ((field === 'issuetype' || field === 'status') &&
+              fields[field] === null),
+        )
         .map((field) => (field === 'issuetype' ? 'type' : field)),
       'labels',
     ],
