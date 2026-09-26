@@ -20,6 +20,13 @@ export async function auditRefresh(app, page, resizeWindow) {
     );
   const status = page.getByRole('status', { name: 'Connection status' });
   const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  const commandRefresh = async () => {
+    await page.getByRole('button', { name: 'More commands' }).click();
+    await page
+      .getByRole('dialog', { name: 'Command palette' })
+      .getByRole('button', { name: /Refresh current tree/ })
+      .click();
+  };
   const checking = page.getByText('Checking for changes');
   const row = (key) => page.locator(`[data-tree-key="${key}"]`);
   const summary = (key) =>
@@ -334,10 +341,19 @@ export async function auditRefresh(app, page, resizeWindow) {
   });
   await page.clock.runFor(31_000);
   expect(await calls('CAN-100')).toBe(coordinated[0] + 1);
+  await commandRefresh();
+  await hold('queued-manual', 'tree', 'CAN-100');
   await release('coalesced');
+  await page.clock.runFor(1000);
+  await started('queued-manual');
+  expect(await calls('CAN-100')).toBe(coordinated[0] + 2);
+  await commandRefresh();
+  await release('queued-manual');
   await idle();
+  await page.clock.runFor(1000);
+  expect(await calls('CAN-100')).toBe(coordinated[0] + 2);
   await page.clock.runFor(31_000);
-  await expect.poll(() => calls('CAN-100')).toBe(coordinated[0] + 2);
+  await expect.poll(() => calls('CAN-100')).toBe(coordinated[0] + 3);
   await idle();
 
   await offline(true);

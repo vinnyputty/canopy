@@ -268,6 +268,7 @@ export function App() {
   const [syncNow, setSyncNow] = useState(Date.now());
   const deferredRefreshes = useRef(new Set<string>());
   const forcedRefreshes = useRef(new Set<string>());
+  const runningExplicitRefreshes = useRef(new Map<string, number>());
   const refreshBlocked = useRef<(connectionId: string) => boolean>(() => false);
   const [online, setOnline] = useState(navigator.onLine);
   const [foreground, setForeground] = useState(
@@ -605,7 +606,13 @@ export function App() {
         return;
       }
       if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
-      if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) return;
+      if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) {
+        if (explicit && !runningExplicitRefreshes.current.has(tab.id)) {
+          forcedRefreshes.current.add(tab.id);
+          deferredRefreshes.current.add(tab.id);
+        }
+        return;
+      }
       const rootKey = refreshRootKey(tab);
       const load = rootRefreshes.current.load(
         rootKey,
@@ -621,6 +628,7 @@ export function App() {
       forcedRefreshes.current.delete(tab.id);
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
       refreshSequences.current[tab.id] = sequence;
+      if (explicit) runningExplicitRefreshes.current.set(tab.id, sequence);
       const epoch = mutations.beginRefresh();
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
@@ -690,6 +698,8 @@ export function App() {
         }));
       } finally {
         mutations.endRefresh(epoch);
+        if (runningExplicitRefreshes.current.get(tab.id) === sequence)
+          runningExplicitRefreshes.current.delete(tab.id);
         if (refreshSequences.current[tab.id] === sequence) {
           refreshSchedule.current.finish(tab.id, Date.now());
           setter((current) => {
@@ -974,6 +984,7 @@ export function App() {
         refreshSchedule.current.forget(id);
         deferredRefreshes.current.delete(id);
         forcedRefreshes.current.delete(id);
+        runningExplicitRefreshes.current.delete(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
         setter(
