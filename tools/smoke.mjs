@@ -2207,6 +2207,7 @@ try {
     ).toHaveCount(0);
     await statusResize.press('ArrowRight');
     await expect(statusResize).toHaveAttribute('aria-valuenow', '138');
+    await statusResize.scrollIntoViewIfNeeded();
     const divider = await statusResize.boundingBox();
     await page.mouse.move(
       divider.x + divider.width / 2,
