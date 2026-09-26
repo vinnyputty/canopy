@@ -55,7 +55,10 @@ function customColor(status: Status): string {
 
 function colorFor(status: Status): string {
   const name = status.name.trim().replace(/\s+/g, ' ').toLowerCase();
-  return SEMANTIC_COLORS[status.category][name] ?? customColor(status);
+  const semantic = SEMANTIC_COLORS[status.category];
+  return Object.prototype.hasOwnProperty.call(semantic, name)
+    ? semantic[name]
+    : customColor(status);
 }
 
 /** Derives stable badge colors from provider category and status identity. */

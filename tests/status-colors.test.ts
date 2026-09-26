@@ -48,6 +48,15 @@ test('a familiar label with a mismatched category uses a custom color', () => {
   assert.notEqual(colors.get('review-new'), colors.get('review-progress'));
 });
 
+test('inherited object property names use custom colors', () => {
+  const colors = new StatusColors().include([
+    { ...status('constructor'), name: 'Constructor' },
+    { ...status('to-string', 'done'), name: 'toString' },
+  ]);
+  assert.match(colors.get('constructor')!, /^hsl\(/);
+  assert.match(colors.get('to-string')!, /^hsl\(/);
+});
+
 test('custom statuses get distinct stable category colors across refreshes and restarts', () => {
   const statuses = Array.from({ length: 30 }, (_, i) => status(String(i)));
   const registry = new StatusColors();
