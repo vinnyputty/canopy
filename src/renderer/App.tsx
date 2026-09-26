@@ -1949,13 +1949,16 @@ export function App() {
       if (!activeTab) return;
       const connectionId = activeTab.connectionId;
       setEditor(null);
-      await mutations.transitionPath(
-        connectionId,
-        issue.key,
-        issue.status,
-        path,
-      );
-      pickers.revalidateStatus(connectionId, issue.key);
+      try {
+        await mutations.transitionPath(
+          connectionId,
+          issue.key,
+          issue.status,
+          path,
+        );
+      } finally {
+        pickers.revalidateStatus(connectionId, issue.key);
+      }
     },
     [activeTab, mutations, pickers],
   );
