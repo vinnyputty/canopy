@@ -38,7 +38,7 @@ Recently saved Jira fields and sibling placement remain visible while search cat
 
 ## Workspace
 
-- Open a root issue by key, Jira browse URL, or summary search. Use Up/Down and Enter to open the selected search result; load additional matches on demand. Each tab remembers hierarchy and linked-issue expansion, filters, subtree focus, hide-done setting, selection, and scroll position.
+- Open a root issue by key, Jira browse URL, key prefix, or summary search. Enter opens a typed key directly; use Up/Down and Enter to open a suggested result. Load additional matches on demand. Each tab remembers hierarchy and linked-issue expansion, filters, subtree focus, hide-done setting, selection, and scroll position.
 - Find loaded hierarchy keys and titles with `⌘F` / `Ctrl+F`. Search and assignee/status/priority filters show matches with ancestor paths; clearing them restores the saved expansion. Search is temporary per tab. Assigned-to-me uses your Jira account ID.
 - Expand opens hierarchy descendants; double-click or `Alt`-click includes linked issues. From a fully expanded tree, Collapse first hides links, then hierarchy; double-click or `Alt`-click collapses both. Tree actions also expose linked expansion, depth controls, selected-branch controls, subtree focus, reveal-selection, and back-to-root.
 - Breadcrumbs navigate subtree focus. Reveal-selection temporarily includes a filtered-out selection without clearing filters. Collapsed rows show open/total direct children; hover the count for total descendants. Counts use the unfiltered hierarchy and Jira’s Done category.
