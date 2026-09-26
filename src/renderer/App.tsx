@@ -216,6 +216,8 @@ export function App() {
   const [history, setHistory] = useState<Navigation>({ back: [], forward: [] });
   const historyRef = useRef(history);
   const workspaceRef = useRef(workspace);
+  const workspaceSaveTimer = useRef<number | null>(null);
+  const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
   workspaceRef.current = workspace;
@@ -615,20 +617,32 @@ export function App() {
       appearancePreview?.palette ?? workspace.palette ?? 'default';
   }, [workspace.theme, workspace.palette, appearancePreview]);
 
+  const saveWorkspace = useCallback((value: Workspace) => {
+    const save = pendingWorkspaceSave.current
+      .catch(() => {})
+      .then(() => window.canopy.saveWorkspace(value));
+    pendingWorkspaceSave.current = save;
+    return save;
+  }, []);
+
   useEffect(() => {
     if (!ready) return;
-    const timer = window.setTimeout(
-      () =>
-        void window.canopy.saveWorkspace(workspace).catch((error) => {
-          setErrors((value) => ({
-            ...value,
-            workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
-          }));
-        }),
-      180,
-    );
-    return () => window.clearTimeout(timer);
-  }, [workspace, ready]);
+    const timer = window.setTimeout(() => {
+      workspaceSaveTimer.current = null;
+      void saveWorkspace(workspace).catch((error) => {
+        setErrors((value) => ({
+          ...value,
+          workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+      });
+    }, 180);
+    workspaceSaveTimer.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (workspaceSaveTimer.current === timer)
+        workspaceSaveTimer.current = null;
+    };
+  }, [workspace, ready, saveWorkspace]);
 
   const refreshTab = useCallback(
     async (tab: TabState, quiet = false, explicit = false) => {
@@ -3605,7 +3619,12 @@ export function App() {
             setDialog(null);
           }}
           onSave={async (theme, palette) => {
-            await window.canopy.saveWorkspace({
+            if (workspaceSaveTimer.current !== null) {
+              window.clearTimeout(workspaceSaveTimer.current);
+              workspaceSaveTimer.current = null;
+              void saveWorkspace(workspaceRef.current).catch(() => {});
+            }
+            await saveWorkspace({
               ...workspaceRef.current,
               theme,
               palette,

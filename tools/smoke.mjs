@@ -345,7 +345,7 @@ async function auditAppearanceSaveFailure() {
   const originalPalette = await root.getAttribute('data-palette');
   await page.getByRole('button', { name: 'Appearance' }).click();
   const dialog = page.getByRole('dialog', { name: 'Appearance' });
-  await dialog.getByRole('radio', { name: 'Ocean' }).check();
+  await dialog.getByRole('radio', { name: 'Forest' }).check();
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(dialog.getByRole('alert')).toContainText(
     'Injected appearance write failure',
@@ -353,6 +353,44 @@ async function auditAppearanceSaveFailure() {
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(root).toHaveAttribute('data-palette', originalPalette);
+}
+
+async function auditAppearanceSaveOrdering() {
+  await app.evaluate(({ ipcMain }) => {
+    globalThis.appearanceSaveRace = { calls: [], release: null };
+    ipcMain.removeHandler('canopy:saveWorkspace');
+    ipcMain.handle('canopy:saveWorkspace', (_event, workspace) => {
+      const race = globalThis.appearanceSaveRace;
+      race.calls.push(workspace);
+      if (race.calls.length === 1)
+        return new Promise((resolve) => {
+          race.release = resolve;
+        });
+    });
+  });
+  const hideDone = page.getByRole('checkbox', { name: 'Hide done' });
+  await hideDone.setChecked(!(await hideDone.isChecked()));
+  await expect
+    .poll(() => app.evaluate(() => globalThis.appearanceSaveRace.calls.length))
+    .toBe(1);
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Appearance' });
+  await dialog.getByRole('radio', { name: 'Ocean' }).check();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+  try {
+    await page.waitForTimeout(250);
+    expect(
+      await app.evaluate(() => globalThis.appearanceSaveRace.calls.length),
+    ).toBe(1);
+  } finally {
+    await app.evaluate(() => globalThis.appearanceSaveRace.release());
+  }
+  await expect(dialog).toHaveCount(0);
+  expect(
+    await app.evaluate(() => globalThis.appearanceSaveRace.calls[1]?.palette),
+  ).toBe('ocean');
+  await page.waitForTimeout(250);
 }
 
 async function openIssue(key, expectTree = true) {
@@ -2866,6 +2904,7 @@ try {
 
   await auditPreview(app, page);
 
+  await auditAppearanceSaveOrdering();
   await auditAppearanceSaveFailure();
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
