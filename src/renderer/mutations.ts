@@ -235,11 +235,13 @@ export class Mutations {
     options?: Partial<EditOptions>,
     record = true,
     token?: symbol,
+    ifCurrent?: (issue?: Issue) => boolean,
   ) {
     return this.enqueue(
       connectionId,
       { key, fields: optimisticFields(patch, options) },
-      async () => {
+      async (entry) => {
+        if (ifCurrent && !ifCurrent(entry.before)) return { key, fields: {} };
         const issue = await this.api.update(connectionId, key, patch);
         const fields: Fields = {};
         if (patch.summary !== undefined) fields.summary = issue.summary;

@@ -1766,17 +1766,15 @@ export function App() {
       if (!priorityEditStarted) return;
       await priorityWork;
       mutations.discardHistory(priorityToken);
-      const current = (await window.canopy.tree('demo', 'CAN-100')).issues.find(
-        (issue) => issue.key === 'CAN-111',
+      await mutations.update(
+        'demo',
+        'CAN-111',
+        { priorityId: '2' },
+        undefined,
+        false,
+        undefined,
+        (issue) => issue?.priority?.id === '1',
       );
-      if (current?.priority?.id === '1')
-        await mutations.update(
-          'demo',
-          'CAN-111',
-          { priorityId: '2' },
-          undefined,
-          false,
-        );
     };
     signal.addEventListener('abort', () => {
       restoreWork = restorePriority().catch((error) =>

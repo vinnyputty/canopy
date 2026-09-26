@@ -239,8 +239,9 @@ if (process.platform !== 'win32') {
     env,
   });
   let childPid;
+  let page;
   try {
-    const page = await app.firstWindow();
+    page = await app.firstWindow();
     await expect(
       page.getByRole('button', { name: 'Try demo' }).first(),
     ).toBeVisible();
@@ -292,12 +293,42 @@ if (process.platform !== 'win32') {
       'Installed entry check passed: Try demo starts a separate process and keeps the normal workspace open.',
     );
   } finally {
-    if (childPid) {
-      try {
-        process.kill(childPid);
-      } catch {}
+    try {
+      if (childPid) {
+        try {
+          process.kill(childPid, 'SIGKILL');
+        } catch {}
+        await expect
+          .poll(
+            () => {
+              try {
+                const state = execFileSync(
+                  'ps',
+                  ['-p', String(childPid), '-o', 'stat='],
+                  { encoding: 'utf8' },
+                ).trim();
+                return !state || state.startsWith('Z');
+              } catch {
+                return true;
+              }
+            },
+            { timeout: 10000 },
+          )
+          .toBe(true);
+        await expect
+          .poll(
+            () =>
+              page.evaluate(
+                () =>
+                  document.visibilityState === 'visible' && document.hasFocus(),
+              ),
+            { timeout: 10000 },
+          )
+          .toBe(true);
+      }
+    } finally {
+      await app.close();
+      await rm(directory, { recursive: true, force: true });
     }
-    await app.close();
-    await rm(directory, { recursive: true, force: true });
   }
 }
