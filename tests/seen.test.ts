@@ -118,4 +118,56 @@ describe('last-seen issue baselines', () => {
     assert.equal(Object.keys(boundRoots(roots)).length, 12);
     assert.equal('0' in boundRoots(roots), false);
   });
+
+  it('retains a baseline in every recent root when the byte limit is reached', () => {
+    const roots = Object.fromEntries(
+      Array.from({ length: 12 }, (_, root) => [
+        String(root),
+        {
+          touchedAt: root,
+          issues: Object.fromEntries(
+            Array.from({ length: 500 }, (_, index) => [
+              `ONE-${index}`,
+              {
+                seenAt: index,
+                fields: {
+                  Summary: 'x'.repeat(300),
+                  Type: 'x'.repeat(300),
+                },
+              },
+            ]),
+          ),
+        },
+      ]),
+    );
+    const bounded = boundRoots(roots);
+    assert.ok(Object.keys(bounded['0'].issues).length > 0);
+    assert.ok(Object.keys(bounded['11'].issues).length > 0);
+  });
+
+  it('uses Jira last activity to flag comment-only changes without tree comment bodies', () => {
+    const initial = { ...issue(), updated: '2026-09-25T00:00:00Z' };
+    const baseline = markRootSeen(tree(initial));
+    const changed = { ...initial, updated: '2026-09-26T00:00:00Z' };
+    assert.deepEqual(unseenChanges(baseline.issues['ONE-1'], changed), {
+      fields: [
+        {
+          name: 'Last activity',
+          before: initial.updated,
+          after: changed.updated,
+        },
+      ],
+      comments: 0,
+    });
+    const reconciled = reconcileOwnEdit(
+      { 'jira:ONE-1': baseline },
+      'jira',
+      changed,
+      ['Summary'],
+    );
+    assert.deepEqual(
+      unseenChanges(reconciled['jira:ONE-1'].issues['ONE-1'], changed),
+      { fields: [], comments: 0 },
+    );
+  });
 });

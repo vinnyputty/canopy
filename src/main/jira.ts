@@ -27,7 +27,7 @@ const ISSUE_FIELDS = [
   'assignee',
   'status',
   'issuelinks',
-  'comment',
+  'updated',
 ];
 const SEARCH_PAGE_SIZE = 100;
 const PARENT_BATCH_SIZE = 50;
@@ -136,6 +136,7 @@ function parseIssue(raw: JiraIssue): Issue {
     },
     links,
     linksAvailable: Array.isArray(fields.issuelinks),
+    ...(typeof fields.updated === 'string' ? { updated: fields.updated } : {}),
     ...(Number.isSafeInteger(fields.comment?.total) && fields.comment.total >= 0
       ? { commentCount: fields.comment.total }
       : {}),
@@ -406,7 +407,7 @@ export class JiraProvider {
   async preview(key: string): Promise<IssuePreview> {
     const [raw, comments] = await Promise.all([
       this.call(
-        `${issuePath(key)}?fields=${encodeURIComponent([...ISSUE_FIELDS, 'description'].join(','))}`,
+        `${issuePath(key)}?fields=${encodeURIComponent([...ISSUE_FIELDS, 'description', 'comment'].join(','))}`,
         undefined,
         `load preview for ${key}`,
       ),
@@ -426,7 +427,13 @@ export class JiraProvider {
         })),
     ]);
     return {
-      issue: parseIssue(raw),
+      issue: {
+        ...parseIssue(raw),
+        ...(Number.isSafeInteger(comments.page?.total) &&
+        comments.page.total >= 0
+          ? { commentCount: comments.page.total }
+          : {}),
+      },
       description: documentText(raw.fields?.description),
       descriptionMarkdown: documentMarkdown(raw.fields?.description),
       ...(raw.fields?.description && typeof raw.fields.description === 'object'

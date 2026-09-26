@@ -152,7 +152,12 @@ export function IssuePreview({
     </button>
   );
   const unseen = observedIssue
-    ? unseenChanges(baseline, observedIssue)
+    ? unseenChanges(
+        baseline,
+        data && !data.commentsError
+          ? { ...observedIssue, commentCount: data.totalComments }
+          : observedIssue,
+      )
     : { fields: [], comments: 0 };
   const confirmedComments =
     baseline && unseen.comments > 0 && !data?.commentsError

@@ -35,6 +35,7 @@ export function issueFields(issue: Issue): Record<string, SeenValue> {
       ? clipped(issue.assignee.name)
       : null;
   if (!unavailable.has('status')) fields.Status = clipped(issue.status.name);
+  if (issue.updated) fields['Last activity'] = clipped(issue.updated);
   if (
     issue.labels &&
     issue.labels.length <= MAX_LABELS &&
@@ -79,11 +80,15 @@ export function boundRoots(
   roots: Record<string, SeenRoot>,
 ): Record<string, SeenRoot> {
   const bounded: Record<string, SeenRoot> = {};
-  let bytes = 0;
-  for (const [key, root] of Object.entries(roots)
+  const retained = Object.entries(roots)
     .sort((a, b) => b[1].touchedAt - a[1].touchedAt)
-    .slice(0, MAX_SEEN_ROOTS)) {
+    .slice(0, MAX_SEEN_ROOTS);
+  const bytesPerRoot = Math.floor(
+    MAX_SEEN_BYTES / Math.max(1, retained.length),
+  );
+  for (const [key, root] of retained) {
     const issues: SeenRoot['issues'] = {};
+    let bytes = 0;
     for (const [issueKey, issue] of Object.entries(root.issues)
       .sort((a, b) => b[1].seenAt - a[1].seenAt)
       .slice(0, MAX_SEEN_ISSUES)) {
@@ -142,6 +147,8 @@ export function reconcileOwnEdit(
     const updated = { ...previous.fields };
     for (const name of written)
       if (name in fields) updated[name] = fields[name];
+    if (written.length && 'Last activity' in fields)
+      updated['Last activity'] = fields['Last activity'];
     next[rootKey] = {
       ...root,
       issues: { ...root.issues, [issue.key]: { ...previous, fields: updated } },

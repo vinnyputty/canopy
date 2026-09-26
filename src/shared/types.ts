@@ -28,6 +28,7 @@ export type Issue = {
   linksAvailable?: boolean;
   labels?: Choice[];
   commentCount?: number;
+  updated?: string;
   unavailableFields?: string[];
 };
 export type IssuePreview = {
