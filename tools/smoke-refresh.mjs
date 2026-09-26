@@ -161,6 +161,7 @@ export async function auditRefresh(app, page, resizeWindow) {
     page.getByRole('button', { name: 'Retry', exact: true }),
   ).toBeDisabled();
   const limitedCalls = await calls(key);
+  const backgroundCalls = await calls('CAN-100');
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.clock.runFor(5000);
   expect(await calls(key)).toBe(limitedCalls);
@@ -174,6 +175,7 @@ export async function auditRefresh(app, page, resizeWindow) {
   await idle();
   await expect(status).toHaveText('Connected');
   await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(await calls('CAN-100')).toBe(backgroundCalls);
 
   // Replacing credentials under the same ID clears the renderer's old deadline.
   const replacementDeadline = await page.evaluate(() => Date.now() + 60_000);

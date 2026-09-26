@@ -774,12 +774,14 @@ export function App() {
           Number(b.id === activeIdRef.current) -
           Number(a.id === activeIdRef.current),
       )) {
+        const activeRecovery =
+          tab.id === activeIdRef.current && recovered.has(tab.connectionId);
         if (
           due.has(tab.id) ||
           deferredRefreshes.current.has(tab.id) ||
-          (tab.id === activeIdRef.current && recovered.has(tab.connectionId))
+          activeRecovery
         )
-          void refreshTab(tab, true, recovered.has(tab.connectionId));
+          void refreshTab(tab, true, activeRecovery);
       }
     };
     const timer = window.setInterval(tick, 1000);
