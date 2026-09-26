@@ -357,6 +357,7 @@ export class GithubProvider {
       .split(/\s+/)
       .map((term) => `"${term.replace(/["\\]/g, '')}"`)
       .join(' ');
+    const issues: SearchPage['issues'] = [];
     while (repo < repos.length) {
       const q = encodeURIComponent(
         `${terms} in:title,body repo:${repos[repo]} is:issue`,
@@ -365,29 +366,26 @@ export class GithubProvider {
         `/search/issues?q=${q}&per_page=100&page=${page}`,
         { signal },
       );
-      const issues = (result.items ?? [])
-        .filter((item: any) => !item.pull_request)
-        .map((item: any) => ({
-          ...parseIssue(item),
-          updated: item.updated_at,
-        }));
-      if (result.total_count > page * 100 && page < 10) page++;
-      else {
-        repo++;
-        page = 1;
-      }
-      if (issues.length || repo >= repos.length)
+      issues.push(
+        ...(result.items ?? [])
+          .filter((item: any) => !item.pull_request)
+          .map((item: any) => ({
+            ...parseIssue(item),
+            updated: item.updated_at,
+          })),
+      );
+      if (result.total_count > page * 100 && page < 10) {
         return {
           issues,
-          nextPageToken:
-            repo < repos.length
-              ? Buffer.from(JSON.stringify({ repo, page })).toString(
-                  'base64url',
-                )
-              : undefined,
+          nextPageToken: Buffer.from(
+            JSON.stringify({ repo, page: page + 1 }),
+          ).toString('base64url'),
         };
+      }
+      repo++;
+      page = 1;
     }
-    throw new Error('Invalid GitHub search page.');
+    return { issues };
   }
   async priorities(): Promise<Choice[]> {
     return [];

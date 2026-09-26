@@ -8,7 +8,7 @@ Open a repository root from the Open issue dialog, or enter `owner/repo` or a Gi
 
 Repository roots load up to 10,000 issues. Larger repositories show a size error; use an individual issue root or search to narrow the view.
 
-Search covers the repositories entered for that connection and advances past empty repository pages automatically. **Group by repository** in search results groups matches without changing the focused root tree. Every issue row shows its full repository and issue number. A child outside the selection appears as a warning; add that repository to the token and reconnect to include it. GitHub dependencies appear as directional links in the preview.
+Search shows matching selected repositories as roots and includes issue matches from each selected repository on the first page when available. **Load more** appears when a repository has another page of matches. **Group by repository** in search results groups matches without changing the focused root tree. Every issue row shows its full repository and issue number. A child outside the selection appears as a warning; add that repository to the token and reconnect to include it. GitHub dependencies appear as directional links in the preview.
 
 Title, assignee, open/closed state, and labels are writable. Edit title, assignee, and state in the tree; edit labels in the issue preview. GitHub issues have no Jira priority, workflow transitions, or sibling ranking in Canopy. GitHub search is paginated by repository and returns at most the first 1,000 matching issues per repository, following GitHub's Search API limit. Rate limits and authorization changes are shown as errors; retry after the displayed reset time or reconnect if the token was revoked.
 

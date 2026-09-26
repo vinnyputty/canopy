@@ -147,21 +147,48 @@ test('GitHub tree follows paginated sub-issues across selected repositories and 
   );
 });
 
-test('GitHub search paginates selected repositories and preserves repository identity', async () => {
+test('GitHub search includes selected repositories without an empty next page', async () => {
   const paths: string[] = [];
   const provider = new GithubProvider(connection, async (path) => {
     paths.push(path);
     return {
-      total_count: 1,
-      items: [raw(path.includes('repo%3Ateam%2Fa') ? 'team/a' : 'team/b', 1)],
+      total_count: path.includes('repo%3Ateam%2Fa') ? 1 : 0,
+      items: path.includes('repo%3Ateam%2Fa') ? [raw('team/a', 1)] : [],
+    };
+  });
+  const result = await provider.search('fix');
+  assert.deepEqual(
+    result.issues.map((issue) => issue.key),
+    ['team/a#1'],
+  );
+  assert.equal(result.nextPageToken, undefined);
+  assert.equal(paths.length, 2);
+  assert.match(paths[0], /is%3Aissue/);
+});
+
+test('GitHub search paginates when a repository has more matches', async () => {
+  const provider = new GithubProvider(connection, async (path) => {
+    if (path.includes('repo%3Ateam%2Fb')) return { total_count: 0, items: [] };
+    const page = Number(
+      new URL(path, 'https://api.github.com').searchParams.get('page'),
+    );
+    return {
+      total_count: 101,
+      items:
+        page === 1
+          ? Array.from({ length: 100 }, (_, index) => raw('team/a', index + 1))
+          : [raw('team/a', 101)],
     };
   });
   const first = await provider.search('fix');
-  assert.equal(first.issues[0].key, 'team/a#1');
+  assert.equal(first.issues.length, 100);
+  assert.ok(first.nextPageToken);
   const second = await provider.search('fix', first.nextPageToken);
-  assert.equal(second.issues[0].key, 'team/b#1');
+  assert.deepEqual(
+    second.issues.map((issue) => issue.key),
+    ['team/a#101'],
+  );
   assert.equal(second.nextPageToken, undefined);
-  assert.match(paths[0], /is%3Aissue/);
 });
 
 test('GitHub search skips empty repositories before showing the first matches', async () => {

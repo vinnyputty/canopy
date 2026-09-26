@@ -191,8 +191,18 @@ export async function auditGithub(app, page) {
       .fill('feature');
     await search.getByRole('checkbox', { name: 'Group by repository' }).check();
     await expect(search.getByText('team/a', { exact: true })).toBeVisible();
-    await search.getByRole('button', { name: 'Load more' }).click();
     await expect(search.getByText('team/b', { exact: true })).toBeVisible();
+    await expect(search.getByRole('button', { name: 'Load more' })).toHaveCount(
+      0,
+    );
+    await search
+      .getByRole('combobox', {
+        name: 'GitHub URL, owner/repo, issue number, or title',
+      })
+      .fill('b');
+    await expect(
+      search.getByRole('option', { name: /team\/b.*Repository/ }),
+    ).toBeVisible();
     await search
       .getByRole('combobox', {
         name: 'GitHub URL, owner/repo, issue number, or title',

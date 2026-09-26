@@ -4195,6 +4195,11 @@ function OpenIssueDialog({
           type: 'Repository',
         }))
       : [];
+  const matchingRepositories = query.trim()
+    ? repositories.filter((repo) =>
+        repo.key.toLowerCase().includes(query.trim().toLowerCase()),
+      )
+    : repositories;
   const options = !query.trim()
     ? [
         ...repositories,
@@ -4208,7 +4213,7 @@ function OpenIssueDialog({
             type: '',
           })),
       ]
-    : searchState.issues;
+    : [...matchingRepositories, ...searchState.issues];
   const displayedOptions =
     groupRepositories &&
     query.trim() &&
@@ -4224,7 +4229,7 @@ function OpenIssueDialog({
   const busy = searchState.loading;
   useEffect(() => inputRef.current?.focus(), []);
   useEffect(() => {
-    setSelectedKey(undefined);
+    setSelectedKey(matchingRepositories[0]?.key);
     setError('');
     search.start(
       connectionId,
