@@ -191,6 +191,29 @@ test('GitHub search paginates when a repository has more matches', async () => {
   assert.equal(second.nextPageToken, undefined);
 });
 
+test('GitHub search bounds repository requests and labels the continuation', async () => {
+  const many: Connection = {
+    ...connection,
+    repositories: Array.from(
+      { length: 12 },
+      (_, index) => `team/repo-${index}`,
+    ),
+  };
+  const paths: string[] = [];
+  const provider = new GithubProvider(many, async (path) => {
+    paths.push(path);
+    return { total_count: 0, items: [] };
+  });
+  const first = await provider.search('fix');
+  assert.equal(first.issues.length, 0);
+  assert.equal(first.nextPageKind, 'repositories');
+  assert.ok(first.nextPageToken);
+  assert.equal(paths.length, 10);
+  const second = await provider.search('fix', first.nextPageToken);
+  assert.equal(second.nextPageToken, undefined);
+  assert.equal(paths.length, 12);
+});
+
 test('GitHub search skips empty repositories before showing the first matches', async () => {
   const paths: string[] = [];
   const provider = new GithubProvider(connection, async (path) => {

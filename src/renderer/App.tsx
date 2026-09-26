@@ -4290,19 +4290,21 @@ function OpenIssueDialog({
               }
               if (
                 (event.key === 'ArrowDown' || event.key === 'ArrowUp') &&
-                options.length
+                displayedOptions.length
               ) {
                 event.preventDefault();
                 const index = Math.max(
                   0,
-                  options.findIndex((issue) => issue.key === selected?.key),
+                  displayedOptions.findIndex(
+                    (issue) => issue.key === selected?.key,
+                  ),
                 );
                 setSelectedKey(
-                  options[
+                  displayedOptions[
                     Math.max(
                       0,
                       Math.min(
-                        options.length - 1,
+                        displayedOptions.length - 1,
                         index + (event.key === 'ArrowDown' ? 1 : -1),
                       ),
                     )
@@ -4365,7 +4367,9 @@ function OpenIssueDialog({
           !options.length && (
             <p className="dialog-note" role="status">
               {searchState.nextPageToken
-                ? 'No matches on this page. Load more to continue searching.'
+                ? searchState.nextPageKind === 'repositories'
+                  ? 'No matches in these repositories. Search more repositories to continue.'
+                  : 'No matches on this page. Load more to continue searching.'
                 : 'No matching issues. Try another summary or enter an issue key.'}
             </p>
           )}
@@ -4433,7 +4437,9 @@ function OpenIssueDialog({
         {query.trim() && searchState.issues.length > 0 && (
           <p className="dialog-note" role="status">
             {searchState.nextPageToken
-              ? `Ranked among ${searchState.issues.length} loaded matches; more matches are available. Later pages may contain better matches.`
+              ? searchState.nextPageKind === 'repositories'
+                ? `${searchState.issues.length} matches loaded. More repositories can be searched.`
+                : `Ranked among ${searchState.issues.length} loaded matches; more matches are available. Later pages may contain better matches.`
               : `${searchState.issues.length} matches loaded.`}
           </p>
         )}
@@ -4445,7 +4451,9 @@ function OpenIssueDialog({
               void search.load().finally(() => inputRef.current?.focus());
             }}
           >
-            Load more
+            {searchState.nextPageKind === 'repositories'
+              ? 'Search more repositories'
+              : 'Load more'}
           </button>
         )}
         <div className="dialog-footer">

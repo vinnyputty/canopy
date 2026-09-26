@@ -358,7 +358,8 @@ export class GithubProvider {
       .map((term) => `"${term.replace(/["\\]/g, '')}"`)
       .join(' ');
     const issues: SearchPage['issues'] = [];
-    while (repo < repos.length) {
+    let searched = 0;
+    while (repo < repos.length && searched < 10) {
       const q = encodeURIComponent(
         `${terms} in:title,body repo:${repos[repo]} is:issue`,
       );
@@ -366,6 +367,7 @@ export class GithubProvider {
         `/search/issues?q=${q}&per_page=100&page=${page}`,
         { signal },
       );
+      searched++;
       issues.push(
         ...(result.items ?? [])
           .filter((item: any) => !item.pull_request)
@@ -380,12 +382,21 @@ export class GithubProvider {
           nextPageToken: Buffer.from(
             JSON.stringify({ repo, page: page + 1 }),
           ).toString('base64url'),
+          nextPageKind: 'issues',
         };
       }
       repo++;
       page = 1;
     }
-    return { issues };
+    return repo < repos.length
+      ? {
+          issues,
+          nextPageToken: Buffer.from(JSON.stringify({ repo, page })).toString(
+            'base64url',
+          ),
+          nextPageKind: 'repositories',
+        }
+      : { issues };
   }
   async priorities(): Promise<Choice[]> {
     return [];

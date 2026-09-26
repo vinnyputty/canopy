@@ -29,7 +29,11 @@ export type IssuePreview = {
   linksError?: string;
 };
 export type SearchIssue = Issue & { updated?: string };
-export type SearchPage = { issues: SearchIssue[]; nextPageToken?: string };
+export type SearchPage = {
+  issues: SearchIssue[];
+  nextPageToken?: string;
+  nextPageKind?: 'issues' | 'repositories';
+};
 export type SearchOptions = { requestId: string; nextPageToken?: string };
 export type TreeSnapshot = {
   rootKey: string;

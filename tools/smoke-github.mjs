@@ -207,6 +207,22 @@ export async function auditGithub(app, page) {
       .getByRole('combobox', {
         name: 'GitHub URL, owner/repo, issue number, or title',
       })
+      .fill('team');
+    await expect(
+      search.getByRole('option', { name: /team\/a#1/ }),
+    ).toBeVisible();
+    await search
+      .getByRole('combobox', {
+        name: 'GitHub URL, owner/repo, issue number, or title',
+      })
+      .press('ArrowDown');
+    await expect(
+      search.getByRole('option', { name: /team\/a#1/ }),
+    ).toHaveAttribute('aria-selected', 'true');
+    await search
+      .getByRole('combobox', {
+        name: 'GitHub URL, owner/repo, issue number, or title',
+      })
       .fill('only-b');
     await expect(
       search.getByRole('option', { name: /team\/b#2/ }),

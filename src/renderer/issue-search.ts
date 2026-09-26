@@ -33,6 +33,7 @@ export type SearchState = {
   searched: boolean;
   error: string;
   nextPageToken?: string;
+  nextPageKind?: 'issues' | 'repositories';
 };
 const empty = (): SearchState => ({
   issues: [],
@@ -104,6 +105,7 @@ export class IssueSearch {
           project,
         ),
         nextPageToken: page.nextPageToken,
+        nextPageKind: page.nextPageKind,
         searched: true,
       });
     } catch (error) {
