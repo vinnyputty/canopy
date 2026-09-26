@@ -94,7 +94,15 @@ export class Pickers {
       if (!graph || this.statusTrees.get(root) !== tree) return;
       for (const [status, choices] of Object.entries(graph)) {
         const pair = JSON.stringify([type, status]);
-        if (!tree.has(pair)) tree.set(pair, choices);
+        const existing = tree.get(pair) ?? [];
+        const ids = new Set(existing.map((choice) => choice.id));
+        const merged = [...existing];
+        for (const choice of choices)
+          if (!ids.has(choice.id)) {
+            merged.push(choice);
+            ids.add(choice.id);
+          }
+        tree.set(pair, merged);
       }
       this.changed({ ...this.values });
     } catch {

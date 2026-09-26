@@ -354,6 +354,7 @@ export class Mutations {
       const visited = new Set([origin.id]);
       entry.statusPath = [origin];
       for (const [index, step] of path.steps.entries()) {
+        let stepReturned = false;
         try {
           const choices = await this.api.transitions(connectionId, key, true);
           const choice = choices.find((value) => value.id === step.id);
@@ -366,6 +367,7 @@ export class Mutations {
           current = await this.api.update(connectionId, key, {
             transitionId: step.id,
           });
+          stepReturned = true;
           if (current.status.id !== step.to.id)
             throw new Error(
               `Jira returned ${current.status.name} instead of ${step.to.name}.`,
@@ -376,18 +378,17 @@ export class Mutations {
           let statusLabel = 'Actual status';
           try {
             current = await this.api.update(connectionId, key, {});
-            if (current.status.id !== entry.statusPath.at(-1)?.id)
-              entry.statusPath.push(current.status);
+            if (current.status.id !== entry.statusPath.at(-1)?.id) {
+              if (stepReturned) entry.statusPath.push(current.status);
+              else entry.undoUnavailable = true;
+            }
           } catch {
             statusLabel = 'Last confirmed status (fresh read unavailable)';
             entry.undoUnavailable = true;
           }
-          const completed =
-            statusLabel === 'Actual status' && current.status.id === step.to.id
-              ? index + 1
-              : index;
-          const message = `Stopped ${key} after ${completed} of ${path.steps.length} planned transitions. ${statusLabel}: ${current.status.name}. ${error instanceof Error ? error.message : String(error)}`;
-          if (entry.statusPath.length === 1) throw new Error(message);
+          const message = `Stopped ${key} after ${index} of ${path.steps.length} planned transitions. ${statusLabel}: ${current.status.name}. ${error instanceof Error ? error.message : String(error)}`;
+          if (entry.statusPath.length === 1 && current.status.id === origin.id)
+            throw new Error(message);
           this.error(message);
           return { key, fields: { status: current.status } };
         }

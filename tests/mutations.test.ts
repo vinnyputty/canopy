@@ -269,7 +269,7 @@ describe('multi-step status transitions', () => {
   });
 
   for (const failure of ['throw', 'unexpected'] as const) {
-    it(`records a step applied before ${failure} and undoes from the fresh status`, async () => {
+    it(`reports the fresh status after ${failure} without reversing an ambiguous write`, async () => {
       const review = {
         id: 'review',
         name: 'In review',
@@ -313,7 +313,7 @@ describe('multi-step status transitions', () => {
                       id: 'back-open',
                       name: 'Back',
                       to: issue('A-2').status,
-                      requiresFields: failure === 'throw',
+                      requiresFields: false,
                     },
                   ]
                 : [
@@ -345,30 +345,22 @@ describe('multi-step status transitions', () => {
       );
       assert.equal(h.current.status.id, observed.id);
       assert.match(h.errors[0], new RegExp(`Actual status: ${observed.name}`));
-      assert.match(
-        h.errors[0],
-        failure === 'throw'
-          ? /after 2 of 2 planned transitions/
-          : /after 1 of 2 planned transitions/,
-      );
+      assert.match(h.errors[0], /after 1 of 2 planned transitions/);
+      if (failure === 'throw') {
+        assert.equal(h.view.undoLabel, undefined);
+        await h.mutations.undo();
+        assert.deepEqual(writes, ['start', 'finish']);
+        assert.equal(h.current.status.id, done.id);
+        return;
+      }
       await h.mutations.undo();
-      assert.deepEqual(writes.slice(0, 3), ['start', 'finish', 'back-started']);
-      assert.equal(
-        h.current.status.id,
-        failure === 'throw' ? 'started' : 'open',
-      );
-      if (failure === 'throw')
-        assert.match(
-          h.errors[1],
-          /Undo stopped after 1 of 2 reverse transitions.*Actual status: Started/,
-        );
-      else
-        assert.deepEqual(writes, [
-          'start',
-          'finish',
-          'back-started',
-          'back-open',
-        ]);
+      assert.equal(h.current.status.id, 'open');
+      assert.deepEqual(writes, [
+        'start',
+        'finish',
+        'back-started',
+        'back-open',
+      ]);
     });
   }
 
@@ -406,6 +398,34 @@ describe('multi-step status transitions', () => {
       h.errors[0],
       /Last confirmed status \(fresh read unavailable\): Started/,
     );
+  });
+
+  it('shows a changed status after an ambiguous first step without recording Undo', async () => {
+    let current = issue('A-2', 'A-1');
+    const h = harness({
+      update: async (_connection, _key, patch) => {
+        if (patch.transitionId === 'start') {
+          current = { ...current, status: started };
+          throw new Error('Transition response lost');
+        }
+        return current;
+      },
+      transitions: async () => [
+        { id: 'start', name: 'Start', to: started, requiresFields: false },
+      ],
+    });
+    assert.equal(
+      await h.mutations.transitionPath(
+        'jira',
+        'A-2',
+        issue('A-2').status,
+        path,
+      ),
+      true,
+    );
+    assert.equal(h.current.status.id, 'started');
+    assert.equal(h.view.undoLabel, undefined);
+    assert.match(h.errors[0], /Actual status: Started/);
   });
 });
 
