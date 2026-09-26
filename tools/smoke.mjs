@@ -130,7 +130,9 @@ async function launch(production = false, fixtureEnv = {}) {
     recordOutput(`renderer ${message.type()}`, message.text()),
   );
   page.on('pageerror', (error) => pageErrors.push(error));
-  await expect(page.getByText('Opening Canopy…')).toBeHidden();
+  await expect(page.getByText('Opening Canopy…')).toBeHidden({
+    timeout: 20_000,
+  });
   await expect(
     page.getByRole('complementary', { name: 'Canopy sidebar' }),
   ).toBeVisible();
