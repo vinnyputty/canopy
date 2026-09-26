@@ -45,7 +45,7 @@ const issue: Issue = {
 
 it('makes a provider-qualified GitHub brief with its original Markdown and dependency URLs', () => {
   const preview: IssuePreview = {
-    issue,
+    issue: { ...issue, parentKey: undefined },
     description: '- [ ] Pass\n\n```ts\nconst x = 1;\n```',
     comments: [],
     totalComments: 0,

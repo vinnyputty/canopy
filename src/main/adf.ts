@@ -64,8 +64,16 @@ export function documentMarkdown(value: unknown): string {
     if (node.type === 'text') {
       let result = String(node.text ?? '');
       for (const mark of Array.isArray(node.marks) ? node.marks : []) {
-        if (mark?.type === 'code')
-          result = `\`${result.replace(/`/g, '\\`')}\``;
+        if (mark?.type === 'code') {
+          const fence = '`'.repeat(
+            Math.max(
+              1,
+              ...[...result.matchAll(/`+/g)].map(([run]) => run.length + 1),
+            ),
+          );
+          const padding = /^`|`$/.test(result) ? ' ' : '';
+          result = `${fence}${padding}${result}${padding}${fence}`;
+        }
         if (mark?.type === 'strong') result = `**${result}**`;
         if (mark?.type === 'em') result = `*${result}*`;
         if (mark?.type === 'strike') result = `~~${result}~~`;

@@ -21,7 +21,7 @@ export function issueWorkBrief({
   const byKey = new Map(knownIssues.map((item) => [item.key, item]));
   const parents: string[] = [];
   const visited = new Set([issue.key]);
-  let parentKey = issue.parentKey;
+  let parentKey = issue.parentKey ?? byKey.get(issue.key)?.parentKey;
   while (parentKey && !visited.has(parentKey)) {
     visited.add(parentKey);
     parents.unshift(parentKey);

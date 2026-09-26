@@ -152,6 +152,20 @@ it('keeps unsupported Jira leaves visible and encodes only valid public web link
   );
 });
 
+it('keeps backticks inside inline code spans', () => {
+  assert.equal(
+    documentMarkdown({
+      type: 'paragraph',
+      content: [
+        { type: 'text', text: 'a`b', marks: [{ type: 'code' }] },
+        { type: 'text', text: ' ' },
+        { type: 'text', text: '`edge`', marks: [{ type: 'code' }] },
+      ],
+    }),
+    '``a`b`` `` `edge` ``',
+  );
+});
+
 it('separates table headers and values while preserving code and media text', () => {
   const cell = (type: string, text: string) => ({
     type,
