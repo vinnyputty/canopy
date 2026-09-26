@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Choice, IssuePreview as Preview } from '../shared/types';
 import { PreviewText } from './PreviewText';
@@ -39,7 +39,9 @@ export function IssuePreview({
   const [savingLabels, setSavingLabels] = useState(false);
   const identity = useRef('');
   const currentIssue = useRef('');
-  currentIssue.current = `${connectionId}:${issueKey}`;
+  useLayoutEffect(() => {
+    currentIssue.current = `${connectionId}:${issueKey}`;
+  }, [connectionId, issueKey]);
   const [dragWidth, setDragWidth] = useState<number>();
   const pane = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; width: number; next: number } | undefined>(
