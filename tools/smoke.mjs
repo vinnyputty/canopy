@@ -1288,11 +1288,15 @@ try {
   ).toBeFocused();
   await page.keyboard.press('End');
   await expect(
-    rowMenu.getByRole('menuitem', { name: 'Open in Jira', exact: true }),
+    rowMenu.getByRole('menuitem', { name: 'Create child issue', exact: true }),
   ).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(
     rowMenu.getByRole('menuitem', { name: 'Copy key', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(
+    rowMenu.getByRole('menuitem', { name: 'Create child issue', exact: true }),
   ).toBeFocused();
   await page.keyboard.press('ArrowUp');
   await page.keyboard.press('Enter');

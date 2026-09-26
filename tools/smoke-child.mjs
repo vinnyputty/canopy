@@ -99,7 +99,9 @@ export async function auditChildCreation(appPath, executablePath, baseEnv) {
     ).toBeVisible();
     await page.getByRole('button', { name: 'Open issue' }).first().click();
     const open = page.getByRole('dialog', { name: 'Open issue tree' });
-    await open.getByLabel('Issue key, Jira URL, or summary').fill('CAN-100');
+    await open
+      .getByLabel('Issue key, uppercase project prefix, Jira URL, or summary')
+      .fill('CAN-100');
     await open.getByRole('button', { name: 'Open tree' }).click();
     const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
     await expect(tree).toBeVisible();
