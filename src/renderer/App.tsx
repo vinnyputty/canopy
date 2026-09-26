@@ -101,7 +101,7 @@ import {
   tableStyle,
 } from './table-view';
 import { Mutations } from './mutations';
-import { RefreshSchedule } from './refresh';
+import { RefreshSchedule, RootRefreshGate } from './refresh';
 import {
   nextEditableCell,
   retainEditingOrder,
@@ -247,6 +247,9 @@ export function App() {
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const refreshSchedule = useRef(new RefreshSchedule());
+  const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
+  const snapshotsRef = useRef(snapshots);
+  snapshotsRef.current = snapshots;
   const workflowReturn = useRef<{
     tabId: string;
     connectionId: string;
@@ -261,6 +264,7 @@ export function App() {
   );
   const [syncNow, setSyncNow] = useState(Date.now());
   const deferredRefreshes = useRef(new Set<string>());
+  const forcedRefreshes = useRef(new Set<string>());
   const refreshBlocked = useRef<(connectionId: string) => boolean>(() => false);
   const [online, setOnline] = useState(navigator.onLine);
   const [foreground, setForeground] = useState(
@@ -589,22 +593,35 @@ export function App() {
   }, [workspace, ready]);
 
   const refreshTab = useCallback(
-    async (tab: TabState, quiet = false, explicit = !quiet) => {
+    async (tab: TabState, quiet = false, explicit = false) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
+      explicit ||= forcedRefreshes.current.has(tab.id);
       if (!navigator.onLine || refreshBlocked.current(tab.connectionId)) {
         deferredRefreshes.current.add(tab.id);
         return;
       }
       if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
       if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) return;
+      const rootKey = JSON.stringify([tab.connectionId, tab.rootKey]);
+      const load = rootRefreshes.current.load(
+        rootKey,
+        explicit,
+        !snapshotsRef.current[tab.id],
+        () => window.canopy.tree(tab.connectionId, tab.rootKey),
+      );
+      if ('due' in load) {
+        refreshSchedule.current.defer(tab.id, load.due);
+        return;
+      }
       deferredRefreshes.current.delete(tab.id);
+      forcedRefreshes.current.delete(tab.id);
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
       refreshSequences.current[tab.id] = sequence;
       const epoch = mutations.beginRefresh();
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
       try {
-        const next = await window.canopy.tree(tab.connectionId, tab.rootKey);
+        const next = await load.promise;
         if (
           refreshSequences.current[tab.id] === sequence &&
           !refreshBlocked.current(tab.connectionId) &&
@@ -689,12 +706,18 @@ export function App() {
       });
     // Enqueue before attempting: an older in-flight response cannot consume this return.
     deferredRefreshes.current.add(tab.id);
-    void refreshTab(tab, true);
+    forcedRefreshes.current.add(tab.id);
+    void refreshTab(tab, true, true);
     return true;
   }, [pickers, refreshTab]);
 
   useEffect(() => {
     if (!ready) return;
+    rootRefreshes.current.retain(
+      workspace.tabs.map((tab) =>
+        JSON.stringify([tab.connectionId, tab.rootKey]),
+      ),
+    );
     const activated = refreshSchedule.current.sync(
       workspace.tabs.map((tab) => tab.id),
       foreground ? workspace.activeTabId : null,
@@ -747,7 +770,7 @@ export function App() {
           deferredRefreshes.current.has(tab.id) ||
           (tab.id === activeIdRef.current && recovered.has(tab.connectionId))
         )
-          void refreshTab(tab, true);
+          void refreshTab(tab, true, recovered.has(tab.connectionId));
       }
     };
     const timer = window.setInterval(tick, 1000);
@@ -909,6 +932,21 @@ export function App() {
 
   const forgetTabs = useCallback(
     (ids: string[]) => {
+      for (const tab of workspaceRef.current.tabs.filter((item) =>
+        ids.includes(item.id),
+      )) {
+        if (
+          !workspaceRef.current.tabs.some(
+            (other) =>
+              !ids.includes(other.id) &&
+              other.connectionId === tab.connectionId &&
+              other.rootKey === tab.rootKey,
+          )
+        )
+          rootRefreshes.current.forget(
+            JSON.stringify([tab.connectionId, tab.rootKey]),
+          );
+      }
       for (const id of ids) {
         mutations.forget(id);
         displayedTrees.current.delete(id);
@@ -916,6 +954,7 @@ export function App() {
         refreshSequences.current[id] = (refreshSequences.current[id] ?? 0) + 1;
         refreshSchedule.current.forget(id);
         deferredRefreshes.current.delete(id);
+        forcedRefreshes.current.delete(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
         setter(
@@ -2477,7 +2516,7 @@ export function App() {
                       title="This tree couldn’t be loaded"
                       detail={errors[activeTab.id]}
                       action="Try again"
-                      onAction={() => void refreshTab(activeTab)}
+                      onAction={() => void refreshTab(activeTab, false, true)}
                     />
                   ) : shownTree ? (
                     <div
@@ -2876,6 +2915,10 @@ export function App() {
         <ConnectDialog
           onClose={() => setDialog(null)}
           onConnected={(value) => {
+            for (const tab of workspaceRef.current.tabs)
+              rootRefreshes.current.forget(
+                JSON.stringify([tab.connectionId, tab.rootKey]),
+              );
             setConnections(value);
             // Token replacement can retain a connection ID. Refresh its transport
             // deadline while preserving limits on other authenticated connections.

@@ -1,6 +1,66 @@
 export const ACTIVE_REFRESH_MS = 30_000;
 export const MAX_BACKGROUND_REFRESH_MS = 60 * 60_000;
 
+type RootLoad<T> = {
+  promise: Promise<T>;
+};
+
+/** Shares tree reads and their minimum automatic interval across duplicate tabs. */
+export class RootRefreshGate<T> {
+  private roots = new Map<
+    string,
+    { inflight?: Promise<T>; lastSuccess?: number; snapshot?: T }
+  >();
+
+  constructor(private now: () => number = Date.now) {}
+
+  load(
+    key: string,
+    explicit: boolean,
+    needsSnapshot: boolean,
+    fetch: () => Promise<T>,
+  ): RootLoad<T> | { due: number } {
+    const root = this.roots.get(key) ?? {};
+    if (root.inflight) return { promise: root.inflight };
+    const due = (root.lastSuccess ?? -Infinity) + ACTIVE_REFRESH_MS;
+    if (!explicit && this.now() < due) {
+      if (needsSnapshot && root.snapshot !== undefined)
+        return { promise: Promise.resolve(root.snapshot) };
+      return { due };
+    }
+    let promise: Promise<T>;
+    try {
+      promise = fetch();
+    } catch (error) {
+      promise = Promise.reject(error);
+    }
+    root.inflight = promise;
+    this.roots.set(key, root);
+    void promise
+      .then(
+        (snapshot) => {
+          root.snapshot = snapshot;
+          root.lastSuccess = this.now();
+        },
+        () => {},
+      )
+      .finally(() => {
+        if (root.inflight === promise) root.inflight = undefined;
+      });
+    return { promise };
+  }
+
+  retain(keys: string[]): void {
+    const active = new Set(keys);
+    for (const [key, root] of this.roots)
+      if (!active.has(key) && !root.inflight) this.roots.delete(key);
+  }
+
+  forget(key: string): void {
+    this.roots.delete(key);
+  }
+}
+
 type Entry = {
   active: boolean;
   interval: number;
@@ -68,5 +128,12 @@ export class RefreshSchedule {
     entry.due = now + entry.interval;
     if (!entry.active)
       entry.interval = Math.min(entry.interval * 2, MAX_BACKGROUND_REFRESH_MS);
+  }
+
+  defer(id: string, due: number): void {
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    entry.inflight = false;
+    entry.due = Math.max(entry.due, due);
   }
 }

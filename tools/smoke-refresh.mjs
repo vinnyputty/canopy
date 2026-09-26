@@ -54,9 +54,16 @@ export async function auditRefresh(app, page, resizeWindow) {
   ).toBeVisible();
   await idle();
   await page.clock.pauseAt(new Date(Date.now() + 1000));
+  const initial100 = await calls('CAN-100');
+  const initial200 = await calls('CAN-200');
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  expect(await calls('CAN-100')).toBe(initial100);
+  await expect(page.locator('.statusbar')).toContainText('Last updated');
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  expect(await calls('CAN-200')).toBe(initial200);
   let gate = 0;
   const activate = async (key) => {
-    await page.clock.runFor(2000);
+    await page.clock.runFor(31_000);
     const id = `activation-${++gate}`;
     await hold(id, 'tree', key);
     await page.getByRole('tab', { name: new RegExp(key) }).click();
@@ -309,9 +316,11 @@ export async function auditRefresh(app, page, resizeWindow) {
   }
 
   await page.clock.runFor(2000);
-  await hold('coalesced', 'tree', 'CAN-100');
   const coordinated = await counts();
   await page.getByRole('tab', { name: /CAN-100/ }).click();
+  expect(await counts()).toEqual(coordinated);
+  await hold('coalesced', 'tree', 'CAN-100');
+  await page.clock.runFor(31_000);
   await started('coalesced');
   await expect(checking).toBeVisible();
   await page.evaluate(() => {
@@ -319,11 +328,11 @@ export async function auditRefresh(app, page, resizeWindow) {
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await page.clock.runFor(31_000);
-  expect(await counts()).toEqual([coordinated[0] + 1, coordinated[1]]);
+  expect(await calls('CAN-100')).toBe(coordinated[0] + 1);
   await release('coalesced');
   await idle();
   await page.clock.runFor(31_000);
-  await expect.poll(counts).toEqual([coordinated[0] + 2, coordinated[1] + 1]);
+  await expect.poll(() => calls('CAN-100')).toBe(coordinated[0] + 2);
   await idle();
 
   await offline(true);
