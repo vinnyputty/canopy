@@ -435,10 +435,19 @@ async function auditAppearanceSaveOrdering() {
     ).toBe(1);
     await app.evaluate(() => globalThis.appearanceSaveRace.release());
     await expect(dialog).toHaveCount(0);
-    expect(
-      await app.evaluate(() => globalThis.appearanceSaveRace.calls[1]?.palette),
-    ).toBe('ocean');
+    // An earlier workspace timer may flush a second default save before the
+    // appearance save. The last persisted workspace must use the new palette.
+    await expect
+      .poll(() =>
+        app.evaluate(() => globalThis.appearanceSaveRace.calls.at(-1)?.palette),
+      )
+      .toBe('ocean');
     await page.waitForTimeout(250);
+    expect(
+      await app.evaluate(
+        () => globalThis.appearanceSaveRace.calls.at(-1)?.palette,
+      ),
+    ).toBe('ocean');
   } finally {
     await app.evaluate(async ({ ipcMain }) => {
       const channel = 'canopy:saveWorkspace';
