@@ -13,6 +13,8 @@ export type Issue = {
   key: string;
   summary: string;
   type: string;
+  typeId?: string;
+  projectId?: string;
   parentKey?: string;
   priority: Choice | null;
   assignee: Choice | null;
@@ -59,6 +61,7 @@ export type RootView = {
   textSize: 'small' | 'medium' | 'large';
   spacing: 'compact' | 'comfortable';
   hideDone: boolean;
+  assumeMatchingStatusTransitions: boolean;
   filters: TreeFilters;
 };
 export type IssuePatch = {
@@ -74,6 +77,7 @@ export type EditOptions = {
   assignees: Choice[];
   transitions: (Choice & { requiresFields: boolean; to?: Status })[];
 };
+export type StatusTransitionTree = Record<string, EditOptions['transitions']>;
 export type RootReference = {
   connectionId: string;
   rootKey: string;
@@ -146,6 +150,11 @@ export interface CanopyAPI {
     key: string,
     refresh?: boolean,
   ): Promise<EditOptions['transitions']>;
+  workflowGraph(
+    connectionId: string,
+    projectId: string,
+    issueTypeId: string,
+  ): Promise<StatusTransitionTree | null>;
   invalidateChoices(connectionId: string, key: string): Promise<void>;
   cachedUsers(connectionId: string): Promise<Choice[]>;
   assignees(

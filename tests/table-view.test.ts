@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { recoverWorkspaceViews, validViewMap } from '../src/shared/views';
 import type {
   Issue,
+  RootView,
   TabState,
   TreeSnapshot,
   Workspace,
@@ -196,6 +197,25 @@ describe('table sorting', () => {
   });
 });
 describe('persisted table views', () => {
+  it('defaults status-transition sharing on and persists root-specific overrides', () => {
+    const a = tab('one', 'A-1');
+    const b = tab('one', 'A-2');
+    const github = tab('github', 'team/a#1');
+    let saved = migrateViews(workspace(a, b, github));
+    assert.equal(rootView(saved, a).assumeMatchingStatusTransitions, true);
+    saved = setRootView(saved, a, {
+      assumeMatchingStatusTransitions: false,
+    });
+    saved = migrateViews(
+      recoverWorkspaceViews(JSON.parse(JSON.stringify(saved))),
+    );
+    assert.equal(rootView(saved, a).assumeMatchingStatusTransitions, false);
+    assert.equal(rootView(saved, b).assumeMatchingStatusTransitions, true);
+    assert.equal(rootView(saved, github).assumeMatchingStatusTransitions, true);
+    saved = resetRootView(saved, a);
+    assert.equal(rootView(saved, a).assumeMatchingStatusTransitions, true);
+  });
+
   it('isolates connections, retains closed roots and resets to connection defaults', () => {
     const a = tab('one', 'A-1'),
       b = tab('one', 'A-2'),
@@ -269,6 +289,7 @@ describe('table view persistence validation', () => {
       { ...DEFAULT_VIEW, sort: { column: 'rank', direction: 'sideways' } },
       { ...DEFAULT_VIEW, textSize: 'huge' },
       { ...DEFAULT_VIEW, spacing: 'huge' },
+      { ...DEFAULT_VIEW, assumeMatchingStatusTransitions: 'yes' },
       { ...DEFAULT_VIEW, filters: { assignee: 'someone' } },
       { ...DEFAULT_VIEW, filters: { status: 5 } },
       { ...DEFAULT_VIEW, filters: { surprise: 'value' } },
@@ -289,6 +310,26 @@ describe('table view persistence validation', () => {
     assert.deepEqual(recovered.viewDefaults, saved.viewDefaults);
     assert.equal(recovered.tabs, current.tabs);
     assert.equal(saved.rootViews!.bad, null);
+  });
+  it('upgrades saved views without the status-transition setting', () => {
+    const old = { ...DEFAULT_VIEW } as Record<string, unknown>;
+    delete old.assumeMatchingStatusTransitions;
+    const current = workspace(tab('one', 'A-1'));
+    const recovered = recoverWorkspaceViews({
+      ...current,
+      tabs: [{ ...current.tabs[0], view: old as RootView }],
+      rootViews: { legacy: old as RootView },
+      viewDefaults: { one: old as RootView },
+    });
+    assert.equal(recovered.tabs[0].view?.assumeMatchingStatusTransitions, true);
+    assert.equal(
+      recovered.rootViews?.legacy.assumeMatchingStatusTransitions,
+      true,
+    );
+    assert.equal(
+      recovered.viewDefaults?.one.assumeMatchingStatusTransitions,
+      true,
+    );
   });
 });
 

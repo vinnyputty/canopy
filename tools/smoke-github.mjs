@@ -1,7 +1,7 @@
 import { expect } from '@playwright/test';
 
 export async function auditGithub(app, page) {
-  await app.evaluate(({ safeStorage }) => {
+  await app.evaluate(({ safeStorage, ipcMain }) => {
     // Synthetic credentials remain in the isolated smoke profile.
     safeStorage.isEncryptionAvailable = () => true;
     safeStorage.getSelectedStorageBackend = () => 'gnome_libsecret';
@@ -26,6 +26,20 @@ export async function auditGithub(app, page) {
       'team/b#2': issue('team/b', 2),
     };
     globalThis.githubSmokePatches = [];
+    const channel = 'canopy:transitions';
+    globalThis.githubSmokeTransitionHandler =
+      ipcMain._invokeHandlers.get(channel);
+    globalThis.githubSmokeTransitionCalls = [];
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, (event, connection, key, refresh) => {
+      globalThis.githubSmokeTransitionCalls.push({ connection, key });
+      return globalThis.githubSmokeTransitionHandler(
+        event,
+        connection,
+        key,
+        refresh,
+      );
+    });
     globalThis.fetch = async (url, init = {}) => {
       const parsed = new URL(String(url));
       if (parsed.hostname !== 'api.github.com')
@@ -219,7 +233,9 @@ export async function auditGithub(app, page) {
     await expect(closed).toHaveCount(0);
     await action.click();
     const rowMenu = page.getByRole('menu', { name: 'Actions for team/a#1' });
-    await rowMenu.getByRole('menuitem', { name: 'Copy key' }).press('Escape');
+    await rowMenu
+      .getByRole('menuitem', { name: 'Copy key', exact: true })
+      .press('Escape');
     await expect(rowMenu).toHaveCount(0);
     await expect(action).toBeFocused();
     await action.click();
@@ -244,8 +260,51 @@ export async function auditGithub(app, page) {
     await root.getByRole('button', { name: 'Assign to me' }).click();
     await expect(root).toContainText('tester');
     await status.click();
+    await expect(root.getByRole('menuitem', { name: 'Open' })).toBeVisible();
+    await expect(root.getByRole('menuitem', { name: 'Closed' })).toBeVisible();
+    await expect(root.getByRole('menuitem', { name: 'Done' })).toHaveCount(0);
+    const firstStatusCalls = await app.evaluate(
+      () => globalThis.githubSmokeTransitionCalls.length,
+    );
+    expect(firstStatusCalls).toBe(1);
+    await root.getByRole('menuitem', { name: 'Closed' }).press('Escape');
+    await page.evaluate(() => {
+      const field = document.querySelector(
+        '[aria-label="Edit status for team/a#1"]',
+      );
+      window.githubStatusLoading = false;
+      const observer = new MutationObserver(() => {
+        if (document.querySelector('.status-popover .choice-loading'))
+          window.githubStatusLoading = true;
+        if (document.querySelector('.status-popover [role="menuitem"]'))
+          observer.disconnect();
+      });
+      field.addEventListener(
+        'click',
+        () =>
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+          }),
+        { once: true },
+      );
+    });
+    await status.click();
+    await expect(root.getByRole('menuitem', { name: 'Closed' })).toBeVisible();
+    expect(await page.evaluate(() => window.githubStatusLoading)).toBe(false);
+    expect(
+      await app.evaluate(() => globalThis.githubSmokeTransitionCalls.length),
+    ).toBe(firstStatusCalls);
     await root.getByRole('menuitem', { name: 'Closed' }).click();
     await expect(root).toContainText('Closed');
+    await root
+      .getByRole('button', { name: 'Edit status for team/a#1' })
+      .click();
+    await expect(root.getByRole('menuitem', { name: 'Open' })).toBeVisible();
+    expect(
+      await app.evaluate(() => globalThis.githubSmokeTransitionCalls.length),
+    ).toBe(firstStatusCalls + 1);
+    await root.getByRole('menuitem', { name: 'Open' }).press('Escape');
     await tree.getByRole('treeitem', { name: /team\/a#1/ }).press('Space');
     const preview = page.getByRole('complementary', {
       name: 'Preview team/a#1',
@@ -343,7 +402,7 @@ export async function auditGithub(app, page) {
     await repositoryAction.click();
     await page
       .getByRole('menu', { name: 'Actions for team/a' })
-      .getByRole('menuitem', { name: 'Copy key' })
+      .getByRole('menuitem', { name: 'Copy key', exact: true })
       .press('Escape');
     await expect(repositoryAction).toBeFocused();
     await repositoryAction.click();
@@ -372,7 +431,14 @@ export async function auditGithub(app, page) {
       'GitHub integration passed: token connection, cross-repository tree, title, assignee, state, labels, and grouped search.',
     );
   } finally {
-    await app.evaluate(() => {
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler('canopy:transitions');
+      ipcMain.handle(
+        'canopy:transitions',
+        globalThis.githubSmokeTransitionHandler,
+      );
+      delete globalThis.githubSmokeTransitionHandler;
+      delete globalThis.githubSmokeTransitionCalls;
       globalThis.fetch = globalThis.githubSmokeFetch;
     });
   }

@@ -408,6 +408,11 @@ async function start(
     },
     transitions: (id: string, issue: string, refresh = false) =>
       provider(id).transitions(normalized(id, issue), refresh === true),
+    workflowGraph: (id: string, projectId: string, issueTypeId: string) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider)) return null;
+      return client.workflowGraph(text(projectId), text(issueTypeId));
+    },
     invalidateChoices: (id: string, issue: string) =>
       provider(id).invalidateChoices(normalized(id, issue)),
     cachedUsers: (id: string) => provider(id).cachedUsers(),

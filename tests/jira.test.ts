@@ -43,6 +43,20 @@ function recordingRequest(
 }
 
 describe('JiraProvider tree', () => {
+  it('includes project and issue-type IDs needed to read workflow graphs', async () => {
+    const provider = new JiraProvider(async (path) =>
+      path.startsWith('/rest/api/3/issue/ABC-1?')
+        ? rawIssue('ABC-1', undefined, {
+            project: { id: '100' },
+            issuetype: { id: '200', name: 'Epic' },
+          })
+        : { issues: [], isLast: true },
+    );
+    const tree = await provider.tree('ABC-1');
+    assert.equal(tree.issues[0].projectId, '100');
+    assert.equal(tree.issues[0].typeId, '200');
+  });
+
   it('walks every hierarchy level and every enhanced-search page without following issue links', async () => {
     const request = recordingRequest((path, init) => {
       if (path.startsWith('/rest/api/3/issue/EPIC-1?')) {
@@ -966,6 +980,96 @@ it('checks fresh required fields before submitting a cached transition and inval
   );
   assert.equal((await provider.transitions('ABC-1'))[0].requiresFields, true);
   assert.equal(request.calls.length, 3);
+});
+
+it('reads the full issue-type workflow graph when Jira grants workflow access', async () => {
+  const request = recordingRequest((path, init) => {
+    assert.equal(path, '/rest/api/3/workflows?useTransitionLinksFormat=true');
+    assert.deepEqual(body(init), {
+      projectAndIssueTypes: [{ projectId: '100', issueTypeId: '200' }],
+    });
+    return {
+      statuses: [
+        {
+          id: '10',
+          statusReference: 'todo',
+          name: 'To Do',
+          statusCategory: 'TODO',
+        },
+        {
+          id: '20',
+          statusReference: 'doing',
+          name: 'In Progress',
+          statusCategory: 'IN_PROGRESS',
+        },
+        {
+          id: '30',
+          statusReference: 'done',
+          name: 'Done',
+          statusCategory: 'DONE',
+        },
+      ],
+      workflows: [
+        {
+          statuses: ['todo', 'doing', 'done'].map((statusReference) => ({
+            statusReference,
+          })),
+          transitions: [
+            {
+              id: '1',
+              type: 'INITIAL',
+              toStatusReference: 'todo',
+              name: 'Create',
+            },
+            {
+              id: '2',
+              type: 'GLOBAL',
+              toStatusReference: 'done',
+              name: 'Finish',
+            },
+            {
+              id: '3',
+              type: 'DIRECTED',
+              links: [{ fromStatusReference: 'todo' }],
+              toStatusReference: 'doing',
+              name: 'Start',
+            },
+          ],
+        },
+      ],
+    };
+  });
+  const provider = new JiraProvider(request);
+  const graph = await provider.workflowGraph('100', '200');
+  assert.deepEqual(
+    graph?.['10'].map((choice) => choice.id),
+    ['2', '3'],
+  );
+  assert.deepEqual(
+    graph?.['20'].map((choice) => choice.id),
+    ['2'],
+  );
+  assert.deepEqual(
+    graph?.['30'].map((choice) => choice.id),
+    ['2'],
+  );
+  assert.deepEqual(graph?.['10'][1].to, {
+    id: '20',
+    name: 'In Progress',
+    category: 'indeterminate',
+  });
+  await provider.workflowGraph('100', '200');
+  assert.equal(request.calls.length, 1);
+});
+
+it('uses issue-transition fallback when workflow metadata is forbidden', async () => {
+  const request = recordingRequest(() => {
+    throw new Error('Jira returned 403.');
+  });
+  const provider = new JiraProvider(request);
+  assert.equal(await provider.workflowGraph('100', '200'), null);
+  assert.equal(await provider.workflowGraph('100', '200'), null);
+  assert.equal(request.calls.length, 1);
 });
 
 describe('Jira search after writes', () => {

@@ -12,6 +12,7 @@ export async function auditWorkflow(app, page) {
       opens: [],
       trees: [],
       metadata: [],
+      graphs: [],
       writes: 0,
       hold: false,
       release: null,
@@ -32,14 +33,51 @@ export async function auditWorkflow(app, page) {
         ].includes(url.hostname)
       )
         throw new Error('Unexpected test destination');
-      if ((init.method || 'GET') !== 'GET') {
+      if (
+        (init.method || 'GET') !== 'GET' &&
+        !(init.method === 'POST' && url.pathname === '/rest/api/3/workflows')
+      ) {
         controls.writes++;
         throw new Error('Unexpected Jira write');
       }
       let body;
       if (url.pathname.endsWith('/myself'))
         body = { accountId: 'fixture', displayName: 'Fixture' };
-      else if (url.pathname.endsWith('/transitions')) {
+      else if (url.pathname === '/rest/api/3/workflows') {
+        controls.graphs.push(url.hostname);
+        body = {
+          statuses: [
+            {
+              id: 'open',
+              statusReference: 'open',
+              name: 'Open',
+              statusCategory: 'TODO',
+            },
+            {
+              id: 'done',
+              statusReference: 'done',
+              name: 'Done',
+              statusCategory: 'DONE',
+            },
+          ],
+          workflows: [
+            {
+              statuses: [
+                { statusReference: 'open' },
+                { statusReference: 'done' },
+              ],
+              transitions: [
+                {
+                  id: 'required',
+                  type: 'GLOBAL',
+                  toStatusReference: 'done',
+                  name: 'Finish',
+                },
+              ],
+            },
+          ],
+        };
+      } else if (url.pathname.endsWith('/transitions')) {
         controls.metadata.push(url.hostname);
         body = {
           transitions: [
@@ -69,6 +107,8 @@ export async function auditWorkflow(app, page) {
           ...(i ? { parentKey: 'TEST-1' } : {}),
           summary: `Issue ${i + 1}`,
           type: 'Task',
+          typeId: '200',
+          projectId: '100',
           priority: null,
           assignee: null,
           status: { id: 'open', name: 'Open', category: 'new' },
@@ -144,6 +184,26 @@ export async function auditWorkflow(app, page) {
     });
   };
   await row.scrollIntoViewIfNeeded();
+  await expect.poll(async () => (await controls()).metadata.length).toBe(2);
+  expect((await controls()).graphs).toEqual([
+    'workflow-first.atlassian.net',
+    'workflow-second.atlassian.net',
+  ]);
+  const prefetched = (await controls()).metadata.length;
+  await field.click();
+  await expect(shortcut('Finish')).toBeVisible();
+  expect((await controls()).metadata.length).toBe(prefetched);
+  await shortcut('Finish').press('Escape');
+  for (const tab of await page.getByRole('tab').all()) {
+    await tab.click();
+    await page.locator('.view-settings > summary').click();
+    await page
+      .getByLabel('Assume matching status transitions for this root')
+      .uncheck();
+    await page.locator('.view-settings > summary').press('Escape');
+  }
+  await page.getByRole('tab').first().click();
+  await set({ metadata: [] });
   await row.focus();
   await expect(
     page.getByRole('button', { name: 'Refresh', exact: true }),

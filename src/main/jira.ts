@@ -5,11 +5,13 @@ import type {
   AssigneePage,
   Choice,
   EditOptions,
+  StatusTransitionTree,
   Issue,
   IssuePatch,
   IssuePreview,
   TreeSnapshot,
   SearchPage,
+  Status,
 } from '../shared/types';
 
 import { documentText } from './adf';
@@ -19,6 +21,7 @@ export type JiraRequest = (path: string, init?: RequestInit) => Promise<any>;
 const ISSUE_FIELDS = [
   'summary',
   'issuetype',
+  'project',
   'parent',
   'priority',
   'assignee',
@@ -101,6 +104,8 @@ function parseIssue(raw: JiraIssue): Issue {
     key: String(raw.key),
     summary: String(fields.summary ?? ''),
     type: String(fields.issuetype?.name ?? 'Issue'),
+    ...(fields.issuetype?.id ? { typeId: String(fields.issuetype.id) } : {}),
+    ...(fields.project?.id ? { projectId: String(fields.project.id) } : {}),
     ...(fields.parent?.key ? { parentKey: String(fields.parent.key) } : {}),
     priority: choice(fields.priority),
     assignee: fields.assignee?.accountId
@@ -525,6 +530,100 @@ export class JiraProvider {
             (field: any) => field?.required === true,
           ),
         }));
+      },
+    );
+  }
+
+  workflowGraph(
+    projectId: string,
+    issueTypeId: string,
+  ): Promise<StatusTransitionTree | null> {
+    return this.cached(
+      JSON.stringify(['workflow', projectId, issueTypeId]),
+      false,
+      async () => {
+        let response: any;
+        try {
+          response = await this.call(
+            '/rest/api/3/workflows?useTransitionLinksFormat=true',
+            jsonInit('POST', {
+              projectAndIssueTypes: [{ projectId, issueTypeId }],
+            }),
+            `load workflow for project ${projectId} and issue type ${issueTypeId}`,
+          );
+        } catch (error) {
+          if (error instanceof JiraRateLimitError) throw error;
+          if (/\b(401|403|404)\b/.test(String(error))) return null;
+          throw error;
+        }
+        const workflow = response?.workflows?.[0];
+        if (
+          !Array.isArray(response?.statuses) ||
+          !Array.isArray(workflow?.statuses) ||
+          !Array.isArray(workflow?.transitions)
+        )
+          return null;
+        const statuses = new Map<string, Status>();
+        for (const raw of response.statuses) {
+          if (raw?.id == null || raw?.statusReference == null) continue;
+          const category = String(raw.statusCategory).toUpperCase();
+          statuses.set(String(raw.statusReference), {
+            id: String(raw.id),
+            name: String(raw.name ?? raw.id),
+            category:
+              category === 'TODO'
+                ? 'new'
+                : category === 'DONE'
+                  ? 'done'
+                  : 'indeterminate',
+          });
+        }
+        const references = workflow.statuses
+          .filter((entry: any) => entry?.deprecated !== true)
+          .map((entry: any) => String(entry.statusReference))
+          .filter((reference: string) => statuses.has(reference));
+        const graph: StatusTransitionTree = {};
+        for (const reference of references)
+          graph[statuses.get(reference)!.id] = [];
+        for (const transition of workflow.transitions) {
+          if (transition?.type === 'INITIAL' || transition?.id == null)
+            continue;
+          const to = statuses.get(
+            String(
+              transition.toStatusReference ?? transition.to?.statusReference,
+            ),
+          );
+          if (!to) continue;
+          const sources =
+            transition.type === 'GLOBAL'
+              ? references
+              : Array.isArray(transition.links)
+                ? transition.links.map((link: any) =>
+                    String(link.fromStatusReference),
+                  )
+                : Array.isArray(transition.from)
+                  ? transition.from.map((entry: any) =>
+                      String(entry.statusReference),
+                    )
+                  : [];
+          for (const source of sources) {
+            const status = statuses.get(source);
+            const choices = status && graph[status.id];
+            if (
+              !choices ||
+              choices.some((item) => item.id === String(transition.id))
+            )
+              continue;
+            choices.push({
+              id: String(transition.id),
+              name: String(transition.name ?? to.name),
+              to,
+              // Jira validates fields and permissions before any transition write.
+              requiresFields: false,
+            });
+          }
+        }
+        return graph;
       },
     );
   }

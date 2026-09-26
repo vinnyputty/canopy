@@ -19,6 +19,8 @@ const api: CanopyAPI = {
   labels: (id, key) => ipcRenderer.invoke('canopy:labels', id, key),
   transitions: (id, key, refresh) =>
     ipcRenderer.invoke('canopy:transitions', id, key, refresh),
+  workflowGraph: (id, projectId, issueTypeId) =>
+    ipcRenderer.invoke('canopy:workflowGraph', id, projectId, issueTypeId),
   invalidateChoices: (id, key) =>
     ipcRenderer.invoke('canopy:invalidateChoices', id, key),
   cachedUsers: (id) => ipcRenderer.invoke('canopy:cachedUsers', id),
