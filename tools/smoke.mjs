@@ -797,13 +797,11 @@ try {
   await auditPickers(app, page);
   await auditSelfConnections(app, page);
   const rootSummary = 'A calmer place to get things done';
-  const rootTab = page.getByRole('tab', { name: /CAN-100/ });
-  const rootSidebar = page.locator('.side-tab').filter({ hasText: 'CAN-100' });
+  const rootTitle = `CAN-100: ${rootSummary} · Canopy demo`;
+  const rootTab = page.locator(`[role="tab"][title="${rootTitle}"]`);
+  const rootSidebar = page.locator(`.side-tab[title="${rootTitle}"]`);
   for (const label of [rootTab, rootSidebar]) {
-    await expect(label).toHaveAttribute(
-      'title',
-      `CAN-100: ${rootSummary} · Canopy demo`,
-    );
+    await expect(label).toHaveAttribute('title', rootTitle);
     const subtitle = label.locator('small');
     await expect(subtitle).toHaveText(rootSummary);
     await expect(subtitle).toHaveCSS('text-overflow', 'ellipsis');
