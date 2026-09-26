@@ -84,7 +84,7 @@ export async function auditBulk(app, page, modifier) {
   await expect(results.locator('li')).toHaveCount(2);
   await page.getByRole('button', { name: 'Open issue' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
-  await dialog.getByLabel('Issue key, Jira URL, or summary').fill('CAN-106');
+  await dialog.getByRole('combobox').fill('CAN-106');
   await dialog.getByRole('button', { name: 'Open tree' }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-106 issue tree' }),
