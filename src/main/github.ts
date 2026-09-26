@@ -12,6 +12,31 @@ import type {
 
 export type GithubRequest = (path: string, init?: RequestInit) => Promise<any>;
 const reference = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)#([1-9]\d*)$/i;
+const repository = /^([a-z0-9_.-]+)\/([a-z0-9_.-]+)$/i;
+export function githubRepository(value: string): string {
+  const input = value.trim();
+  let match = input.match(repository);
+  if (!match) {
+    try {
+      const url = new URL(input);
+      if (url.origin === 'https://github.com')
+        match = url.pathname.match(/^\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/?$/i);
+    } catch {}
+  }
+  if (!match) throw new Error('Enter a selected GitHub repository.');
+  return `${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
+}
+export function githubRootKey(value: string): string {
+  try {
+    return githubRepository(value);
+  } catch {
+    return githubKey(value);
+  }
+}
+export function githubRootUrl(value: string): string {
+  const key = githubRootKey(value);
+  return key.includes('#') ? githubIssueUrl(key) : `https://github.com/${key}`;
+}
 export function githubKey(value: string): string {
   const input = value.trim();
   let match = input.match(reference);
@@ -41,6 +66,7 @@ function rawKey(raw: any): string {
       `${String(raw.repository_url ?? '').replace('https://api.github.com/repos/', '')}#${raw.number}`,
   );
 }
+type ChildMetadata = { key: string; count: number; parentKey?: string };
 function parseIssue(raw: any, parentKey?: string): Issue {
   const key = rawKey(raw);
   const assignee = raw.assignee ?? raw.assignees?.[0];
@@ -110,11 +136,118 @@ export class GithubProvider {
       items.push(...batch);
       if (batch.length < 100) return items;
     }
-    throw new Error(
-      'GitHub returned more than 10,000 related issues. Narrow the root.',
+    throw new Error('GitHub returned more than 10,000 issues for this view.');
+  }
+  private async childMetadata(
+    candidates: { key: string; nodeId: string }[],
+  ): Promise<ChildMetadata[]> {
+    const metadata: ChildMetadata[] = [];
+    for (let start = 0; start < candidates.length; start += 100) {
+      const batch = candidates.slice(start, start + 100);
+      const result = await this.request('/graphql', {
+        method: 'POST',
+        body: JSON.stringify({
+          query:
+            'query($ids:[ID!]!){nodes(ids:$ids){... on Issue{parent{url} subIssuesSummary{total}}}}',
+          variables: { ids: batch.map((item) => item.nodeId) },
+        }),
+      });
+      if (result.errors?.length || !Array.isArray(result.data?.nodes))
+        throw new Error('GitHub could not load sub-issue metadata.');
+      if (result.data.nodes.length !== batch.length)
+        throw new Error('GitHub returned incomplete sub-issue metadata.');
+      for (let index = 0; index < batch.length; index++) {
+        const node = result.data.nodes[index];
+        const count = node?.subIssuesSummary?.total;
+        if (!Number.isSafeInteger(count) || count < 0)
+          throw new Error('GitHub returned invalid sub-issue counts.');
+        metadata.push({
+          key: batch[index].key,
+          count,
+          parentKey: node.parent?.url ? githubKey(node.parent.url) : undefined,
+        });
+      }
+    }
+    return metadata;
+  }
+  private async repositoryTree(repo: string): Promise<TreeSnapshot> {
+    if (!this.selected.has(repo))
+      throw new Error(
+        `Repository ${repo} is outside this GitHub connection. Add it to the connection and token selection.`,
+      );
+    const listed = (await this.all(`/repos/${repo}/issues?state=all`)).filter(
+      (raw) => !raw.pull_request,
     );
+    const issues = new Map<string, Issue>();
+    for (const raw of listed) {
+      const issue = parseIssue(raw, repo);
+      issues.set(issue.key, issue);
+    }
+    const metadata = await this.childMetadata(
+      listed.map((raw) => ({ key: rawKey(raw), nodeId: raw.node_id })),
+    );
+    for (const item of metadata) {
+      const issue = issues.get(item.key)!;
+      if (item.parentKey && issues.has(item.parentKey))
+        issue.parentKey = item.parentKey;
+    }
+    const warnings: string[] = [];
+    let frontier = metadata
+      .filter((item) => item.count > 0)
+      .map((item) => item.key);
+    while (frontier.length) {
+      const candidates: { key: string; nodeId: string }[] = [];
+      for (const parent of frontier) {
+        const children = await this.all(this.path(parent, '/sub_issues'));
+        for (const child of children) {
+          const key = rawKey(child);
+          if (!this.selected.has(parts(key).repo)) {
+            warnings.push(
+              `${key} is outside the selected repositories. Add that repository to read this subtree.`,
+            );
+            continue;
+          }
+          const existing = issues.get(key);
+          if (existing) {
+            existing.parentKey = parent;
+            continue;
+          }
+          const issue = parseIssue(child, parent);
+          issues.set(key, issue);
+          candidates.push({ key, nodeId: child.node_id });
+        }
+      }
+      frontier = (await this.childMetadata(candidates))
+        .filter((item) => item.count > 0)
+        .map((item) => item.key);
+    }
+    return {
+      rootKey: repo,
+      issues: [
+        {
+          id: `repository:${repo}`,
+          key: repo,
+          summary: 'Repository',
+          type: 'Repository',
+          priority: null,
+          assignee: null,
+          status: { id: 'repository', name: 'Repository', category: 'new' },
+          links: [],
+        },
+        ...issues.values(),
+      ],
+      fetchedAt: Date.now(),
+      warnings,
+      ranking: {
+        state: 'unsupported',
+        reason: 'GitHub issues have no Jira rank.',
+        issueKeys: [],
+      },
+    };
   }
   async tree(rootKey: string): Promise<TreeSnapshot> {
+    if (!githubRootKey(rootKey).includes('#'))
+      return this.repositoryTree(githubRepository(rootKey));
     const root = githubKey(rootKey);
     const raw = await this.request(this.path(root));
     if (raw.pull_request)
@@ -147,27 +280,11 @@ export class GithubProvider {
           else next.push(key);
         }
       }
-      for (let start = 0; start < candidates.length; start += 100) {
-        const batch = candidates.slice(start, start + 100);
-        const result = await this.request('/graphql', {
-          method: 'POST',
-          body: JSON.stringify({
-            query:
-              'query($ids:[ID!]!){nodes(ids:$ids){... on Issue{subIssuesSummary{total}}}}',
-            variables: { ids: batch.map((item) => item.nodeId) },
-          }),
-        });
-        if (result.errors?.length || !Array.isArray(result.data?.nodes))
-          throw new Error('GitHub could not load sub-issue counts.');
-        if (result.data.nodes.length !== batch.length)
-          throw new Error('GitHub returned incomplete sub-issue counts.');
-        for (let index = 0; index < batch.length; index++) {
-          const count = result.data.nodes[index]?.subIssuesSummary?.total;
-          if (!Number.isSafeInteger(count) || count < 0)
-            throw new Error('GitHub returned invalid sub-issue counts.');
-          if (count > 0) next.push(batch[index].key);
-        }
-      }
+      next.push(
+        ...(await this.childMetadata(candidates))
+          .filter((item) => item.count > 0)
+          .map((item) => item.key),
+      );
       frontier = next;
     }
     return {
@@ -240,28 +357,37 @@ export class GithubProvider {
       .split(/\s+/)
       .map((term) => `"${term.replace(/["\\]/g, '')}"`)
       .join(' ');
-    const q = encodeURIComponent(
-      `${terms} in:title,body repo:${repos[repo]} is:issue`,
-    );
-    const result = await this.request(
-      `/search/issues?q=${q}&per_page=100&page=${page}`,
-      { signal },
-    );
-    const issues = (result.items ?? [])
-      .filter((item: any) => !item.pull_request)
-      .map((item: any) => ({ ...parseIssue(item), updated: item.updated_at }));
-    if (result.total_count > page * 100 && page < 10) page++;
-    else {
-      repo++;
-      page = 1;
+    while (repo < repos.length) {
+      const q = encodeURIComponent(
+        `${terms} in:title,body repo:${repos[repo]} is:issue`,
+      );
+      const result = await this.request(
+        `/search/issues?q=${q}&per_page=100&page=${page}`,
+        { signal },
+      );
+      const issues = (result.items ?? [])
+        .filter((item: any) => !item.pull_request)
+        .map((item: any) => ({
+          ...parseIssue(item),
+          updated: item.updated_at,
+        }));
+      if (result.total_count > page * 100 && page < 10) page++;
+      else {
+        repo++;
+        page = 1;
+      }
+      if (issues.length || repo >= repos.length)
+        return {
+          issues,
+          nextPageToken:
+            repo < repos.length
+              ? Buffer.from(JSON.stringify({ repo, page })).toString(
+                  'base64url',
+                )
+              : undefined,
+        };
     }
-    return {
-      issues,
-      nextPageToken:
-        repo < repos.length
-          ? Buffer.from(JSON.stringify({ repo, page })).toString('base64url')
-          : undefined,
-    };
+    throw new Error('Invalid GitHub search page.');
   }
   async priorities(): Promise<Choice[]> {
     return [];

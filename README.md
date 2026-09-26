@@ -32,7 +32,7 @@ Use **Connect Jira site** to add a Jira Cloud site, your Atlassian account email
 
 See [Jira connection setup](docs/connections.md) for token scopes and organization policy checks. [Browser OAuth](docs/oauth.md) is an optional alternative and requires the included broker service.
 
-Use **Connect Jira or GitHub → GitHub** to connect selected repositories with a fine-grained personal access token. See [GitHub connection setup](docs/github.md) for permissions, search, hierarchy, and writable actions.
+Use **Connect Jira or GitHub → GitHub** to connect selected repositories with a fine-grained personal access token. Open a repository root to browse all issues with native sub-issue nesting, or open one issue as a focused tree. See [GitHub connection setup](docs/github.md) for permissions, search, hierarchy, and writable actions.
 
 Recently saved Jira fields and sibling placement remain visible while search catches up. Reconciliation covers the last 50 changed issues per connection for up to five minutes; rank undo remains retryable during catch-up. See [Jira consistency limits](docs/jira.md).
 

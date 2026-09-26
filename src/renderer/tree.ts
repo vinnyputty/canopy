@@ -166,6 +166,20 @@ export function parseIssueKey(input: string): string | null {
   return key?.toUpperCase() ?? null;
 }
 
+export function parseGithubRepository(input: string): string | null {
+  const trimmed = input.trim();
+  const direct = trimmed.match(/^([\w.-]+)\/([\w.-]+)$/);
+  if (direct) return `${direct[1].toLowerCase()}/${direct[2].toLowerCase()}`;
+  try {
+    const url = new URL(trimmed);
+    if (url.origin === 'https://github.com') {
+      const match = url.pathname.match(/^\/([\w.-]+)\/([\w.-]+)\/?$/);
+      if (match) return `${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
+    }
+  } catch {}
+  return null;
+}
+
 export function eventShortcut(
   event: Pick<
     KeyboardEvent,

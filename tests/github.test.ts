@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { GithubProvider, githubIssueUrl, githubKey } from '../src/main/github';
+import {
+  GithubProvider,
+  githubIssueUrl,
+  githubKey,
+  githubRootKey,
+  githubRootUrl,
+} from '../src/main/github';
+import { buildIssueTree, visibleTree } from '../src/renderer/tree';
 import { Auth } from '../src/main/auth';
 import type { Connection } from '../src/shared/types';
 import type { Storage } from '../src/main/storage';
@@ -34,12 +41,65 @@ test('GitHub references accept only issue URLs and owner/repo numbers', () => {
     githubIssueUrl('team/b#42'),
     'https://github.com/team/b/issues/42',
   );
+  assert.equal(githubRootKey('https://github.com/TEAM/A'), 'team/a');
+  assert.equal(githubRootUrl('team/a'), 'https://github.com/team/a');
   for (const input of [
     'https://evil.example/team/a/issues/1',
     'team/a#0',
     'https://github.com/team/a/pull/1',
   ])
     assert.throws(() => githubKey(input));
+});
+
+test('GitHub repository roots preserve sub-issues and hide closed leaves', async () => {
+  const paths: string[] = [];
+  const provider = new GithubProvider(connection, async (path, init) => {
+    paths.push(path);
+    if (path === '/repos/team/a/issues?state=all&per_page=100&page=1')
+      return [
+        raw('team/a', 1),
+        raw('team/a', 3, { state: 'closed' }),
+        raw('team/a', 4, { pull_request: {} }),
+      ];
+    if (path === '/repos/team/a/issues/1/sub_issues?per_page=100&page=1')
+      return [raw('team/a', 3, { state: 'closed' }), raw('team/b', 2)];
+    if (path === '/graphql')
+      return {
+        data: {
+          nodes: JSON.parse(String(init?.body)).variables.ids.map(
+            (id: string) => ({
+              parent:
+                id === 'team/a-3' || id === 'team/b-2'
+                  ? { url: 'https://github.com/team/a/issues/1' }
+                  : null,
+              subIssuesSummary: { total: id === 'team/a-1' ? 2 : 0 },
+            }),
+          ),
+        },
+      };
+    throw new Error(path);
+  });
+  const snapshot = await provider.tree('team/a');
+  assert.deepEqual(
+    snapshot.issues.map((issue) => [issue.key, issue.parentKey]),
+    [
+      ['team/a', undefined],
+      ['team/a#1', 'team/a'],
+      ['team/a#3', 'team/a#1'],
+      ['team/b#2', 'team/a#1'],
+    ],
+  );
+  const root = buildIssueTree(snapshot.issues, snapshot.rootKey)!;
+  assert.deepEqual(
+    visibleTree(root, true, root.issue.key)!.children[0].children.map(
+      (node) => node.issue.key,
+    ),
+    ['team/b#2'],
+  );
+  assert.equal(
+    paths.includes('/repos/team/b/issues/2/sub_issues?per_page=100&page=1'),
+    false,
+  );
 });
 
 test('GitHub tree follows paginated sub-issues across selected repositories and warns about inaccessible children', async () => {
@@ -102,6 +162,26 @@ test('GitHub search paginates selected repositories and preserves repository ide
   assert.equal(second.issues[0].key, 'team/b#1');
   assert.equal(second.nextPageToken, undefined);
   assert.match(paths[0], /is%3Aissue/);
+});
+
+test('GitHub search skips empty repositories before showing the first matches', async () => {
+  const paths: string[] = [];
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    return path.includes('repo%3Ateam%2Fa')
+      ? { total_count: 0, items: [] }
+      : {
+          total_count: 3,
+          items: [raw('team/b', 2), raw('team/b', 3), raw('team/b', 4)],
+        };
+  });
+  const page = await provider.search('feature');
+  assert.deepEqual(
+    page.issues.map((issue) => issue.key),
+    ['team/b#2', 'team/b#3', 'team/b#4'],
+  );
+  assert.equal(page.nextPageToken, undefined);
+  assert.equal(paths.length, 2);
 });
 
 test('GitHub writes map title, assignee, labels, and state without Jira fields', async () => {

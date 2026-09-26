@@ -60,6 +60,7 @@ import {
   flattenVisible,
   matchesShortcut,
   parseIssueKey,
+  parseGithubRepository,
   SHORTCUT_LABELS,
   shortcutCollisions,
   filterTree,
@@ -459,8 +460,17 @@ export function App() {
 
   useEffect(() => {
     if (activeTab?.selectedKey)
-      setPreviewKey((current) => (current ? activeTab.selectedKey! : null));
-  }, [activeTab?.selectedKey]);
+      setPreviewKey((current) =>
+        current &&
+        !(
+          activeConnection?.provider === 'github' &&
+          activeTab.selectedKey === activeTab.rootKey &&
+          !activeTab.rootKey.includes('#')
+        )
+          ? activeTab.selectedKey!
+          : null,
+      );
+  }, [activeTab?.selectedKey, activeTab?.rootKey, activeConnection?.provider]);
   const closePreview = useCallback(() => {
     setPreviewKey(null);
     restoreTreeFocus(activeTab?.selectedKey ?? activeTab?.rootKey);
@@ -1946,7 +1956,11 @@ export function App() {
                       })
                     }
                   />
-                  <span>Hide done</span>
+                  <span>
+                    {activeConnection?.provider === 'github'
+                      ? 'Hide closed'
+                      : 'Hide done'}
+                  </span>
                 </label>
                 <span className="separator" />
                 <button
@@ -2491,9 +2505,21 @@ export function App() {
                   ) : tree && activeTab.hideDone ? (
                     <EmptyState
                       icon={Check}
-                      title="All issues are done"
-                      detail="Completed issues in this tree are currently hidden."
-                      action="Show done issues"
+                      title={
+                        activeConnection?.provider === 'github'
+                          ? 'All issues are closed'
+                          : 'All issues are done'
+                      }
+                      detail={
+                        activeConnection?.provider === 'github'
+                          ? 'Closed issues in this tree are currently hidden.'
+                          : 'Completed issues in this tree are currently hidden.'
+                      }
+                      action={
+                        activeConnection?.provider === 'github'
+                          ? 'Show closed issues'
+                          : 'Show done issues'
+                      }
                       onAction={() =>
                         updateTab(activeTab.id, { hideDone: false })
                       }
@@ -2504,7 +2530,7 @@ export function App() {
                       title="No issue tree yet"
                       detail={
                         activeConnection?.provider === 'github'
-                          ? 'Open a GitHub issue URL or owner/repo#number to see its sub-issues.'
+                          ? 'Open a selected repository, GitHub issue URL, or owner/repo#number.'
                           : 'Open an issue key or Jira URL to see its full hierarchy.'
                       }
                       action="Open issue"
@@ -2938,6 +2964,8 @@ function TreeRows(props: RowsProps) {
     focusNeighbor,
   } = props;
   const { issue } = node;
+  const repositoryRoot =
+    props.provider === 'github' && issue.type === 'Repository';
   const open = expanded.has(issue.key);
   const hasChildren = node.children.length > 0;
   const linksOpen = props.linkedExpanded.has(issue.key);
@@ -2990,7 +3018,9 @@ function TreeRows(props: RowsProps) {
     }
     if (event.key === 'F2' || event.key === 'Enter') {
       event.preventDefault();
-      props.beginEdit(issue.key, 'summary');
+      if (repositoryRoot) {
+        if (hasChildren && !props.expansionLocked) onToggle(issue.key);
+      } else props.beginEdit(issue.key, 'summary');
     }
     if (
       event.key === ' ' &&
@@ -2998,7 +3028,9 @@ function TreeRows(props: RowsProps) {
       event.target === event.currentTarget
     ) {
       event.preventDefault();
-      props.onPreview(issue.key);
+      if (repositoryRoot) {
+        if (hasChildren && !props.expansionLocked) onToggle(issue.key);
+      } else props.onPreview(issue.key);
     }
   };
   const cells: Record<TableColumn, React.ReactNode> = {
@@ -3076,8 +3108,10 @@ function TreeRows(props: RowsProps) {
           >
             <Copy size={11} />
           </button>
-          {props.editor?.key === issue.key &&
-          props.editor.field === 'summary' ? (
+          {repositoryRoot ? (
+            <span className="summary">{issue.summary}</span>
+          ) : props.editor?.key === issue.key &&
+            props.editor.field === 'summary' ? (
             <SummaryEditor
               provider={props.provider}
               issue={issue}
@@ -3123,7 +3157,7 @@ function TreeRows(props: RowsProps) {
         )}
       </div>
     ),
-    priority: (
+    priority: repositoryRoot ? null : (
       <FieldCell
         label={`Edit priority for ${issue.key}`}
         active={
@@ -3148,7 +3182,7 @@ function TreeRows(props: RowsProps) {
         />
       </FieldCell>
     ),
-    assignee: (
+    assignee: repositoryRoot ? null : (
       <FieldCell
         label={`Edit assignee for ${issue.key}`}
         active={
@@ -3176,7 +3210,7 @@ function TreeRows(props: RowsProps) {
         />
       </FieldCell>
     ),
-    status: (
+    status: repositoryRoot ? null : (
       <FieldCell
         label={`Edit status for ${issue.key}`}
         active={
@@ -4133,11 +4167,15 @@ function OpenIssueDialog({
     (item) => item.id === connectionId,
   );
   const parsedKey = parseIssueKey(query);
+  const parsedRepository = parseGithubRepository(query);
   const directKey =
     selectedConnection?.provider === 'github'
       ? parsedKey?.includes('#')
         ? parsedKey
-        : null
+        : parsedRepository &&
+            selectedConnection.repositories?.includes(parsedRepository)
+          ? parsedRepository
+          : null
       : parsedKey && !parsedKey.includes('#')
         ? parsedKey
         : null;
@@ -4149,15 +4187,32 @@ function OpenIssueDialog({
   const recent = recentRoots
     .filter((root) => root.connectionId === connectionId)
     .slice(0, 20);
+  const repositories =
+    selectedConnection?.provider === 'github'
+      ? (selectedConnection.repositories ?? []).map((key) => ({
+          key,
+          summary: 'Repository',
+          type: 'Repository',
+        }))
+      : [];
   const options = !query.trim()
-    ? recent.map((root) => ({
-        key: root.rootKey,
-        summary: root.summary ?? '',
-        type: '',
-      }))
+    ? [
+        ...repositories,
+        ...recent
+          .filter(
+            (root) => !repositories.some((repo) => repo.key === root.rootKey),
+          )
+          .map((root) => ({
+            key: root.rootKey,
+            summary: root.summary ?? '',
+            type: '',
+          })),
+      ]
     : searchState.issues;
   const displayedOptions =
-    groupRepositories && selectedConnection?.provider === 'github'
+    groupRepositories &&
+    query.trim() &&
+    selectedConnection?.provider === 'github'
       ? [...options].sort(
           (a, b) =>
             a.key.split('#')[0].localeCompare(b.key.split('#')[0]) ||
@@ -4259,12 +4314,12 @@ function OpenIssueDialog({
             }
             placeholder={
               selectedConnection?.provider === 'github'
-                ? 'GitHub URL, owner/repo#number, or title'
+                ? 'GitHub URL, owner/repo, issue number, or title'
                 : 'Issue key, Jira URL, or summary'
             }
             aria-label={
               selectedConnection?.provider === 'github'
-                ? 'GitHub URL, owner/repo#number, or title'
+                ? 'GitHub URL, owner/repo, issue number, or title'
                 : 'Issue key, Jira URL, or summary'
             }
           />
@@ -4310,7 +4365,11 @@ function OpenIssueDialog({
             </p>
           )}
         {!query.trim() && options.length > 0 && (
-          <p className="dialog-note">Recent roots</p>
+          <p className="dialog-note">
+            {selectedConnection?.provider === 'github'
+              ? 'Repositories and recent roots'
+              : 'Recent roots'}
+          </p>
         )}
         {selectedConnection?.provider === 'github' && (
           <label className="checkbox">
@@ -4335,6 +4394,7 @@ function OpenIssueDialog({
           {displayedOptions.map((issue, index) => (
             <React.Fragment key={issue.key}>
               {groupRepositories &&
+                query.trim() &&
                 selectedConnection?.provider === 'github' &&
                 (index === 0 ||
                   displayedOptions[index - 1].key.split('#')[0] !==

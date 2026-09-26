@@ -21,6 +21,8 @@ export async function auditGithub(app, page) {
     });
     globalThis.githubSmokeIssues = {
       'team/a#1': issue('team/a', 1),
+      'team/a#3': issue('team/a', 3, { state: 'closed' }),
+      'team/a#4': issue('team/a', 4),
       'team/b#2': issue('team/b', 2),
     };
     globalThis.fetch = async (url, init = {}) => {
@@ -29,11 +31,27 @@ export async function auditGithub(app, page) {
         return globalThis.githubSmokeFetch(url, init);
       const path = parsed.pathname;
       if (path === '/user') return Response.json({ login: 'tester' });
-      if (path === '/graphql')
+      if (path === '/graphql') {
+        const ids = JSON.parse(String(init.body)).variables.ids;
         return Response.json({
-          data: { nodes: [{ subIssuesSummary: { total: 0 } }] },
+          data: {
+            nodes: ids.map(() => ({
+              parent: null,
+              subIssuesSummary: { total: 0 },
+            })),
+          },
         });
-      if (/^\/repos\/team\/[ab]\/issues$/.test(path)) return Response.json([]);
+      }
+      if (/^\/repos\/team\/[ab]\/issues$/.test(path))
+        return Response.json(
+          parsed.searchParams.has('state')
+            ? [
+                globalThis.githubSmokeIssues['team/a#1'],
+                globalThis.githubSmokeIssues['team/a#3'],
+                globalThis.githubSmokeIssues['team/a#4'],
+              ]
+            : [],
+        );
       if (path === '/repos/team/a/issues/1/sub_issues')
         return Response.json([globalThis.githubSmokeIssues['team/b#2']]);
       if (path === '/repos/team/b/issues/2/sub_issues')
@@ -65,6 +83,11 @@ export async function auditGithub(app, page) {
       if (path === '/repos/team/a/assignees')
         return Response.json([{ login: 'tester' }]);
       if (path === '/search/issues') {
+        if (
+          parsed.searchParams.get('q')?.includes('only-b') &&
+          parsed.searchParams.get('q')?.includes('repo:team/a')
+        )
+          return Response.json({ total_count: 0, items: [] });
         const repo = parsed.searchParams.get('q')?.includes('repo:team/b')
           ? 'team/b'
           : 'team/a';
@@ -110,7 +133,7 @@ export async function auditGithub(app, page) {
     const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
     await dialog
       .getByRole('combobox', {
-        name: 'GitHub URL, owner/repo#number, or title',
+        name: 'GitHub URL, owner/repo, issue number, or title',
       })
       .fill('https://github.com/team/a/issues/1');
     await dialog.getByRole('button', { name: 'Open tree' }).click();
@@ -163,14 +186,48 @@ export async function auditGithub(app, page) {
     const search = page.getByRole('dialog', { name: 'Open issue tree' });
     await search
       .getByRole('combobox', {
-        name: 'GitHub URL, owner/repo#number, or title',
+        name: 'GitHub URL, owner/repo, issue number, or title',
       })
       .fill('feature');
     await search.getByRole('checkbox', { name: 'Group by repository' }).check();
     await expect(search.getByText('team/a', { exact: true })).toBeVisible();
     await search.getByRole('button', { name: 'Load more' }).click();
     await expect(search.getByText('team/b', { exact: true })).toBeVisible();
+    await search
+      .getByRole('combobox', {
+        name: 'GitHub URL, owner/repo, issue number, or title',
+      })
+      .fill('only-b');
+    await expect(
+      search.getByRole('option', { name: /team\/b#2/ }),
+    ).toBeVisible();
+    await expect(search.getByRole('button', { name: 'Load more' })).toHaveCount(
+      0,
+    );
     await search.getByRole('button', { name: 'Close dialog' }).click();
+    await page
+      .getByRole('button', { name: 'Open issue', exact: true })
+      .first()
+      .click();
+    const repositoryDialog = page.getByRole('dialog', {
+      name: 'Open issue tree',
+    });
+    await repositoryDialog
+      .getByRole('option', { name: /team\/a.*Repository/ })
+      .click();
+    const repositoryTree = page.getByRole('tree', {
+      name: 'team/a issue tree',
+    });
+    await expect(
+      repositoryTree.getByRole('treeitem', { name: /team\/a#4/ }),
+    ).toBeVisible();
+    await expect(
+      repositoryTree.getByRole('treeitem', { name: /team\/a#3/ }),
+    ).toHaveCount(0);
+    await page.getByRole('checkbox', { name: 'Hide closed' }).uncheck();
+    await expect(
+      repositoryTree.getByRole('treeitem', { name: /team\/a#3/ }),
+    ).toBeVisible();
     await page.getByTitle('Disconnect GitHub · tester').click();
     await expect(
       page.getByText('GitHub · tester', { exact: true }),

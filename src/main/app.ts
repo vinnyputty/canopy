@@ -20,7 +20,12 @@ import type {
 } from '../shared/types';
 import { Auth } from './auth';
 import { JiraProvider } from './jira';
-import { GithubProvider, githubKey, githubIssueUrl } from './github';
+import {
+  GithubProvider,
+  githubKey,
+  githubRootKey,
+  githubRootUrl,
+} from './github';
 import { Storage } from './storage';
 import { restoreWindow, type WindowState } from './window-state';
 import { configureLinuxCredentialStore } from './credentials';
@@ -52,6 +57,11 @@ function key(value: unknown) {
 function issueKey(value: unknown, connection?: Connection) {
   return connection?.provider === 'github'
     ? githubKey(text(value))
+    : key(value);
+}
+function treeKey(value: unknown, connection?: Connection) {
+  return connection?.provider === 'github'
+    ? githubRootKey(text(value))
     : key(value);
 }
 function patch(value: unknown): IssuePatch {
@@ -119,7 +129,8 @@ function workspace(value: Workspace) {
       if (
         typeof root.rootKey !== 'string' ||
         (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(root.rootKey) &&
-          !/^[-\w.]+\/[-\w.]+#\d+$/i.test(root.rootKey))
+          !/^[-\w.]+\/[-\w.]+#\d+$/i.test(root.rootKey) &&
+          !/^[-\w.]+\/[-\w.]+$/i.test(root.rootKey))
       )
         throw new Error('Invalid root key.');
       if (
@@ -151,7 +162,8 @@ function workspace(value: Workspace) {
     if (
       typeof tab.rootKey !== 'string' ||
       (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(tab.rootKey) &&
-        !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.rootKey))
+        !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.rootKey) &&
+        !/^[-\w.]+\/[-\w.]+$/i.test(tab.rootKey))
     )
       throw new Error('Invalid root key.');
     if (
@@ -165,7 +177,8 @@ function workspace(value: Workspace) {
     if (
       tab.focusKey !== undefined &&
       !/^[A-Z][A-Z0-9_]*-\d+$/i.test(tab.focusKey) &&
-      !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.focusKey)
+      !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.focusKey) &&
+      !/^[-\w.]+\/[-\w.]+$/i.test(tab.focusKey)
     )
       throw new Error('Invalid focus key.');
     if (tab.filters !== undefined) {
@@ -264,12 +277,17 @@ async function start(
       value,
       connections().find((connection) => connection.id === id),
     );
+  const normalizedRoot = (id: string, value: unknown) =>
+    treeKey(
+      value,
+      connections().find((connection) => connection.id === id),
+    );
   const issueUrl = (id: string, issue: string) => {
     const connection = connections().find((connection) => connection.id === id);
     if (!connection) throw new Error('This connection is unavailable.');
-    const value = normalized(id, issue);
+    const value = normalizedRoot(id, issue);
     return connection.provider === 'github'
-      ? githubIssueUrl(value)
+      ? githubRootUrl(value)
       : `${connection.url}/browse/${encodeURIComponent(value)}`;
   };
   const searches = new Map<string, AbortController>();
@@ -340,7 +358,8 @@ async function start(
           ? auth.githubSyncStatus(id)
           : auth.syncStatus(id);
     },
-    tree: (id: string, root: string) => provider(id).tree(normalized(id, root)),
+    tree: (id: string, root: string) =>
+      provider(id).tree(normalizedRoot(id, root)),
     priorityOrder: (id: string, keys: unknown) => {
       if (!Array.isArray(keys) || keys.length > 1000)
         throw new Error('Invalid priority representatives.');
