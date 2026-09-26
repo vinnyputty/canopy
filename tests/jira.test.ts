@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { JiraProvider, type JiraRequest } from '../src/main/jira';
+import {
+  JiraProvider,
+  jiraRemoteLinkUrl,
+  type JiraRequest,
+} from '../src/main/jira';
 
 function rawIssue(
   key: string,
@@ -948,10 +952,6 @@ describe('JiraProvider preview', () => {
       ['blocks', 'is blocked by'],
     );
     assert.equal(result.issue.parentKey, 'PARENT-1');
-    assert.equal(
-      (await new JiraProvider(request).development('TEST-1')).state,
-      'unavailable',
-    );
   });
   it('retains issue details when comments fail and can retry', async () => {
     let fails = true;
@@ -969,6 +969,97 @@ describe('JiraProvider preview', () => {
     fails = false;
     assert.equal((await provider.preview('TEST-1')).commentsError, undefined);
   });
+});
+
+it('loads and classifies safe Jira remote links as a partial development view', async () => {
+  const paths: string[] = [];
+  const sha = 'a'.repeat(40);
+  const provider = new JiraProvider(async (path) => {
+    paths.push(path);
+    return [
+      {
+        object: {
+          title: 'Fix',
+          url: 'https://github.com/team/repo/pull/42',
+          status: { icon: { title: 'Merged' } },
+        },
+      },
+      { object: { title: 'Fix', url: 'https://github.com/team/repo/pull/42' } },
+      {
+        object: {
+          title: 'Branch',
+          url: 'https://bitbucket.org/team/repo/branch/ABC-1-work',
+        },
+      },
+      {
+        object: {
+          title: 'Commit',
+          url: `https://gitlab.com/team/repo/-/commit/${sha}`,
+        },
+      },
+      {
+        object: {
+          title: 'Design',
+          url: 'https://docs.example.com/design?id=42',
+        },
+      },
+      { object: { title: 'Unsafe', url: 'javascript:alert(1)' } },
+      { object: { title: 'Local', url: 'https://127.0.0.1/private' } },
+      { object: { title: 'Insecure', url: 'http://example.com/page' } },
+    ];
+  });
+  const result = await provider.development('ABC-1');
+  assert.deepEqual(paths, ['/rest/api/3/issue/ABC-1/remotelink']);
+  assert.equal(result.source, 'jira-remote-links');
+  assert.equal(result.state, 'available');
+  assert.deepEqual(result.pullRequests, [
+    {
+      title: 'Fix',
+      url: 'https://github.com/team/repo/pull/42',
+      state: 'Merged',
+    },
+  ]);
+  assert.deepEqual(result.branches, {
+    state: 'available',
+    links: [
+      {
+        title: 'Branch',
+        url: 'https://bitbucket.org/team/repo/branch/ABC-1-work',
+      },
+    ],
+  });
+  assert.deepEqual(result.commits, [
+    { title: 'Commit', url: `https://gitlab.com/team/repo/-/commit/${sha}` },
+  ]);
+  assert.deepEqual(result.otherLinks, [
+    { title: 'Design', url: 'https://docs.example.com/design?id=42' },
+  ]);
+  assert.match(result.reason!, /partial view.*3 remote links omitted/);
+  assert.throws(() =>
+    jiraRemoteLinkUrl('https://user:secret@example.com/path'),
+  );
+  assert.throws(() => jiraRemoteLinkUrl('https://localhost/private'));
+  assert.throws(() => jiraRemoteLinkUrl('https://localhost./private'));
+});
+
+it('keeps Jira remote link access and response failures distinct from an empty result', async () => {
+  await assert.rejects(
+    new JiraProvider(async () => {
+      throw new Error('Jira 403');
+    }).development('ABC-1'),
+    /Jira 403/,
+  );
+  await assert.rejects(
+    new JiraProvider(async () => ({})).development('ABC-1'),
+    /invalid remote links/,
+  );
+  const empty = await new JiraProvider(async () => []).development('ABC-1');
+  assert.equal(empty.state, 'available');
+  assert.deepEqual(empty.pullRequests, []);
+  assert.match(
+    empty.reason!,
+    /no remote links.*native Development panel may still contain/i,
+  );
 });
 
 it('caps preview comments at ten, retains author/date, and supports absent content', async () => {

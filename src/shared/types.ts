@@ -53,12 +53,17 @@ export type IssuePreview = {
   commentsError?: string;
   linksError?: string;
 };
+export type DevelopmentLink = { title: string; url: string; state?: string };
 export type DevelopmentLinks = {
   state: 'available' | 'unavailable';
   reason?: string;
-  branches: { state: 'unavailable'; reason: string };
-  pullRequests: { title: string; url: string; state: string }[];
-  commits: { title: string; url: string; state: string }[];
+  source?: 'github-timeline' | 'jira-remote-links';
+  branches:
+    | { state: 'unavailable'; reason: string }
+    | { state: 'available'; links: DevelopmentLink[] };
+  pullRequests: DevelopmentLink[];
+  commits: DevelopmentLink[];
+  otherLinks?: DevelopmentLink[];
 };
 export type SearchIssue = Issue & { updated?: string };
 export type SearchPage = {
@@ -218,7 +223,7 @@ export interface CanopyAPI {
   preview(connectionId: string, key: string): Promise<IssuePreview>;
   issueUrl(connectionId: string, key: string): Promise<string>;
   development(connectionId: string, key: string): Promise<DevelopmentLinks>;
-  openDevelopmentLink(url: string): Promise<void>;
+  openDevelopmentLink(connectionId: string, url: string): Promise<void>;
   copyText(value: string): Promise<void>;
   search(
     connectionId: string,

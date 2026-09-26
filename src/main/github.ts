@@ -437,6 +437,7 @@ export class GithubProvider {
     }
     return {
       state: 'available',
+      source: 'github-timeline',
       branches: {
         state: 'unavailable',
         reason:

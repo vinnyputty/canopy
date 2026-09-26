@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import type { Choice, DevelopmentLinks, Issue, IssuePreview as Preview, SeenIssue, SeenValue } from '../shared/types';
+import type { Choice, DevelopmentLink, DevelopmentLinks, Issue, IssuePreview as Preview, SeenIssue, SeenValue } from '../shared/types';
 import { unseenChanges } from './seen';
 
 function displayValue(value: SeenValue) {
@@ -131,7 +131,7 @@ export function IssuePreview({
   const openDevelopmentLink = async (url: string) => {
     setDevelopmentLinkError('');
     try {
-      await window.canopy.openDevelopmentLink(url);
+      await window.canopy.openDevelopmentLink(connectionId, url);
     } catch (reason) {
       if (identity.current === developmentIdentity)
         setDevelopmentLinkError(
@@ -139,6 +139,18 @@ export function IssuePreview({
         );
     }
   };
+  const developmentLink = (item: DevelopmentLink) => (
+    <div className="preview-development-link" key={item.url}>
+      <button
+        className="text-button"
+        onClick={() => void openDevelopmentLink(item.url)}
+        title={`Open ${item.url}`}
+      >
+        {item.title}
+      </button>
+      {item.state && <span>{item.state}</span>}
+    </div>
+  );
   useEffect(() => {
     if (provider !== 'github' || !editingLabels) return;
     let live = true;
@@ -456,43 +468,48 @@ export function IssuePreview({
                 ) : (
                   <div>
                     <p className="preview-hint">
-                      Associations shown from the GitHub issue timeline.
+                      {development.reason ||
+                        'Associations shown from the GitHub issue timeline.'}
                     </p>
                     {developmentLinkError && (
                       <p role="alert">{developmentLinkError}</p>
                     )}
                     <h4>Branches</h4>
-                    <p>{development.branches.reason}</p>
+                    {development.branches.state === 'unavailable' ? (
+                      <p>{development.branches.reason}</p>
+                    ) : development.branches.links.length ? (
+                      development.branches.links.map(developmentLink)
+                    ) : (
+                      <p>No branch remote links found.</p>
+                    )}
                     <h4>Pull requests</h4>
                     {development.pullRequests.length === 0 && (
-                      <p>No associated pull requests found.</p>
+                      <p>
+                        {development.source === 'jira-remote-links'
+                          ? 'No pull request remote links found.'
+                          : 'No associated pull requests found.'}
+                      </p>
                     )}
-                    {development.pullRequests.map((item) => (
-                      <div className="preview-development-link" key={item.url}>
-                        <button
-                          className="text-button"
-                          onClick={() => void openDevelopmentLink(item.url)}
-                        >
-                          {item.title}
-                        </button>
-                        <span>{item.state}</span>
-                      </div>
-                    ))}
+                    {development.pullRequests.map(developmentLink)}
                     <h4>Commits</h4>
                     {development.commits.length === 0 && (
-                      <p>No associated commits found.</p>
+                      <p>
+                        {development.source === 'jira-remote-links'
+                          ? 'No commit remote links found.'
+                          : 'No associated commits found.'}
+                      </p>
                     )}
-                    {development.commits.map((item) => (
-                      <div className="preview-development-link" key={item.url}>
-                        <button
-                          className="text-button"
-                          onClick={() => void openDevelopmentLink(item.url)}
-                        >
-                          {item.title}
-                        </button>
-                        <span>{item.state}</span>
-                      </div>
-                    ))}
+                    {development.commits.map(developmentLink)}
+                    {development.source === 'jira-remote-links' && (
+                      <>
+                        <h4>Other remote links</h4>
+                        {development.otherLinks?.length ? (
+                          development.otherLinks.map(developmentLink)
+                        ) : (
+                          <p>No other remote links found.</p>
+                        )}
+                      </>
+                    )}
                   </div>
                 ))}
             </section>

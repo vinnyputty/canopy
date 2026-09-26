@@ -28,6 +28,7 @@ export async function installPreviewHandlers(
         created: created ?? null,
         clipboard: '',
         developmentCalls: 0,
+        openedDevelopment: [],
       };
       globalThis.previewRecovery = controls;
       const handlers = {
@@ -108,7 +109,7 @@ export async function installPreviewHandlers(
               updated: null,
             },
             description: '<img src=x onerror="window.previewExecuted=true">',
-            ...(mode === 'success'
+            ...(['success', 'metadata-permission'].includes(mode)
               ? {
                   descriptionDocument: {
                     type: 'doc',
@@ -161,7 +162,7 @@ export async function installPreviewHandlers(
                       author: '<b>Ada</b>',
                       created: '2026-01-01T12:00:00Z',
                       body: '<script>window.previewExecuted=true</script>\nDocs (https://example.com)',
-                      ...(mode === 'success'
+                      ...(['success', 'metadata-permission'].includes(mode)
                         ? {
                             bodyDocument: {
                               type: 'doc',
@@ -241,15 +242,22 @@ export async function installPreviewHandlers(
         development: () => {
           controls.developmentCalls++;
           return {
-            state: 'unavailable',
-            reason: 'Development links are unavailable for this Jira connection.',
-            branches: {
-              state: 'unavailable',
-              reason: 'Development integration is unavailable.',
-            },
-            pullRequests: [],
+            state: 'available',
+            source: 'jira-remote-links',
+            reason:
+              'Jira remote links are a partial view. The native Development panel may contain other branches, commits, and pull requests.',
+            branches: { state: 'available', links: [] },
+            pullRequests: [
+              { title: 'Fix PR', url: 'https://github.com/team/repo/pull/42' },
+            ],
             commits: [],
+            otherLinks: [
+              { title: 'Design', url: 'https://docs.example.com/design' },
+            ],
           };
+        },
+        openDevelopmentLink: (_event, id, url) => {
+          controls.openedDevelopment.push([id, url]);
         },
         copyText: (_event, value) => {
           controls.clipboard = value;
@@ -337,9 +345,12 @@ export async function auditPreview(app, page, restart) {
     await app.evaluate(() => globalThis.previewRecovery.developmentCalls),
   ).toBe(0);
   await pane.getByRole('button', { name: 'Show development' }).click();
-  await expect(pane).toContainText(
-    'Development links are unavailable for this Jira connection.',
-  );
+  await expect(pane).toContainText('Jira remote links are a partial view.');
+  await expect(pane).toContainText('Other remote links');
+  await pane.getByRole('button', { name: 'Fix PR' }).click();
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.openedDevelopment),
+  ).toEqual([['second', 'https://github.com/team/repo/pull/42']]);
   expect(
     await app.evaluate(() => globalThis.previewRecovery.developmentCalls),
   ).toBe(1);

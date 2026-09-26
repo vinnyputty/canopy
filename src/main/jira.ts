@@ -1,4 +1,5 @@
 import { JiraConsistency } from './jira-consistency';
+import { isIP } from 'node:net';
 
 import { JiraRateLimitError } from './jira-requests';
 import type {
@@ -7,6 +8,7 @@ import type {
   ChildCreateOptions,
   ChildIssueInput,
   Choice,
+  DevelopmentLink,
   DevelopmentLinks,
   EditOptions,
   StatusTransitionTree,
@@ -21,6 +23,57 @@ import type {
 import { documentMarkdown, documentText } from './adf';
 
 export type JiraRequest = (path: string, init?: RequestInit) => Promise<any>;
+
+export function jiraRemoteLinkUrl(value: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length > 2048 ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  )
+    throw new Error('Invalid Jira remote link.');
+  const url = new URL(value);
+  const hostname = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.port ||
+    !hostname.includes('.') ||
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    isIP(hostname)
+  )
+    throw new Error('Invalid Jira remote link.');
+  return url.href;
+}
+
+function remoteLinkKind(
+  url: URL,
+): 'branches' | 'pullRequests' | 'commits' | 'otherLinks' {
+  const path = url.pathname;
+  if (url.hostname === 'github.com') {
+    if (/^\/[^/]+\/[^/]+\/pull\/[1-9]\d*\/?$/i.test(path))
+      return 'pullRequests';
+    if (/^\/[^/]+\/[^/]+\/commit\/[a-f0-9]{7,64}\/?$/i.test(path))
+      return 'commits';
+    if (/^\/[^/]+\/[^/]+\/tree\/.+$/i.test(path)) return 'branches';
+  }
+  if (url.hostname === 'bitbucket.org') {
+    if (/^\/[^/]+\/[^/]+\/pull-requests\/[1-9]\d*\/?$/i.test(path))
+      return 'pullRequests';
+    if (/^\/[^/]+\/[^/]+\/commits\/[a-f0-9]{7,64}\/?$/i.test(path))
+      return 'commits';
+    if (/^\/[^/]+\/[^/]+\/branch\/.+$/i.test(path)) return 'branches';
+  }
+  if (url.hostname === 'gitlab.com') {
+    if (/^\/(?:[^/]+\/)+-\/merge_requests\/[1-9]\d*\/?$/i.test(path))
+      return 'pullRequests';
+    if (/^\/(?:[^/]+\/)+-\/commit\/[a-f0-9]{7,64}\/?$/i.test(path))
+      return 'commits';
+    if (/^\/(?:[^/]+\/)+-\/tree\/.+$/i.test(path)) return 'branches';
+  }
+  return 'otherLinks';
+}
 
 const ISSUE_FIELDS = [
   'summary',
@@ -510,16 +563,50 @@ export class JiraProvider {
       ...(comments.error ? { commentsError: comments.error } : {}),
     };
   }
-  async development(_key: string): Promise<DevelopmentLinks> {
-    return {
-      state: 'unavailable',
-      reason: 'Development links are unavailable for this Jira connection.',
-      branches: {
-        state: 'unavailable',
-        reason: 'Development integration is unavailable.',
-      },
+  async development(key: string): Promise<DevelopmentLinks> {
+    const raw = await this.call(
+      issuePath(key, '/remotelink'),
+      undefined,
+      `load remote links for ${key}`,
+    );
+    if (!Array.isArray(raw))
+      throw new Error('Jira returned invalid remote links.');
+    const links: Record<
+      'branches' | 'pullRequests' | 'commits' | 'otherLinks',
+      DevelopmentLink[]
+    > = {
+      branches: [],
       pullRequests: [],
       commits: [],
+      otherLinks: [],
+    };
+    let omitted = 0;
+    for (const item of raw) {
+      let url: string;
+      try {
+        url = jiraRemoteLinkUrl(item?.object?.url);
+      } catch {
+        omitted++;
+        continue;
+      }
+      const kind = remoteLinkKind(new URL(url));
+      const status = item.object?.status?.icon?.title;
+      const link: DevelopmentLink = {
+        title: String(item.object?.title || url),
+        url,
+        ...(typeof status === 'string' && status ? { state: status } : {}),
+      };
+      if (!links[kind].some((existing) => existing.url === url))
+        links[kind].push(link);
+    }
+    return {
+      state: 'available',
+      source: 'jira-remote-links',
+      reason: `${raw.length ? 'Jira remote links are a partial view.' : 'Jira returned no remote links for this issue.'} The native Development panel may still contain branches, commits, and pull requests.${omitted ? ` ${omitted} remote link${omitted === 1 ? '' : 's'} omitted without a safe HTTPS target.` : ''}`,
+      branches: { state: 'available', links: links.branches },
+      pullRequests: links.pullRequests,
+      commits: links.commits,
+      otherLinks: links.otherLinks,
     };
   }
 
