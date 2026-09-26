@@ -238,10 +238,7 @@ export async function auditPickers(app, page) {
   await field('status').click();
   await expect(page.locator('.view-settings')).not.toHaveAttribute('open');
   await expect(transition).toBeVisible();
-  await page
-    .locator('.status-popover')
-    .getByRole('button', { name: 'Cancel' })
-    .click();
+  await transition.press('Escape');
   await fixture('hold', 'picker-priority', 'priorities', 'CAN-100');
   await field('priority').click();
   await expect.poll(() => fixture('started', 'picker-priority')).toBe(true);

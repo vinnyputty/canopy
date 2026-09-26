@@ -233,7 +233,9 @@ export async function auditGithub(app, page) {
     await expect(closed).toHaveCount(0);
     await action.click();
     const rowMenu = page.getByRole('menu', { name: 'Actions for team/a#1' });
-    await rowMenu.getByRole('menuitem', { name: 'Copy key' }).press('Escape');
+    await rowMenu
+      .getByRole('menuitem', { name: 'Copy key', exact: true })
+      .press('Escape');
     await expect(rowMenu).toHaveCount(0);
     await expect(action).toBeFocused();
     await action.click();
@@ -265,10 +267,7 @@ export async function auditGithub(app, page) {
       () => globalThis.githubSmokeTransitionCalls.length,
     );
     expect(firstStatusCalls).toBe(1);
-    await root
-      .locator('.status-popover')
-      .getByRole('button', { name: 'Cancel' })
-      .click();
+    await root.getByRole('menuitem', { name: 'Closed' }).press('Escape');
     await page.evaluate(() => {
       const field = document.querySelector(
         '[aria-label="Edit status for team/a#1"]',
@@ -305,10 +304,7 @@ export async function auditGithub(app, page) {
     expect(
       await app.evaluate(() => globalThis.githubSmokeTransitionCalls.length),
     ).toBe(firstStatusCalls + 1);
-    await root
-      .locator('.status-popover')
-      .getByRole('button', { name: 'Cancel' })
-      .click();
+    await root.getByRole('menuitem', { name: 'Open' }).press('Escape');
     await tree.getByRole('treeitem', { name: /team\/a#1/ }).press('Space');
     const preview = page.getByRole('complementary', {
       name: 'Preview team/a#1',
@@ -406,7 +402,7 @@ export async function auditGithub(app, page) {
     await repositoryAction.click();
     await page
       .getByRole('menu', { name: 'Actions for team/a' })
-      .getByRole('menuitem', { name: 'Copy key' })
+      .getByRole('menuitem', { name: 'Copy key', exact: true })
       .press('Escape');
     await expect(repositoryAction).toBeFocused();
     await repositoryAction.click();

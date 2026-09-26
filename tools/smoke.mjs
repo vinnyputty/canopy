@@ -1008,7 +1008,9 @@ try {
   await expect(rowMenu).toBeHidden();
   await expect(rowTrigger).toBeFocused();
   await rowTrigger.press('Enter');
-  await rowMenu.getByRole('menuitem', { name: 'Copy key' }).press('Escape');
+  await rowMenu
+    .getByRole('menuitem', { name: 'Copy key', exact: true })
+    .press('Escape');
   await expect(rowMenu).toBeHidden();
   await expect(rowTrigger).toBeFocused();
   const title = issue('CAN-109').locator('.summary');
