@@ -1173,9 +1173,9 @@ try {
   });
   await expect(preview).toBeVisible();
   await preview.getByRole('button', { name: 'Copy key and summary' }).click();
-  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
-    'CAN-108 Keep unfinished descendants visible',
-  );
+  await expect
+    .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
+    .toBe('CAN-108 Keep unfinished descendants visible');
   await expect(
     preview.getByText('Comments temporarily unavailable.'),
   ).toBeVisible();
