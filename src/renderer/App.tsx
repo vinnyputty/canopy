@@ -276,6 +276,7 @@ export function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
+  const previousVirtualTabs = useRef(new Map<string, TabState>());
   const refreshSchedule = useRef(new RefreshSchedule());
   const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
   const snapshotsRef = useRef(snapshots);
@@ -566,6 +567,7 @@ export function App() {
   useEffect(() => {
     if (activeSavedView?.filters.assignee !== 'me') return;
     let live = true;
+    const generation = identityGeneration.current;
     for (const id of new Set(
       savedSources.map((source) => source.connectionId),
     )) {
@@ -573,7 +575,7 @@ export function App() {
       void window.canopy
         .currentUser(id)
         .then((user) => {
-          if (live) {
+          if (live && generation === identityGeneration.current) {
             setCurrentUsers((current) => ({ ...current, [id]: user }));
             setIdentityErrors((current) => {
               const next = { ...current };
@@ -583,7 +585,7 @@ export function App() {
           }
         })
         .catch((error) => {
-          if (live)
+          if (live && generation === identityGeneration.current)
             setIdentityErrors((current) => ({
               ...current,
               [id]: `Couldn’t identify your account: ${String(error)}`,
@@ -804,8 +806,8 @@ export function App() {
           for (const target of targets) {
             if (
               !tabsRef.current.some((item) => item.id === target.id) ||
-              target.id === tab.id &&
-              refreshSequences.current[tab.id] !== sequence
+              (target.id === tab.id &&
+                refreshSequences.current[tab.id] !== sequence)
             )
               continue;
             mutations.receive(target, next, epoch);
@@ -1163,7 +1165,7 @@ export function App() {
         ids.includes(item.id),
       )) {
         if (
-          !workspaceRef.current.tabs.some(
+          !tabsRef.current.some(
             (other) =>
               !ids.includes(other.id) &&
               refreshRootKey(other) === refreshRootKey(tab),
@@ -1193,6 +1195,27 @@ export function App() {
     },
     [mutations],
   );
+
+  useEffect(() => {
+    const virtualTabs = new Map(
+      allRefreshTabs
+        .filter((tab) => tab.id.startsWith('saved-view:'))
+        .map((tab) => [tab.id, tab] as const),
+    );
+    const removed = [...previousVirtualTabs.current.values()].filter(
+      (tab) => !virtualTabs.has(tab.id),
+    );
+    previousVirtualTabs.current = virtualTabs;
+    if (!removed.length) return;
+    for (const tab of removed)
+      if (
+        !allRefreshTabs.some(
+          (item) => refreshRootKey(item) === refreshRootKey(tab),
+        )
+      )
+        rootRefreshes.current.forget(refreshRootKey(tab));
+    forgetTabs(removed.map((tab) => tab.id));
+  }, [allRefreshTabs, forgetTabs]);
 
   const closeTabIds = useCallback(
     (ids: string[]) => {

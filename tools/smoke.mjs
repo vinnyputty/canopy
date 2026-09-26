@@ -801,12 +801,15 @@ try {
   await page
     .getByRole('button', { name: 'Saved view: Assigned to me' })
     .click();
-  const savedList = page.getByRole('listbox', {
+  const savedList = page.getByRole('list', {
     name: 'Assigned to me results',
   });
-  const savedRoot = savedList.getByRole('option', { name: /^CAN-100 / });
+  const savedOpen = savedList.getByRole('button', {
+    name: 'Open CAN-100 in tree',
+  });
+  const savedRoot = savedOpen.locator('..');
   await expect(savedRoot).toContainText('Canopy demo · CAN-100');
-  await savedRoot.getByText('Open in tree').click();
+  await savedOpen.press('Enter');
   await expect(
     tree.getByRole('treeitem', { name: /CAN-100:/ }),
   ).toHaveAttribute('aria-selected', 'true');

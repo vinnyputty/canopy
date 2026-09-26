@@ -264,7 +264,7 @@ export function SavedViewsPanel(props: Props) {
       })}
       <div
         className="saved-view-list"
-        role="listbox"
+        role="list"
         aria-label={`${view.name} results`}
       >
         {results.map((result) => {
@@ -276,34 +276,29 @@ export function SavedViewsPanel(props: Props) {
             result.issue.id,
           ]);
           return (
-            <button
-              key={identity}
-              role="option"
-              aria-selected={identity === props.selected}
-              className={identity === props.selected ? 'selected' : ''}
-              onClick={() => props.onSelect(identity)}
-              onDoubleClick={() => props.onOpen(result)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') props.onOpen(result);
-              }}
-            >
-              <strong>{result.issue.key}</strong>
-              <span>{result.issue.summary}</span>
-              <small>
-                {connection?.provider ?? 'Unknown provider'} ·{' '}
-                {connection?.name ?? result.source.connectionId} ·{' '}
-                {result.source.rootKey} · {result.issue.status.name}
-              </small>
-              <span
+            <div className="saved-view-result" role="listitem" key={identity}>
+              <button
+                className={`saved-view-choice ${identity === props.selected ? 'selected' : ''}`}
+                aria-current={identity === props.selected ? 'true' : undefined}
+                onClick={() => props.onSelect(identity)}
+                onDoubleClick={() => props.onOpen(result)}
+              >
+                <strong>{result.issue.key}</strong>
+                <span>{result.issue.summary}</span>
+                <small>
+                  {connection?.provider ?? 'Unknown provider'} ·{' '}
+                  {connection?.name ?? result.source.connectionId} ·{' '}
+                  {result.source.rootKey} · {result.issue.status.name}
+                </small>
+              </button>
+              <button
                 className="saved-view-open"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.onOpen(result);
-                }}
+                aria-label={`Open ${result.issue.key} in tree`}
+                onClick={() => props.onOpen(result)}
               >
                 Open in tree
-              </span>
-            </button>
+              </button>
+            </div>
           );
         })}
         {!results.length && sources.length > 0 && (
