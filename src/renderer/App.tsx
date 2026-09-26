@@ -89,6 +89,7 @@ import { RowMenu } from './RowMenu';
 import { issueKeyAndSummary, issueWorkBrief } from './copy-issue';
 import { BulkTriage, type BulkOperation } from './BulkTriage';
 import { copySelectedIssues } from './bulk-triage';
+import { CreateChildDialog } from './CreateChildDialog';
 import { StatusColors } from './status-colors';
 import {
   activateTab,
@@ -268,7 +269,7 @@ export function App() {
     Record<string, NextTaskCriterion>
   >({});
   const [nextTaskMine, setNextTaskMine] = useState<Record<string, boolean>>({});
-  const [reveal, setReveal] = useState<{ tabId: string; key: string } | null>(
+  const [reveal, setReveal] = useState<{ tabId: string; key: string; preserveScroll?: boolean } | null>(
     null,
   );
   const focusedReveal = useRef<typeof reveal>(null);
@@ -303,6 +304,11 @@ export function App() {
     Record<string, BulkOperation>
   >({});
   const suppressTreeFocus = useRef(false);
+  const [childParent, setChildParent] = useState<{
+    issue: Issue;
+    connectionId: string;
+    tabId: string;
+  } | null>(null);
   const restoreTreeFocus = useCallback((key?: string) => {
     const row = key
       ? document.querySelector<HTMLElement>(`[data-tree-key="${key}"]`)
@@ -752,7 +758,7 @@ export function App() {
     restoreTreeFocus(activeTab?.selectedKey ?? activeTab?.rootKey);
   }, [activeTab?.selectedKey, activeTab?.rootKey, restoreTreeFocus]);
   useEffect(() => {
-    if (!previewKey || dialog || workBrief || editor || rowMenu || tabMenu)
+    if (!previewKey || dialog || workBrief || childParent || editor || rowMenu || tabMenu)
       return;
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented) {
@@ -762,7 +768,7 @@ export function App() {
     };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
-  }, [previewKey, dialog, workBrief, editor, rowMenu, tabMenu, closePreview]);
+  }, [previewKey, dialog, workBrief, childParent, editor, rowMenu, tabMenu, closePreview]);
 
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
@@ -1819,6 +1825,7 @@ export function App() {
     navigateHistory,
     dialog,
     workBrief,
+    childParent,
     editor,
   ]);
 
@@ -1937,7 +1944,7 @@ export function App() {
       if (
         event.defaultPrevented ||
         dialog ||
-        workBrief ||
+        workBrief || childParent ||
         event.shiftKey ||
         event.altKey ||
         !(event.metaKey || event.ctrlKey) ||
@@ -2086,7 +2093,8 @@ export function App() {
       !reveal ||
       reveal.tabId !== activeTab?.id ||
       reveal.key !== activeTab?.selectedKey ||
-      editor
+      editor ||
+      reveal.preserveScroll
     )
       return;
     document
@@ -4420,7 +4428,13 @@ export function App() {
           position={rowMenu}
           onClose={closeRowMenu}
           onAction={(action) => {
-            if (action === 'link')
+            if (action === 'createChild')
+              setChildParent({
+                issue: rowMenu.issue,
+                connectionId: activeTab.connectionId,
+                tabId: activeTab.id,
+              });
+            else if (action === 'link')
               void copyIssueLink(activeTab.connectionId, rowMenu.issue.key);
             else if (action === 'open')
               void openExternal(activeTab.connectionId, rowMenu.issue.key);
@@ -4437,6 +4451,40 @@ export function App() {
       )}
       {workBrief && (
         <WorkBriefDialog {...workBrief} onClose={() => setWorkBrief(null)} />
+      )}
+      {childParent && (
+        <CreateChildDialog
+          key={`${childParent.connectionId}:${childParent.issue.key}`}
+          connectionId={childParent.connectionId}
+          parent={childParent.issue}
+          onClose={() => {
+            setChildParent(null);
+            restoreTreeFocus(childParent.issue.key);
+          }}
+          onOpenJira={() =>
+            void openExternal(childParent.connectionId, childParent.issue.key)
+          }
+          onCreated={(issue) => {
+            mutations.insertCreated(childParent.connectionId, issue);
+            updateTab(childParent.tabId, {
+              expanded: [
+                ...new Set([
+                  ...(workspaceRef.current.tabs.find(
+                    (tab) => tab.id === childParent.tabId,
+                  )?.expanded ?? []),
+                  childParent.issue.key,
+                ]),
+              ],
+              selectedKey: issue.key,
+            });
+            setReveal({
+              tabId: childParent.tabId,
+              key: issue.key,
+              preserveScroll: true,
+            });
+            setChildParent(null);
+          }}
+        />
       )}
       {dialog === 'open' && (
         <OpenIssueDialog

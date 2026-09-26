@@ -208,6 +208,209 @@ describe('JiraProvider tree', () => {
   });
 });
 
+describe('JiraProvider child creation', () => {
+  const request = recordingRequest((path, init) => {
+    if (path.includes('/issue/EPIC-1?fields=project'))
+      return rawIssue('EPIC-1', undefined, {
+        project: { id: '100', key: 'PROJ', name: 'Project' },
+        issuetype: { id: '10', name: 'Epic' },
+      });
+    if (path.endsWith('/issuetype/10')) return { hierarchyLevel: 1 };
+    if (path.endsWith('/issuetype/11')) return { hierarchyLevel: 0 };
+    if (path.endsWith('/issuetype/12')) return { hierarchyLevel: -1 };
+    if (path.includes('/createmeta/100/issuetypes/11'))
+      return {
+        fields: [
+          { fieldId: 'summary', name: 'Summary', required: true },
+          { fieldId: 'description', name: 'Description' },
+          {
+            fieldId: 'priority',
+            name: 'Priority',
+            allowedValues: [{ id: '2', name: 'High' }],
+          },
+          { fieldId: 'assignee', name: 'Assignee' },
+          { fieldId: 'customfield_1', name: 'Release gate', required: true },
+        ],
+        total: 5,
+      };
+    if (path.includes('/createmeta/100/issuetypes'))
+      return {
+        issueTypes: [
+          { id: '11', name: 'Task' },
+          { id: '12', name: 'Subtask' },
+        ],
+        total: 2,
+      };
+    if (path === '/rest/api/3/issue' && init?.method === 'POST')
+      return { key: 'PROJ-2' };
+    if (path.includes('/issue/PROJ-2?')) return rawIssue('PROJ-2', 'EPIC-1');
+    if (path.includes('/issue/EPIC-1?')) return rawIssue('EPIC-1');
+    if (path === '/rest/api/3/search/jql') return { issues: [], isLast: true };
+    throw new Error(`Unexpected request: ${path}`);
+  });
+
+  it('offers only direct child types and blocks required fields the dialog cannot fill', async () => {
+    const provider = new JiraProvider(request);
+    const options = await provider.childCreateOptions('EPIC-1');
+    assert.deepEqual(options.types, [{ id: '11', name: 'Task' }]);
+    const fields = await provider.childCreateFields('EPIC-1', '11');
+    assert.match(fields.unsupported ?? '', /Release gate/);
+    await assert.rejects(
+      provider.createChild('EPIC-1', { typeId: '11', summary: 'New task' }),
+      /Release gate/,
+    );
+    assert.equal(
+      request.calls.filter(
+        ([path, init]) =>
+          path === '/rest/api/3/issue' && init?.method === 'POST',
+      ).length,
+      0,
+    );
+  });
+
+  it('reads every type and field metadata page before allowing creation', async () => {
+    const paged = recordingRequest((path) => {
+      if (path.includes('/issue/EPIC-1?fields=project'))
+        return rawIssue('EPIC-1', undefined, {
+          project: { id: '100', key: 'PROJ', name: 'Project' },
+          issuetype: { id: '10', name: 'Epic' },
+        });
+      if (path.endsWith('/issuetype/10')) return { hierarchyLevel: 1 };
+      if (path.includes('/createmeta/100/issuetypes/11?startAt=0'))
+        return { fields: [{ fieldId: 'summary', required: true }], total: 2 };
+      if (path.includes('/createmeta/100/issuetypes/11?startAt=1'))
+        return {
+          fields: [
+            { fieldId: 'customfield_1', name: 'Release gate', required: true },
+          ],
+          total: 2,
+        };
+      if (path.includes('/createmeta/100/issuetypes?startAt=0'))
+        return {
+          issueTypes: [{ id: '12', name: 'Subtask', hierarchyLevel: -1 }],
+          total: 2,
+        };
+      if (path.includes('/createmeta/100/issuetypes?startAt=1'))
+        return {
+          issueTypes: [{ id: '11', name: 'Task', hierarchyLevel: 0 }],
+          total: 2,
+        };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const provider = new JiraProvider(paged);
+    assert.deepEqual((await provider.childCreateOptions('EPIC-1')).types, [
+      { id: '11', name: 'Task' },
+    ]);
+    assert.match(
+      (await provider.childCreateFields('EPIC-1', '11')).unsupported ?? '',
+      /Release gate/,
+    );
+  });
+
+  it('sends parent, project, ADF description, assignee, and priority, then retains a child during search lag', async () => {
+    const writable = recordingRequest((path, init) => {
+      if (path.includes('/issue/EPIC-1?fields=project'))
+        return rawIssue('EPIC-1', undefined, {
+          project: { id: '100', key: 'PROJ', name: 'Project' },
+          issuetype: { id: '10', name: 'Epic' },
+        });
+      if (path.endsWith('/issuetype/10')) return { hierarchyLevel: 1 };
+      if (path.endsWith('/issuetype/11')) return { hierarchyLevel: 0 };
+      if (path.includes('/createmeta/100/issuetypes/11'))
+        return {
+          fields: [
+            { fieldId: 'summary', required: true },
+            { fieldId: 'description' },
+            { fieldId: 'assignee' },
+            { fieldId: 'priority', allowedValues: [{ id: '2', name: 'High' }] },
+          ],
+          total: 4,
+        };
+      if (path.includes('/createmeta/100/issuetypes'))
+        return {
+          issueTypes: [{ id: '11', name: 'Task', hierarchyLevel: 0 }],
+          total: 1,
+        };
+      if (path === '/rest/api/3/issue' && init?.method === 'POST')
+        return { key: 'PROJ-2' };
+      if (path.includes('/issue/PROJ-2?')) return rawIssue('PROJ-2', 'EPIC-1');
+      if (path.includes('/issue/EPIC-1?')) return rawIssue('EPIC-1');
+      if (path === '/rest/api/3/search/jql')
+        return { issues: [], isLast: true };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const provider = new JiraProvider(writable);
+    const child = await provider.createChild('EPIC-1', {
+      typeId: '11',
+      summary: 'New task',
+      description: 'Line one\nLine two',
+      assigneeId: 'account-1',
+      priorityId: '2',
+    });
+    assert.equal(child.key, 'PROJ-2');
+    const post = writable.calls.find(
+      ([path, init]) => path === '/rest/api/3/issue' && init?.method === 'POST',
+    );
+    assert.deepEqual(body(post?.[1]).fields, {
+      project: { id: '100' },
+      parent: { key: 'EPIC-1' },
+      issuetype: { id: '11' },
+      summary: 'New task',
+      description: {
+        type: 'doc',
+        version: 1,
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'Line one' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Line two' }] },
+        ],
+      },
+      assignee: { accountId: 'account-1' },
+      priority: { id: '2' },
+    });
+    assert.deepEqual(
+      (await provider.tree('EPIC-1')).issues.map((issue) => issue.key),
+      ['EPIC-1', 'PROJ-2'],
+    );
+  });
+
+  it('reports the created key when the follow-up read fails so a retry cannot silently duplicate it', async () => {
+    const failedRead = recordingRequest((path, init) => {
+      if (path.includes('/issue/EPIC-1?fields=project'))
+        return rawIssue('EPIC-1', undefined, {
+          project: { id: '100', key: 'PROJ', name: 'Project' },
+          issuetype: { id: '10', name: 'Epic' },
+        });
+      if (path.endsWith('/issuetype/10')) return { hierarchyLevel: 1 };
+      if (path.includes('/createmeta/100/issuetypes/11'))
+        return { fields: [{ fieldId: 'summary', required: true }], total: 1 };
+      if (path.includes('/createmeta/100/issuetypes'))
+        return {
+          issueTypes: [{ id: '11', name: 'Task', hierarchyLevel: 0 }],
+          total: 1,
+        };
+      if (path === '/rest/api/3/issue' && init?.method === 'POST')
+        return { key: 'PROJ-2' };
+      if (path.includes('/issue/PROJ-2?'))
+        throw new Error('Temporary read failure');
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    await assert.rejects(
+      new JiraProvider(failedRead).createChild('EPIC-1', {
+        typeId: '11',
+        summary: 'New task',
+      }),
+      /Jira created PROJ-2, but Canopy could not load it/,
+    );
+    assert.equal(
+      failedRead.calls.filter(
+        ([path, init]) =>
+          path === '/rest/api/3/issue' && init?.method === 'POST',
+      ).length,
+      1,
+    );
+  });
+});
+
 describe('JiraProvider search and editing', () => {
   it('escapes user input and returns each page on demand', async () => {
     const request = recordingRequest((_path, init) => {

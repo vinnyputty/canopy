@@ -35,6 +35,12 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:validateAssignee', id, key, accountId, refresh),
   update: (id, key, patch) =>
     ipcRenderer.invoke('canopy:update', id, key, patch),
+  childCreateOptions: (id, key, refresh) =>
+    ipcRenderer.invoke('canopy:childCreateOptions', id, key, refresh),
+  childCreateFields: (id, key, typeId) =>
+    ipcRenderer.invoke('canopy:childCreateFields', id, key, typeId),
+  createChild: (id, key, input) =>
+    ipcRenderer.invoke('canopy:createChild', id, key, input),
   rank: (id, key, before, position) =>
     ipcRenderer.invoke('canopy:rank', id, key, before, position),
   priorityOrder: (id, keys) =>

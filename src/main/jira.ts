@@ -3,6 +3,9 @@ import { JiraConsistency } from './jira-consistency';
 import { JiraRateLimitError } from './jira-requests';
 import type {
   AssigneePage,
+  ChildCreateFields,
+  ChildCreateOptions,
+  ChildIssueInput,
   Choice,
   EditOptions,
   StatusTransitionTree,
@@ -168,6 +171,11 @@ export class JiraProvider {
   private reconcileSupported = true;
   private identities = new Map<string, Choice>();
   private statuses = new Map<string, string>();
+  private created = new Map<string, { issue: Issue; at: number }>();
+  private childOptions = new Map<
+    string,
+    { options: ChildCreateOptions; at: number }
+  >();
   private pickerCache = new Map<
     string,
     { promise: Promise<any>; pending: boolean }
@@ -284,6 +292,12 @@ export class JiraProvider {
 
         for (const raw of children) {
           const child = await this.consistentIssue(raw, recent);
+          if (child && this.created.has(child.key)) {
+            const saved = this.created.get(child.key)!;
+            if (child.parentKey !== saved.issue.parentKey)
+              this.created.delete(child.key);
+            else this.created.set(child.key, { ...saved, issue: child });
+          }
           if (!child?.parentKey || !parents.includes(child.parentKey)) continue;
           if (visited.has(child.key)) {
             warnings.push(`Ignored duplicate or cyclic child ${child.key}.`);
@@ -292,6 +306,21 @@ export class JiraProvider {
           visited.add(child.key);
           issues.push(child);
           nextFrontier.push(child.key);
+        }
+        for (const [key, entry] of this.created) {
+          if (Date.now() - entry.at > 5 * 60_000) {
+            this.created.delete(key);
+            continue;
+          }
+          const child = entry.issue;
+          if (
+            parents.includes(child.parentKey ?? '') &&
+            !visited.has(child.key)
+          ) {
+            visited.add(child.key);
+            issues.push(child);
+            nextFrontier.push(child.key);
+          }
         }
       }
       frontier = nextFrontier;
@@ -543,6 +572,258 @@ export class JiraProvider {
           .filter((value: Choice | null): value is Choice => value !== null),
       );
     });
+  }
+
+  async childCreateOptions(
+    parentKey: string,
+    refresh = false,
+  ): Promise<ChildCreateOptions> {
+    const cached = this.childOptions.get(parentKey);
+    if (!refresh && cached && Date.now() - cached.at < 30_000)
+      return cached.options;
+    const parent = await this.call(
+      `${issuePath(parentKey)}?fields=project,issuetype,summary`,
+      undefined,
+      `load child creation context for ${parentKey}`,
+    );
+    const project = choice(parent?.fields?.project);
+    const parentTypeId = parent?.fields?.issuetype?.id;
+    if (!project || !parentTypeId || !parent?.key)
+      throw new Error(
+        'Jira did not provide the parent project and issue type.',
+      );
+    const parentType = await this.call(
+      `/rest/api/3/issuetype/${encodeURIComponent(String(parentTypeId))}`,
+      undefined,
+      `load issue hierarchy for ${parentKey}`,
+    );
+    const parentLevel = parentType?.hierarchyLevel;
+    if (typeof parentLevel !== 'number' || !Number.isInteger(parentLevel))
+      throw new Error('Jira did not provide this parent’s hierarchy level.');
+    if (parentLevel < 0) {
+      const options = {
+        project,
+        parent: {
+          id: parent.key,
+          name: String(parent.fields.summary ?? parent.key),
+        },
+        types: [],
+        reason: 'This issue type cannot have children in Jira.',
+      };
+      this.childOptions.set(parentKey, { options, at: Date.now() });
+      return options;
+    }
+    const path = `/rest/api/3/issue/createmeta/${encodeURIComponent(project.id)}/issuetypes`;
+    const types: any[] = [];
+    let startAt = 0;
+    while (true) {
+      const page = await this.call(
+        `${path}?startAt=${startAt}&maxResults=100`,
+        undefined,
+        `load creatable issue types for ${project.name}`,
+      );
+      if (!Array.isArray(page?.issueTypes) || !Number.isInteger(page.total))
+        throw new Error('Jira returned invalid create issue type metadata.');
+      types.push(...page.issueTypes);
+      startAt += page.issueTypes.length;
+      if (startAt >= page.total) break;
+      if (!page.issueTypes.length)
+        throw new Error('Jira returned an incomplete issue type list.');
+    }
+    const eligible: (Choice | null)[] = [];
+    for (let offset = 0; offset < types.length; offset += 5) {
+      eligible.push(
+        ...(await Promise.all(
+          types.slice(offset, offset + 5).map(async (type) => {
+            if (!type?.id || !type?.name) return null;
+            const details = Number.isInteger(type.hierarchyLevel)
+              ? type
+              : await this.call(
+                  `/rest/api/3/issuetype/${encodeURIComponent(String(type.id))}`,
+                  undefined,
+                  `load hierarchy for ${type.name}`,
+                );
+            return typeof details?.hierarchyLevel === 'number' &&
+              details.hierarchyLevel === parentLevel - 1
+              ? { id: String(type.id), name: String(type.name) }
+              : null;
+          }),
+        )),
+      );
+    }
+    const choices = eligible.filter((type): type is Choice => type !== null);
+    const options = {
+      project,
+      parent: {
+        id: String(parent.key),
+        name: String(parent.fields.summary ?? parent.key),
+      },
+      types: choices,
+      ...(!choices.length
+        ? {
+            reason:
+              'Jira offers no child issue types for this parent, project, and account.',
+          }
+        : {}),
+    };
+    this.childOptions.set(parentKey, { options, at: Date.now() });
+    return options;
+  }
+
+  async childCreateFields(
+    parentKey: string,
+    typeId: string,
+  ): Promise<ChildCreateFields> {
+    const options = await this.childCreateOptions(parentKey);
+    return this.loadChildCreateFields(options, typeId);
+  }
+
+  private async loadChildCreateFields(
+    options: ChildCreateOptions,
+    typeId: string,
+  ): Promise<ChildCreateFields> {
+    if (!options.types.some((type) => type.id === typeId))
+      throw new Error(
+        'This issue type is not available as a child of this parent.',
+      );
+    const path = `/rest/api/3/issue/createmeta/${encodeURIComponent(options.project.id)}/issuetypes/${encodeURIComponent(typeId)}`;
+    const fields: any[] = [];
+    let startAt = 0;
+    while (true) {
+      const page = await this.call(
+        `${path}?startAt=${startAt}&maxResults=100`,
+        undefined,
+        `load create fields for ${typeId}`,
+      );
+      if (!Array.isArray(page?.fields) || !Number.isInteger(page.total))
+        throw new Error('Jira returned invalid create field metadata.');
+      fields.push(...page.fields);
+      startAt += page.fields.length;
+      if (startAt >= page.total) break;
+      if (!page.fields.length)
+        throw new Error('Jira returned an incomplete create field list.');
+    }
+    const find = (id: string) =>
+      fields.find((field) => field?.fieldId === id || field?.key === id);
+    const unsupported = fields
+      .filter(
+        (field) =>
+          field?.required &&
+          !field.hasDefaultValue &&
+          ![
+            'project',
+            'issuetype',
+            'parent',
+            'summary',
+            'description',
+            'assignee',
+            'priority',
+          ].includes(field.fieldId ?? field.key),
+      )
+      .map((field) => String(field.name ?? field.fieldId ?? field.key));
+    if (!find('summary')) unsupported.push('Summary');
+    const priority = find('priority');
+    const priorities = Array.isArray(priority?.allowedValues)
+      ? uniqueChoices(
+          priority.allowedValues
+            .map(choice)
+            .filter((value: Choice | null): value is Choice => value !== null),
+        )
+      : [];
+    if (priority?.required && !priority.hasDefaultValue && !priorities.length)
+      unsupported.push('Priority choices');
+    return {
+      description: !!find('description'),
+      descriptionRequired:
+        find('description')?.required === true &&
+        find('description')?.hasDefaultValue !== true,
+      assignee: !!find('assignee'),
+      assigneeRequired:
+        find('assignee')?.required === true &&
+        find('assignee')?.hasDefaultValue !== true,
+      priority: !!priority && priorities.length > 0,
+      priorityRequired:
+        priority?.required === true && priority?.hasDefaultValue !== true,
+      priorities,
+      ...(unsupported.length
+        ? {
+            unsupported: `Jira requires fields Canopy cannot fill: ${unsupported.join(', ')}. Create this child in Jira.`,
+          }
+        : {}),
+    };
+  }
+
+  async createChild(parentKey: string, input: ChildIssueInput): Promise<Issue> {
+    const options = await this.childCreateOptions(parentKey, true);
+    if (!options.types.some((type) => type.id === input.typeId))
+      throw new Error('Jira does not allow that child issue type here.');
+    const metadata = await this.loadChildCreateFields(options, input.typeId);
+    if (metadata.unsupported) throw new Error(metadata.unsupported);
+    if (metadata.descriptionRequired && !input.description?.trim())
+      throw new Error('Description is required by Jira.');
+    if (metadata.assigneeRequired && !input.assigneeId)
+      throw new Error('Assignee is required by Jira.');
+    if (metadata.priorityRequired && !input.priorityId)
+      throw new Error('Priority is required by Jira.');
+    const fields: Record<string, unknown> = {
+      project: { id: options.project.id },
+      parent: { key: options.parent.id },
+      issuetype: { id: input.typeId },
+      summary: input.summary,
+    };
+    if (input.description) {
+      if (!metadata.description)
+        throw new Error(
+          'Description is unavailable on this Jira create screen.',
+        );
+      fields.description = {
+        type: 'doc',
+        version: 1,
+        content: input.description.split('\n').map((line) => ({
+          type: 'paragraph',
+          content: line ? [{ type: 'text', text: line }] : [],
+        })),
+      };
+    }
+    if (input.assigneeId) {
+      if (!metadata.assignee)
+        throw new Error('Assignee is unavailable on this Jira create screen.');
+      fields.assignee = { accountId: input.assigneeId };
+    }
+    if (input.priorityId) {
+      if (
+        !metadata.priority ||
+        !metadata.priorities.some((value) => value.id === input.priorityId)
+      )
+        throw new Error(
+          'This priority is unavailable on the Jira create screen.',
+        );
+      fields.priority = { id: input.priorityId };
+    }
+    const created = await this.call(
+      '/rest/api/3/issue',
+      jsonInit('POST', { fields }),
+      `create child of ${parentKey}`,
+    );
+    if (!created?.key)
+      throw new Error(
+        'Jira created the issue without returning its key. Refresh the tree before trying again.',
+      );
+    let issue: Issue;
+    try {
+      issue = await this.getIssue(String(created.key));
+    } catch (error) {
+      throw new Error(
+        `Jira created ${created.key}, but Canopy could not load it. Refresh the tree before creating another child. ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (issue.parentKey !== options.parent.id)
+      throw new Error(
+        `Jira created ${issue.key}, but it did not report ${options.parent.id} as its parent. Open it in Jira to review the hierarchy.`,
+      );
+    this.created.set(issue.key, { issue, at: Date.now() });
+    this.consistency.changed(issue.key, issue.id);
+    return issue;
   }
 
   transitions(

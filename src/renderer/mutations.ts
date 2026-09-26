@@ -123,6 +123,7 @@ export class Mutations {
   private checkingUndo = false;
   private refreshes = new Map<number, number>();
   private rendered: Record<string, TreeSnapshot> = {};
+  private created = new Map<string, { issue: Issue; at: number }>();
   constructor(
     private api: Pick<
       CanopyAPI,
@@ -162,6 +163,25 @@ export class Mutations {
   }
   receive(tab: TabState, snapshot: TreeSnapshot, revision: number) {
     this.tabs.set(tab.id, tab);
+    for (const [owner, entry] of this.created) {
+      if (Date.now() - entry.at > 5 * 60_000) {
+        this.created.delete(owner);
+        continue;
+      }
+      const remote = snapshot.issues.find(
+        (issue) => issue.key === entry.issue.key,
+      );
+      if (remote && remote.parentKey !== entry.issue.parentKey) {
+        this.created.delete(owner);
+        continue;
+      }
+      if (
+        owner.startsWith(`${tab.connectionId}:`) &&
+        snapshot.issues.some((issue) => issue.key === entry.issue.parentKey) &&
+        !snapshot.issues.some((issue) => issue.key === entry.issue.key)
+      )
+        snapshot = { ...snapshot, issues: [...snapshot.issues, entry.issue] };
+    }
     for (const done of this.completed)
       if (done.connectionId === tab.connectionId && done.revision > revision)
         snapshot = applyChange(snapshot, done.change);
@@ -170,6 +190,20 @@ export class Mutations {
   }
   confirmedSnapshot(id: string) {
     return this.bases[id];
+  }
+  insertCreated(connectionId: string, issue: Issue) {
+    this.created.set(`${connectionId}:${issue.key}`, { issue, at: Date.now() });
+    for (const [id, tab] of this.tabs)
+      if (
+        tab.connectionId === connectionId &&
+        this.bases[id]?.issues.some((value) => value.key === issue.parentKey) &&
+        !this.bases[id].issues.some((value) => value.key === issue.key)
+      )
+        this.bases[id] = {
+          ...this.bases[id],
+          issues: [...this.bases[id].issues, issue],
+        };
+    this.publish();
   }
   forget(id: string) {
     this.tabs.delete(id);

@@ -238,6 +238,25 @@ describe('optimistic mutation reconciliation', () => {
     assert.equal(h.view.confirmedSnapshots.one.issues[1].summary, 'Saved');
     assert.deepEqual(confirmed, [{ summary: 'Saved', fields: ['summary'] }]);
   });
+  it('inserts a created child across overlapping tabs and keeps it through a stale refresh', () => {
+    const h = harness();
+    h.mutations.insertCreated('jira', issue('A-5', 'A-2'));
+    for (const id of ['one', 'two'])
+      assert.ok(
+        h.view.snapshots[id].issues.some((value) => value.key === 'A-5'),
+      );
+    assert.equal(
+      h.view.snapshots.other.issues.some((value) => value.key === 'A-5'),
+      false,
+    );
+    h.mutations.receive(tab(), snapshot(), h.mutations.revision);
+    assert.ok(h.view.snapshots.one.issues.some((value) => value.key === 'A-5'));
+    const current = snapshot();
+    current.issues.push(issue('A-5', 'A-2'));
+    h.mutations.receive(tab(), current, h.mutations.revision);
+    h.mutations.receive(tab('two'), snapshot(), h.mutations.revision);
+    assert.ok(h.view.snapshots.two.issues.some((value) => value.key === 'A-5'));
+  });
   it('applies fields to every matching tab, scopes pending by connection, and restores a failed edit', async () => {
     const request = deferred<Issue>();
     const h = harness({ update: () => request.promise });

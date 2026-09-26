@@ -88,6 +88,29 @@ export type IssuePatch = {
   transitionId?: string;
   labels?: string[];
 };
+export type ChildCreateOptions = {
+  project: Choice;
+  parent: Choice;
+  types: Choice[];
+  reason?: string;
+};
+export type ChildCreateFields = {
+  description: boolean;
+  descriptionRequired: boolean;
+  assignee: boolean;
+  assigneeRequired: boolean;
+  priority: boolean;
+  priorityRequired: boolean;
+  priorities: Choice[];
+  unsupported?: string;
+};
+export type ChildIssueInput = {
+  typeId: string;
+  summary: string;
+  description?: string;
+  assigneeId?: string;
+  priorityId?: string;
+};
 export type AssigneePage = { users: Choice[]; nextStartAt?: number };
 export type EditOptions = {
   priorities: Choice[];
@@ -220,6 +243,21 @@ export interface CanopyAPI {
     refresh?: boolean,
   ): Promise<Choice | null>;
   update(connectionId: string, key: string, patch: IssuePatch): Promise<Issue>;
+  childCreateOptions(
+    connectionId: string,
+    parentKey: string,
+    refresh?: boolean,
+  ): Promise<ChildCreateOptions>;
+  childCreateFields(
+    connectionId: string,
+    parentKey: string,
+    typeId: string,
+  ): Promise<ChildCreateFields>;
+  createChild(
+    connectionId: string,
+    parentKey: string,
+    input: ChildIssueInput,
+  ): Promise<Issue>;
   rank(
     connectionId: string,
     key: string,
