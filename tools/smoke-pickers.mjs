@@ -483,6 +483,9 @@ export async function auditSelfConnections(app, page) {
       await app.evaluate(() => globalThis.selfConnectionAudit.writes.at(-1)),
     ).toEqual({ connection: 'demo', patch: { assigneeId: 'jordan' } });
   } finally {
+    // Let the app's debounced save of the two-tab fixture reach the stub
+    // before restoring the real workspace handler.
+    await page.waitForTimeout(250);
     await app.evaluate(async ({ ipcMain }) => {
       await globalThis.canopySmoke.remoteUpdate('CAN-100', {
         assigneeId: 'alex',
