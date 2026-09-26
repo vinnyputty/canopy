@@ -144,6 +144,15 @@ export async function auditGithub(app, page) {
     await expect(
       tree.getByRole('treeitem', { name: /team\/b#2/ }),
     ).toBeVisible();
+    const child = tree.locator('[data-tree-key="team/b#2"]');
+    await child.getByRole('button', { name: 'Actions for team/b#2' }).click();
+    await page
+      .getByRole('menu', { name: 'Actions for team/b#2' })
+      .getByRole('menuitem', { name: 'Copy key and summary' })
+      .click();
+    expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+      'team/b#2 team/b issue 2',
+    );
     await expect(page.getByLabel('Filter priority')).toHaveCount(0);
     const statusResize = page.getByRole('separator', {
       name: 'Resize Status column',
@@ -207,6 +216,10 @@ export async function auditGithub(app, page) {
     const preview = page.getByRole('complementary', {
       name: 'Preview team/a#1',
     });
+    await preview.getByRole('button', { name: 'Copy key and summary' }).click();
+    expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+      'team/a#1 Updated GitHub title',
+    );
     await expect(preview.getByText('No labels.')).toBeVisible();
     await expect(preview.getByText('team/b#2')).toBeVisible();
     await preview.getByRole('button', { name: 'Edit labels' }).click();

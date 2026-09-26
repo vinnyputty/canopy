@@ -13,9 +13,10 @@ export function RowMenu({
   provider: 'jira' | 'github' | 'demo';
   position: { x: number; y: number };
   onClose: (restore?: boolean) => void;
-  onAction: (action: 'key' | 'title' | 'link' | 'open') => void;
+  onAction: (action: 'key' | 'title' | 'key-summary' | 'link' | 'open') => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
+  const above = position.y + 200 > window.innerHeight;
   useEffect(() => {
     menu.current?.querySelector<HTMLElement>('button')?.focus();
     const click = (event: PointerEvent) => {
@@ -33,8 +34,14 @@ export function RowMenu({
       role="menu"
       aria-label={`Actions for ${issue.key}`}
       style={{
-        left: Math.max(4, Math.min(position.x, window.innerWidth - 190)),
-        top: Math.max(4, Math.min(position.y, window.innerHeight - 160)),
+        left: Math.max(
+          4,
+          Math.min(
+            above ? position.x - 190 : position.x,
+            window.innerWidth - 190,
+          ),
+        ),
+        top: Math.max(4, above ? position.y - 200 : position.y),
       }}
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -65,6 +72,7 @@ export function RowMenu({
         [
           ['key', 'Copy key'],
           ['title', 'Copy title'],
+          ['key-summary', 'Copy key and summary'],
           ['link', 'Copy link'],
           ['open', `Open in ${provider === 'github' ? 'GitHub' : 'Jira'}`],
         ] as const

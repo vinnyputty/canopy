@@ -855,6 +855,10 @@ try {
     exact: true,
   });
   await expect(preview).toBeVisible();
+  await preview.getByRole('button', { name: 'Copy key and summary' }).click();
+  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+    'CAN-108 Keep unfinished descendants visible',
+  );
   await expect(
     preview.getByText('Comments temporarily unavailable.'),
   ).toBeVisible();
@@ -911,6 +915,10 @@ try {
   await page.keyboard.press('Shift+F10');
   const rowMenu = page.getByRole('menu', { name: 'Actions for CAN-109' });
   await expect(rowMenu).toBeVisible();
+  const menuBounds = await rowMenu.boundingBox();
+  expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(
+    await page.evaluate(() => window.innerHeight),
+  );
   await page.keyboard.press('Escape');
   await expect(rowMenu).toBeHidden();
   await expect(
@@ -930,6 +938,13 @@ try {
     .click();
   expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
     'Add linked issue references',
+  );
+  await page.keyboard.press('Shift+F10');
+  await rowMenu
+    .getByRole('menuitem', { name: 'Copy key and summary', exact: true })
+    .click();
+  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+    'CAN-109 Add linked issue references',
   );
   await page.keyboard.press('Shift+F10');
   await rowMenu
