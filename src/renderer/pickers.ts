@@ -33,6 +33,7 @@ export class Pickers {
   values: Record<string, PickerOptions> = {};
   private sequences = new Map<string, number>();
   private statuses = new Map<string, string>();
+  private pendingStatuses = new Map<string, Promise<void>>();
   constructor(
     private api: API,
     private changed: (values: Record<string, PickerOptions>) => void,
@@ -58,6 +59,7 @@ export class Pickers {
     for (const [key, value] of this.sequences)
       this.sequences.set(key, value + 1);
     this.statuses.clear();
+    this.pendingStatuses.clear();
     this.changed(this.values);
   }
   observe(connection: string, issues: Issue[]) {
@@ -80,6 +82,7 @@ export class Pickers {
   }
   invalidate(connection: string, key: string) {
     const scope = this.scoped(connection, key);
+    this.pendingStatuses.delete(scope);
     for (const field of ['priority', 'assignee', 'status'] as const)
       this.sequence(scope, field);
     const values = { ...this.values };
@@ -105,6 +108,22 @@ export class Pickers {
     this.set(scope, { query, nextStartAt: 0, assignee: { loading: true } });
   }
   async open(connection: string, key: string, field: PickerField) {
+    if (field === 'status') {
+      const scope = this.scoped(connection, key);
+      const previous = this.values[scope];
+      if (previous?.transitions && !previous.status?.error) return;
+      const pending = this.pendingStatuses.get(scope);
+      if (pending) return pending;
+      const load = this.load(connection, key, field);
+      this.pendingStatuses.set(scope, load);
+      try {
+        await load;
+      } finally {
+        if (this.pendingStatuses.get(scope) === load)
+          this.pendingStatuses.delete(scope);
+      }
+      return;
+    }
     if (field !== 'assignee') return this.load(connection, key, field);
     const scope = this.scoped(connection, key);
     const current = this.sequence(scope, field);
@@ -218,7 +237,13 @@ export class Pickers {
     }
   }
   rejected(connection: string, key: string, field: PickerField) {
-    this.set(this.scoped(connection, key), {
+    const scope = this.scoped(connection, key);
+    if (field === 'status') {
+      this.sequence(scope, field);
+      this.pendingStatuses.delete(scope);
+    }
+    this.set(scope, {
+      ...(field === 'status' ? { transitions: undefined } : {}),
       [field]: {
         error:
           'Jira rejected this selection. Retry to refresh the available choices.',

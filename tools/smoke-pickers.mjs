@@ -170,7 +170,13 @@ export async function auditPickers(app, page) {
   await expect(page.getByLabel('Search assignees')).toBeVisible();
   expect(await count('update')).toBe(writes);
   await app.evaluate(() => globalThis.canopySmoke.unassignableUsers.clear());
+  const statusCount = await count('transitions');
+  await fixture('hold', 'picker-status', 'transitions', 'CAN-100');
   await field('status').click();
+  await expect.poll(() => fixture('started', 'picker-status')).toBe(true);
+  await expect(page.locator('.status-popover .choice-loading')).toBeVisible();
+  expect(await count('transitions')).toBe(statusCount + 1);
+  await fixture('release', 'picker-status');
   const transition = page.getByRole('menuitem', {
     name: 'To Do',
     exact: true,
@@ -197,6 +203,10 @@ export async function auditPickers(app, page) {
   await field('status').click();
   await expect(page.locator('.view-settings')).not.toHaveAttribute('open');
   await expect(transition).toBeVisible();
+  await page
+    .locator('.status-popover')
+    .getByRole('button', { name: 'Cancel' })
+    .click();
   await fixture('hold', 'picker-priority', 'priorities', 'CAN-100');
   await field('priority').click();
   await expect.poll(() => fixture('started', 'picker-priority')).toBe(true);
@@ -222,13 +232,59 @@ export async function auditPickers(app, page) {
   await expect(
     page.getByRole('combobox', { name: 'Choose value' }),
   ).toBeVisible();
+  await page.evaluate(() => {
+    const field = document.querySelector(
+      '[aria-label="Edit status for CAN-100"]',
+    );
+    const result = { loading: false, latencyMs: null };
+    window.statusReopenMeasurement = result;
+    field.addEventListener(
+      'click',
+      () => {
+        const started = performance.now();
+        const observer = new MutationObserver(() => {
+          if (document.querySelector('.status-popover .choice-loading'))
+            result.loading = true;
+          if (document.querySelector('.status-popover [role="menuitem"]')) {
+            result.latencyMs = performance.now() - started;
+            observer.disconnect();
+          }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+      },
+      { once: true },
+    );
+  });
   await field('status').click();
   await expect(
     page.getByRole('menuitem', { name: 'To Do', exact: true }),
   ).toBeVisible();
-  await page
-    .getByRole('menuitem', { name: 'To Do', exact: true })
-    .press('Escape');
+  const statusReopen = await page.evaluate(() => {
+    const result = window.statusReopenMeasurement;
+    delete window.statusReopenMeasurement;
+    return result;
+  });
+  expect(statusReopen.loading).toBe(false);
+  expect(statusReopen.latencyMs).not.toBeNull();
+  expect(await count('transitions')).toBe(statusCount + 1);
+  console.log('Status picker cached reopen:', statusReopen);
+  await page.getByRole('menuitem', { name: 'To Do', exact: true }).click();
+  await expect(field('status')).toContainText('To Do');
+  await expect(page.getByLabel('Saving CAN-100')).toBeHidden();
+  await fixture('hold', 'picker-status-after-change', 'transitions', 'CAN-100');
+  await field('status').click();
+  await expect
+    .poll(() => fixture('started', 'picker-status-after-change'))
+    .toBe(true);
+  await expect(page.locator('.status-popover .choice-loading')).toBeVisible();
+  expect(await count('transitions')).toBe(statusCount + 2);
+  await fixture('release', 'picker-status-after-change');
+  await expect(
+    page.getByRole('menuitem', { name: 'In Progress', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('menuitem', { name: 'In Progress', exact: true }).click();
+  await expect(field('status')).toContainText('In Progress');
+  await expect(page.getByLabel('Saving CAN-100')).toBeHidden();
 }
 
 export async function auditSelfConnections(app, page) {

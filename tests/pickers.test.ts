@@ -165,3 +165,92 @@ it('preserves a rejected status error while rollback invalidates the optimistic 
   assert.match(pickers.values['a:ABC-1'].status?.error ?? '', /Jira rejected/);
   assert.equal(pickers.values['a:ABC-1'].transitions, undefined);
 });
+
+it('shows cached transitions immediately and shares an in-flight status load', async () => {
+  const pending =
+    deferred<{ id: string; name: string; requiresFields: boolean }[]>();
+  let requests = 0;
+  let loadingRenders = 0;
+  const pickers = new Pickers(
+    {
+      priorities: async () => [],
+      transitions: async () => {
+        requests++;
+        return pending.promise;
+      },
+      cachedUsers: async () => [],
+      assignees: async () => ({ users: [] }),
+      validateAssignee: async () => null,
+    },
+    (values) => {
+      if (values['a:ABC-1']?.status?.loading) loadingRenders++;
+    },
+  );
+  const first = pickers.open('a', 'ABC-1', 'status');
+  const repeatedWhilePending = pickers.open('a', 'ABC-1', 'status');
+  assert.equal(requests, 1);
+  pending.resolve([{ id: 'done', name: 'Done', requiresFields: false }]);
+  await Promise.all([first, repeatedWhilePending]);
+  loadingRenders = 0;
+  await pickers.open('a', 'ABC-1', 'status');
+  assert.equal(requests, 1);
+  assert.equal(loadingRenders, 0);
+  assert.deepEqual(pickers.values['a:ABC-1'].transitions, [
+    { id: 'done', name: 'Done', requiresFields: false },
+  ]);
+});
+
+it('reloads transitions after status changes and ignores stale in-flight choices', async () => {
+  const first =
+    deferred<{ id: string; name: string; requiresFields: boolean }[]>();
+  let requests = 0;
+  const { pickers } = harness({
+    transitions: async () => {
+      requests++;
+      return requests === 1
+        ? first.promise
+        : [{ id: 'reopen', name: 'Reopen', requiresFields: false }];
+    },
+  });
+  const issue = {
+    id: '1',
+    key: 'ABC-1',
+    summary: '',
+    type: 'Task',
+    priority: null,
+    assignee: null,
+    links: [],
+    status: { id: 'open', name: 'Open', category: 'new' as const },
+  };
+  pickers.observe('a', [issue]);
+  const old = pickers.open('a', issue.key, 'status');
+  pickers.observe('a', [{ ...issue, status: { ...issue.status, id: 'done' } }]);
+  await pickers.open('a', issue.key, 'status');
+  first.resolve([{ id: 'done', name: 'Done', requiresFields: false }]);
+  await old;
+  assert.equal(requests, 2);
+  assert.deepEqual(pickers.values['a:ABC-1'].transitions, [
+    { id: 'reopen', name: 'Reopen', requiresFields: false },
+  ]);
+});
+
+it('clears rejected choices and can retry after a failed transition load', async () => {
+  let requests = 0;
+  const { pickers } = harness({
+    transitions: async () => {
+      requests++;
+      if (requests === 2) throw new Error('Workflow unavailable');
+      return [{ id: String(requests), name: 'Choice', requiresFields: false }];
+    },
+  });
+  await pickers.open('a', 'ABC-1', 'status');
+  pickers.rejected('a', 'ABC-1', 'status');
+  assert.equal(pickers.values['a:ABC-1'].transitions, undefined);
+  await pickers.open('a', 'ABC-1', 'status');
+  assert.equal(pickers.values['a:ABC-1'].status?.error, 'Workflow unavailable');
+  await pickers.load('a', 'ABC-1', 'status', '', false, true);
+  assert.equal(requests, 3);
+  assert.deepEqual(pickers.values['a:ABC-1'].transitions, [
+    { id: '3', name: 'Choice', requiresFields: false },
+  ]);
+});
