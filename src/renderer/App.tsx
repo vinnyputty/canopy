@@ -597,6 +597,7 @@ export function App() {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       explicit ||= forcedRefreshes.current.has(tab.id);
       if (!navigator.onLine || refreshBlocked.current(tab.connectionId)) {
+        if (explicit) forcedRefreshes.current.add(tab.id);
         deferredRefreshes.current.add(tab.id);
         return;
       }
@@ -626,6 +627,7 @@ export function App() {
           rootKey,
           load.generation,
         );
+        const delivered = new Set<string>();
         if (currentRoot && !refreshBlocked.current(tab.connectionId)) {
           const targets = load.started
             ? tabsRef.current.filter(
@@ -641,19 +643,20 @@ export function App() {
               )
               continue;
             mutations.receive(target, next, epoch);
+            delivered.add(target.id);
           }
         } else if (refreshSequences.current[tab.id] === sequence) {
           deferredRefreshes.current.add(tab.id);
         }
-        if (refreshSequences.current[tab.id] !== sequence) return;
+        if (!delivered.size) return;
         setConnectionErrors((current) => {
           const copy = new Set(current);
-          copy.delete(tab.id);
+          for (const id of delivered) copy.delete(id);
           return copy;
         });
         setErrors((current) => {
           const copy = { ...current };
-          delete copy[tab.id];
+          for (const id of delivered) delete copy[id];
           return copy;
         });
       } catch (error) {

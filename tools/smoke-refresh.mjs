@@ -282,11 +282,14 @@ export async function auditRefresh(app, page, resizeWindow) {
   await expect(summary(key)).toHaveText(baseline);
   const undoCalls = await calls();
   await refresh.click();
-  await page.clock.runFor(61_000);
+  await page.clock.runFor(1000);
   expect(await calls()).toBe(undoCalls);
+  await hold('undo-forced-tree', 'tree', key);
   await release('undo-write');
   await saved(key);
   await page.clock.runFor(1000);
+  await started('undo-forced-tree');
+  await release('undo-forced-tree');
   await expect.poll(calls).toBeGreaterThan(undoCalls);
   await idle();
   await expect(summary(key)).toHaveText(baseline);
@@ -370,6 +373,15 @@ export async function auditRefresh(app, page, resizeWindow) {
   await page.getByRole('tab').nth(1).click();
   await expect(page.locator('.statusbar')).toContainText('Last updated');
   expect(await calls('CAN-100')).toBe(beforeDuplicate + 1);
+  await hold('duplicate-error', 'tree', 'CAN-100');
+  await refresh.click();
+  await started('duplicate-error');
+  await release('duplicate-error', 'Duplicate refresh failure');
+  await expect(page.getByRole('alert')).toContainText(
+    'Duplicate refresh failure',
+  );
+  await expect(status).toHaveText('Connection error');
+  await page.getByRole('tab').nth(0).click();
   await page.waitForTimeout(1100);
   await hold('duplicate-manual', 'tree', 'CAN-100');
   await refresh.click();
@@ -380,12 +392,14 @@ export async function auditRefresh(app, page, resizeWindow) {
     .locator('.statusbar [title]')
     .first()
     .getAttribute('title');
-  await page.getByRole('tab').nth(0).click();
+  await page.getByRole('tab').nth(1).click();
   await expect(page.locator('.statusbar [title]').first()).toHaveAttribute(
     'title',
     updated,
   );
-  expect(await calls('CAN-100')).toBe(beforeDuplicate + 2);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(status).toHaveText('Connected');
+  expect(await calls('CAN-100')).toBe(beforeDuplicate + 3);
 
   console.log(
     'Adaptive refresh integration passed: preserved views, pending edits/undo, offline recovery, background cadence, and coalesced activation.',
