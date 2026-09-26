@@ -246,7 +246,7 @@ export class Pickers {
       ...(field === 'status' ? { transitions: undefined } : {}),
       [field]: {
         error:
-          'Jira rejected this selection. Retry to refresh the available choices.',
+          'This selection was rejected. Retry to refresh the available choices.',
       },
     });
   }

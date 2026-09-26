@@ -162,7 +162,7 @@ it('preserves a rejected status error while rollback invalidates the optimistic 
   await pickers.open('a', issue.key, 'status');
   pickers.rejected('a', issue.key, 'status');
   pickers.observe('a', [{ ...issue, status: { ...issue.status, id: 'open' } }]);
-  assert.match(pickers.values['a:ABC-1'].status?.error ?? '', /Jira rejected/);
+  assert.match(pickers.values['a:ABC-1'].status?.error ?? '', /was rejected/);
   assert.equal(pickers.values['a:ABC-1'].transitions, undefined);
 });
 
@@ -252,5 +252,29 @@ it('clears rejected choices and can retry after a failed transition load', async
   assert.equal(requests, 3);
   assert.deepEqual(pickers.values['a:ABC-1'].transitions, [
     { id: '3', name: 'Choice', requiresFields: false },
+  ]);
+});
+
+it('keeps status choices for the same issue key separate by connection', async () => {
+  const requests: string[] = [];
+  const { pickers } = harness({
+    transitions: async (connection) => {
+      requests.push(connection);
+      return connection === 'github'
+        ? [{ id: 'closed', name: 'Closed', requiresFields: false }]
+        : [{ id: 'jira-42', name: 'Complete', requiresFields: false }];
+    },
+  });
+  await Promise.all([
+    pickers.open('github', 'team/a#1', 'status'),
+    pickers.open('jira', 'team/a#1', 'status'),
+  ]);
+  await pickers.open('github', 'team/a#1', 'status');
+  assert.deepEqual(requests, ['github', 'jira']);
+  assert.deepEqual(pickers.values['github:team/a#1'].transitions, [
+    { id: 'closed', name: 'Closed', requiresFields: false },
+  ]);
+  assert.deepEqual(pickers.values['jira:team/a#1'].transitions, [
+    { id: 'jira-42', name: 'Complete', requiresFields: false },
   ]);
 });

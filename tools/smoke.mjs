@@ -295,7 +295,7 @@ async function auditMutations() {
   await release('priority', 'Priority permission denied');
   await saved();
   await expect(issue(key).getByRole('alert')).toContainText(
-    'Jira rejected this selection',
+    'This selection was rejected',
   );
   await issue(key).getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(issue(key).getByText('Highest', { exact: true })).toBeVisible();
@@ -319,7 +319,7 @@ async function auditMutations() {
   await release('assignee', 'Assignee permission denied');
   await saved();
   await expect(issue(key).getByRole('alert')).toContainText(
-    'Jira rejected this selection',
+    'This selection was rejected',
   );
   await page.getByLabel('Search assignees').press('Escape');
   await expect(
@@ -352,7 +352,7 @@ async function auditMutations() {
   await release('status', 'Workflow changed');
   await saved();
   await expect(issue(key).getByRole('alert')).toContainText(
-    'Jira rejected this selection',
+    'This selection was rejected',
   );
   await page.keyboard.press('Escape');
   await expect(
