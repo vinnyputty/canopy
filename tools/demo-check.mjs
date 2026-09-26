@@ -162,6 +162,11 @@ try {
   await expect(
     page.getByText('Tour complete. The sample tree is yours to explore.'),
   ).toBeVisible({ timeout: 20000 });
+  await page.locator('[data-tree-key="CAN-110"]').focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('[data-tree-key="CAN-111"]')).toHaveCount(0);
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('[data-tree-key="CAN-111"]')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Open in Jira' })).toHaveCount(
     0,
   );

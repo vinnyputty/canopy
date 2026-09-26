@@ -1937,6 +1937,7 @@ export function App() {
     const manual = (event: Event) => {
       if (
         signal.aborted ||
+        finished ||
         !event.isTrusted ||
         !(event.target instanceof Element)
       )
