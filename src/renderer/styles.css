@@ -1303,10 +1303,23 @@ select:focus-visible,
   color: var(--muted);
 }
 .status-popover {
-  min-width: 185px;
+  left: auto;
+  right: 0;
+  box-sizing: border-box;
+  width: min(360px, calc(100vw - 24px));
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.status-popover.above {
+  top: auto;
+  bottom: calc(100% + 3px);
 }
 .status-popover button {
   justify-content: space-between;
+}
+.status-popover button > span {
+  min-width: 0;
 }
 .status-popover button:disabled {
   color: var(--faint);
@@ -1326,7 +1339,15 @@ select:focus-visible,
   display: block;
   margin-top: 3px;
   font-size: 10px;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.status-popover .status-destination {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .status-popover .picker-note {
   max-width: 260px;

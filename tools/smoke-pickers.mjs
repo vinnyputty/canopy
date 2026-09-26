@@ -203,6 +203,14 @@ export async function auditPickers(app, page) {
   const matchingTransitions = page.getByRole('checkbox', {
     name: 'Assume matching status transitions for this root',
   });
+  const originalBounds = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].getBounds(),
+  );
+  await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    window.setSize(1024, 700);
+  });
+  await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(1024);
   await page.locator('.view-settings > summary').click();
   await matchingTransitions.uncheck();
   await page.locator('.view-settings > summary').click();
@@ -220,6 +228,16 @@ export async function auditPickers(app, page) {
     exact: true,
   });
   await expect(transition).toBeVisible();
+  const menuBounds = await page.locator('.status-popover').evaluate((menu) => {
+    const bounds = menu.getBoundingClientRect();
+    return {
+      left: bounds.left,
+      right: bounds.right,
+      viewport: document.documentElement.clientWidth,
+    };
+  });
+  expect(menuBounds.left).toBeGreaterThanOrEqual(0);
+  expect(menuBounds.right).toBeLessThanOrEqual(menuBounds.viewport + 1);
   const firstStatusOpen = await statusTiming();
   expect(firstStatusOpen.loading).toBe(true);
   expect(firstStatusOpen.latencyMs).toBeGreaterThanOrEqual(500);
@@ -228,6 +246,9 @@ export async function auditPickers(app, page) {
   await expect(field('status')).toBeFocused();
   await expect(transition).toHaveCount(0);
   expect(await count('update')).toBe(beforeDismiss);
+  await app.evaluate(({ BrowserWindow }, bounds) => {
+    BrowserWindow.getAllWindows()[0].setBounds(bounds);
+  }, originalBounds);
   await field('assignee').click();
   await expect(page.getByLabel('Search assignees')).toBeFocused();
   await field('priority').click();
@@ -309,6 +330,46 @@ export async function auditPickers(app, page) {
     .click();
   await expect(field('status')).toContainText('In Progress');
   await expect(page.getByLabel('Saving CAN-100')).toBeHidden();
+  // A long menu stays usable when its status cell is near the bottom edge.
+  const statusFields = page.locator('[aria-label^="Edit status for "]');
+  expect(await statusFields.count()).toBeGreaterThan(1);
+  await page.evaluate(() => {
+    const scroller = document.querySelector('.tree-scroll');
+    scroller.style.maxHeight = '220px';
+    scroller.style.flex = 'none';
+  });
+  await statusFields.last().click();
+  await expect(page.locator('.status-popover')).toBeVisible();
+  const bottomMenuBounds = await page
+    .locator('.status-popover')
+    .evaluate((menu) => {
+      const filler = document.createElement('div');
+      filler.style.height = '1000px';
+      menu.append(filler);
+      window.dispatchEvent(new Event('resize'));
+      const bounds = menu.getBoundingClientRect();
+      const scroller = menu.closest('.tree-scroll').getBoundingClientRect();
+      return {
+        top: bounds.top,
+        bottom: bounds.bottom,
+        scrollerTop: scroller.top,
+        scrollerBottom: scroller.bottom,
+        scrollable: menu.scrollHeight > menu.clientHeight,
+      };
+    });
+  expect(bottomMenuBounds.top).toBeGreaterThanOrEqual(
+    bottomMenuBounds.scrollerTop - 1,
+  );
+  expect(bottomMenuBounds.bottom).toBeLessThanOrEqual(
+    bottomMenuBounds.scrollerBottom + 1,
+  );
+  expect(bottomMenuBounds.scrollable).toBe(true);
+  await page.locator('.status-popover').press('Escape');
+  await page.evaluate(() => {
+    const scroller = document.querySelector('.tree-scroll');
+    scroller.style.removeProperty('max-height');
+    scroller.style.removeProperty('flex');
+  });
   await page.locator('.view-settings > summary').click();
   await matchingTransitions.check();
   await page.locator('.view-settings > summary').click();

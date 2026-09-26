@@ -77,7 +77,7 @@ it('loads destination paths on demand when status sharing is disabled', async ()
   assert.deepEqual(
     pickers
       .paths('a', 'ABC-1', open)
-      .map((path) => path.steps.map((step) => step.id)),
+      .routes.map((path) => path.steps.map((step) => step.id)),
     [['start', 'finish']],
   );
 });
@@ -531,7 +531,10 @@ it('adds graph-only edges after cached status choices when workflow loading reco
   assert.deepEqual(
     pickers
       .paths('jira', root.key, root)
-      .map((path) => [path.destination.id, path.steps.map((step) => step.id)]),
+      .routes.map((path) => [
+        path.destination.id,
+        path.steps.map((step) => step.id),
+      ]),
     [
       ['done', ['start', 'finish']],
       ['review', ['start', 'review']],

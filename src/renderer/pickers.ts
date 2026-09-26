@@ -1,5 +1,5 @@
 import type { CanopyAPI, Choice, EditOptions, Issue } from '../shared/types';
-import { statusPaths } from './status-paths';
+import { statusPaths, type StatusRoutes } from './status-paths';
 
 export type PickerField = 'priority' | 'assignee' | 'status';
 export type FieldLoad = {
@@ -62,7 +62,7 @@ export class Pickers {
       ? JSON.stringify([issue.projectId, issue.typeId])
       : issue.type;
   }
-  paths(connection: string, rootKey: string, issue: Issue) {
+  paths(connection: string, rootKey: string, issue: Issue): StatusRoutes {
     const root = JSON.stringify([connection, rootKey]);
     const type = this.typeKey(issue);
     const graph: Record<string, EditOptions['transitions']> = {};
@@ -81,7 +81,9 @@ export class Pickers {
         ];
       }
     const direct = this.values[this.scoped(connection, issue.key)]?.transitions;
-    return direct ? statusPaths(issue.status, direct, graph) : [];
+    return direct
+      ? statusPaths(issue.status, direct, graph)
+      : { routes: [], truncated: false };
   }
   private async loadPathGraph(
     connection: string,

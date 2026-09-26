@@ -91,7 +91,7 @@ import { BulkTriage, type BulkOperation } from './BulkTriage';
 import { copySelectedIssues } from './bulk-triage';
 import { CreateChildDialog } from './CreateChildDialog';
 import { StatusColors } from './status-colors';
-import type { StatusPath } from './status-paths';
+import type { StatusPath, StatusRoutes } from './status-paths';
 import {
   activateTab,
   closeTabs,
@@ -4047,7 +4047,7 @@ export function App() {
                                 activeTab.rootKey,
                                 issue,
                               )
-                            : []
+                            : { routes: [], truncated: false }
                         }
                         transitionPath={transitionPath}
                         advanceEdit={advanceEdit}
@@ -4754,7 +4754,7 @@ type RowsProps = {
     refresh?: boolean,
   ) => Promise<void>;
   updateIssue: (key: string, patch: IssuePatch) => Promise<void>;
-  statusPaths: (issue: Issue) => StatusPath[];
+  statusPaths: (issue: Issue) => StatusRoutes;
   transitionPath: (issue: Issue, path: StatusPath) => Promise<void>;
   advanceEdit: (key: string, field: EditField, direction: -1 | 1) => void;
   saving: Set<string>;
@@ -5064,7 +5064,7 @@ function TreeRows(props: RowsProps) {
           paths={
             props.editor?.key === issue.key && props.editor.field === 'status'
               ? props.statusPaths(issue)
-              : []
+              : { routes: [], truncated: false }
           }
           state={props.options[issue.key]?.status}
           retry={() =>
@@ -5617,13 +5617,42 @@ function StatusEditor({
   active: boolean;
   issue: Issue;
   choices?: EditOptions['transitions'];
-  paths: StatusPath[];
+  paths: StatusRoutes;
   state?: FieldLoad;
   retry: () => void;
   save: (id: string) => void;
   savePath: (path: StatusPath) => void;
   openWorkflow: () => void;
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!active) return;
+    const menu = menuRef.current;
+    const cell = menu?.closest<HTMLElement>('.field-cell');
+    const scroller = menu?.closest<HTMLElement>('.tree-scroll');
+    if (!menu || !cell) return;
+    const position = () => {
+      const cellBounds = cell.getBoundingClientRect();
+      const scrollBounds = scroller?.getBoundingClientRect();
+      const top = Math.max(0, scrollBounds?.top ?? 0);
+      const bottom = Math.min(
+        window.innerHeight,
+        scrollBounds?.bottom ?? window.innerHeight,
+      );
+      const above = Math.max(0, cellBounds.top - top - 4);
+      const below = Math.max(0, bottom - cellBounds.bottom - 4);
+      const placeAbove = menu.scrollHeight > below && above > below;
+      menu.classList.toggle('above', placeAbove);
+      menu.style.maxHeight = `${Math.floor(placeAbove ? above : below)}px`;
+    };
+    position();
+    window.addEventListener('resize', position);
+    scroller?.addEventListener('scroll', position);
+    return () => {
+      window.removeEventListener('resize', position);
+      scroller?.removeEventListener('scroll', position);
+    };
+  }, [active, choices, paths, state]);
   if (!active)
     return (
       <span className="status" style={{ backgroundColor: color }}>
@@ -5632,6 +5661,7 @@ function StatusEditor({
     );
   return (
     <div
+      ref={menuRef}
       className="popover status-popover"
       role="menu"
       onKeyDown={(event) =>
@@ -5662,7 +5692,14 @@ function StatusEditor({
               }
               onClick={() => save(choice.id)}
             >
-              {choice.name}
+              <span className="status-transition-label">
+                {choice.name}
+                {choice.to && choice.to.name !== choice.name && (
+                  <small className="status-destination">
+                    → {choice.to.name}
+                  </small>
+                )}
+              </span>
               {choice.requiresFields && <small>Requires fields</small>}
             </button>
             {choice.requiresFields && (
@@ -5680,18 +5717,20 @@ function StatusEditor({
             )}
           </div>
         ))}
-      {!state?.error && !state?.loading && paths.length > 0 && (
+      {!state?.error && !state?.loading && paths.routes.length > 0 && (
         <>
           <span className="status-section">Multi-step destinations</span>
-          {paths.map((path) => (
+          {paths.routes.map((path) => (
             <button
-              key={path.destination.id}
+              key={JSON.stringify(
+                path.steps.map((step) => [step.id, step.to.id]),
+              )}
               role="menuitem"
               title="Each step is checked in Jira before it runs. Undo may stop if a reverse transition is unavailable."
               onClick={() => savePath(path)}
             >
               <span>
-                {path.destination.name}
+                {path.destination.name} · {path.steps.length} steps
                 <small className="status-path">
                   {[
                     issue.status.name,
@@ -5705,6 +5744,9 @@ function StatusEditor({
             Jira checks each step. The path may stop partway; Undo requires
             available reverse transitions.
           </p>
+          {paths.truncated && (
+            <p className="picker-note">More routes may exist in Jira.</p>
+          )}
         </>
       )}
     </div>
