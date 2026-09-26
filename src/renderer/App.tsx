@@ -77,6 +77,8 @@ import { IssuePreview } from './IssuePreview';
 import { nextTasks, type NextTaskCriterion } from './next-tasks';
 import { RowMenu } from './RowMenu';
 import { issueKeyAndSummary, issueWorkBrief } from './copy-issue';
+import { BulkTriage, type BulkOperation } from './BulkTriage';
+import { copySelectedIssues } from './bulk-triage';
 import { StatusColors } from './status-colors';
 import {
   activateTab,
@@ -279,6 +281,15 @@ export function App() {
     y: number;
     trigger?: boolean;
   } | null>(null);
+  const [multiSelection, setMultiSelection] = useState<{
+    tabId: string;
+    keys: string[];
+    anchor: string;
+  } | null>(null);
+  const [bulkOperations, setBulkOperations] = useState<
+    Record<string, BulkOperation>
+  >({});
+  const suppressTreeFocus = useRef(false);
   const restoreTreeFocus = useCallback((key?: string) => {
     const row = key
       ? document.querySelector<HTMLElement>(`[data-tree-key="${key}"]`)
@@ -2035,6 +2046,58 @@ export function App() {
     () => flattenVisible(shownTree, expandedSet),
     [shownTree, expandedSet],
   );
+  const selectedKeys =
+    activeTab && multiSelection?.tabId === activeTab.id
+      ? new Set(
+          multiSelection.keys.filter((key) =>
+            flat.some((node) => node.issue.key === key),
+          ),
+        )
+      : new Set<string>();
+  const bulkIssues = useMemo(() => {
+    if (!activeTab || !snapshot || multiSelection?.tabId !== activeTab.id)
+      return [];
+    const byKey = new Map(snapshot.issues.map((issue) => [issue.key, issue]));
+    return multiSelection.keys
+      .map((key) => byKey.get(key))
+      .filter(
+        (issue): issue is Issue =>
+          Boolean(issue) && issue?.type !== 'Repository',
+      );
+  }, [activeTab?.id, snapshot, multiSelection]);
+  const selectMultiple = (key: string, range: boolean, toggle: boolean) => {
+    if (!activeTab) return;
+    const previous =
+      multiSelection?.tabId === activeTab.id ? multiSelection : null;
+    const anchor = previous?.anchor ?? activeTab.selectedKey ?? key;
+    let keys: string[];
+    if (range) {
+      const start = flat.findIndex((node) => node.issue.key === anchor);
+      const end = flat.findIndex((node) => node.issue.key === key);
+      keys =
+        start < 0 || end < 0
+          ? [key]
+          : flat
+              .slice(Math.min(start, end), Math.max(start, end) + 1)
+              .map((node) => node.issue.key);
+    } else if (toggle) {
+      const current = new Set(
+        previous?.keys ??
+          (activeTab.selectedKey ? [activeTab.selectedKey] : []),
+      );
+      if (current.has(key)) current.delete(key);
+      else current.add(key);
+      keys = [...current];
+    } else keys = [key];
+    setMultiSelection(
+      keys.length > 1
+        ? { tabId: activeTab.id, keys, anchor: range ? anchor : key }
+        : null,
+    );
+    updateTab(activeTab.id, {
+      selectedKey: keys.includes(key) ? key : keys.at(-1),
+    });
+  };
 
   const advanceEdit = (key: string, field: EditField, direction: -1 | 1) => {
     const target = nextEditableCell(flat, view.columns, key, field, direction);
@@ -2052,13 +2115,23 @@ export function App() {
     );
   };
 
-  const focusTreeNeighbor = (key: string, direction: -1 | 1) => {
+  const focusTreeNeighbor = (
+    key: string,
+    direction: -1 | 1,
+    extend = false,
+  ) => {
     const index = flat.findIndex((node) => node.issue.key === key);
     const target = flat[index + direction];
-    if (target)
+    if (target) {
+      if (extend) {
+        suppressTreeFocus.current = true;
+        selectMultiple(target.issue.key, true, false);
+      } else setMultiSelection(null);
       document
         .querySelector<HTMLElement>(`[data-tree-key="${target.issue.key}"]`)
         ?.focus();
+      suppressTreeFocus.current = false;
+    }
   };
 
   const launchDemo = () =>
@@ -3439,6 +3512,75 @@ export function App() {
                 {warning}
               </div>
             ))}
+            {activeTab &&
+              activeConnection &&
+              (bulkIssues.length > 1 || bulkOperations[activeTab.id]) && (
+                <BulkTriage
+                  api={window.canopy}
+                  connection={activeConnection}
+                  issues={bulkIssues}
+                  operation={bulkOperations[activeTab.id] ?? null}
+                  onOperation={(change) => {
+                    const tabId = activeTab.id;
+                    setBulkOperations((current) => {
+                      const next = change(current[tabId] ?? null);
+                      if (next) return { ...current, [tabId]: next };
+                      const copy = { ...current };
+                      delete copy[tabId];
+                      return copy;
+                    });
+                  }}
+                  currentUser={currentUsers[activeConnection.id]}
+                  onClear={() => setMultiSelection(null)}
+                  copy={async (issues) => {
+                    const result = await copySelectedIssues(
+                      window.canopy,
+                      issues,
+                    );
+                    if (!result.ok)
+                      setErrors((current) => ({
+                        ...current,
+                        app: `Couldn’t copy selected issues: ${result.error}`,
+                      }));
+                    return result.ok;
+                  }}
+                  canUndo={(key) => mutations.canUndo(activeConnection.id, key)}
+                  undo={(key) => mutations.undo(activeConnection.id, key)}
+                  update={async (key, patch, choice) => {
+                    const options = patch.priorityId
+                      ? { priorities: choice ? [choice] : [] }
+                      : patch.assigneeId
+                        ? { assignees: choice ? [choice] : [] }
+                        : patch.transitionId
+                          ? {
+                              transitions: [
+                                {
+                                  id: patch.transitionId,
+                                  name: choice?.name ?? '',
+                                  requiresFields: false,
+                                  to: choice?.category
+                                    ? {
+                                        id: choice.id,
+                                        name: choice.name,
+                                        category: choice.category,
+                                      }
+                                    : undefined,
+                                },
+                              ],
+                            }
+                          : undefined;
+                    const success = await mutations.update(
+                      activeConnection.id,
+                      key,
+                      patch,
+                      options,
+                    );
+                    if (success && patch.transitionId)
+                      pickers.invalidate(activeConnection.id, key);
+                    return success;
+                  }}
+                />
+              )}
             {snapshot && activeConnection?.provider !== 'github' && (
               <div className="ranking-note" role="status">
                 {view.sort.column !== 'rank'
@@ -3697,9 +3839,13 @@ export function App() {
                           })
                         }
                         selectedKey={activeTab.selectedKey}
-                        onSelect={(key) =>
-                          updateTab(activeTab.id, { selectedKey: key })
-                        }
+                        selectedKeys={selectedKeys}
+                        suppressFocus={suppressTreeFocus}
+                        onSelect={(key) => {
+                          setMultiSelection(null);
+                          updateTab(activeTab.id, { selectedKey: key });
+                        }}
+                        onMultiSelect={selectMultiple}
                         onOpenTab={(key) =>
                           openTab(activeTab.connectionId, key)
                         }
@@ -4339,7 +4485,10 @@ type RowsProps = {
   revealedKey?: string;
   onToggle: (key: string) => void;
   selectedKey?: string;
+  selectedKeys: Set<string>;
+  suppressFocus: React.RefObject<boolean>;
   onSelect: (key: string) => void;
+  onMultiSelect: (key: string, range: boolean, toggle: boolean) => void;
   onOpenTab: (key: string) => void;
   onOpenExternal: (key: string) => void;
   onOpenWorkflow: (key: string) => void;
@@ -4366,7 +4515,7 @@ type RowsProps = {
   setDragKey: (key: string | null) => void;
   rankBefore: (key: string, beforeKey: string) => Promise<void>;
   keyboardRank: (node: IssueNode, direction: -1 | 1) => void;
-  focusNeighbor: (key: string, direction: -1 | 1) => void;
+  focusNeighbor: (key: string, direction: -1 | 1, extend?: boolean) => void;
 };
 
 function TreeRows(props: RowsProps) {
@@ -4417,11 +4566,11 @@ function TreeRows(props: RowsProps) {
     }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
-      focusNeighbor(issue.key, 1);
+      focusNeighbor(issue.key, 1, event.shiftKey);
     }
     if (event.key === 'ArrowUp') {
       event.preventDefault();
-      focusNeighbor(issue.key, -1);
+      focusNeighbor(issue.key, -1, event.shiftKey);
     }
     if (
       event.key === 'ArrowRight' &&
@@ -4554,7 +4703,15 @@ function TreeRows(props: RowsProps) {
                 }
               }}
               onDoubleClick={() => props.beginEdit(issue.key, 'summary')}
-              onClick={() => onSelect(issue.key)}
+              onClick={(event) => {
+                if (event.metaKey || event.ctrlKey || event.shiftKey)
+                  props.onMultiSelect(
+                    issue.key,
+                    event.shiftKey,
+                    event.metaKey || event.ctrlKey,
+                  );
+                else onSelect(issue.key);
+              }}
               title={`${issue.summary} — Double-click to edit`}
               aria-label={issue.summary}
             >
@@ -4667,14 +4824,35 @@ function TreeRows(props: RowsProps) {
       role="treeitem"
       aria-expanded={hasChildren ? open : undefined}
       aria-label={`${issue.key}: ${issue.summary}`}
-      aria-selected={selectedKey === issue.key}
+      aria-selected={
+        props.selectedKeys.size > 0
+          ? props.selectedKeys.has(issue.key)
+          : selectedKey === issue.key
+      }
       data-tree-key={issue.key}
       tabIndex={
         selectedKey === issue.key || (!selectedKey && depth === 0) ? 0 : -1
       }
       onFocus={(event) => {
         event.stopPropagation();
-        onSelect(issue.key);
+        if (!props.suppressFocus.current) onSelect(issue.key);
+      }}
+      onPointerDownCapture={(event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey)
+          props.suppressFocus.current = true;
+      }}
+      onClick={(event) => {
+        const target = event.target as HTMLElement;
+        if (!target.closest('input,button,select,[role="button"]')) {
+          if (event.metaKey || event.ctrlKey || event.shiftKey)
+            props.onMultiSelect(
+              issue.key,
+              event.shiftKey,
+              event.metaKey || event.ctrlKey,
+            );
+          else onSelect(issue.key);
+        }
+        props.suppressFocus.current = false;
       }}
       onKeyDown={onTreeKey}
       onKeyDownCapture={(event) => {
@@ -4704,7 +4882,9 @@ function TreeRows(props: RowsProps) {
       <div
         className={cx(
           'issue-row',
-          selectedKey === issue.key && 'selected',
+          (props.selectedKeys.size > 0
+            ? props.selectedKeys.has(issue.key)
+            : selectedKey === issue.key) && 'selected',
           props.revealedKey === issue.key && 'revealed',
           props.rankingEnabled &&
             dragKey &&

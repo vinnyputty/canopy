@@ -51,6 +51,17 @@ test('GitHub references accept only issue URLs and owner/repo numbers', () => {
     assert.throws(() => githubKey(input));
 });
 
+test('GitHub transitions include destination states for validated Undo', async () => {
+  const provider = new GithubProvider(connection, async () => []);
+  assert.deepEqual(
+    (await provider.transitions()).map((value) => value.to),
+    [
+      { id: 'open', name: 'Open', category: 'new' },
+      { id: 'closed', name: 'Closed', category: 'done' },
+    ],
+  );
+});
+
 test('GitHub repository roots preserve sub-issues and hide closed leaves', async () => {
   const paths: string[] = [];
   const provider = new GithubProvider(connection, async (path, init) => {

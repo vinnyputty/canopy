@@ -103,6 +103,20 @@ export class Mutations {
   private entries: Entry[] = [];
   private completed: Completed[] = [];
   private history: Entry[] = [];
+  canUndo(connectionId: string, key: string) {
+    const entry = [...this.history]
+      .reverse()
+      .find(
+        (value) =>
+          value.connectionId === connectionId && value.change.key === key,
+      );
+    return Boolean(
+      entry?.before &&
+      (!entry.change.fields ||
+        !('priority' in entry.change.fields) ||
+        entry.before.priority),
+    );
+  }
   private queues = new Map<string, Promise<void>>();
   private checkingUndo = false;
   private refreshes = new Map<number, number>();
@@ -310,9 +324,17 @@ export class Mutations {
       record,
     );
   }
-  async undo() {
-    const entry = this.history.at(-1);
-    if (!entry || this.checkingUndo || this.entries.length) return;
+  async undo(connectionId?: string, key?: string): Promise<boolean> {
+    const entry =
+      connectionId && key
+        ? [...this.history]
+            .reverse()
+            .find(
+              (value) =>
+                value.connectionId === connectionId && value.change.key === key,
+            )
+        : this.history.at(-1);
+    if (!entry || this.checkingUndo || this.entries.length) return false;
     this.checkingUndo = true;
     this.publish();
     const revision = this.revision;
@@ -456,12 +478,14 @@ export class Mutations {
           );
       if (success)
         this.history = this.history.filter((value) => value !== entry);
+      return success;
     } catch (error) {
       if (error instanceof UndoUnavailable)
         this.history = this.history.filter((value) => value !== entry);
       this.error(
         `Couldn’t undo: ${error instanceof Error ? error.message : String(error)}`,
       );
+      return false;
     } finally {
       this.checkingUndo = false;
       this.publish();

@@ -135,6 +135,43 @@ describe('optimistic mutation reconciliation', () => {
     assert.equal(h.current.priority?.id, '2');
   });
 
+  it('undoes a selected issue without consuming another issue’s history', async () => {
+    const remote = snapshot();
+    const h = harness({
+      update: async (_connection, key, patch) => {
+        const current = remote.issues.find((value) => value.key === key)!;
+        const changed = {
+          ...current,
+          summary: patch.summary ?? current.summary,
+        };
+        remote.issues = remote.issues.map((value) =>
+          value.key === key ? changed : value,
+        );
+        return changed;
+      },
+      tree: async () => remote,
+    });
+    assert.equal(
+      await h.mutations.update('jira', 'A-2', { summary: 'Second' }),
+      true,
+    );
+    assert.equal(
+      await h.mutations.update('jira', 'A-3', { summary: 'Third' }),
+      true,
+    );
+    assert.equal(h.mutations.canUndo('jira', 'A-2'), true);
+    assert.equal(await h.mutations.undo('jira', 'A-2'), true);
+    assert.equal(
+      remote.issues.find((value) => value.key === 'A-2')?.summary,
+      'A-2',
+    );
+    assert.equal(
+      remote.issues.find((value) => value.key === 'A-3')?.summary,
+      'Third',
+    );
+    assert.equal(h.mutations.canUndo('jira', 'A-2'), false);
+    assert.equal(h.mutations.canUndo('jira', 'A-3'), true);
+  });
   it('applies fields to every matching tab, scopes pending by connection, and restores a failed edit', async () => {
     const request = deferred<Issue>();
     const h = harness({ update: () => request.promise });
