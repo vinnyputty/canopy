@@ -86,6 +86,10 @@ export async function auditGithub(app, page) {
         }
         if (init.method === 'PATCH') {
           const patch = JSON.parse(String(init.body));
+          if (patch.labels && globalThis.githubLabelHold) {
+            globalThis.githubLabelHold.started = true;
+            await globalThis.githubLabelHold.promise;
+          }
           globalThis.githubSmokePatches.push(patch);
           const current = globalThis.githubSmokeIssues['team/a#1'];
           globalThis.githubSmokeIssues['team/a#1'] = {
@@ -99,15 +103,21 @@ export async function auditGithub(app, page) {
                 : null
               : current.assignee,
           };
+          if (patch.labels && globalThis.githubLabelHold)
+            globalThis.githubLabelHold.completed = true;
         }
         return Response.json(globalThis.githubSmokeIssues['team/a#1']);
       }
       if (path === '/repos/team/a/issues/1/comments') return Response.json([]);
+      if (path === '/repos/team/b/issues/2')
+        return Response.json(globalThis.githubSmokeIssues['team/b#2']);
+      if (path === '/repos/team/b/issues/2/comments') return Response.json([]);
       if (path.endsWith('/dependencies/blocked_by'))
         return Response.json([globalThis.githubSmokeIssues['team/b#2']]);
       if (path.endsWith('/dependencies/blocking')) return Response.json([]);
       if (path === '/repos/team/a/labels')
         return Response.json([{ name: 'ready' }]);
+      if (path === '/repos/team/b/labels') return Response.json([]);
       if (path === '/repos/team/a/assignees')
         return Response.json([{ login: 'tester' }]);
       if (path === '/search/issues') {
@@ -333,7 +343,39 @@ export async function auditGithub(app, page) {
       preview.getByRole('checkbox', { name: 'ready' }),
     ).toBeChecked();
     await expect(preview.getByText('team/b#2')).toBeVisible();
-    await preview.getByRole('button', { name: 'Close issue preview' }).click();
+    await app.evaluate(() => {
+      const hold = { started: false, completed: false, release: null };
+      hold.promise = new Promise((resolve) => {
+        hold.release = resolve;
+      });
+      globalThis.githubLabelHold = hold;
+    });
+    await preview.getByRole('checkbox', { name: 'ready' }).click();
+    await expect
+      .poll(() => app.evaluate(() => globalThis.githubLabelHold.started))
+      .toBe(true);
+    await tree.getByRole('treeitem', { name: /team\/b#2/ }).click();
+    const nextPreview = page.getByRole('complementary', {
+      name: 'Preview team/b#2',
+    });
+    await expect(nextPreview.locator('h2')).toHaveText('team/b issue 2');
+    await app.evaluate(() => {
+      globalThis.githubLabelHold.release();
+    });
+    await expect
+      .poll(() => app.evaluate(() => globalThis.githubLabelHold.completed))
+      .toBe(true);
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    await expect(nextPreview.locator('h2')).toHaveText('team/b issue 2');
+    await expect(nextPreview).toContainText('No labels.');
+    await nextPreview
+      .getByRole('button', { name: 'Close issue preview' })
+      .click();
     await page
       .getByRole('button', { name: 'Open issue', exact: true })
       .first()

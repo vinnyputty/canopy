@@ -38,6 +38,8 @@ export function IssuePreview({
   const [editingLabels, setEditingLabels] = useState(false);
   const [savingLabels, setSavingLabels] = useState(false);
   const identity = useRef('');
+  const currentIssue = useRef('');
+  currentIssue.current = `${connectionId}:${issueKey}`;
   const [dragWidth, setDragWidth] = useState<number>();
   const pane = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; width: number; next: number } | undefined>(
@@ -87,6 +89,7 @@ export function IssuePreview({
   }, [provider, editingLabels, connectionId, issueKey]);
   const toggleLabel = async (name: string) => {
     if (!data || savingLabels) return;
+    const requestIdentity = currentIssue.current;
     setSavingLabels(true);
     setError('');
     const current = data.issue.labels?.map((item) => item.name) ?? [];
@@ -104,11 +107,15 @@ export function IssuePreview({
       const issue = await window.canopy.update(connectionId, issueKey, {
         labels: next,
       });
-      setData({ ...data, issue: { ...issue, links: data.issue.links } });
-      onChanged();
+      if (currentIssue.current === requestIdentity) {
+        setData({ ...data, issue: { ...issue, links: data.issue.links } });
+        onChanged();
+      }
     } catch (reason) {
-      setData(data);
-      setError(String(reason));
+      if (currentIssue.current === requestIdentity) {
+        setData(data);
+        setError(String(reason));
+      }
     } finally {
       setSavingLabels(false);
     }
