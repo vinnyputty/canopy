@@ -9,7 +9,7 @@ import type {
 import { reconcileSnapshot } from './tree';
 
 type Fields = Partial<
-  Pick<Issue, 'summary' | 'priority' | 'assignee' | 'status'>
+  Pick<Issue, 'summary' | 'priority' | 'assignee' | 'status' | 'labels'>
 >;
 type Change = {
   key: string;
@@ -31,6 +31,7 @@ class UndoUnavailable extends Error {}
 type Completed = { revision: number; connectionId: string; change: Change };
 export type MutationView = {
   snapshots: Record<string, TreeSnapshot>;
+  confirmedSnapshots: Record<string, TreeSnapshot>;
   saving: Set<string>;
   undoLabel?: string;
   undoBusy: boolean;
@@ -134,6 +135,11 @@ export class Mutations {
     >,
     private changed: (view: MutationView) => void,
     private error: (message: string) => void,
+    private confirmedEdit?: (
+      connectionId: string,
+      issue: Issue,
+      fields: string[],
+    ) => void,
   ) {}
 
   beginRefresh() {
@@ -162,6 +168,9 @@ export class Mutations {
     this.bases[tab.id] = snapshot;
     this.publish();
   }
+  confirmedSnapshot(id: string) {
+    return this.bases[id];
+  }
   forget(id: string) {
     this.tabs.delete(id);
     delete this.bases[id];
@@ -187,6 +196,7 @@ export class Mutations {
     const last = this.history.at(-1);
     this.changed({
       snapshots,
+      confirmedSnapshots: { ...this.bases },
       saving: new Set(
         this.entries.map(
           (entry) => `${entry.connectionId}:${entry.change.key}`,
@@ -204,6 +214,18 @@ export class Mutations {
     for (const [id, tab] of this.tabs)
       if (tab.connectionId === connectionId && this.bases[id])
         this.bases[id] = applyChange(this.bases[id], change);
+    if (change.fields) {
+      const issue = this.find(connectionId, change.key);
+      if (issue)
+        this.confirmedEdit?.(connectionId, issue, Object.keys(change.fields));
+    }
+  }
+  acceptConfirmedLabels(connectionId: string, issue: Issue) {
+    this.confirm(connectionId, {
+      key: issue.key,
+      fields: { labels: issue.labels },
+    });
+    this.publish();
   }
   private enqueue(
     connectionId: string,

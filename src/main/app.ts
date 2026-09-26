@@ -219,6 +219,36 @@ function workspace(value: Workspace) {
   }
   if (JSON.stringify(value).length > 4_000_000)
     throw new Error('Workspace is too large to save.');
+  if (value.seenRoots !== undefined) {
+    if (
+      !value.seenRoots ||
+      typeof value.seenRoots !== 'object' ||
+      Array.isArray(value.seenRoots) ||
+      Object.keys(value.seenRoots).length > 12
+    )
+      throw new Error('Invalid last-seen roots.');
+    for (const root of Object.values(value.seenRoots)) {
+      if (
+        !root ||
+        !Number.isSafeInteger(root.touchedAt) ||
+        !root.issues ||
+        typeof root.issues !== 'object' ||
+        Array.isArray(root.issues) ||
+        Object.keys(root.issues).length > 1000
+      )
+        throw new Error('Invalid last-seen root.');
+      for (const issue of Object.values(root.issues)) {
+        if (
+          !issue ||
+          !Number.isSafeInteger(issue.seenAt) ||
+          !issue.fields ||
+          typeof issue.fields !== 'object' ||
+          Array.isArray(issue.fields)
+        )
+          throw new Error('Invalid last-seen issue.');
+      }
+    }
+  }
   return value;
 }
 type Fixture = {
@@ -562,6 +592,15 @@ async function start(
       if (!['http:', 'https:'].includes(url.protocol))
         throw new Error('Unsupported link URL.');
       await shell.openExternal(url.href);
+    },
+    openComment: async (id: string, issue: string, commentId: string) => {
+      if (id === fixture?.connection.id) fixture.openIssue();
+      const fragment =
+        provider(id) instanceof GithubProvider ? 'issuecomment-' : 'comment-';
+      if (!/^\d+$/.test(commentId)) throw new Error('Invalid comment ID.');
+      await shell.openExternal(
+        `${issueUrl(id, issue)}#${fragment}${commentId}`,
+      );
     },
   };
   for (const [name, handler] of Object.entries(handlers))

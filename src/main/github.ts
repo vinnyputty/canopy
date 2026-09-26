@@ -87,6 +87,18 @@ function parseIssue(raw: any, parentKey?: string): Issue {
       .filter((label: any) => typeof label !== 'string')
       .map((label: any) => ({ id: label.name, name: label.name })),
     links: [],
+    ...(Number.isSafeInteger(raw.comments) && raw.comments >= 0
+      ? { commentCount: raw.comments }
+      : {}),
+    unavailableFields: [
+      'priority',
+      ...(raw.labels === undefined ? ['labels'] : []),
+      ...(raw.title === undefined ? ['summary'] : []),
+      ...(raw.state === undefined ? ['status'] : []),
+      ...(raw.assignee === undefined && raw.assignees === undefined
+        ? ['assignee']
+        : []),
+    ],
   };
 }
 function pageToken(value?: string): { repo: number; page: number } {
@@ -304,7 +316,9 @@ export class GithubProvider {
     const issue = parseIssue(raw);
     const [commentsResult, blockedByResult, blockingResult] = await Promise.all(
       [
-        this.request(`${this.path(key, '/comments')}?per_page=20`).then(
+        this.request(
+          `${this.path(key, '/comments')}?per_page=100&page=${Math.max(1, Math.ceil((issue.commentCount ?? 0) / 100))}`,
+        ).then(
           (value) => ({ value, error: '' }),
           (error: unknown) => ({ value: [], error: String(error) }),
         ),

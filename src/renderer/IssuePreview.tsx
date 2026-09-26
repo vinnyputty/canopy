@@ -1,12 +1,26 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import type { Choice, IssuePreview as Preview } from '../shared/types';
+import type {
+  Choice,
+  Issue,
+  IssuePreview as Preview,
+  SeenIssue,
+  SeenValue,
+} from '../shared/types';
+import { unseenChanges } from './seen';
+
+function displayValue(value: SeenValue) {
+  return Array.isArray(value) ? value.join(', ') || 'None' : (value ?? 'None');
+}
 import { PreviewText } from './PreviewText';
 
 export function IssuePreview({
   connectionId,
   provider,
   issueKey,
+  observedIssue,
+  baseline,
+  onMarkSeen,
   width,
   onWidth,
   onClose,
@@ -16,19 +30,24 @@ export function IssuePreview({
   onOpenExternal,
   onCopyKeySummary,
   onWorkBrief,
+  onOpenComment,
 }: {
   connectionId: string;
   provider: 'jira' | 'github' | 'demo';
   issueKey: string;
+  observedIssue?: Issue;
+  baseline?: SeenIssue;
+  onMarkSeen: (issue: Issue) => void;
   width: number;
   onWidth: (width: number) => void;
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: (issue: Issue) => void;
   onPreview: (key: string) => void;
   onOpenTab: (key: string) => void;
   onOpenExternal: (key: string) => void;
   onCopyKeySummary: (issue: Preview['issue']) => void;
   onWorkBrief: (preview: Preview) => void;
+  onOpenComment: (commentId: string) => void;
 }) {
   const [data, setData] = useState<Preview>();
   const [error, setError] = useState('');
@@ -111,7 +130,7 @@ export function IssuePreview({
       });
       if (currentIssue.current === requestIdentity) {
         setData({ ...data, issue: { ...issue, links: data.issue.links } });
-        onChanged();
+        onChanged(issue);
       }
     } catch (reason) {
       if (currentIssue.current === requestIdentity) {
@@ -132,6 +151,18 @@ export function IssuePreview({
       Retry
     </button>
   );
+  const unseen = observedIssue
+    ? unseenChanges(baseline, observedIssue)
+    : { fields: [], comments: 0 };
+  const confirmedComments =
+    baseline && unseen.comments > 0 && !data?.commentsError
+      ? (data?.comments ?? []).filter(
+          (comment) =>
+            /^\d+$/.test(comment.id) &&
+            Number.isFinite(Date.parse(comment.created)) &&
+            Date.parse(comment.created) > baseline.seenAt,
+        )
+      : [];
   return (
     <aside
       ref={pane}
@@ -208,6 +239,70 @@ export function IssuePreview({
         ) : (
           <>
             <h2>{data.issue.summary}</h2>
+            <section
+              className="preview-changes"
+              aria-label="Changes since last seen"
+            >
+              <h3>Since last seen</h3>
+              {!observedIssue || !baseline ? (
+                <p>No last-seen baseline for this issue in this root.</p>
+              ) : unseen.fields.length === 0 && unseen.comments === 0 ? (
+                <p>No confirmed unread changes in the refreshed tree.</p>
+              ) : (
+                <>
+                  {unseen.fields.map((change) => (
+                    <p key={change.name}>
+                      <strong>{change.name}:</strong>{' '}
+                      {displayValue(change.before)} →{' '}
+                      {displayValue(change.after)}
+                    </p>
+                  ))}
+                  {unseen.comments > 0 && (
+                    <p>
+                      {unseen.comments} more comment
+                      {unseen.comments === 1 ? '' : 's'} than at the last view.{' '}
+                      {confirmedComments.length < unseen.comments
+                        ? 'Some recent comment links are unavailable.'
+                        : ''}
+                    </p>
+                  )}
+                  {confirmedComments.map((comment) => (
+                    <button
+                      key={comment.id}
+                      className="text-button"
+                      onClick={() => onOpenComment(comment.id)}
+                    >
+                      New comment by {comment.author} ·{' '}
+                      {new Date(comment.created).toLocaleString()}
+                    </button>
+                  ))}
+                  <button
+                    className="tool-button"
+                    onClick={() =>
+                      onMarkSeen({
+                        ...data.issue,
+                        commentCount: Math.max(
+                          data.issue.commentCount ?? 0,
+                          data.totalComments,
+                        ),
+                      })
+                    }
+                  >
+                    Mark issue seen
+                  </button>
+                </>
+              )}
+              <p className="preview-hint">
+                Development updates and provider history are unavailable in this
+                view.
+              </p>
+              {observedIssue?.unavailableFields?.length ? (
+                <p className="preview-hint">
+                  This tree did not supply:{' '}
+                  {observedIssue.unavailableFields.join(', ')}.
+                </p>
+              ) : null}
+            </section>
             {provider !== 'demo' && (
               <button
                 className="tool-button"

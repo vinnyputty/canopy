@@ -27,6 +27,7 @@ const ISSUE_FIELDS = [
   'assignee',
   'status',
   'issuelinks',
+  'comment',
 ];
 const SEARCH_PAGE_SIZE = 100;
 const PARENT_BATCH_SIZE = 50;
@@ -135,6 +136,24 @@ function parseIssue(raw: JiraIssue): Issue {
     },
     links,
     linksAvailable: Array.isArray(fields.issuelinks),
+    ...(Number.isSafeInteger(fields.comment?.total) && fields.comment.total >= 0
+      ? { commentCount: fields.comment.total }
+      : {}),
+    unavailableFields: [
+      ...(
+        [
+          'summary',
+          'issuetype',
+          'parent',
+          'priority',
+          'assignee',
+          'status',
+        ] as const
+      )
+        .filter((field) => !(field in fields))
+        .map((field) => (field === 'issuetype' ? 'type' : field)),
+      'labels',
+    ],
   };
 }
 
