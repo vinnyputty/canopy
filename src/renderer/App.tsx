@@ -3108,7 +3108,10 @@ export function App() {
                         <input
                           type="checkbox"
                           checked={Boolean(nextTaskMine[activeTab.id])}
-                          disabled={!currentUsers[activeTab.connectionId]}
+                          disabled={
+                            !currentUsers[activeTab.connectionId] &&
+                            !nextTaskMine[activeTab.id]
+                          }
                           onChange={(event) =>
                             setNextTaskMine((current) => ({
                               ...current,
@@ -3156,7 +3159,12 @@ export function App() {
                     )}
                     <div className="next-tasks-list">
                       {tasks.length === 0 ? (
-                        <p>No unfinished issues match this view.</p>
+                        <p>
+                          {nextTaskMine[activeTab.id] &&
+                          !currentUsers[activeTab.connectionId]
+                            ? 'Your account is unavailable. Clear Assigned to me or retry account lookup.'
+                            : 'No unfinished issues match this view.'}
+                        </p>
                       ) : (
                         tasks.map((task, index) => (
                           <React.Fragment key={task.issue.key}>
