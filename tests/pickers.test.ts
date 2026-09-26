@@ -49,6 +49,38 @@ const issue = (key: string, statusId: string, type = 'Task'): Issue => ({
   links: [],
   status: { id: statusId, name: statusId, category: 'new' },
 });
+it('loads destination paths on demand when status sharing is disabled', async () => {
+  const open = issue('ABC-1', 'open');
+  open.projectId = 'project';
+  open.typeId = 'task';
+  const started = {
+    id: 'started',
+    name: 'Started',
+    category: 'indeterminate' as const,
+  };
+  const done = { id: 'done', name: 'Done', category: 'done' as const };
+  const { pickers } = harness({
+    transitions: async () => [
+      { id: 'start', name: 'Start', to: started, requiresFields: false },
+    ],
+    workflowGraph: async () => ({
+      open: [
+        { id: 'start', name: 'Start', to: started, requiresFields: false },
+      ],
+      started: [
+        { id: 'finish', name: 'Finish', to: done, requiresFields: false },
+      ],
+    }),
+  });
+  await pickers.open('a', open.key, 'status', 'ABC-1', false, open);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    pickers
+      .paths('a', 'ABC-1', open)
+      .map((path) => path.steps.map((step) => step.id)),
+    [['start', 'finish']],
+  );
+});
 it('shows cached suggestions on opening without loading unrelated fields or directory search', async () => {
   const { pickers, calls } = harness();
   await pickers.open('a', 'ABC-1', 'assignee');

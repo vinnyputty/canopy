@@ -91,6 +91,7 @@ import { BulkTriage, type BulkOperation } from './BulkTriage';
 import { copySelectedIssues } from './bulk-triage';
 import { CreateChildDialog } from './CreateChildDialog';
 import { StatusColors } from './status-colors';
+import type { StatusPath } from './status-paths';
 import {
   activateTab,
   closeTabs,
@@ -1940,6 +1941,21 @@ export function App() {
         if (activeIdRef.current === tabId && editSession.current === session)
           setEditor((current) => current ?? { connectionId, key, field });
       }
+    },
+    [activeTab, mutations, pickers],
+  );
+  const transitionPath = useCallback(
+    async (issue: Issue, path: StatusPath) => {
+      if (!activeTab) return;
+      const connectionId = activeTab.connectionId;
+      setEditor(null);
+      await mutations.transitionPath(
+        connectionId,
+        issue.key,
+        issue.status,
+        path,
+      );
+      pickers.revalidateStatus(connectionId, issue.key);
     },
     [activeTab, mutations, pickers],
   );
@@ -4021,6 +4037,16 @@ export function App() {
                             );
                         }}
                         updateIssue={updateIssue}
+                        statusPaths={(issue) =>
+                          activeConnection?.provider === 'jira'
+                            ? pickers.paths(
+                                activeTab.connectionId,
+                                activeTab.rootKey,
+                                issue,
+                              )
+                            : []
+                        }
+                        transitionPath={transitionPath}
                         advanceEdit={advanceEdit}
                         saving={
                           new Set(
@@ -4725,6 +4751,8 @@ type RowsProps = {
     refresh?: boolean,
   ) => Promise<void>;
   updateIssue: (key: string, patch: IssuePatch) => Promise<void>;
+  statusPaths: (issue: Issue) => StatusPath[];
+  transitionPath: (issue: Issue, path: StatusPath) => Promise<void>;
   advanceEdit: (key: string, field: EditField, direction: -1 | 1) => void;
   saving: Set<string>;
   dragKey: string | null;
@@ -5030,11 +5058,17 @@ function TreeRows(props: RowsProps) {
           issue={issue}
           openWorkflow={() => props.onOpenWorkflow(issue.key)}
           choices={props.options[issue.key]?.transitions}
+          paths={
+            props.editor?.key === issue.key && props.editor.field === 'status'
+              ? props.statusPaths(issue)
+              : []
+          }
           state={props.options[issue.key]?.status}
           retry={() =>
             void props.loadOptions(issue.key, 'status', '', false, true)
           }
           save={(id) => void props.updateIssue(issue.key, { transitionId: id })}
+          savePath={(path) => void props.transitionPath(issue, path)}
         />
       </FieldCell>
     ),
@@ -5571,16 +5605,20 @@ function StatusEditor({
   active,
   issue,
   choices,
+  paths,
   save,
+  savePath,
   openWorkflow,
 }: {
   color?: string;
   active: boolean;
   issue: Issue;
   choices?: EditOptions['transitions'];
+  paths: StatusPath[];
   state?: FieldLoad;
   retry: () => void;
   save: (id: string) => void;
+  savePath: (path: StatusPath) => void;
   openWorkflow: () => void;
 }) {
   if (!active)
@@ -5598,6 +5636,9 @@ function StatusEditor({
       }
     >
       <PickerFeedback state={state} retry={retry} />
+      {!state?.loading && !state?.error && choices && choices.length > 0 && (
+        <span className="status-section">Direct transitions</span>
+      )}
       {!state?.loading && !state?.error && choices?.length === 0 && (
         <span className="no-choices">No transitions available</span>
       )}
@@ -5636,6 +5677,33 @@ function StatusEditor({
             )}
           </div>
         ))}
+      {!state?.error && !state?.loading && paths.length > 0 && (
+        <>
+          <span className="status-section">Multi-step destinations</span>
+          {paths.map((path) => (
+            <button
+              key={path.destination.id}
+              role="menuitem"
+              title="Each step is checked in Jira before it runs. Undo may stop if a reverse transition is unavailable."
+              onClick={() => savePath(path)}
+            >
+              <span>
+                {path.destination.name}
+                <small className="status-path">
+                  {[
+                    issue.status.name,
+                    ...path.steps.map((step) => step.to.name),
+                  ].join(' → ')}
+                </small>
+              </span>
+            </button>
+          ))}
+          <p className="picker-note">
+            Jira checks each step. The path may stop partway; Undo requires
+            available reverse transitions.
+          </p>
+        </>
+      )}
     </div>
   );
 }

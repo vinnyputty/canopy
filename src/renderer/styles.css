@@ -1315,6 +1315,23 @@ select:focus-visible,
   color: var(--faint);
   font-size: 9px;
 }
+.status-popover .status-section {
+  display: block;
+  padding: 8px 7px 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.status-popover .status-path {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.status-popover .picker-note {
+  max-width: 260px;
+  margin: 6px 7px;
+}
 .linked-panel {
   display: flex;
   padding: 5px 150px 7px calc(47px + var(--depth) * 23px);

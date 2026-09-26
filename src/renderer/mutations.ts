@@ -3,10 +3,12 @@ import type {
   EditOptions,
   Issue,
   IssuePatch,
+  Status,
   TabState,
   TreeSnapshot,
 } from '../shared/types';
 import { reconcileSnapshot } from './tree';
+import type { StatusPath } from './status-paths';
 
 type Fields = Partial<
   Pick<Issue, 'summary' | 'priority' | 'assignee' | 'status' | 'labels'>
@@ -25,6 +27,8 @@ type Entry = {
   before?: Issue;
   order?: string[];
   parentKey?: string;
+  statusPath?: Status[];
+  undoUnavailable?: boolean;
 };
 class UndoUnavailable extends Error {}
 
@@ -121,6 +125,7 @@ export class Mutations {
   }
   private queues = new Map<string, Promise<void>>();
   private checkingUndo = false;
+  private undoingConnection: string | null = null;
   private refreshes = new Map<number, number>();
   private rendered: Record<string, TreeSnapshot> = {};
   private created = new Map<string, { issue: Issue; at: number }>();
@@ -159,7 +164,10 @@ export class Mutations {
     this.completed = this.completed.filter((done) => done.revision > oldest);
   }
   pending(connectionId: string) {
-    return this.entries.some((entry) => entry.connectionId === connectionId);
+    return (
+      this.undoingConnection === connectionId ||
+      this.entries.some((entry) => entry.connectionId === connectionId)
+    );
   }
   receive(tab: TabState, snapshot: TreeSnapshot, revision: number) {
     this.tabs.set(tab.id, tab);
@@ -237,7 +245,9 @@ export class Mutations {
         ),
       ),
       undoLabel: last
-        ? `Undo ${last.change.fields ? 'edit to' : 'reorder of'} ${last.change.key}`
+        ? last.statusPath
+          ? `Undo status path for ${last.change.key} (may stop partway)`
+          : `Undo ${last.change.fields ? 'edit to' : 'reorder of'} ${last.change.key}`
         : undefined,
       undoBusy: this.checkingUndo || this.entries.length > 0,
     });
@@ -279,7 +289,7 @@ export class Mutations {
         const confirmed = await execute(entry);
         this.confirm(connectionId, confirmed);
         entry.change = confirmed;
-        if (record) this.history.push(entry);
+        if (record && !entry.undoUnavailable) this.history.push(entry);
         return true;
       } catch (error) {
         this.revision++;
@@ -328,6 +338,62 @@ export class Mutations {
   discardHistory(token: symbol) {
     this.history = this.history.filter((entry) => entry.token !== token);
     this.publish();
+  }
+  transitionPath(
+    connectionId: string,
+    key: string,
+    origin: Status,
+    path: StatusPath,
+  ) {
+    return this.enqueue(connectionId, { key, fields: {} }, async (entry) => {
+      let current = await this.api.update(connectionId, key, {});
+      if (current.status.id !== origin.id)
+        throw new Error(
+          `Status changed to ${current.status.name}. Refresh the path and try again.`,
+        );
+      const visited = new Set([origin.id]);
+      entry.statusPath = [origin];
+      for (const [index, step] of path.steps.entries()) {
+        try {
+          const choices = await this.api.transitions(connectionId, key, true);
+          const choice = choices.find((value) => value.id === step.id);
+          if (!choice || choice.to?.id !== step.to.id || choice.requiresFields)
+            throw new Error(
+              `The planned transition to ${step.to.name} changed or now requires fields.`,
+            );
+          if (visited.has(step.to.id))
+            throw new Error('The planned path contains a cycle.');
+          current = await this.api.update(connectionId, key, {
+            transitionId: step.id,
+          });
+          if (current.status.id !== step.to.id)
+            throw new Error(
+              `Jira returned ${current.status.name} instead of ${step.to.name}.`,
+            );
+          visited.add(current.status.id);
+          entry.statusPath.push(current.status);
+        } catch (error) {
+          let statusLabel = 'Actual status';
+          try {
+            current = await this.api.update(connectionId, key, {});
+            if (current.status.id !== entry.statusPath.at(-1)?.id)
+              entry.statusPath.push(current.status);
+          } catch {
+            statusLabel = 'Last confirmed status (fresh read unavailable)';
+            entry.undoUnavailable = true;
+          }
+          const completed =
+            statusLabel === 'Actual status' && current.status.id === step.to.id
+              ? index + 1
+              : index;
+          const message = `Stopped ${key} after ${completed} of ${path.steps.length} planned transitions. ${statusLabel}: ${current.status.name}. ${error instanceof Error ? error.message : String(error)}`;
+          if (entry.statusPath.length === 1) throw new Error(message);
+          this.error(message);
+          return { key, fields: { status: current.status } };
+        }
+      }
+      return { key, fields: { status: current.status } };
+    });
   }
   rank(
     connectionId: string,
@@ -403,6 +469,7 @@ export class Mutations {
     )
       return false;
     this.checkingUndo = true;
+    this.undoingConnection = entry.connectionId;
     this.publish();
     const revision = this.revision;
     const assertCurrent = () => {
@@ -421,6 +488,75 @@ export class Mutations {
       const current = fresh.issues.find((issue) => issue.key === change.key);
       if (!current || !before)
         throw new UndoUnavailable('The issue is no longer available.');
+      if (entry.statusPath) {
+        const path = entry.statusPath;
+        if (current.status.id !== path.at(-1)?.id)
+          throw new UndoUnavailable(
+            'The status changed in Jira. Refresh and review it before undoing.',
+          );
+        let actual = current.status;
+        let reversed = 0;
+        let undoRevision = revision;
+        const assertUndoCurrent = () => {
+          if (undoRevision !== this.revision || this.entries.length)
+            throw new Error(
+              'Another edit started during Undo. Review the current status before trying again.',
+            );
+        };
+        try {
+          for (let index = path.length - 2; index >= 0; index--) {
+            assertUndoCurrent();
+            const choices = await this.api.transitions(
+              connectionId,
+              change.key,
+              true,
+            );
+            assertUndoCurrent();
+            const reverse = choices.find(
+              (choice) =>
+                choice.to?.id === path[index].id && !choice.requiresFields,
+            );
+            if (!reverse)
+              throw new UndoUnavailable(
+                `No supported reverse transition from ${actual.name} to ${path[index].name}.`,
+              );
+            const result = await this.api.update(connectionId, change.key, {
+              transitionId: reverse.id,
+            });
+            actual = result.status;
+            this.confirm(connectionId, {
+              key: change.key,
+              fields: { status: actual },
+            });
+            undoRevision = this.revision;
+            this.publish();
+            if (actual.id !== path[index].id)
+              throw new Error(
+                `Jira returned ${actual.name} instead of ${path[index].name}.`,
+              );
+            reversed++;
+          }
+        } catch (error) {
+          let statusLabel = 'Actual status';
+          try {
+            actual = (await this.api.update(connectionId, change.key, {}))
+              .status;
+            this.confirm(connectionId, {
+              key: change.key,
+              fields: { status: actual },
+            });
+          } catch {
+            statusLabel = 'Last confirmed status (fresh read unavailable)';
+          }
+          this.history = this.history.filter((value) => value !== entry);
+          this.error(
+            `Undo stopped after ${reversed} of ${path.length - 1} reverse transitions. ${statusLabel}: ${actual.name}. ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return;
+        }
+        this.history = this.history.filter((value) => value !== entry);
+        return;
+      }
       let patch: IssuePatch | undefined;
       let options: EditOptions | undefined;
       let anchor: string | undefined;
@@ -555,6 +691,7 @@ export class Mutations {
       return false;
     } finally {
       this.checkingUndo = false;
+      this.undoingConnection = null;
       this.publish();
     }
   }
