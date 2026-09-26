@@ -1,7 +1,12 @@
 import { expect } from '@playwright/test';
 
 export async function auditGithub(app, page) {
-  await app.evaluate(() => {
+  await app.evaluate(({ safeStorage }) => {
+    // Synthetic credentials remain in the isolated smoke profile.
+    safeStorage.isEncryptionAvailable = () => true;
+    safeStorage.getSelectedStorageBackend = () => 'gnome_libsecret';
+    safeStorage.encryptString = (value) => Buffer.from(value);
+    safeStorage.decryptString = (value) => value.toString();
     globalThis.githubSmokeFetch = globalThis.fetch;
     const issue = (repo, number, extra = {}) => ({
       id: number + (repo === 'team/b' ? 100 : 0),
