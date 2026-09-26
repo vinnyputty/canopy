@@ -151,6 +151,15 @@ export function removeConnection(workspace: Workspace, id: string): Workspace {
         (connectionId) => connectionId !== id,
       ),
     })),
+    ...(workspace.seenRoots
+      ? {
+          seenRoots: Object.fromEntries(
+            Object.entries(workspace.seenRoots).filter(
+              ([key]) => !key.startsWith(`${id}:`),
+            ),
+          ),
+        }
+      : {}),
   };
 }
 

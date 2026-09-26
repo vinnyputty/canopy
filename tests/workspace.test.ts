@@ -135,6 +135,10 @@ describe('workspace restoration', () => {
       togglePinned(rememberRoot(current, tab('1')), tab('1')),
       ['1'],
     );
+    current.seenRoots = {
+      'site:CAN-1': { touchedAt: 1, issues: {} },
+      'other-site:CAN-1': { touchedAt: 2, issues: {} },
+    };
     const next = removeConnection(current, 'site');
     assert.deepEqual(
       next.tabs.map((item) => item.id),
@@ -144,6 +148,7 @@ describe('workspace restoration', () => {
     assert.deepEqual(next.pinnedRoots, []);
     assert.deepEqual(next.recentRoots, []);
     assert.deepEqual(next.closedTabs, []);
+    assert.deepEqual(Object.keys(next.seenRoots ?? {}), ['other-site:CAN-1']);
   });
   it('restores visited position in either direction and discards the forward branch after a new visit', () => {
     const from = {

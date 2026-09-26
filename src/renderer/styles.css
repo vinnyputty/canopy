@@ -970,6 +970,16 @@ select:focus-visible,
   background: var(--selected);
   box-shadow: inset 2px 0 var(--selected-border);
 }
+.unread-badge {
+  position: absolute;
+  top: 50%;
+  right: 29px;
+  transform: translateY(-50%);
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+  pointer-events: none;
+}
 .issue-row.drop-ready:hover:after {
   content: '';
   position: absolute;
@@ -2655,6 +2665,17 @@ kbd {
 .preview-content h3 {
   font-size: 12px;
   margin-top: 24px;
+}
+.preview-changes {
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+.preview-changes p {
+  margin: 8px 0;
+}
+.preview-changes .text-button {
+  display: block;
+  margin: 7px 0;
 }
 .preview-text {
   white-space: pre-wrap;

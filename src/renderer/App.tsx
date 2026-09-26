@@ -50,6 +50,7 @@ import type {
   RootReference,
   RootView,
   SavedIssueView,
+  SeenIssue,
   TableColumn,
   TabState,
   TreeSnapshot,
@@ -75,6 +76,15 @@ import {
 } from './tree';
 import { IssuePreview } from './IssuePreview';
 import { nextTasks, type NextTaskCriterion } from './next-tasks';
+import {
+  boundRoots,
+  markIssueSeen,
+  markRootSeen,
+  reconcileOwnEdit,
+  seedOrExtend,
+  seenRootKey,
+  unseenChanges,
+} from './seen';
 import { RowMenu } from './RowMenu';
 import { issueKeyAndSummary, issueWorkBrief } from './copy-issue';
 import { BulkTriage, type BulkOperation } from './BulkTriage';
@@ -192,6 +202,9 @@ export function App() {
   );
   const [connections, storeConnections] = useState<Connection[]>([]);
   const [snapshots, setSnapshots] = useState<Record<string, TreeSnapshot>>({});
+  const [confirmedSnapshots, setConfirmedSnapshots] = useState<
+    Record<string, TreeSnapshot>
+  >({});
   const [loading, setLoading] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -354,10 +367,21 @@ export function App() {
         window.canopy,
         (view) => {
           setSnapshots(view.snapshots);
+          setConfirmedSnapshots(view.confirmedSnapshots);
           setSaving(view.saving);
           setUndoState({ label: view.undoLabel, busy: view.undoBusy });
         },
         (message) => setErrors((current) => ({ ...current, edit: message })),
+        (connectionId, issue, fields) =>
+          setWorkspace((current) => ({
+            ...current,
+            seenRoots: reconcileOwnEdit(
+              current.seenRoots ?? {},
+              connectionId,
+              issue,
+              fields.map((field) => field[0].toUpperCase() + field.slice(1)),
+            ),
+          })),
       ),
   );
   const editSession = useRef(0);
@@ -462,6 +486,34 @@ export function App() {
   const nextTaskCriterion = activeTab
     ? (nextTaskCriteria[activeTab.id] ?? 'rank')
     : 'rank';
+  const confirmedSnapshot = activeTab
+    ? confirmedSnapshots[activeTab.id]
+    : undefined;
+  const activeSeenRoot = activeTab
+    ? workspace.seenRoots?.[
+        seenRootKey(activeTab.connectionId, activeTab.rootKey)
+      ]
+    : undefined;
+  const unreadCount =
+    confirmedSnapshot?.issues.filter((issue) => {
+      const changes = unseenChanges(activeSeenRoot?.issues[issue.key], issue);
+      return changes.fields.length > 0 || changes.comments > 0;
+    }).length ?? 0;
+  const markSeen = (issue: Issue) => {
+    if (!activeTab) return;
+    const rootKey = seenRootKey(activeTab.connectionId, activeTab.rootKey);
+    setWorkspace((current) => {
+      const root = current.seenRoots?.[rootKey];
+      if (!root) return current;
+      return {
+        ...current,
+        seenRoots: boundRoots({
+          ...current.seenRoots,
+          [rootKey]: markIssueSeen(root, issue, Date.now()),
+        }),
+      };
+    });
+  };
   const query = activeTab ? (queries[activeTab.id] ?? '') : '';
   const filtering = Boolean(
     query.trim() || Object.values(activeTab?.filters ?? {}).some(Boolean),
@@ -903,6 +955,24 @@ export function App() {
               continue;
             mutations.receive(target, next, epoch);
             delivered.add(target.id);
+          }
+          if (delivered.size) {
+            const confirmed =
+              mutations.confirmedSnapshot(delivered.values().next().value!) ??
+              next;
+            setWorkspace((current) => {
+              const seenKey = seenRootKey(tab.connectionId, tab.rootKey);
+              return {
+                ...current,
+                seenRoots: boundRoots({
+                  ...current.seenRoots,
+                  [seenKey]: seedOrExtend(
+                    current.seenRoots?.[seenKey],
+                    confirmed,
+                  ),
+                }),
+              };
+            });
           }
         } else if (refreshSequences.current[tab.id] === sequence) {
           deferredRefreshes.current.add(tab.id);
@@ -3185,6 +3255,29 @@ export function App() {
                     size={16}
                   />
                 </button>
+                {unreadCount > 0 && confirmedSnapshot && (
+                  <button
+                    className="tool-button"
+                    onClick={() => {
+                      const rootKey = seenRootKey(
+                        activeTab.connectionId,
+                        activeTab.rootKey,
+                      );
+                      setWorkspace((current) => ({
+                        ...current,
+                        seenRoots: boundRoots({
+                          ...current.seenRoots,
+                          [rootKey]: markRootSeen(
+                            confirmedSnapshot,
+                            current.seenRoots?.[rootKey],
+                          ),
+                        }),
+                      }));
+                    }}
+                  >
+                    Mark root seen ({unreadCount})
+                  </button>
+                )}
                 <button
                   className="icon-button"
                   onClick={() => setDialog('commands')}
@@ -3831,6 +3924,15 @@ export function App() {
                           })
                         }
                         counts={counts}
+                        seenIssues={activeSeenRoot?.issues ?? {}}
+                        confirmedIssues={
+                          new Map(
+                            confirmedSnapshot?.issues.map((issue) => [
+                              issue.key,
+                              issue,
+                            ]) ?? [],
+                          )
+                        }
                         revealedKey={
                           reveal?.tabId === activeTab.id
                             ? reveal.key
@@ -4011,6 +4113,23 @@ export function App() {
                   provider={activeConnection?.provider ?? 'jira'}
                   connectionId={activeTab.connectionId}
                   issueKey={previewKey}
+                  observedIssue={confirmedSnapshot?.issues.find(
+                    (issue) => issue.key === previewKey,
+                  )}
+                  baseline={activeSeenRoot?.issues[previewKey]}
+                  onMarkSeen={(previewIssue) => {
+                    const issue = confirmedSnapshot?.issues.find(
+                      (value) => value.key === previewKey,
+                    );
+                    if (issue)
+                      markSeen({
+                        ...issue,
+                        commentCount: Math.max(
+                          issue.commentCount ?? 0,
+                          previewIssue.commentCount ?? 0,
+                        ),
+                      });
+                  }}
                   width={
                     Number.isFinite(workspace.previewWidth)
                       ? Math.max(300, Math.min(720, workspace.previewWidth!))
@@ -4020,7 +4139,13 @@ export function App() {
                     setWorkspace((current) => ({ ...current, previewWidth }))
                   }
                   onClose={closePreview}
-                  onChanged={() => void refreshTab(activeTab)}
+                  onChanged={(issue) => {
+                    mutations.acceptConfirmedLabels(
+                      activeTab.connectionId,
+                      issue,
+                    );
+                    void refreshTab(activeTab);
+                  }}
                   onPreview={setPreviewKey}
                   onOpenTab={(key) => openTab(activeTab.connectionId, key)}
                   onOpenExternal={(key) =>
@@ -4038,6 +4163,20 @@ export function App() {
                       preview,
                     })
                   }
+                  onOpenComment={(commentId) => {
+                    void window.canopy
+                      .openComment(
+                        activeTab.connectionId,
+                        previewKey,
+                        commentId,
+                      )
+                      .catch((error: unknown) =>
+                        setErrors((current) => ({
+                          ...current,
+                          app: `Couldn’t open comment: ${error instanceof Error ? error.message : String(error)}`,
+                        })),
+                      );
+                  }}
                 />
               )}
             </div>
@@ -4489,6 +4628,8 @@ type RowsProps = {
   linkedExpanded: Set<string>;
   onToggleLinks: (key: string) => void;
   counts: Map<string, ReturnType<typeof childCounts>>;
+  seenIssues: Record<string, SeenIssue>;
+  confirmedIssues: Map<string, Issue>;
   revealedKey?: string;
   onToggle: (key: string) => void;
   selectedKey?: string;
@@ -4540,6 +4681,10 @@ function TreeRows(props: RowsProps) {
     focusNeighbor,
   } = props;
   const { issue } = node;
+  const unread = unseenChanges(
+    props.seenIssues[issue.key],
+    props.confirmedIssues.get(issue.key) ?? issue,
+  );
   const repositoryRoot =
     props.provider === 'github' && issue.type === 'Repository';
   const open = expanded.has(issue.key);
@@ -4927,6 +5072,15 @@ function TreeRows(props: RowsProps) {
         {props.columns.map((column) => (
           <React.Fragment key={column}>{cells[column]}</React.Fragment>
         ))}
+        {(unread.fields.length > 0 || unread.comments > 0) && (
+          <span
+            className="unread-badge"
+            aria-label={`Unseen changes on ${issue.key}`}
+            title="Unseen changes"
+          >
+            ●
+          </span>
+        )}
         <div className="row-actions">
           <button
             className="icon-button row-menu-trigger"

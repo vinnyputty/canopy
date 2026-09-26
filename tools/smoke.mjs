@@ -3,7 +3,7 @@ import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
 import { auditWorkflow } from './smoke-workflow.mjs';
-import { auditPreview } from './smoke-preview.mjs';
+import { auditPreview, installPreviewHandlers } from './smoke-preview.mjs';
 import { auditGithub } from './smoke-github.mjs';
 import { auditBulk } from './smoke-bulk.mjs';
 import { createRequire } from 'node:module';
@@ -1173,9 +1173,9 @@ try {
   });
   await expect(preview).toBeVisible();
   await preview.getByRole('button', { name: 'Copy key and summary' }).click();
-  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
-    'CAN-108 Keep unfinished descendants visible',
-  );
+  await expect
+    .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
+    .toBe('CAN-108 Keep unfinished descendants visible');
   await expect(
     preview.getByText('Comments temporarily unavailable.'),
   ).toBeVisible();
@@ -3038,7 +3038,21 @@ try {
 
   await auditWorkflow(app, page);
 
-  await auditPreview(app, page);
+  await auditPreview(
+    app,
+    page,
+    async (savedWorkspace, currentIssue, created) => {
+      await close();
+      await launch(true);
+      await installPreviewHandlers(app, true, currentIssue, created);
+      await writeFile(
+        join(userData, 'workspace.json'),
+        JSON.stringify(savedWorkspace),
+      );
+      await page.reload();
+      return { app, page };
+    },
+  );
 
   await auditAppearanceSaveOrdering();
   await auditAppearanceSaveFailure();

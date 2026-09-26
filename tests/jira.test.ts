@@ -119,6 +119,18 @@ describe('JiraProvider tree', () => {
         .length,
       5,
     );
+    for (const [path, init] of request.calls) {
+      if (path === '/rest/api/3/search/jql') {
+        assert.ok(body(init).fields.includes('updated'));
+        assert.equal(body(init).fields.includes('comment'), false);
+      }
+    }
+    const rootFields = new URL(
+      request.calls[0][0],
+      'https://jira.example',
+    ).searchParams.get('fields');
+    assert.ok(rootFields?.includes('updated'));
+    assert.equal(rootFields?.includes('comment'), false);
   });
 
   it('reports duplicate or cyclic children and terminates safely', async () => {

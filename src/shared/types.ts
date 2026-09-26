@@ -27,6 +27,9 @@ export type Issue = {
   }[];
   linksAvailable?: boolean;
   labels?: Choice[];
+  commentCount?: number;
+  updated?: string;
+  unavailableFields?: string[];
 };
 export type IssuePreview = {
   issue: Issue;
@@ -148,7 +151,15 @@ export type Workspace = {
   rootViews?: Record<string, RootView>;
   savedViews?: SavedIssueView[];
   activeSavedViewId?: string | null;
+  seenRoots?: Record<string, SeenRoot>;
 };
+export type SeenValue = string | null | string[];
+export type SeenIssue = {
+  seenAt: number;
+  fields: Record<string, SeenValue>;
+  commentCount?: number;
+};
+export type SeenRoot = { touchedAt: number; issues: Record<string, SeenIssue> };
 export type TokenConnectionInput = {
   siteUrl: string;
   email: string;
@@ -221,6 +232,11 @@ export interface CanopyAPI {
   copyIssueLink(connectionId: string, key: string): Promise<void>;
   openIssue(connectionId: string, key: string): Promise<void>;
   openLink(url: string): Promise<void>;
+  openComment(
+    connectionId: string,
+    key: string,
+    commentId: string,
+  ): Promise<void>;
 }
 declare global {
   interface Window {

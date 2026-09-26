@@ -64,7 +64,10 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
-function harness(overrides: Partial<CanopyAPI> = {}) {
+function harness(
+  overrides: Partial<CanopyAPI> = {},
+  confirmed?: (connectionId: string, issue: Issue, fields: string[]) => void,
+) {
   let view!: MutationView;
   const errors: string[] = [];
   const api = {
@@ -84,6 +87,7 @@ function harness(overrides: Partial<CanopyAPI> = {}) {
     api,
     (next) => (view = next),
     (message) => errors.push(message),
+    confirmed,
   );
   mutations.receive(tab(), snapshot(), 0);
   mutations.receive(tab('two'), snapshot(), 0);
@@ -213,6 +217,26 @@ describe('optimistic mutation reconciliation', () => {
     assert.equal(await h.mutations.undo('jira', 'A-2', bulk), true);
     assert.equal(h.current.summary, 'A-2');
     assert.deepEqual(writes, ['Bulk', 'Manual', 'Bulk', 'A-2']);
+  });
+  it('reports confirmed own fields only after the provider accepts a write', async () => {
+    const request = deferred<Issue>();
+    const confirmed: Array<{ summary: string; fields: string[] }> = [];
+    const h = harness(
+      { update: () => request.promise },
+      (_connection, value, fields) =>
+        confirmed.push({ summary: value.summary, fields }),
+    );
+    // The rendered state is optimistic; confirmed state stays at the prior value.
+    const writing = h.mutations.update('jira', 'A-2', { summary: 'Draft' });
+    assert.equal(h.current.summary, 'Draft');
+    assert.equal(h.view.confirmedSnapshots.one.issues[1].summary, 'A-2');
+    assert.equal(h.mutations.pending('jira'), true);
+    assert.deepEqual(confirmed, []);
+    request.resolve({ ...issue('A-2', 'A-1'), summary: 'Saved' });
+    assert.equal(await writing, true);
+    assert.equal(h.current.summary, 'Saved');
+    assert.equal(h.view.confirmedSnapshots.one.issues[1].summary, 'Saved');
+    assert.deepEqual(confirmed, [{ summary: 'Saved', fields: ['summary'] }]);
   });
   it('applies fields to every matching tab, scopes pending by connection, and restores a failed edit', async () => {
     const request = deferred<Issue>();
