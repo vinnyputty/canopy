@@ -93,6 +93,16 @@ function parseIssue(raw: JiraIssue): Issue {
     links.push({
       key: String(linked.key),
       summary: String(linked.fields?.summary ?? linked.key),
+      ...(linked.fields?.status?.statusCategory?.key
+        ? {
+            statusCategory:
+              linked.fields.status.statusCategory.key === 'done'
+                ? ('done' as const)
+                : linked.fields.status.statusCategory.key === 'new'
+                  ? ('new' as const)
+                  : ('indeterminate' as const),
+          }
+        : {}),
       relationship: String(
         link.outwardIssue
           ? (link.type?.outward ?? 'links to')
@@ -124,6 +134,7 @@ function parseIssue(raw: JiraIssue): Issue {
       category,
     },
     links,
+    linksAvailable: Array.isArray(fields.issuelinks),
   };
 }
 

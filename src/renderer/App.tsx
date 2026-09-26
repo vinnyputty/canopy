@@ -72,6 +72,7 @@ import {
   type IssueNode,
 } from './tree';
 import { IssuePreview } from './IssuePreview';
+import { nextTasks, type NextTaskCriterion } from './next-tasks';
 import { RowMenu } from './RowMenu';
 import { issueKeyAndSummary } from './copy-issue';
 import { StatusColors } from './status-colors';
@@ -214,6 +215,13 @@ export function App() {
   connectionsRef.current = connections;
   historyRef.current = history;
   const [queries, setQueries] = useState<Record<string, string>>({});
+  const [nextTaskViews, setNextTaskViews] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [nextTaskCriteria, setNextTaskCriteria] = useState<
+    Record<string, NextTaskCriterion>
+  >({});
+  const [nextTaskMine, setNextTaskMine] = useState<Record<string, boolean>>({});
   const [reveal, setReveal] = useState<{ tabId: string; key: string } | null>(
     null,
   );
@@ -338,6 +346,10 @@ export function App() {
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
+  const nextTaskOpen = activeTab ? Boolean(nextTaskViews[activeTab.id]) : false;
+  const nextTaskCriterion = activeTab
+    ? (nextTaskCriteria[activeTab.id] ?? 'rank')
+    : 'rank';
   const query = activeTab ? (queries[activeTab.id] ?? '') : '';
   const filtering = Boolean(
     query.trim() || Object.values(activeTab?.filters ?? {}).some(Boolean),
@@ -413,7 +425,8 @@ export function App() {
     if (
       !activeTab ||
       !snapshot ||
-      view.sort.column !== 'priority' ||
+      (view.sort.column !== 'priority' &&
+        !(nextTaskOpen && nextTaskCriterion === 'priority')) ||
       priorityOrder ||
       priorityError
     )
@@ -447,6 +460,8 @@ export function App() {
     activeTab?.connectionId,
     Boolean(snapshot),
     view.sort.column,
+    nextTaskOpen,
+    nextTaskCriterion,
     priorityCacheKey,
     priorityOrder,
     priorityError,
@@ -1611,6 +1626,45 @@ export function App() {
     () => (snapshot ? buildIssueTree(snapshot.issues, snapshot.rootKey) : null),
     [snapshot],
   );
+  const tasks = useMemo(
+    () =>
+      snapshot
+        ? nextTasks(
+            snapshot,
+            activeConnection?.provider ?? 'jira',
+            nextTaskCriterion,
+            activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
+            activeTab ? Boolean(nextTaskMine[activeTab.id]) : false,
+            priorityOrder,
+          )
+        : [],
+    [
+      snapshot,
+      activeConnection?.provider,
+      nextTaskCriterion,
+      activeTab?.id,
+      activeTab?.connectionId,
+      currentUsers,
+      nextTaskMine,
+      priorityOrder,
+    ],
+  );
+  const jumpToTask = (key: string) => {
+    if (!activeTab || !tree) return;
+    const path = ancestorPath(tree, key);
+    if (!path.length) return;
+    updateTab(activeTab.id, {
+      selectedKey: key,
+      focusKey: undefined,
+      expanded: [
+        ...new Set([
+          ...activeTab.expanded,
+          ...path.map((node) => node.issue.key),
+        ]),
+      ],
+    });
+    setReveal({ tabId: activeTab.id, key });
+  };
   const retainedKeys = new Set(
     [...saving]
       .filter(
@@ -2575,6 +2629,18 @@ export function App() {
                 <strong>{activeTab.rootKey}</strong>
               </div>
               <div className="toolbar-actions">
+                <button
+                  className={cx('tool-button', nextTaskOpen && 'active')}
+                  aria-pressed={nextTaskOpen}
+                  onClick={() =>
+                    setNextTaskViews((current) => ({
+                      ...current,
+                      [activeTab.id]: !current[activeTab.id],
+                    }))
+                  }
+                >
+                  Next tasks
+                </button>
                 <ViewSettings
                   view={view}
                   provider={activeConnection?.provider}
@@ -3008,6 +3074,151 @@ export function App() {
             )}
             <div className="tree-with-preview">
               <div className="tree-content">
+                {nextTaskOpen && snapshot && (
+                  <section className="next-tasks" aria-label="Next tasks">
+                    <div className="next-tasks-controls">
+                      <strong>Next tasks in {activeTab.rootKey}</strong>
+                      <label>
+                        Order by{' '}
+                        <select
+                          aria-label="Order next tasks by"
+                          value={nextTaskCriterion}
+                          onChange={(event) =>
+                            setNextTaskCriteria((current) => ({
+                              ...current,
+                              [activeTab.id]: event.target
+                                .value as NextTaskCriterion,
+                            }))
+                          }
+                        >
+                          <option value="rank">
+                            {activeConnection?.provider === 'github'
+                              ? 'Tree order'
+                              : 'Sibling rank'}
+                          </option>
+                          {activeConnection?.provider !== 'github' && (
+                            <option value="priority">Jira priority</option>
+                          )}
+                          <option value="status">Status</option>
+                          <option value="assignment">Assignment</option>
+                          <option value="blocked">Blocked state</option>
+                        </select>
+                      </label>
+                      <label className="checkbox">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(nextTaskMine[activeTab.id])}
+                          disabled={!currentUsers[activeTab.connectionId]}
+                          onChange={(event) =>
+                            setNextTaskMine((current) => ({
+                              ...current,
+                              [activeTab.id]: event.target.checked,
+                            }))
+                          }
+                        />
+                        Assigned to me
+                      </label>
+                    </div>
+                    <p className="next-tasks-explanation">
+                      {nextTaskCriterion === 'priority'
+                        ? priorityOrder
+                          ? 'Jira priority orders issues using this site’s priority order. Missing priorities follow known values.'
+                          : priorityError
+                            ? `Jira priority order is unavailable: ${priorityError}. Showing tree order.`
+                            : 'Loading Jira priority order. Showing tree order for now.'
+                        : nextTaskCriterion === 'rank'
+                          ? activeConnection?.provider === 'github'
+                            ? 'Tree order follows the loaded hierarchy; GitHub has no Jira sibling rank.'
+                            : snapshot.warnings.some((warning) =>
+                                  warning.includes(
+                                    'Rank ordering is unavailable',
+                                  ),
+                                )
+                              ? 'Jira rank ordering is unavailable. Tree order follows issue keys.'
+                              : 'Sibling rank follows Jira order within each parent. Parent branches follow tree order.'
+                          : nextTaskCriterion === 'status'
+                            ? 'New statuses appear before in progress statuses; tree order breaks ties.'
+                            : nextTaskCriterion === 'assignment'
+                              ? currentUsers[activeTab.connectionId]
+                                ? 'Your issues appear first, then other assigned issues, then unassigned issues; assignee name and tree order break ties.'
+                                : 'Your account is unavailable. Assigned issues appear before unassigned issues; assignee name and tree order break ties.'
+                              : 'Clear issues appear first, unknown blocker state next, then confirmed blocked issues.'}{' '}
+                      Blocked issues always follow clear and unknown issues.{' '}
+                      {activeConnection?.provider === 'github'
+                        ? 'GitHub dependency data is unavailable in tree snapshots, so blocker state is unknown.'
+                        : 'Jira blocker state is unknown when link data or a linked blocker status is unavailable.'}
+                    </p>
+                    {snapshot.warnings.length > 0 && (
+                      <p className="next-tasks-explanation">
+                        This tree may be incomplete:{' '}
+                        {snapshot.warnings.join(' ')}
+                      </p>
+                    )}
+                    <div className="next-tasks-list">
+                      {tasks.length === 0 ? (
+                        <p>No unfinished issues match this view.</p>
+                      ) : (
+                        tasks.map((task, index) => (
+                          <React.Fragment key={task.issue.key}>
+                            {task.blocker !== tasks[index - 1]?.blocker && (
+                              <div className="next-task-group">
+                                {task.blocker === 'clear'
+                                  ? 'No active blockers found'
+                                  : task.blocker === 'unknown'
+                                    ? 'Blocker state unknown'
+                                    : 'Blocked'}
+                              </div>
+                            )}
+                            <div className="next-task">
+                              <span className="next-task-number">
+                                {index + 1}
+                              </span>
+                              <div className="next-task-detail">
+                                <div className="next-task-title">
+                                  <strong>{task.issue.key}</strong>{' '}
+                                  {task.issue.summary}
+                                </div>
+                                <div className="next-task-context">
+                                  {task.parents.length > 0
+                                    ? task.parents
+                                        .map((parent) => parent.key)
+                                        .join(' › ')
+                                    : 'Root issue'}
+                                  {' · '}
+                                  {task.parents.length > 0
+                                    ? `${activeConnection?.provider === 'github' || snapshot.warnings.some((warning) => warning.includes('Rank ordering is unavailable')) ? 'Tree position' : 'Sibling rank'} #${task.rankPath.at(-1)! + 1}`
+                                    : 'Root'}
+                                  {' · '}
+                                  {task.issue.priority?.name ??
+                                    (activeConnection?.provider === 'github'
+                                      ? 'Jira priority unavailable'
+                                      : 'Priority unknown')}
+                                  {' · '}
+                                  {task.issue.status.name}
+                                  {' · '}
+                                  {task.issue.assignee?.name ?? 'Unassigned'}
+                                  {' · '}
+                                  {task.blocker === 'blocked'
+                                    ? `Blocked by ${task.blockers.join(', ')}`
+                                    : task.blocker === 'unknown'
+                                      ? 'Blocker state unknown'
+                                      : 'No active blockers found'}
+                                </div>
+                              </div>
+                              <button
+                                className="tool-button"
+                                onClick={() => jumpToTask(task.issue.key)}
+                                aria-label={`Show ${task.issue.key} in tree`}
+                              >
+                                Show in tree
+                              </button>
+                            </div>
+                          </React.Fragment>
+                        ))
+                      )}
+                    </div>
+                  </section>
+                )}
                 <div
                   className="tree-scroll"
                   style={tableStyle(view) as React.CSSProperties}

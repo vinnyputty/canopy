@@ -103,7 +103,12 @@ describe('JiraProvider tree', () => {
       ['EPIC-1', 'STORY-1', 'STORY-2', 'TASK-1', 'SUB-1'],
     );
     assert.deepEqual(snapshot.issues[0].links, [
-      { key: 'LINK-9', summary: 'LINK-9 summary', relationship: 'blocks' },
+      {
+        key: 'LINK-9',
+        summary: 'LINK-9 summary',
+        relationship: 'blocks',
+        statusCategory: 'indeterminate',
+      },
     ]);
     assert.equal(
       request.calls.some(([path]) => path.includes('LINK-9')),

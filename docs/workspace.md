@@ -1,5 +1,7 @@
 # Workspace controls
 
+Use **Next tasks** in a root toolbar to see unfinished issues from the whole root alongside the tree. The list includes unfinished parent issues and shows each issue’s ancestry, priority, status, assignee, and blocker state. **Show in tree** expands the path and selects that issue. Choose sibling rank, Jira priority, status, assignment, or blocker state as the ordering criterion; confirmed blocked issues follow clear and unknown issues. **Assigned to me** narrows the list to your issues. The list updates after edits and tree refreshes. GitHub priority and blocker data are unavailable in the tree view, so GitHub issues show an unknown blocker state. Jira blocker state is unknown when link data or a linked blocker’s status is unavailable. The list contains issues returned by the current connection; tree warnings indicate when part of the hierarchy could not be loaded.
+
 Drag a tab onto another tab to move it to that position. Keyboard users can focus a tab and press `Alt+Shift+Left` or `Alt+Shift+Right`. Tab order is saved with the workspace.
 
 Right-click a tab, or press `Shift+F10` while it is focused, to close other tabs, close tabs to its right, pin its root, copy its Jira link, or open it in Jira. Middle-click closes a tab. Pins are sidebar favorites: closing their tabs retains the favorites, and favorites do not affect tab ordering or bulk close actions. The sidebar unpin button removes a favorite.
