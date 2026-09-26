@@ -269,9 +269,11 @@ export function App() {
     Record<string, NextTaskCriterion>
   >({});
   const [nextTaskMine, setNextTaskMine] = useState<Record<string, boolean>>({});
-  const [reveal, setReveal] = useState<{ tabId: string; key: string; preserveScroll?: boolean } | null>(
-    null,
-  );
+  const [reveal, setReveal] = useState<{
+    tabId: string;
+    key: string;
+    preserveScroll?: boolean;
+  } | null>(null);
   const focusedReveal = useRef<typeof reveal>(null);
   const navigationReveal = useRef<{ tabId: string; key: string } | null>(null);
   const [currentUsers, setCurrentUsers] = useState<Record<string, Choice>>({});
@@ -758,7 +760,15 @@ export function App() {
     restoreTreeFocus(activeTab?.selectedKey ?? activeTab?.rootKey);
   }, [activeTab?.selectedKey, activeTab?.rootKey, restoreTreeFocus]);
   useEffect(() => {
-    if (!previewKey || dialog || workBrief || childParent || editor || rowMenu || tabMenu)
+    if (
+      !previewKey ||
+      dialog ||
+      workBrief ||
+      childParent ||
+      editor ||
+      rowMenu ||
+      tabMenu
+    )
       return;
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented) {
@@ -768,7 +778,16 @@ export function App() {
     };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
-  }, [previewKey, dialog, workBrief, childParent, editor, rowMenu, tabMenu, closePreview]);
+  }, [
+    previewKey,
+    dialog,
+    workBrief,
+    childParent,
+    editor,
+    rowMenu,
+    tabMenu,
+    closePreview,
+  ]);
 
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
@@ -1944,7 +1963,8 @@ export function App() {
       if (
         event.defaultPrevented ||
         dialog ||
-        workBrief || childParent ||
+        workBrief ||
+        childParent ||
         event.shiftKey ||
         event.altKey ||
         !(event.metaKey || event.ctrlKey) ||

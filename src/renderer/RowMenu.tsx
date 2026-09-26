@@ -14,7 +14,14 @@ export function RowMenu({
   position: { x: number; y: number };
   onClose: (restore?: boolean) => void;
   onAction: (
-    action: 'key' | 'title' | 'key-summary' | 'brief' | 'link' | 'open' | 'createChild',
+    action:
+      | 'key'
+      | 'title'
+      | 'key-summary'
+      | 'brief'
+      | 'link'
+      | 'open'
+      | 'createChild',
   ) => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
