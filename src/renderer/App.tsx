@@ -49,6 +49,7 @@ import type {
   IssuePatch,
   RootReference,
   RootView,
+  SavedIssueView,
   TableColumn,
   TabState,
   TreeSnapshot,
@@ -104,6 +105,14 @@ import {
 } from './table-view';
 import { Mutations } from './mutations';
 import { RefreshSchedule, RootRefreshGate } from './refresh';
+import {
+  configuredRoots,
+  sourceTabId,
+  starterViews,
+  viewResults,
+  viewSources,
+} from './saved-views';
+import { SavedViewsPanel } from './SavedViewsPanel';
 import {
   nextEditableCell,
   retainEditingOrder,
@@ -176,6 +185,9 @@ function refreshRootKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {
 }
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const [selectedViewIssue, setSelectedViewIssue] = useState<string | null>(
+    null,
+  );
   const [connections, storeConnections] = useState<Connection[]>([]);
   const [snapshots, setSnapshots] = useState<Record<string, TreeSnapshot>>({});
   const [loading, setLoading] = useState<Set<string>>(new Set());
@@ -244,6 +256,8 @@ export function App() {
   const [reveal, setReveal] = useState<{ tabId: string; key: string } | null>(
     null,
   );
+  const focusedReveal = useRef<typeof reveal>(null);
+  const navigationReveal = useRef<{ tabId: string; key: string } | null>(null);
   const [currentUsers, setCurrentUsers] = useState<Record<string, Choice>>({});
   const [identityErrors, setIdentityErrors] = useState<Record<string, string>>(
     {},
@@ -290,6 +304,7 @@ export function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
+  const previousVirtualTabs = useRef(new Map<string, TabState>());
   const refreshSchedule = useRef(new RefreshSchedule());
   const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
   const snapshotsRef = useRef(snapshots);
@@ -358,12 +373,79 @@ export function App() {
   const tabsRef = useRef<TabState[]>([]);
   const pendingScrollRestore = useRef<string | null>(null);
   const activeIdRef = useRef<string | null>(null);
-  activeIdRef.current = workspace.activeTabId;
+  const activeViewSourceIdsRef = useRef<string[]>([]);
   refreshBlocked.current = (connectionId) =>
     editorRef.current?.connectionId === connectionId ||
     mutations.pending(connectionId);
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
+  const activeSavedView = workspace.savedViews?.find(
+    (item) => item.id === workspace.activeSavedViewId,
+  );
+  const availableRoots = useMemo(
+    () => configuredRoots(workspace, connections),
+    [workspace.tabs, workspace.pinnedRoots, workspace.recentRoots, connections],
+  );
+  const savedSources = useMemo(
+    () => (activeSavedView ? viewSources(activeSavedView, availableRoots) : []),
+    [activeSavedView, availableRoots],
+  );
+  const sourceTabs = useMemo<TabState[]>(
+    () =>
+      savedSources.map((source) => ({
+        ...source,
+        expanded: [source.rootKey],
+        hideDone: false,
+        scrollTop: 0,
+      })),
+    [savedSources],
+  );
+  activeIdRef.current = workspace.activeSavedViewId
+    ? (sourceTabs[0]?.id ?? null)
+    : workspace.activeTabId;
+  const allRefreshTabs = useMemo(
+    () => [
+      ...workspace.tabs,
+      ...sourceTabs.filter(
+        (source) => !workspace.tabs.some((tab) => sameRoot(source, tab)),
+      ),
+    ],
+    [workspace.tabs, sourceTabs],
+  );
+  activeViewSourceIdsRef.current = activeSavedView
+    ? allRefreshTabs
+        .filter((tab) => savedSources.some((source) => sameRoot(source, tab)))
+        .map((tab) => tab.id)
+    : [];
+  const sourceTabKeys = JSON.stringify(
+    workspace.tabs.map(({ id, connectionId, rootKey }) => [
+      id,
+      connectionId,
+      rootKey,
+    ]),
+  );
+  const viewSnapshots = useMemo(
+    () =>
+      Object.fromEntries(
+        savedSources.map((source) => [
+          source.id,
+          snapshots[sourceTabId(source, workspace.tabs)],
+        ]),
+      ),
+    [savedSources, snapshots, sourceTabKeys],
+  );
+  const savedResults = useMemo(
+    () =>
+      activeSavedView
+        ? viewResults(
+            activeSavedView,
+            savedSources,
+            viewSnapshots,
+            currentUsers,
+          )
+        : [],
+    [activeSavedView, savedSources, viewSnapshots, currentUsers],
+  );
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
   const nextTaskOpen = activeTab ? Boolean(nextTaskViews[activeTab.id]) : false;
   const nextTaskCriterion = activeTab
@@ -402,7 +484,17 @@ export function App() {
     };
   }, [activeTab?.connectionId, identityRetry]);
   useEffect(() => {
-    setReveal(null);
+    const requested = navigationReveal.current;
+    navigationReveal.current = null;
+    setReveal((current) => {
+      const preserve =
+        current &&
+        current.tabId === activeTab?.id &&
+        current.key === activeTab?.selectedKey &&
+        requested?.tabId === current.tabId &&
+        requested.key === current.key;
+      return preserve ? current : null;
+    });
   }, [activeTab?.id, query, activeTab?.filters, activeTab?.hideDone]);
   useEffect(() => {
     setReveal((current) =>
@@ -531,8 +623,46 @@ export function App() {
   }, [activeTab?.connectionId, options]);
 
   useEffect(() => {
-    tabsRef.current = workspace.tabs;
-  }, [workspace.tabs]);
+    tabsRef.current = allRefreshTabs;
+  }, [allRefreshTabs]);
+  useEffect(() => {
+    if (activeSavedView?.filters.assignee !== 'me') return;
+    let live = true;
+    const generation = identityGeneration.current;
+    for (const id of new Set(
+      savedSources.map((source) => source.connectionId),
+    )) {
+      if (currentUsers[id]) continue;
+      void window.canopy
+        .currentUser(id)
+        .then((user) => {
+          if (live && generation === identityGeneration.current) {
+            setCurrentUsers((current) => ({ ...current, [id]: user }));
+            setIdentityErrors((current) => {
+              const next = { ...current };
+              delete next[id];
+              return next;
+            });
+          }
+        })
+        .catch((error) => {
+          if (live && generation === identityGeneration.current)
+            setIdentityErrors((current) => ({
+              ...current,
+              [id]: `Couldn’t identify your account: ${String(error)}`,
+            }));
+        });
+    }
+    return () => {
+      live = false;
+    };
+  }, [
+    activeSavedView?.id,
+    activeSavedView?.filters.assignee,
+    savedSources,
+    currentUsers,
+    identityRetry,
+  ]);
   useEffect(() => {
     setEditor(null);
     setDragKey(null);
@@ -610,6 +740,14 @@ export function App() {
               ? {
                   ...EMPTY_WORKSPACE,
                   ...saved,
+                  savedViews:
+                    saved.savedViews ??
+                    starterViews().map((view) => ({
+                      ...view,
+                      connectionIds: nextConnections.map(
+                        (connection) => connection.id,
+                      ),
+                    })),
                   tabs,
                   pinnedRoots: saved.pinnedRoots?.filter(
                     (root) => root.connectionId !== 'demo' || hasDemo,
@@ -625,7 +763,15 @@ export function App() {
                     : (tabs[0]?.id ?? null),
                   shortcuts: { ...PLATFORM_SHORTCUTS, ...saved.shortcuts },
                 }
-              : EMPTY_WORKSPACE,
+              : {
+                  ...EMPTY_WORKSPACE,
+                  savedViews: starterViews().map((view) => ({
+                    ...view,
+                    connectionIds: nextConnections.map(
+                      (connection) => connection.id,
+                    ),
+                  })),
+                },
           ),
         );
       })
@@ -726,6 +872,7 @@ export function App() {
             ?.provider === 'jira' &&
           targets.some(
             (target) =>
+              !target.id.startsWith('saved-view:') &&
               rootView(workspaceRef.current, target)
                 .assumeMatchingStatusTransitions,
           )
@@ -738,8 +885,9 @@ export function App() {
         ) {
           for (const target of targets) {
             if (
-              target.id === tab.id &&
-              refreshSequences.current[tab.id] !== sequence
+              !tabsRef.current.some((item) => item.id === target.id) ||
+              (target.id === tab.id &&
+                refreshSequences.current[tab.id] !== sequence)
             )
               continue;
             mutations.receive(target, next, epoch);
@@ -829,13 +977,21 @@ export function App() {
 
   useEffect(() => {
     if (!ready) return;
-    rootRefreshes.current.retain(workspace.tabs.map(refreshRootKey));
+    rootRefreshes.current.retain(allRefreshTabs.map(refreshRootKey));
     const activated = refreshSchedule.current.sync(
-      workspace.tabs.map((tab) => tab.id),
-      foreground ? workspace.activeTabId : null,
+      allRefreshTabs.map((tab) => tab.id),
+      foreground
+        ? activeSavedView
+          ? allRefreshTabs
+              .filter((tab) =>
+                savedSources.some((source) => sameRoot(source, tab)),
+              )
+              .map((tab) => tab.id)
+          : workspace.activeTabId
+        : null,
       Date.now(),
     );
-    for (const tab of [...workspace.tabs].sort(
+    for (const tab of [...allRefreshTabs].sort(
       (a, b) =>
         Number(b.id === workspace.activeTabId) -
         Number(a.id === workspace.activeTabId),
@@ -851,6 +1007,9 @@ export function App() {
     ready,
     workspace.tabs,
     workspace.activeTabId,
+    allRefreshTabs,
+    activeSavedView?.id,
+    savedSources,
     foreground,
     snapshots,
     refreshTab,
@@ -889,10 +1048,12 @@ export function App() {
     };
     const timer = window.setInterval(tick, 1000);
     const refreshActive = () => {
-      const tab = tabsRef.current.find(
-        (item) => item.id === activeIdRef.current,
-      );
-      if (tab) void refreshTab(tab, true);
+      for (const tab of tabsRef.current.filter((item) =>
+        activeViewSourceIdsRef.current.length
+          ? activeViewSourceIdsRef.current.includes(item.id)
+          : item.id === activeIdRef.current,
+      ))
+        void refreshTab(tab, true);
     };
     const visibility = () => {
       const visible =
@@ -929,10 +1090,10 @@ export function App() {
   }, [ready, refreshTab, finishWorkflowReturn, demoMode]);
 
   useEffect(() => {
-    for (const tab of workspace.tabs) {
+    for (const tab of allRefreshTabs) {
       if (deferredRefreshes.current.has(tab.id)) void refreshTab(tab, true);
     }
-  }, [editor, saving, online, workspace.tabs, refreshTab]);
+  }, [editor, saving, online, allRefreshTabs, refreshTab]);
 
   const restoreScroll = useCallback((tab: TabState) => {
     const element = scrollRef.current;
@@ -999,7 +1160,10 @@ export function App() {
     if (!restoring) setHistory(visit(historyRef.current, from, tab));
     pendingScrollRestore.current =
       current.tabs.find((item) => sameRoot(item, tab))?.id ?? tab.id;
-    setWorkspace((value) => activateTab(value, tab, restoring));
+    setWorkspace((value) => ({
+      ...activateTab(value, tab, restoring),
+      activeSavedViewId: null,
+    }));
   }, []);
 
   const selectTab = useCallback(
@@ -1043,6 +1207,40 @@ export function App() {
     },
     [navigate, connections],
   );
+  const openSavedResult = useCallback(
+    (result: { issue: Issue; source: RootReference }) => {
+      const current = workspaceRef.current;
+      const existing = current.tabs.find((tab) => sameRoot(tab, result.source));
+      const source = savedSources.find((item) => sameRoot(item, result.source));
+      const snapshot = source ? viewSnapshots[source.id] : undefined;
+      const expanded = snapshot
+        ? ancestorPath(
+            buildIssueTree(snapshot.issues, source!.rootKey),
+            result.issue.key,
+          ).map((node) => node.issue.key)
+        : [result.source.rootKey];
+      const savedRootView = rootView(current, result.source);
+      const tab: TabState = existing ?? {
+        id: crypto.randomUUID(),
+        connectionId: result.source.connectionId,
+        rootKey: result.source.rootKey,
+        expanded: [],
+        hideDone: savedRootView.hideDone,
+        filters: savedRootView.filters,
+        scrollTop: 0,
+      };
+      const next = {
+        ...tab,
+        selectedKey: result.issue.key,
+        focusKey: undefined,
+        expanded: [...new Set([...tab.expanded, ...expanded])],
+      };
+      navigate(next);
+      navigationReveal.current = { tabId: next.id, key: result.issue.key };
+      setReveal({ tabId: next.id, key: result.issue.key });
+    },
+    [navigate, savedSources, viewSnapshots],
+  );
 
   const forgetTabs = useCallback(
     (ids: string[]) => {
@@ -1050,7 +1248,7 @@ export function App() {
         ids.includes(item.id),
       )) {
         if (
-          !workspaceRef.current.tabs.some(
+          !tabsRef.current.some(
             (other) =>
               !ids.includes(other.id) &&
               refreshRootKey(other) === refreshRootKey(tab),
@@ -1080,6 +1278,27 @@ export function App() {
     },
     [mutations],
   );
+
+  useEffect(() => {
+    const virtualTabs = new Map(
+      allRefreshTabs
+        .filter((tab) => tab.id.startsWith('saved-view:'))
+        .map((tab) => [tab.id, tab] as const),
+    );
+    const removed = [...previousVirtualTabs.current.values()].filter(
+      (tab) => !virtualTabs.has(tab.id),
+    );
+    previousVirtualTabs.current = virtualTabs;
+    if (!removed.length) return;
+    for (const tab of removed)
+      if (
+        !allRefreshTabs.some(
+          (item) => refreshRootKey(item) === refreshRootKey(tab),
+        )
+      )
+        rootRefreshes.current.forget(refreshRootKey(tab));
+    forgetTabs(removed.map((tab) => tab.id));
+  }, [allRefreshTabs, forgetTabs]);
 
   const closeTabIds = useCallback(
     (ids: string[]) => {
@@ -1111,7 +1330,7 @@ export function App() {
       ),
     );
     pendingScrollRestore.current = tab.id;
-    setWorkspace(next);
+    setWorkspace({ ...next, activeSavedViewId: null });
   }, []);
   const navigateHistory = useCallback(
     (direction: 'back' | 'forward') => {
@@ -1797,11 +2016,21 @@ export function App() {
   }, [reveal, activeTab?.id, activeTab?.selectedKey, snapshot, editor]);
   useEffect(() => {
     // Only an explicit reveal request moves keyboard focus. Refresh preserves it.
-    if (!reveal || reveal.tabId !== activeTab?.id || editor) return;
-    document
-      .querySelector<HTMLElement>(`[data-tree-key="${reveal.key}"]`)
-      ?.focus({ preventScroll: true });
-  }, [reveal, activeTab?.id]);
+    if (
+      !reveal ||
+      reveal === focusedReveal.current ||
+      reveal.tabId !== activeTab?.id ||
+      editor
+    )
+      return;
+    const target = document.querySelector<HTMLElement>(
+      `[data-tree-key="${reveal.key}"]`,
+    );
+    if (target) {
+      target.focus({ preventScroll: true });
+      focusedReveal.current = reveal;
+    }
+  }, [reveal, activeTab?.id, snapshot]);
   const flat = useMemo(
     () => flattenVisible(shownTree, expandedSet),
     [shownTree, expandedSet],
@@ -2332,6 +2561,59 @@ export function App() {
           <Menu size={17} />
         </button>
         <div className="sidebar-body">
+          <div className="side-heading">
+            <span>SAVED VIEWS</span>
+            <button
+              className="icon-button"
+              aria-label="Create saved view"
+              onClick={() => {
+                const id = crypto.randomUUID();
+                const view: SavedIssueView = {
+                  id,
+                  name: 'New view',
+                  roots: [],
+                  connectionIds: [],
+                  filters: {
+                    assignee: 'any',
+                    statuses: [],
+                    priority: '',
+                    hideDone: true,
+                  },
+                  sort: { column: 'key', direction: 'asc' },
+                };
+                setWorkspace((current) => ({
+                  ...current,
+                  savedViews: [...(current.savedViews ?? []), view],
+                  activeSavedViewId: id,
+                }));
+              }}
+            >
+              <Plus size={15} />
+            </button>
+          </div>
+          <nav className="side-tabs" aria-label="Saved views">
+            {(workspace.savedViews ?? []).map((item) => (
+              <button
+                key={item.id}
+                aria-label={`Saved view: ${item.name}`}
+                className={cx(
+                  'side-tab',
+                  item.id === activeSavedView?.id && 'active',
+                )}
+                onClick={() => {
+                  setSelectedViewIssue(null);
+                  setWorkspace((current) => ({
+                    ...current,
+                    activeSavedViewId: item.id,
+                  }));
+                }}
+              >
+                <span>
+                  <b>{item.name}</b>
+                </span>
+              </button>
+            ))}
+          </nav>
           {(workspace.pinnedRoots?.length ?? 0) > 0 && (
             <>
               <div className="side-heading">
@@ -2654,7 +2936,65 @@ export function App() {
           <div className="window-drag" />
         </div>
 
-        {activeTab && (
+        {activeSavedView && (
+          <SavedViewsPanel
+            view={activeSavedView}
+            connections={connections}
+            availableRoots={availableRoots}
+            sources={savedSources}
+            results={savedResults}
+            selected={selectedViewIssue}
+            errors={Object.fromEntries(
+              savedSources
+                .map((source) => [
+                  source.id,
+                  errors[sourceTabId(source, workspace.tabs)],
+                ])
+                .filter(([, error]) => error),
+            )}
+            workspaceError={errors.workspace}
+            appError={errors.app}
+            identityErrors={identityErrors}
+            loading={
+              new Set(
+                savedSources
+                  .filter((source) =>
+                    loading.has(sourceTabId(source, workspace.tabs)),
+                  )
+                  .map((source) => source.id),
+              )
+            }
+            onSelect={setSelectedViewIssue}
+            onOpen={openSavedResult}
+            onChange={(view) =>
+              setWorkspace((current) => ({
+                ...current,
+                savedViews: current.savedViews?.map((item) =>
+                  item.id === view.id ? view : item,
+                ),
+              }))
+            }
+            onDelete={() =>
+              setWorkspace((current) => ({
+                ...current,
+                savedViews: current.savedViews?.filter(
+                  (item) => item.id !== activeSavedView.id,
+                ),
+                activeSavedViewId: null,
+              }))
+            }
+            onRefresh={() => {
+              setIdentityRetry((value) => value + 1);
+              for (const source of savedSources) {
+                const tab = allRefreshTabs.find((item) =>
+                  sameRoot(item, source),
+                );
+                if (tab) void refreshTab(tab, true, true);
+              }
+            }}
+          />
+        )}
+        {activeTab && !activeSavedView && (
           <>
             <header className="toolbar">
               <button
@@ -3551,6 +3891,7 @@ export function App() {
           </>
         )}
         {!activeTab &&
+          !activeSavedView &&
           (history.back.length > 0 || history.forward.length > 0) && (
             <header className="toolbar">
               <button
@@ -3573,7 +3914,7 @@ export function App() {
               </button>
             </header>
           )}
-        {!activeTab && (
+        {!activeTab && !activeSavedView && (
           <Welcome
             onOpen={() => setDialog('open')}
             onConnect={() => setDialog('connect')}
@@ -3818,8 +4159,9 @@ export function App() {
         <ConnectDialog
           onClose={() => setDialog(null)}
           onConnected={(value) => {
-            for (const tab of workspaceRef.current.tabs)
+            for (const tab of allRefreshTabs)
               rootRefreshes.current.forget(refreshRootKey(tab));
+            forgetTabs(allRefreshTabs.map((tab) => tab.id));
             setConnections(value);
             // Token replacement can retain a connection ID. Refresh its transport
             // deadline while preserving limits on other authenticated connections.

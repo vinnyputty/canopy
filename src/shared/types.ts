@@ -97,6 +97,22 @@ export type RootReference = {
   rootKey: string;
   summary?: string;
 };
+export type SavedIssueView = {
+  id: string;
+  name: string;
+  roots: RootReference[];
+  connectionIds: string[];
+  filters: {
+    assignee: 'any' | 'me' | 'unassigned';
+    statuses: string[];
+    priority: string;
+    hideDone: boolean;
+  };
+  sort: {
+    column: 'key' | 'summary' | 'status' | 'priority' | 'assignee';
+    direction: 'asc' | 'desc';
+  };
+};
 export type TreeFilters = {
   assignee?: 'me' | 'unassigned';
   status?: string;
@@ -130,6 +146,8 @@ export type Workspace = {
   previewWidth?: number;
   viewDefaults?: Record<string, RootView>;
   rootViews?: Record<string, RootView>;
+  savedViews?: SavedIssueView[];
+  activeSavedViewId?: string | null;
 };
 export type TokenConnectionInput = {
   siteUrl: string;

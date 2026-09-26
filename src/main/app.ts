@@ -36,6 +36,7 @@ import { configureLinuxCredentialStore } from './credentials';
 import { demoWorkspace } from './demo';
 import {
   recoverWorkspaceViews,
+  validSavedViews,
   validViewMap,
   validRootView,
 } from '../shared/views';
@@ -126,6 +127,8 @@ function workspace(value: Workspace) {
     (value.viewDefaults !== undefined && !validViewMap(value.viewDefaults))
   )
     throw new Error('Invalid table view.');
+  if (value.savedViews !== undefined && !validSavedViews(value.savedViews))
+    throw new Error('Invalid saved issue view.');
   for (const [name, minimum, maximum] of [
     ['sidebarWidth', 180, 400],
     ['previewWidth', 300, 720],

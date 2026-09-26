@@ -30,6 +30,19 @@ it('keeps the active cadence while background intervals double up to an hour', (
   }
 });
 
+it('refreshes every source in an active saved view on the active cadence', () => {
+  const schedule = new RefreshSchedule();
+  schedule.sync(['a', 'b', 'other'], ['a', 'b'], 0);
+  for (const id of ['a', 'b', 'other']) {
+    assert.equal(schedule.begin(id, 0), true);
+    schedule.finish(id, 0);
+  }
+  assert.deepEqual(schedule.due(30_000), ['a', 'b']);
+  assert.deepEqual(schedule.sync(['a', 'b', 'other'], 'other', 31_000), [
+    'other',
+  ]);
+});
+
 it('activation and window return reset cadence and share an in-flight request', () => {
   const schedule = new RefreshSchedule();
   schedule.sync(['a', 'b'], 'a', 0);

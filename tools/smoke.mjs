@@ -1058,6 +1058,40 @@ try {
   ).toBeEnabled();
   const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
   await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  await tree.getByRole('treeitem').nth(1).locator('.issue-row').click();
+  await page.locator('.tree-view-menu summary').click();
+  await page.getByRole('button', { name: 'Focus selected subtree' }).click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
+  await page
+    .getByRole('button', { name: 'Saved view: Assigned to me' })
+    .click();
+  const savedList = page.getByRole('list', {
+    name: 'Assigned to me results',
+  });
+  const savedOpen = savedList.getByRole('button', {
+    name: 'Open CAN-100 in tree',
+  });
+  const savedRoot = savedOpen.locator('..');
+  await expect(savedRoot).toContainText('Canopy demo · CAN-100');
+  await savedOpen.press('Enter');
+  await expect(
+    tree.getByRole('treeitem', { name: /CAN-100:/ }),
+  ).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.getByRole('navigation', { name: 'Issue ancestry' }),
+  ).not.toContainText('Focused subtree');
+  await page
+    .getByRole('button', { name: 'Saved view: Assigned to me' })
+    .click();
+  await page.getByRole('button', { name: 'Close CAN-100' }).click();
+  await savedOpen.press('Enter');
+  await expect(tree.getByRole('treeitem', { name: /CAN-100:/ })).toBeFocused();
+  await page
+    .getByRole('button', { name: 'Saved view: Assigned to me' })
+    .click();
+  await page.getByRole('button', { name: 'Close CAN-100' }).click();
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(tree).toBeVisible();
   await auditPickers(app, page);
   await auditSelfConnections(app, page);
   const rootSummary = 'A calmer place to get things done';
