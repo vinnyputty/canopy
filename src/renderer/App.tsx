@@ -229,6 +229,7 @@ export function App() {
   const [reveal, setReveal] = useState<{ tabId: string; key: string } | null>(
     null,
   );
+  const focusedReveal = useRef<typeof reveal>(null);
   const navigationReveal = useRef<{ tabId: string; key: string } | null>(null);
   const [currentUsers, setCurrentUsers] = useState<Record<string, Choice>>({});
   const [identityErrors, setIdentityErrors] = useState<Record<string, string>>(
@@ -1910,11 +1911,21 @@ export function App() {
   }, [reveal, activeTab?.id, activeTab?.selectedKey, snapshot, editor]);
   useEffect(() => {
     // Only an explicit reveal request moves keyboard focus. Refresh preserves it.
-    if (!reveal || reveal.tabId !== activeTab?.id || editor) return;
-    document
-      .querySelector<HTMLElement>(`[data-tree-key="${reveal.key}"]`)
-      ?.focus({ preventScroll: true });
-  }, [reveal, activeTab?.id]);
+    if (
+      !reveal ||
+      reveal === focusedReveal.current ||
+      reveal.tabId !== activeTab?.id ||
+      editor
+    )
+      return;
+    const target = document.querySelector<HTMLElement>(
+      `[data-tree-key="${reveal.key}"]`,
+    );
+    if (target) {
+      target.focus({ preventScroll: true });
+      focusedReveal.current = reveal;
+    }
+  }, [reveal, activeTab?.id, snapshot]);
   const flat = useMemo(
     () => flattenVisible(shownTree, expandedSet),
     [shownTree, expandedSet],
@@ -2830,6 +2841,7 @@ export function App() {
                 .filter(([, error]) => error),
             )}
             workspaceError={errors.workspace}
+            appError={errors.app}
             identityErrors={identityErrors}
             loading={
               new Set(

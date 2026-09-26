@@ -16,6 +16,7 @@ type Props = {
   selected: string | null;
   errors: Record<string, string>;
   workspaceError?: string;
+  appError?: string;
   identityErrors: Record<string, string>;
   loading: ReadonlySet<string>;
   onSelect: (identity: string) => void;
@@ -253,6 +254,11 @@ export function SavedViewsPanel(props: Props) {
       {props.workspaceError && (
         <div className="saved-view-error" role="alert">
           <AlertCircle size={14} /> {props.workspaceError}
+        </div>
+      )}
+      {props.appError && (
+        <div className="saved-view-error" role="alert">
+          <AlertCircle size={14} /> {props.appError}
         </div>
       )}
       {sources.map((source) => {

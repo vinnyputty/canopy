@@ -47,4 +47,15 @@ it('distinguishes loading, total failure, partial failure, and an empty match', 
     /Some roots could not be loaded/,
   );
   assert.match(render({}), /No matching issues/);
+  const appError = renderToStaticMarkup(
+    React.createElement(SavedViewsPanel, {
+      ...base,
+      errors: {},
+      loading: new Set<string>(),
+      workspaceError: 'Couldn’t save workspace',
+      appError: 'Couldn’t disconnect site',
+    }),
+  );
+  assert.match(appError, /Couldn’t save workspace/);
+  assert.match(appError, /Couldn’t disconnect site/);
 });

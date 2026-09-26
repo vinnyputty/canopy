@@ -824,6 +824,12 @@ try {
     .getByRole('button', { name: 'Saved view: Assigned to me' })
     .click();
   await page.getByRole('button', { name: 'Close CAN-100' }).click();
+  await savedOpen.press('Enter');
+  await expect(tree.getByRole('treeitem', { name: /CAN-100:/ })).toBeFocused();
+  await page
+    .getByRole('button', { name: 'Saved view: Assigned to me' })
+    .click();
+  await page.getByRole('button', { name: 'Close CAN-100' }).click();
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(tree).toBeVisible();
   await auditPickers(app, page);
