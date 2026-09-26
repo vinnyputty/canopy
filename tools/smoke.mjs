@@ -335,23 +335,23 @@ async function auditAppearance() {
 }
 
 async function auditAppearanceSaveFailure() {
-  await app.evaluate(({ ipcMain }) => {
-    globalThis.releaseAppearanceFailure = null;
-    ipcMain.removeHandler('canopy:saveWorkspace');
-    ipcMain.handle(
-      'canopy:saveWorkspace',
-      () =>
-        new Promise((_resolve, reject) => {
-          globalThis.releaseAppearanceFailure = () =>
-            reject(new Error('Injected appearance write failure'));
-        }),
-    );
-  });
   const root = page.locator('html');
   const originalPalette = await root.getAttribute('data-palette');
+  const targetPalette = originalPalette === 'forest' ? 'Ocean' : 'Forest';
+  await app.evaluate(({ ipcMain }, target) => {
+    globalThis.releaseAppearanceFailure = null;
+    ipcMain.removeHandler('canopy:saveWorkspace');
+    ipcMain.handle('canopy:saveWorkspace', (_event, workspace) => {
+      if (workspace.palette !== target) return;
+      return new Promise((_resolve, reject) => {
+        globalThis.releaseAppearanceFailure = () =>
+          reject(new Error('Injected appearance write failure'));
+      });
+    });
+  }, targetPalette.toLowerCase());
   await page.getByRole('button', { name: 'Appearance' }).click();
   const dialog = page.getByRole('dialog', { name: 'Appearance' });
-  await dialog.getByRole('radio', { name: 'Forest' }).check();
+  await dialog.getByRole('radio', { name: targetPalette }).check();
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect
     .poll(() => app.evaluate(() => !!globalThis.releaseAppearanceFailure))
