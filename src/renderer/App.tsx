@@ -4837,7 +4837,11 @@ function TreeRows(props: RowsProps) {
       }
       onFocus={(event) => {
         event.stopPropagation();
-        if (!props.suppressFocus.current) onSelect(issue.key);
+        if (
+          event.target === event.currentTarget &&
+          !props.suppressFocus.current
+        )
+          onSelect(issue.key);
       }}
       onPointerDownCapture={(event) => {
         if (

@@ -39,6 +39,14 @@ export async function auditBulk(app, page, modifier) {
     .getByRole('button', { name: 'Make room for every issue' })
     .click({ modifiers: [modifier] });
   await expect(bulk).toBeVisible();
+  await row('CAN-101')
+    .getByRole('button', { name: 'Copy link to CAN-101' })
+    .click();
+  await expect(bulk).toContainText('2 issues selected');
+  await row('CAN-106')
+    .getByRole('button', { name: 'Copy link to CAN-106' })
+    .focus();
+  await expect(bulk).toContainText('2 issues selected');
   await bulk.getByRole('button', { name: 'Copy keys and summaries' }).click();
   expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
     'CAN-101 Build the workspace foundation\nCAN-106 Make room for every issue',
