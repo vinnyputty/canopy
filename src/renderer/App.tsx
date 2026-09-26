@@ -114,6 +114,7 @@ const EMPTY_WORKSPACE: Workspace = {
   activeTabId: null,
   shortcuts: PLATFORM_SHORTCUTS,
   theme: 'system',
+  palette: 'default',
   sidebarCollapsed: false,
   sidebarWidth: 220,
   previewWidth: 420,
@@ -194,8 +195,12 @@ export function App() {
   const tourProgressRef = useRef<HTMLProgressElement>(null);
   const tourEditor = useRef(false);
   const [dialog, setDialog] = useState<
-    'open' | 'commands' | 'shortcuts' | 'connect' | null
+    'open' | 'commands' | 'shortcuts' | 'appearance' | 'connect' | null
   >(null);
+  const [appearancePreview, setAppearancePreview] = useState<{
+    theme: Workspace['theme'];
+    palette: NonNullable<Workspace['palette']>;
+  } | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
   const [options, setOptions] = useState<Record<string, PickerOptions>>({});
   const [saving, setSaving] = useState<Set<string>>(new Set());
@@ -601,7 +606,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = workspace.theme;
+    document.documentElement.dataset.theme =
+      appearancePreview?.theme ?? workspace.theme;
+    document.documentElement.dataset.palette =
+      appearancePreview?.palette ?? workspace.palette ?? 'default';
+  }, [workspace.theme, workspace.palette, appearancePreview]);
+
+  useEffect(() => {
     if (!ready) return;
     const timer = window.setTimeout(
       () =>
@@ -2346,9 +2357,16 @@ export function App() {
         </div>
         <button
           className="sidebar-settings"
-          onClick={() => setDialog('shortcuts')}
+          onClick={() => setDialog('appearance')}
         >
           <Settings2 size={16} />
+          <span>Appearance</span>
+        </button>
+        <button
+          className="sidebar-settings"
+          onClick={() => setDialog('shortcuts')}
+        >
+          <Keyboard size={16} />
           <span>Keyboard shortcuts</span>
         </button>
         {!demoMode && (
@@ -3572,6 +3590,26 @@ export function App() {
             setWorkspace((value) => ({ ...value, shortcuts }))
           }
           onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === 'appearance' && (
+        <AppearanceDialog
+          theme={workspace.theme}
+          palette={workspace.palette ?? 'default'}
+          onPreview={setAppearancePreview}
+          onClose={() => {
+            setAppearancePreview(null);
+            setDialog(null);
+          }}
+          onSave={(theme, palette) => {
+            setWorkspace((current) => ({ ...current, theme, palette }));
+            setAppearancePreview(null);
+            setDialog(null);
+          }}
+          onShortcuts={() => {
+            setAppearancePreview(null);
+            setDialog('shortcuts');
+          }}
         />
       )}
     </div>
@@ -5297,6 +5335,116 @@ function shortcutDisplay(shortcut = '') {
     .replace('Alt', '⌥')
     .replace('Shift', '⇧')
     .replaceAll('+', '');
+}
+
+function AppearanceDialog({
+  theme,
+  palette,
+  onPreview,
+  onClose,
+  onSave,
+  onShortcuts,
+}: {
+  theme: Workspace['theme'];
+  palette: NonNullable<Workspace['palette']>;
+  onPreview: (value: {
+    theme: Workspace['theme'];
+    palette: NonNullable<Workspace['palette']>;
+  }) => void;
+  onClose: () => void;
+  onSave: (
+    theme: Workspace['theme'],
+    palette: NonNullable<Workspace['palette']>,
+  ) => void;
+  onShortcuts: () => void;
+}) {
+  const [draftTheme, setDraftTheme] = useState(theme);
+  const [draftPalette, setDraftPalette] = useState(palette);
+  const preview = (
+    nextTheme: Workspace['theme'],
+    nextPalette: NonNullable<Workspace['palette']>,
+  ) => {
+    setDraftTheme(nextTheme);
+    setDraftPalette(nextPalette);
+    onPreview({ theme: nextTheme, palette: nextPalette });
+  };
+  return (
+    <Dialog title="Appearance" onClose={onClose}>
+      <div className="appearance-dialog">
+        <p>
+          Choose a palette and appearance. Changes preview throughout the window
+          until you save.
+        </p>
+        <fieldset className="appearance-modes">
+          <legend>Appearance</legend>
+          {(['system', 'light', 'dark'] as const).map((mode) => (
+            <label key={mode} className="appearance-mode">
+              <input
+                type="radio"
+                name="appearance-mode"
+                checked={draftTheme === mode}
+                onChange={() => preview(mode, draftPalette)}
+              />
+              {mode === 'system'
+                ? 'System'
+                : mode === 'light'
+                  ? 'Light'
+                  : 'Dark'}
+            </label>
+          ))}
+        </fieldset>
+        <fieldset className="appearance-palettes">
+          <legend>Palette</legend>
+          {(['default', 'ocean', 'forest'] as const).map((choice) => (
+            <label key={choice} className="appearance-palette">
+              <input
+                type="radio"
+                name="appearance-palette"
+                checked={draftPalette === choice}
+                onChange={() => preview(draftTheme, choice)}
+              />
+              <span className="palette-samples" aria-hidden="true">
+                {(['light', 'dark'] as const).map((mode) => (
+                  <span
+                    key={mode}
+                    className="palette-sample"
+                    data-palette={choice}
+                    data-theme={mode}
+                  >
+                    <i />
+                    <b />
+                    <em />
+                  </span>
+                ))}
+              </span>
+              <span>
+                {choice === 'default'
+                  ? 'Default'
+                  : choice === 'ocean'
+                    ? 'Ocean'
+                    : 'Forest'}
+              </span>
+            </label>
+          ))}
+        </fieldset>
+      </div>
+      <div className="dialog-footer">
+        <button className="secondary" onClick={onShortcuts}>
+          Keyboard shortcuts
+        </button>
+        <span className="footer-spacer" />
+        <button className="secondary" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          className="primary"
+          onClick={() => onSave(draftTheme, draftPalette)}
+        >
+          Save
+        </button>
+      </div>
+    </Dialog>
+  );
 }
 
 function ShortcutsDialog({

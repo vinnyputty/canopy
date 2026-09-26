@@ -114,6 +114,8 @@ function workspace(value: Workspace) {
     !Array.isArray(value.tabs) ||
     value.tabs.length > 100 ||
     !['system', 'light', 'dark'].includes(value.theme) ||
+    (value.palette !== undefined &&
+      !['default', 'ocean', 'forest'].includes(value.palette)) ||
     typeof value.sidebarCollapsed !== 'boolean' ||
     typeof value.shortcuts !== 'object' ||
     !value.shortcuts

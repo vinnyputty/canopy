@@ -107,6 +107,7 @@ export type Workspace = {
   activeTabId: string | null;
   shortcuts: Record<string, string>;
   theme: 'system' | 'dark' | 'light';
+  palette?: 'default' | 'ocean' | 'forest';
   sidebarCollapsed: boolean;
   pinnedRoots?: RootReference[];
   recentRoots?: RootReference[];

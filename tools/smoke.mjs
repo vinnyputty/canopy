@@ -203,6 +203,120 @@ async function scrollGeometry() {
   });
 }
 
+async function auditAppearance() {
+  const root = page.locator('html');
+  await expect(root).toHaveAttribute('data-palette', 'default');
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Appearance' });
+  await expect(dialog).toBeVisible();
+  for (const palette of ['Default', 'Ocean', 'Forest']) {
+    await dialog.getByRole('radio', { name: palette }).check();
+    for (const mode of ['Light', 'Dark']) {
+      await dialog.getByRole('radio', { name: mode }).check();
+      await expect(root).toHaveAttribute('data-palette', palette.toLowerCase());
+      await expect(root).toHaveAttribute('data-theme', mode.toLowerCase());
+      const contrast = await page.evaluate(() => {
+        const style = getComputedStyle(document.documentElement);
+        const token = (name) => style.getPropertyValue(`--${name}`).trim();
+        const rgb = (value) => {
+          const match = value.match(/^#([0-9a-f]{6})$/i);
+          if (!match) throw new Error(`Unexpected color: ${value}`);
+          return [0, 2, 4].map((offset) =>
+            parseInt(match[1].slice(offset, offset + 2), 16),
+          );
+        };
+        const luminance = (value) =>
+          rgb(value)
+            .map((component) => component / 255)
+            .map((component) =>
+              component <= 0.04045
+                ? component / 12.92
+                : ((component + 0.055) / 1.055) ** 2.4,
+            )
+            .reduce(
+              (sum, component, index) =>
+                sum + component * [0.2126, 0.7152, 0.0722][index],
+              0,
+            );
+        const ratio = (left, right) => {
+          const values = [luminance(left), luminance(right)].sort(
+            (a, b) => b - a,
+          );
+          return (values[0] + 0.05) / (values[1] + 0.05);
+        };
+        return {
+          text: Math.min(
+            ...['bg', 'panel', 'panel-raised', 'selected'].map((surface) =>
+              ratio(token('text'), token(surface)),
+            ),
+          ),
+          muted: Math.min(
+            ...['bg', 'panel', 'panel-raised'].map((surface) =>
+              ratio(token('muted'), token(surface)),
+            ),
+          ),
+          accent: ratio(token('accent'), token('bg')),
+          focus: Math.min(
+            ...['bg', 'panel-raised', 'selected'].map((surface) =>
+              ratio(token('selected-border'), token(surface)),
+            ),
+          ),
+          badge: Math.min(
+            ...[
+              '#2563a6',
+              '#b45309',
+              '#8749a8',
+              '#be3a52',
+              '#087f5b',
+              '#687181',
+            ].map((background) => ratio('#ffffff', background)),
+          ),
+        };
+      });
+      expect(contrast.text, `${palette} ${mode} text`).toBeGreaterThanOrEqual(
+        4.5,
+      );
+      expect(
+        contrast.muted,
+        `${palette} ${mode} muted text`,
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast.accent,
+        `${palette} ${mode} accent text`,
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(contrast.focus, `${palette} ${mode} focus`).toBeGreaterThanOrEqual(
+        3,
+      );
+      expect(
+        contrast.badge,
+        `${palette} ${mode} status badge`,
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+    await dialog.getByRole('radio', { name: 'System' }).check();
+    await page.emulateMedia({ colorScheme: 'light' });
+    const light = await root.evaluate((element) =>
+      getComputedStyle(element).getPropertyValue('--bg'),
+    );
+    await page.emulateMedia({ colorScheme: 'dark' });
+    const dark = await root.evaluate((element) =>
+      getComputedStyle(element).getPropertyValue('--bg'),
+    );
+    expect(light).not.toBe(dark);
+  }
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(root).toHaveAttribute('data-palette', 'default');
+  await expect(root).toHaveAttribute('data-theme', 'dark');
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  await dialog.getByRole('radio', { name: 'Forest' }).check();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(root).toHaveAttribute('data-palette', 'forest');
+  await page.waitForTimeout(350);
+  await close();
+  await launch(true);
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+}
+
 async function openIssue(key, expectTree = true) {
   await page.getByRole('button', { name: 'Open issue' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
@@ -2701,6 +2815,7 @@ try {
   expect(await page.evaluate(() => window.canopy.connections())).toEqual([]);
   await expect(page.getByRole('tab')).toHaveCount(0);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await auditAppearance();
   await expect(
     page.getByRole('navigation', { name: 'Pinned roots' }),
   ).toHaveCount(0);
