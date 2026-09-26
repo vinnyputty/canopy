@@ -797,13 +797,11 @@ try {
   await auditPickers(app, page);
   await auditSelfConnections(app, page);
   const rootSummary = 'A calmer place to get things done';
-  const rootTab = page.getByRole('tab', { name: /CAN-100/ });
-  const rootSidebar = page.locator('.side-tab').filter({ hasText: 'CAN-100' });
+  const rootTitle = `CAN-100: ${rootSummary} · Canopy demo`;
+  const rootTab = page.locator(`[role="tab"][title="${rootTitle}"]`);
+  const rootSidebar = page.locator(`.side-tab[title="${rootTitle}"]`);
   for (const label of [rootTab, rootSidebar]) {
-    await expect(label).toHaveAttribute(
-      'title',
-      `CAN-100: ${rootSummary} · Canopy demo`,
-    );
+    await expect(label).toHaveAttribute('title', rootTitle);
     const subtitle = label.locator('small');
     await expect(subtitle).toHaveText(rootSummary);
     await expect(subtitle).toHaveCSS('text-overflow', 'ellipsis');
@@ -2151,6 +2149,39 @@ try {
       .uncheck();
     await page.getByRole('button', { name: 'Expand', exact: true }).click();
     await openIssue('CAN-200');
+    const statusResize = page.getByRole('separator', {
+      name: 'Resize Status column',
+    });
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '128');
+    const statusFits = () =>
+      page
+        .locator('.issue-row .status')
+        .first()
+        .evaluate((badge) => {
+          const original = badge.textContent;
+          try {
+            return ['In Progress', 'Not Started'].every((label) => {
+              badge.textContent = label;
+              return badge.scrollWidth <= badge.clientWidth;
+            });
+          } finally {
+            badge.textContent = original;
+          }
+        });
+    expect(await statusFits()).toBe(true);
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window.setSize(920, window.getSize()[1]);
+    });
+    await expect
+      .poll(() =>
+        page
+          .locator('.tree-scroll')
+          .evaluate((tree) => tree.scrollWidth > tree.clientWidth),
+      )
+      .toBe(true);
+    expect(await statusFits()).toBe(true);
+    await resizeWindow(600);
     // Table presentation is stored per root and survives closing and reopening.
     await page.locator('.view-settings > summary').click();
     await page.getByLabel('Text size', { exact: true }).selectOption('large');
@@ -2172,11 +2203,9 @@ try {
     await expect(
       page.getByRole('button', { name: 'Sort by Priority', exact: true }),
     ).toHaveCount(0);
-    const statusResize = page.getByRole('separator', {
-      name: 'Resize Status column',
-    });
     await statusResize.press('ArrowRight');
-    await expect(statusResize).toHaveAttribute('aria-valuenow', '128');
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '138');
+    await statusResize.scrollIntoViewIfNeeded();
     const divider = await statusResize.boundingBox();
     await page.mouse.move(
       divider.x + divider.width / 2,
@@ -2188,9 +2217,9 @@ try {
       divider.y + divider.height / 2,
     );
     await page.mouse.up();
-    await expect(statusResize).toHaveAttribute('aria-valuenow', '148');
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '158');
     await statusResize.dblclick();
-    await expect(statusResize).toHaveAttribute('aria-valuenow', '118');
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '128');
     await statusResize.press('ArrowRight');
     const statusHeader = page.getByRole('button', {
       name: 'Sort by Status',
@@ -2219,7 +2248,7 @@ try {
     await openIssue('CAN-200');
     await expect(
       page.getByRole('separator', { name: 'Resize Status column' }),
-    ).toHaveAttribute('aria-valuenow', '128');
+    ).toHaveAttribute('aria-valuenow', '138');
     await expect(page.locator('.column-heading').nth(1)).toHaveAttribute(
       'data-column',
       'status',
@@ -2243,7 +2272,7 @@ try {
 
     await expect(
       page.getByRole('separator', { name: 'Resize Status column' }),
-    ).toHaveAttribute('aria-valuenow', '128');
+    ).toHaveAttribute('aria-valuenow', '138');
     await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
     await page.locator('.view-settings > summary').click();
     await expect(page.getByLabel('Sort by', { exact: true })).toHaveValue(

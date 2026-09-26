@@ -18,7 +18,7 @@ export const COLUMN_LABELS: Record<TableColumn, string> = {
 };
 export const DEFAULT_VIEW: RootView = {
   columns: ['issue', 'priority', 'assignee', 'status'],
-  widths: { issue: 480, priority: 104, assignee: 165, status: 118 },
+  widths: { issue: 480, priority: 104, assignee: 165, status: 128 },
   sort: { column: 'rank', direction: 'asc' },
   textSize: 'medium',
   spacing: 'compact',

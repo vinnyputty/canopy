@@ -402,7 +402,12 @@ export async function auditSelfConnections(app, page) {
       }
       delete globalThis.selfConnectionAudit;
     });
+    await page.evaluate(
+      (saved) => window.canopy.saveWorkspace(saved),
+      workspace,
+    );
     await page.reload();
+    await expect(page.getByRole('tab')).toHaveCount(workspace.tabs.length);
     await expect(
       page.getByRole('tree', { name: 'CAN-100 issue tree' }),
     ).toBeVisible();

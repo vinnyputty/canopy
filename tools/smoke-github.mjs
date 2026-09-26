@@ -145,6 +145,43 @@ export async function auditGithub(app, page) {
       tree.getByRole('treeitem', { name: /team\/b#2/ }),
     ).toBeVisible();
     await expect(page.getByLabel('Filter priority')).toHaveCount(0);
+    const statusResize = page.getByRole('separator', {
+      name: 'Resize Status column',
+    });
+    const statusesFit = (issueTree) =>
+      issueTree
+        .locator('.status')
+        .evaluateAll((badges) =>
+          badges.every((badge) => badge.scrollWidth <= badge.clientWidth),
+        );
+    await expect(tree.locator('.status')).toHaveCount(2);
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '128');
+    expect(await statusesFit(tree)).toBe(true);
+    const originalWindowSize = await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      const size = window.getSize();
+      window.setSize(920, size[1]);
+      return size;
+    });
+    await expect
+      .poll(() =>
+        page
+          .locator('.tree-scroll')
+          .evaluate((scroll) => scroll.scrollWidth > scroll.clientWidth),
+      )
+      .toBe(true);
+    expect(await statusesFit(tree)).toBe(true);
+    await app.evaluate(({ BrowserWindow }, size) => {
+      BrowserWindow.getAllWindows()[0].setSize(...size);
+    }, originalWindowSize);
+    await page.locator('.view-settings > summary').click();
+    await page.getByLabel('Text size', { exact: true }).selectOption('large');
+    await expect(tree).toHaveCSS('font-size', '15px');
+    expect(await statusesFit(tree)).toBe(true);
+    await page.getByLabel('Text size', { exact: true }).selectOption('medium');
+    await page.locator('.view-settings > summary').click();
+    await statusResize.press('ArrowRight');
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '138');
     const root = tree.locator('[data-tree-key="team/a#1"]');
     await root
       .getByRole('button', { name: 'team/a issue 1', exact: true })
@@ -254,6 +291,11 @@ export async function auditGithub(app, page) {
     await expect(
       repositoryTree.getByRole('treeitem', { name: /team\/a#3/ }),
     ).toBeVisible();
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '128');
+    await expect(repositoryTree.locator('.status')).toHaveCount(3);
+    expect(await statusesFit(repositoryTree)).toBe(true);
+    await page.getByRole('tab', { name: /team\/a#1/ }).click();
+    await expect(statusResize).toHaveAttribute('aria-valuenow', '138');
     await page.getByTitle('Disconnect GitHub · tester').click();
     await expect(
       page.getByText('GitHub · tester', { exact: true }),
