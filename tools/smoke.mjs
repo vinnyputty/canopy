@@ -209,6 +209,18 @@ async function auditAppearance() {
   await page.getByRole('button', { name: 'Appearance' }).click();
   const dialog = page.getByRole('dialog', { name: 'Appearance' });
   await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: 'Dark' })).toBeFocused();
+  await dialog.getByRole('radio', { name: 'Ocean' }).check();
+  await page.keyboard.press(`${modifier}+/`);
+  await expect(
+    page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
+  ).toBeVisible();
+  await expect(root).toHaveAttribute('data-palette', 'default');
+  await page
+    .getByRole('dialog', { name: 'Keyboard shortcuts' })
+    .getByRole('button', { name: 'Cancel' })
+    .click();
+  await page.getByRole('button', { name: 'Appearance' }).click();
   for (const palette of ['Default', 'Ocean', 'Forest']) {
     await dialog.getByRole('radio', { name: palette }).check();
     for (const mode of ['Light', 'Dark']) {

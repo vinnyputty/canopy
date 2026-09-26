@@ -201,6 +201,9 @@ export function App() {
     theme: Workspace['theme'];
     palette: NonNullable<Workspace['palette']>;
   } | null>(null);
+  useLayoutEffect(() => {
+    if (dialog !== 'appearance') setAppearancePreview(null);
+  }, [dialog]);
   const [editor, setEditor] = useState<Editor>(null);
   const [options, setOptions] = useState<Record<string, PickerOptions>>({});
   const [saving, setSaving] = useState<Set<string>>(new Set());
@@ -5360,6 +5363,10 @@ function AppearanceDialog({
 }) {
   const [draftTheme, setDraftTheme] = useState(theme);
   const [draftPalette, setDraftPalette] = useState(palette);
+  const initialFocus = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    initialFocus.current?.focus();
+  }, []);
   const preview = (
     nextTheme: Workspace['theme'],
     nextPalette: NonNullable<Workspace['palette']>,
@@ -5380,6 +5387,7 @@ function AppearanceDialog({
           {(['system', 'light', 'dark'] as const).map((mode) => (
             <label key={mode} className="appearance-mode">
               <input
+                ref={mode === theme ? initialFocus : undefined}
                 type="radio"
                 name="appearance-mode"
                 checked={draftTheme === mode}
