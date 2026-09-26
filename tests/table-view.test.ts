@@ -199,22 +199,25 @@ describe('persisted table views', () => {
   it('isolates connections, retains closed roots and resets to connection defaults', () => {
     const a = tab('one', 'A-1'),
       b = tab('one', 'A-2'),
-      other = tab('two', 'A-1');
+      other = tab('github', 'team/a#1');
     let saved = migrateViews(workspace(a, b, other));
     saved = setRootView(saved, a, {
       columns: ['issue', 'status'],
       textSize: 'large',
       hideDone: false,
       filters: { priority: 'p9' },
+      widths: { ...DEFAULT_VIEW.widths, status: 96 },
     });
     saved = defaultRootView(saved, a);
     assert.equal(rootView(saved, b).textSize, 'large');
+    assert.equal(rootView(saved, b).widths.status, 96);
     assert.equal(saved.tabs[1].hideDone, false);
     assert.deepEqual(saved.tabs[1].filters, { priority: 'p9' });
     assert.equal(rootView(saved, other).textSize, 'medium');
+    assert.equal(rootView(saved, other).widths.status, 128);
     saved = setRootView(saved, b, {
       textSize: 'small',
-      widths: { ...DEFAULT_VIEW.widths, issue: 650 },
+      widths: { ...DEFAULT_VIEW.widths, issue: 650, status: 142 },
       sort: { column: 'status', direction: 'desc' },
       spacing: 'comfortable',
     });
@@ -225,6 +228,7 @@ describe('persisted table views', () => {
     saved = JSON.parse(JSON.stringify(saved));
     assert.equal(rootView(saved, b).textSize, 'small');
     assert.equal(rootView(saved, b).widths.issue, 650);
+    assert.equal(rootView(saved, b).widths.status, 142);
     assert.deepEqual(rootView(saved, b).sort, {
       column: 'status',
       direction: 'desc',
@@ -232,6 +236,7 @@ describe('persisted table views', () => {
     assert.equal(rootView(saved, b).spacing, 'comfortable');
     saved = resetRootView(saved, b);
     assert.equal(rootView(saved, b).textSize, 'medium');
+    assert.equal(rootView(saved, b).widths.status, 96);
     assert.deepEqual(rootView(saved, b).filters, { priority: 'p9' });
   });
   it('migrates legacy filters without making untouched roots override defaults', () => {
