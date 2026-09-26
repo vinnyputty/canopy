@@ -955,11 +955,6 @@ select:focus-visible,
   color: var(--faint);
   font-size: 9px;
 }
-.status-popover .cancel-choice {
-  border-top: 1px solid var(--border-soft);
-  margin-top: 4px;
-  color: var(--muted);
-}
 .linked-panel {
   display: flex;
   padding: 5px 150px 7px calc(47px + var(--depth) * 23px);

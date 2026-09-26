@@ -171,13 +171,32 @@ export async function auditPickers(app, page) {
   expect(await count('update')).toBe(writes);
   await app.evaluate(() => globalThis.canopySmoke.unassignableUsers.clear());
   await field('status').click();
-  await expect(
-    page.getByRole('menuitem', { name: 'To Do', exact: true }),
-  ).toBeVisible();
-  await page
-    .locator('.status-popover')
-    .getByRole('button', { name: 'Cancel' })
-    .click();
+  const transition = page.getByRole('menuitem', {
+    name: 'To Do',
+    exact: true,
+  });
+  await expect(transition).toBeVisible();
+  const beforeDismiss = await count('update');
+  await transition.press('Escape');
+  await expect(field('status')).toBeFocused();
+  await expect(transition).toHaveCount(0);
+  expect(await count('update')).toBe(beforeDismiss);
+  await field('assignee').click();
+  await expect(page.getByLabel('Search assignees')).toBeFocused();
+  await field('priority').click();
+  await expect(page.getByLabel('Choose value')).toBeFocused();
+  await expect(page.getByLabel('Search assignees')).toHaveCount(0);
+  await field('status').click();
+  await expect(transition).toBeVisible();
+  await page.locator('.view-settings > summary').click();
+  await expect(transition).toHaveCount(0);
+  expect(await count('update')).toBe(beforeDismiss);
+  await page.locator('.view-settings > summary').press('Escape');
+  await expect(page.locator('.view-settings > summary')).toBeFocused();
+  await page.locator('.view-settings > summary').click();
+  await field('status').click();
+  await expect(page.locator('.view-settings')).not.toHaveAttribute('open');
+  await expect(transition).toBeVisible();
   await fixture('hold', 'picker-priority', 'priorities', 'CAN-100');
   await field('priority').click();
   await expect.poll(() => fixture('started', 'picker-priority')).toBe(true);
@@ -208,9 +227,8 @@ export async function auditPickers(app, page) {
     page.getByRole('menuitem', { name: 'To Do', exact: true }),
   ).toBeVisible();
   await page
-    .locator('.status-popover')
-    .getByRole('button', { name: 'Cancel' })
-    .click();
+    .getByRole('menuitem', { name: 'To Do', exact: true })
+    .press('Escape');
 }
 
 export async function auditSelfConnections(app, page) {
