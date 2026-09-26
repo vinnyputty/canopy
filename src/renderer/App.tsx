@@ -5887,7 +5887,9 @@ function WorkBriefDialog({
       preview
         ? Promise.resolve(preview)
         : window.canopy.preview(connectionId, issueKey),
-      window.canopy.issueUrl(connectionId, issueKey),
+      provider === 'demo'
+        ? Promise.resolve('Local sample workspace')
+        : window.canopy.issueUrl(connectionId, issueKey),
     ]).then(
       ([details, sourceUrl]) => {
         if (live)

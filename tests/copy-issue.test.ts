@@ -100,3 +100,33 @@ it('marks unavailable Jira parents, description, and dependencies without copyin
   assert.match(brief, /\[CAN-9\]\(https:\/\/jira.example.com\/browse\/CAN-9\)/);
   assert.doesNotMatch(brief, /token=secret/);
 });
+
+it('identifies demo issues without inventing external links', () => {
+  const brief = issueWorkBrief({
+    preview: {
+      issue: {
+        ...issue,
+        key: 'CAN-111',
+        parentKey: 'CAN-100',
+        links: [
+          {
+            key: 'CAN-112',
+            summary: 'Sample dependency',
+            relationship: 'blocks',
+          },
+        ],
+      },
+      description: 'Sample description',
+      comments: [],
+      totalComments: 0,
+    },
+    provider: 'demo',
+    sourceUrl: 'Local sample workspace',
+    knownIssues: [{ ...issue, key: 'CAN-100', parentKey: undefined }],
+  });
+  assert.match(brief, /- Issue: Demo CAN-111/);
+  assert.match(brief, /- Source: Local sample workspace/);
+  assert.match(brief, /- Parent path: CAN-100/);
+  assert.match(brief, /blocks: CAN-112 — Sample dependency/);
+  assert.doesNotMatch(brief, /https?:\/\//);
+});

@@ -33,6 +33,7 @@ export function issueWorkBrief({
     parentKey = parent.parentKey;
   }
   const issueLink = (key: string) => {
+    if (provider === 'demo') return '';
     if (provider === 'github' && /^[^/#]+\/[^/#]+#[1-9]\d*$/.test(key)) {
       const [repo, number] = key.split('#');
       return `https://github.com/${repo}/issues/${number}`;
