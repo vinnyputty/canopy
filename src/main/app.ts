@@ -16,9 +16,16 @@ import type {
   IssuePatch,
   Workspace,
   TokenConnectionInput,
+  GithubConnectionInput,
 } from '../shared/types';
 import { Auth } from './auth';
 import { JiraProvider } from './jira';
+import {
+  GithubProvider,
+  githubKey,
+  githubRootKey,
+  githubRootUrl,
+} from './github';
 import { Storage } from './storage';
 import { restoreWindow, type WindowState } from './window-state';
 import { configureLinuxCredentialStore } from './credentials';
@@ -47,13 +54,31 @@ function key(value: unknown) {
     throw new Error('Enter a valid issue key, such as CAN-100.');
   return result;
 }
+function issueKey(value: unknown, connection?: Connection) {
+  return connection?.provider === 'github'
+    ? githubKey(text(value))
+    : key(value);
+}
+function treeKey(value: unknown, connection?: Connection) {
+  return connection?.provider === 'github'
+    ? githubRootKey(text(value))
+    : key(value);
+}
 function patch(value: unknown): IssuePatch {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid issue edit.');
   const input = value as Record<string, unknown>;
   const result: IssuePatch = {};
   for (const name of Object.keys(input))
-    if (!['summary', 'priorityId', 'assigneeId', 'transitionId'].includes(name))
+    if (
+      ![
+        'summary',
+        'priorityId',
+        'assigneeId',
+        'transitionId',
+        'labels',
+      ].includes(name)
+    )
       throw new Error('Unsupported issue field.');
   if ('summary' in input) result.summary = text(input.summary, 255);
   if ('priorityId' in input) result.priorityId = text(input.priorityId);
@@ -61,6 +86,11 @@ function patch(value: unknown): IssuePatch {
     result.assigneeId =
       input.assigneeId === null ? null : text(input.assigneeId);
   if ('transitionId' in input) result.transitionId = text(input.transitionId);
+  if ('labels' in input) {
+    if (!Array.isArray(input.labels) || input.labels.length > 100)
+      throw new Error('Invalid labels.');
+    result.labels = input.labels.map((label: unknown) => text(label, 100));
+  }
   return result;
 }
 function workspace(value: Workspace) {
@@ -96,7 +126,13 @@ function workspace(value: Workspace) {
       throw new Error('Invalid saved roots.');
     for (const root of roots ?? []) {
       text(root.connectionId);
-      key(root.rootKey);
+      if (
+        typeof root.rootKey !== 'string' ||
+        (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(root.rootKey) &&
+          !/^[-\w.]+\/[-\w.]+#\d+$/i.test(root.rootKey) &&
+          !/^[-\w.]+\/[-\w.]+$/i.test(root.rootKey))
+      )
+        throw new Error('Invalid root key.');
       if (
         root.summary !== undefined &&
         (typeof root.summary !== 'string' || root.summary.length > 10000)
@@ -123,7 +159,13 @@ function workspace(value: Workspace) {
       throw new Error('Invalid linked expansion state.');
     text(tab.id);
     text(tab.connectionId);
-    key(tab.rootKey);
+    if (
+      typeof tab.rootKey !== 'string' ||
+      (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(tab.rootKey) &&
+        !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.rootKey) &&
+        !/^[-\w.]+\/[-\w.]+$/i.test(tab.rootKey))
+    )
+      throw new Error('Invalid root key.');
     if (
       !Array.isArray(tab.expanded) ||
       tab.expanded.length > 100_000 ||
@@ -132,7 +174,13 @@ function workspace(value: Workspace) {
       !Number.isFinite(tab.scrollTop)
     )
       throw new Error('Invalid tab state.');
-    if (tab.focusKey !== undefined) key(tab.focusKey);
+    if (
+      tab.focusKey !== undefined &&
+      !/^[A-Z][A-Z0-9_]*-\d+$/i.test(tab.focusKey) &&
+      !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.focusKey) &&
+      !/^[-\w.]+\/[-\w.]+$/i.test(tab.focusKey)
+    )
+      throw new Error('Invalid focus key.');
     if (tab.filters !== undefined) {
       if (
         !tab.filters ||
@@ -201,16 +249,46 @@ async function start(
         return result;
       }),
   );
+  const githubProviders = new Providers(
+    () =>
+      auth
+        .connections()
+        .filter((connection) => connection.provider === 'github'),
+    (connection, current) =>
+      new GithubProvider(connection, async (path, init) => {
+        current();
+        const result = await auth.githubRequest(connection.id, path, init);
+        current();
+        return result;
+      }),
+  );
   const provider = (id: string) => {
     text(id);
     if (fixture?.connection.id === id) return fixture.provider;
+    if (
+      connections().find((connection) => connection.id === id)?.provider ===
+      'github'
+    )
+      return githubProviders.get(id);
     return providers.get(id);
   };
+  const normalized = (id: string, value: unknown) =>
+    issueKey(
+      value,
+      connections().find((connection) => connection.id === id),
+    );
+  const normalizedRoot = (id: string, value: unknown) =>
+    treeKey(
+      value,
+      connections().find((connection) => connection.id === id),
+    );
   const issueUrl = (id: string, issue: string) => {
-    const issueKey = key(issue);
     const connection = connections().find((connection) => connection.id === id);
     if (!connection) throw new Error('This connection is unavailable.');
-    return `${connection.url}/browse/${encodeURIComponent(issueKey)}`;
+    const value = normalizedRoot(id, issue);
+    return connection.provider === 'github'
+      ? githubRootUrl(value)
+      : `${connection.url}/browse/${encodeURIComponent(value)}`;
   };
   const searches = new Map<string, AbortController>();
   const cancelSearch = (id: string, requestId: string) => {
@@ -224,6 +302,10 @@ async function start(
       provider(id);
       if (id === fixture?.connection.id)
         return { id: 'alex', name: 'Alex Morgan' };
+      if (connections().find((item) => item.id === id)?.provider === 'github') {
+        const user = await auth.githubUser(id);
+        return { id: text(user.login), name: text(user.login) };
+      }
       const user = await auth.request(id, '/rest/api/3/myself');
       return {
         id: text(user.accountId),
@@ -236,6 +318,15 @@ async function start(
         await auth.connect(input);
       } finally {
         providers.reconcile();
+      }
+      return connections();
+    },
+    connectGithub: async (input: GithubConnectionInput) => {
+      if (authError) throw new Error(authError);
+      try {
+        await auth.connectGithub(input);
+      } finally {
+        githubProviders.reconcile();
       }
       return connections();
     },
@@ -256,21 +347,28 @@ async function start(
         await auth.disconnect(id);
       } finally {
         providers.remove(id);
+        githubProviders.remove(id);
       }
     },
     syncStatus: (id: string) => {
       provider(id);
       return id === fixture?.connection.id
         ? (fixture.syncStatus?.() ?? { retryAt: null })
-        : auth.syncStatus(id);
+        : connections().find((item) => item.id === id)?.provider === 'github'
+          ? auth.githubSyncStatus(id)
+          : auth.syncStatus(id);
     },
-    tree: (id: string, root: string) => provider(id).tree(key(root)),
+    tree: (id: string, root: string) =>
+      provider(id).tree(normalizedRoot(id, root)),
     priorityOrder: (id: string, keys: unknown) => {
       if (!Array.isArray(keys) || keys.length > 1000)
         throw new Error('Invalid priority representatives.');
-      return provider(id).priorityOrder(keys.map(key));
+      return provider(id).priorityOrder(
+        keys.map((value) => normalized(id, value)),
+      );
     },
-    preview: (id: string, issue: string) => provider(id).preview(key(issue)),
+    preview: (id: string, issue: string) =>
+      provider(id).preview(normalized(id, issue)),
     copyText: (value: string) => {
       if (typeof value !== 'string' || value.length > 100_000)
         throw new Error('Invalid clipboard text.');
@@ -301,11 +399,17 @@ async function start(
     },
     cancelSearch,
     priorities: (id: string, issue: string, refresh = false) =>
-      provider(id).priorities(key(issue), refresh === true),
+      provider(id).priorities(normalized(id, issue), refresh === true),
+    labels: (id: string, issue: string) => {
+      const client = provider(id);
+      if (!(client instanceof GithubProvider))
+        throw new Error('Labels are available for GitHub issues.');
+      return client.labels(normalized(id, issue));
+    },
     transitions: (id: string, issue: string, refresh = false) =>
-      provider(id).transitions(key(issue), refresh === true),
+      provider(id).transitions(normalized(id, issue), refresh === true),
     invalidateChoices: (id: string, issue: string) =>
-      provider(id).invalidateChoices(key(issue)),
+      provider(id).invalidateChoices(normalized(id, issue)),
     cachedUsers: (id: string) => provider(id).cachedUsers(),
     assignees: (
       id: string,
@@ -315,7 +419,7 @@ async function start(
       refresh = false,
     ) =>
       provider(id).assignees(
-        key(issue),
+        normalized(id, issue),
         typeof query === 'string' && !query.trim() ? '' : text(query),
         startAt,
         refresh === true,
@@ -327,12 +431,12 @@ async function start(
       refresh = false,
     ) =>
       provider(id).validateAssignee(
-        key(issue),
+        normalized(id, issue),
         text(accountId),
         refresh === true,
       ),
     update: (id: string, issue: string, value: IssuePatch) =>
-      provider(id).update(key(issue), patch(value)),
+      provider(id).update(normalized(id, issue), patch(value)),
     rank: (
       id: string,
       issue: string,
@@ -341,7 +445,11 @@ async function start(
     ) => {
       if (position !== 'before' && position !== 'after')
         throw new Error('Invalid rank position.');
-      return provider(id).rank(key(issue), key(before), position);
+      return provider(id).rank(
+        normalized(id, issue),
+        normalized(id, before),
+        position,
+      );
     },
     loadWorkspace: async () => {
       const saved = await storage.read<Workspace>('workspace');

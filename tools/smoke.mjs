@@ -4,6 +4,7 @@ import { auditSearch } from './smoke-search.mjs';
 import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
 import { auditWorkflow } from './smoke-workflow.mjs';
 import { auditPreview } from './smoke-preview.mjs';
+import { auditGithub } from './smoke-github.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -2633,6 +2634,8 @@ try {
   ).toHaveCount(0);
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(page.getByRole('tab')).toHaveCount(0);
+
+  await auditGithub(app, page);
 
   await auditWorkflow(app, page);
 

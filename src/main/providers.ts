@@ -12,7 +12,7 @@ export class Providers<T> {
     if (!connection) {
       this.entries.delete(id);
       throw new Error(
-        'This connection is unavailable. Connect the Jira site again.',
+        'This connection is unavailable. Connect the account again.',
       );
     }
     const entry = this.entries.get(id);

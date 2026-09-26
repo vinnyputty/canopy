@@ -33,6 +33,7 @@ export type SearchState = {
   searched: boolean;
   error: string;
   nextPageToken?: string;
+  nextPageKind?: 'issues' | 'repositories';
 };
 const empty = (): SearchState => ({
   issues: [],
@@ -94,7 +95,7 @@ export class IssueSearch {
         (page.nextPageToken === token || this.tokens.has(page.nextPageToken))
       )
         throw new Error(
-          'Jira repeated a search page. Change the search and try again.',
+          'The provider repeated a search page. Change the search and try again.',
         );
       if (token) this.tokens.add(token);
       this.publish({
@@ -104,6 +105,7 @@ export class IssueSearch {
           project,
         ),
         nextPageToken: page.nextPageToken,
+        nextPageKind: page.nextPageKind,
         searched: true,
       });
     } catch (error) {

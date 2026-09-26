@@ -1,8 +1,8 @@
 # Canopy
 
-A focused Electron desktop workspace for Jira issue trees, with one root issue per tab. Expand the actual parent/child hierarchy, edit summaries, priorities, assignees, and status inline, and reorder siblings using Jira rank. Linked issues appear as references that open their own tabs.
+A focused Electron desktop workspace for Jira and GitHub issue trees, with one root issue per tab. Expand the provider's parent/child hierarchy and open linked issues in their own tabs. Jira supports inline summaries, priorities, assignees, status, and sibling ranking. GitHub supports title, assignee, labels, and open/closed state.
 
-Canopy targets macOS, Windows, and Linux. The first version supports Jira Cloud; its provider boundary keeps the tree UI independent of Jira's REST payloads.
+Canopy targets macOS, Windows, and Linux. Its provider boundary keeps the tree UI independent of Jira and GitHub REST payloads.
 
 ## Run
 
@@ -15,6 +15,8 @@ bazel run //:dev
 ```
 
 Run `bazel run //:smoke` for an automated Electron demo test covering editing, tree controls, linked tabs, shortcuts, and persistence across restarts. Failures print visible app errors and recent process output, and save a screenshot plus `failure.json` under `.cache/smoke-failure/`; CI uploads these as `smoke-failure-<OS>` artifacts. Set `CANOPY_SMOKE_TEST_DIAGNOSTICS=1` to verify capture with an intentional failure. It opens isolated app windows and writes a screenshot to `.cache/tree.png`; it does not use your saved connections.
+
+Run `bazel run //:smoke_github` for a focused Electron test with mocked GitHub API responses covering connection, cross-repository sub-issues, edits, labels, and grouped search. It uses isolated app data and does not use your saved credentials.
 
 Run the full CI sequence locally with:
 
@@ -29,6 +31,8 @@ Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You d
 Use **Connect Jira site** to add a Jira Cloud site, your Atlassian account email, and a personal API token. Select **Scoped** for a token created with scopes, or **Classic** for a token created without scopes. Canopy checks `/myself` before saving the connection and uses the operating system credential store to encrypt credentials. Tokens stay in the Electron main process. Each connection is associated with a site and account.
 
 See [Jira connection setup](docs/connections.md) for token scopes and organization policy checks. [Browser OAuth](docs/oauth.md) is an optional alternative and requires the included broker service.
+
+Use **Connect Jira or GitHub → GitHub** to connect selected repositories with a fine-grained personal access token. Open a repository root to browse all issues with native sub-issue nesting, or open one issue as a focused tree. See [GitHub connection setup](docs/github.md) for permissions, search, hierarchy, and writable actions.
 
 Recently saved Jira fields and sibling placement remain visible while search catches up. Reconciliation covers the last 50 changed issues per connection for up to five minutes; rank undo remains retryable during catch-up. See [Jira consistency limits](docs/jira.md).
 

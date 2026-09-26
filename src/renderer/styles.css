@@ -298,6 +298,10 @@ select:focus-visible,
   background: #9d74dc;
   box-shadow: 0 0 0 3px color-mix(in srgb, #9d74dc 18%, transparent);
 }
+.connection-dot.github {
+  background: #8b949e;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #8b949e 18%, transparent);
+}
 .connection > span {
   min-width: 0;
   flex: 1;
@@ -1362,6 +1366,20 @@ kbd {
   background: var(--bg);
   user-select: text;
 }
+.connect-dialog > label > textarea {
+  min-height: 62px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+.connect-provider {
+  display: flex;
+  gap: 7px;
+  margin-bottom: 14px;
+}
 .connect-dialog > label > input:focus {
   border-color: var(--accent);
 }
@@ -1517,6 +1535,22 @@ kbd {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.search-results.github-results button > span:nth-child(2) {
+  grid-template-columns: minmax(120px, 45%) 1fr;
+}
+.search-repo-group {
+  padding: 8px 8px 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+.github-labels {
+  display: grid;
+  gap: 5px;
+  max-height: 180px;
+  overflow: auto;
+  margin-top: 8px;
 }
 .search-results button > span:nth-child(2) b {
   color: var(--accent);

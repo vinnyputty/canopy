@@ -187,7 +187,7 @@ export async function auditRefresh(app, page, resizeWindow) {
     });
   }, connections);
   await page
-    .getByRole('button', { name: 'Connect Jira site', exact: true })
+    .getByRole('button', { name: 'Connect Jira or GitHub', exact: true })
     .click();
   await page.getByLabel('Jira site URL').fill('https://fixture.atlassian.net');
   await page.getByLabel('Atlassian email').fill('fixture@example.com');

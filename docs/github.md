@@ -1,0 +1,15 @@
+# GitHub Issues connections
+
+Canopy connects to GitHub.com using a fine-grained personal access token. Create one under GitHub **Settings → Developer settings → Personal access tokens → Fine-grained tokens**. Select the user or organization that owns the repositories, select only the repositories you want Canopy to access, and grant **Issues: Read and write**. Organization policy may require token approval.
+
+In Canopy, choose **Connect Jira or GitHub → GitHub**. Enter the selected repositories as `owner/repo` names, separated by commas or spaces, and paste the token. Canopy verifies the account and issue access on each repository before saving the connection. An empty repository verifies successfully; a denied or missing repository produces an access error. The token is encrypted by the operating system credential store and stays in the Electron main process. Disconnecting removes the local token; revoke it in GitHub to invalidate it everywhere.
+
+Open a repository root from the Open issue dialog, or enter `owner/repo` or a GitHub repository URL. It shows all issues in that repository, open and closed, with native sub-issues nested under their parents. Selected cross-repository descendants also appear under their parent. **Hide closed** hides closed leaf issues while retaining closed parents with visible children. You can also open an individual issue root using `owner/repo#number` or an issue URL.
+
+Repository roots load up to 10,000 issues. Larger repositories show a size error; use an individual issue root or search to narrow the view.
+
+Search shows matching selected repositories as roots and includes issue matches from up to ten selected repositories on each search page. **Search more repositories** continues through larger selections, while **Load more** appears when a repository has another page of matches. **Group by repository** in search results groups matches without changing the focused root tree. Every issue row shows its full repository and issue number. A child outside the selection appears as a warning; add that repository to the token and reconnect to include it. GitHub dependencies appear as directional links in the preview.
+
+Title, assignee, open/closed state, and labels are writable. Edit title, assignee, and state in the tree; edit labels in the issue preview. GitHub issues have no Jira priority, workflow transitions, or sibling ranking in Canopy. GitHub search is paginated by repository and returns at most the first 1,000 matching issues per repository, following GitHub's Search API limit. Rate limits and authorization changes are shown as errors; retry after the displayed reset time or reconnect if the token was revoked.
+
+The automated suite uses mocked GitHub responses for cross-repository hierarchy, pagination, writes, access failures, and rate limits. Live verification requires a token with Issues read and write access to two test repositories containing cross-repository sub-issues and dependencies. To share a token for local testing, save it in a file outside this repository and provide only the file path, repository names, and root issue reference.

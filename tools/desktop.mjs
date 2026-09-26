@@ -30,7 +30,7 @@ delete manifest.dependencies;
 delete manifest.devDependencies;
 delete manifest.packageManager;
 await writeFile(join(staging, 'package.json'), JSON.stringify(manifest));
-if (mode === 'dev' || mode === 'smoke') {
+if (mode === 'dev' || mode === 'smoke' || mode === 'smoke-github') {
   // Electron's platform archive is a runtime download, outside Bazel actions.
   const { downloadArtifact } = await import('@electron/get');
   const extract = require('extract-zip');
@@ -60,10 +60,16 @@ if (mode === 'dev' || mode === 'smoke') {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const result =
-    mode === 'smoke'
+    mode === 'smoke' || mode === 'smoke-github'
       ? spawnSync(
           process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
-          [join(root, 'tools', 'smoke.mjs')],
+          [
+            join(
+              root,
+              'tools',
+              mode === 'smoke' ? 'smoke.mjs' : 'smoke-github-cli.mjs',
+            ),
+          ],
           {
             stdio: 'inherit',
             cwd: root,
