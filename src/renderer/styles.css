@@ -2754,6 +2754,26 @@ kbd {
   text-decoration: underline;
   cursor: pointer;
 }
+.preview-metadata {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) minmax(0, 2fr);
+  gap: 8px 12px;
+  margin: 0;
+}
+.preview-metadata dt,
+.preview-development-link span {
+  color: var(--muted);
+}
+.preview-metadata dd {
+  margin: 0;
+}
+.preview-development-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  margin: 8px 0;
+}
 .preview-comment,
 .preview-link {
   padding: 12px 0;

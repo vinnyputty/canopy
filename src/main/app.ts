@@ -24,9 +24,10 @@ import type {
   ChildIssueInput,
 } from '../shared/types';
 import { Auth } from './auth';
-import { JiraProvider } from './jira';
+import { JiraProvider, jiraRemoteLinkUrl } from './jira';
 import {
   GithubProvider,
+  githubDevelopmentUrl,
   githubKey,
   githubRootKey,
   githubRootUrl,
@@ -297,6 +298,7 @@ type Fixture = {
   provider: Pick<
     JiraProvider,
     | 'preview'
+    | 'development'
     | 'tree'
     | 'search'
     | 'priorities'
@@ -517,6 +519,19 @@ async function start(
     preview: (id: string, issue: string) =>
       provider(id).preview(normalized(id, issue)),
     issueUrl: (id: string, issue: string) => issueUrl(id, issue),
+    development: (id: string, issue: string) =>
+      provider(id).development(normalized(id, issue)),
+    openDevelopmentLink: (id: string, url: string) => {
+      const client = provider(id);
+      const safe =
+        client instanceof GithubProvider
+          ? githubDevelopmentUrl(url)
+          : client instanceof JiraProvider
+            ? jiraRemoteLinkUrl(url)
+            : null;
+      if (!safe) throw new Error('Development links are unavailable here.');
+      return shell.openExternal(safe);
+    },
     copyText: (value: string) => {
       if (typeof value !== 'string' || value.length > 100_000)
         throw new Error('Invalid clipboard text.');

@@ -27,6 +27,8 @@ export async function installPreviewHandlers(
         currentIssue: currentIssue ?? issue,
         created: created ?? null,
         clipboard: '',
+        developmentCalls: 0,
+        openedDevelopment: [],
       };
       globalThis.previewRecovery = controls;
       const handlers = {
@@ -86,9 +88,33 @@ export async function installPreviewHandlers(
               'Cannot load preview for TEST-1: Jira 403: Permission denied.',
             );
           return {
-            issue: { ...issue, summary: `${connection} issue` },
+            issue: {
+              ...issue,
+              summary: `${connection} issue`,
+              ...(mode === 'metadata-permission'
+                ? {
+                    type: 'Issue',
+                    status: {
+                      id: '',
+                      name: 'Unknown',
+                      category: 'indeterminate',
+                    },
+                    unavailableFields: [
+                      'type',
+                      'status',
+                      'priority',
+                      'assignee',
+                    ],
+                  }
+                : {}),
+            },
+            metadata: {
+              reporter: 'Ada',
+              created: '2026-01-01T12:00:00Z',
+              updated: null,
+            },
             description: '<img src=x onerror="window.previewExecuted=true">',
-            ...(mode === 'success'
+            ...(['success', 'metadata-permission'].includes(mode)
               ? {
                   descriptionDocument: {
                     type: 'doc',
@@ -141,7 +167,7 @@ export async function installPreviewHandlers(
                       author: '<b>Ada</b>',
                       created: '2026-01-01T12:00:00Z',
                       body: '<script>window.previewExecuted=true</script>\nDocs (https://example.com)',
-                      ...(mode === 'success'
+                      ...(['success', 'metadata-permission'].includes(mode)
                         ? {
                             bodyDocument: {
                               type: 'doc',
@@ -217,6 +243,26 @@ export async function installPreviewHandlers(
           if (controls.mode === 'brief-fail')
             throw new Error('URL unavailable');
           return `https://${connection}.example.invalid/browse/${key}`;
+        },
+        development: () => {
+          controls.developmentCalls++;
+          return {
+            state: 'available',
+            source: 'jira-remote-links',
+            reason:
+              'Jira remote links are a partial view. The native Development panel may contain other branches, commits, and pull requests.',
+            branches: { state: 'available', links: [] },
+            pullRequests: [
+              { title: 'Fix PR', url: 'https://github.com/team/repo/pull/42' },
+            ],
+            commits: [],
+            otherLinks: [
+              { title: 'Design', url: 'https://docs.example.com/design' },
+            ],
+          };
+        },
+        openDevelopmentLink: (_event, id, url) => {
+          controls.openedDevelopment.push([id, url]);
         },
         copyText: (_event, value) => {
           controls.clipboard = value;
@@ -298,6 +344,33 @@ export async function auditPreview(app, page, restart) {
   await mode('success');
   await pane.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(pane.getByRole('alert')).toHaveCount(0);
+  await expect(pane).toContainText('Ada');
+  await expect(pane).toContainText('None');
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.developmentCalls),
+  ).toBe(0);
+  await pane.getByRole('button', { name: 'Show development' }).click();
+  await expect(pane).toContainText('Jira remote links are a partial view.');
+  await expect(pane).toContainText('Other remote links');
+  await pane.getByRole('button', { name: 'Fix PR' }).click();
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.openedDevelopment),
+  ).toEqual([['second', 'https://github.com/team/repo/pull/42']]);
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.developmentCalls),
+  ).toBe(1);
+  await mode('metadata-permission');
+  await page.keyboard.press('Escape');
+  await open();
+  await expect(pane.locator('.preview-metadata dd')).toHaveText([
+    'Ada',
+    /2026/,
+    'None',
+    'Unavailable',
+    'Unavailable',
+    'Unavailable',
+    'Unavailable',
+  ]);
   await expect(pane).toContainText(
     '<script>window.previewExecuted=true</script>',
   );

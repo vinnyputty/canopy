@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   GithubProvider,
+  githubDevelopmentUrl,
   githubIssueUrl,
   githubKey,
   githubRootKey,
@@ -59,6 +60,74 @@ test('GitHub transitions include destination states for validated Undo', async (
       { id: 'open', name: 'Open', category: 'new' },
       { id: 'closed', name: 'Closed', category: 'done' },
     ],
+  );
+});
+
+test('GitHub development loads timeline associations with safe links and states', async () => {
+  const paths: string[] = [];
+  const sha = 'a'.repeat(40);
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    if (path.endsWith('/timeline?per_page=100&page=1'))
+      return [
+        {
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              title: 'Fix it',
+              state: 'open',
+              pull_request: { html_url: 'https://github.com/team/a/pull/7' },
+            },
+          },
+        },
+        {
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              title: 'Unsafe',
+              state: 'closed',
+              pull_request: { html_url: 'https://evil.example/team/a/pull/8' },
+            },
+          },
+        },
+        {
+          event: 'referenced',
+          commit_id: sha,
+          commit_url: `https://api.github.com/repos/team/a/commits/${sha}`,
+        },
+        {
+          event: 'referenced',
+          commit_id: sha,
+          commit_url: `https://api.github.com/repos/team/a/commits/${sha}`,
+        },
+      ];
+    throw new Error(path);
+  });
+  const result = await provider.development('team/a#1');
+  assert.deepEqual(paths, [
+    '/repos/team/a/issues/1/timeline?per_page=100&page=1',
+  ]);
+  assert.equal(result.state, 'available');
+  assert.deepEqual(result.pullRequests, [
+    {
+      title: 'Fix it',
+      url: 'https://github.com/team/a/pull/7',
+      state: 'Open',
+    },
+  ]);
+  assert.deepEqual(result.commits, [
+    {
+      title: 'aaaaaaa',
+      url: `https://github.com/team/a/commit/${sha}`,
+      state: 'Referenced',
+    },
+  ]);
+  assert.equal(result.branches.state, 'unavailable');
+  assert.throws(() =>
+    githubDevelopmentUrl('https://github.com.evil.example/team/a/pull/7'),
+  );
+  assert.throws(() =>
+    githubDevelopmentUrl('https://github.com/team/a/pull/7?x=1'),
   );
 });
 
