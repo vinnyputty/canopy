@@ -657,7 +657,12 @@ describe('JiraProvider preview', () => {
       }
       assert.ok(decodeURIComponent(path).includes('description'));
       return rawIssue('TEST-1', 'PARENT-1', {
-        description: 'Details',
+        description: {
+          type: 'doc',
+          content: [
+            { type: 'paragraph', content: [{ type: 'text', text: 'Details' }] },
+          ],
+        },
         issuelinks: [
           {
             type: { outward: 'blocks', inward: 'is blocked by' },
@@ -672,7 +677,22 @@ describe('JiraProvider preview', () => {
     });
     const result = await new JiraProvider(request).preview('TEST-1');
     assert.equal(result.description, 'Details');
+    assert.deepEqual(result.descriptionDocument, {
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'Details' }] },
+      ],
+    });
     assert.equal(result.comments[0].body, 'Recent comment');
+    assert.deepEqual(result.comments[0].bodyDocument, {
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'Recent comment' }],
+        },
+      ],
+    });
     assert.equal(result.totalComments, 20);
     assert.deepEqual(
       result.issue.links.map((link) => link.relationship),

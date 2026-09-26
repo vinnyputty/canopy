@@ -2184,6 +2184,37 @@ kbd {
   white-space: pre-wrap;
   line-height: 1.6;
 }
+.preview-text p,
+.preview-text ul,
+.preview-text ol,
+.preview-text pre {
+  margin: 0 0 0.7em;
+}
+.preview-text li > p {
+  margin: 0;
+}
+.preview-text ul,
+.preview-text ol {
+  padding-left: 1.5em;
+}
+.preview-text pre {
+  overflow-x: auto;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  white-space: pre;
+}
+.preview-inline-link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
 .preview-comment,
 .preview-link {
   padding: 12px 0;

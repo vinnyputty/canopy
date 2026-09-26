@@ -25,7 +25,14 @@ export type Issue = {
 export type IssuePreview = {
   issue: Issue;
   description: string;
-  comments: { id: string; author: string; created: string; body: string }[];
+  descriptionDocument?: unknown;
+  comments: {
+    id: string;
+    author: string;
+    created: string;
+    body: string;
+    bodyDocument?: unknown;
+  }[];
   totalComments: number;
   commentsError?: string;
   linksError?: string;
@@ -186,6 +193,7 @@ export interface CanopyAPI {
   saveWorkspace(workspace: Workspace): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;
   openIssue(connectionId: string, key: string): Promise<void>;
+  openLink(url: string): Promise<void>;
 }
 declare global {
   interface Window {

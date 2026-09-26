@@ -398,6 +398,9 @@ export class JiraProvider {
     return {
       issue: parseIssue(raw),
       description: documentText(raw.fields?.description),
+      ...(raw.fields?.description && typeof raw.fields.description === 'object'
+        ? { descriptionDocument: raw.fields.description }
+        : {}),
       comments: (comments.page?.comments ?? [])
         .slice(0, 10)
         .map((comment: any) => ({
@@ -405,6 +408,9 @@ export class JiraProvider {
           author: String(comment.author?.displayName ?? 'Unknown author'),
           created: String(comment.created ?? ''),
           body: documentText(comment.body),
+          ...(comment.body && typeof comment.body === 'object'
+            ? { bodyDocument: comment.body }
+            : {}),
         })),
       totalComments: Number(comments.page?.total ?? 0),
       ...(comments.error ? { commentsError: comments.error } : {}),

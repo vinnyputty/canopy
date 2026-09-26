@@ -551,6 +551,12 @@ async function start(
       if (id === fixture?.connection.id) fixture.openIssue();
       await shell.openExternal(issueUrl(id, issue));
     },
+    openLink: async (value: unknown) => {
+      const url = new URL(text(value, 2048));
+      if (!['http:', 'https:'].includes(url.protocol))
+        throw new Error('Unsupported link URL.');
+      await shell.openExternal(url.href);
+    },
   };
   for (const [name, handler] of Object.entries(handlers))
     ipcMain.handle(`canopy:${name}`, (event, ...args) => {
