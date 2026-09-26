@@ -1172,6 +1172,7 @@ export function App() {
       const next = {
         ...tab,
         selectedKey: result.issue.key,
+        focusKey: undefined,
         expanded: [...new Set([...tab.expanded, ...expanded])],
       };
       navigate(next);
@@ -1269,7 +1270,7 @@ export function App() {
       ),
     );
     pendingScrollRestore.current = tab.id;
-    setWorkspace(next);
+    setWorkspace({ ...next, activeSavedViewId: null });
   }, []);
   const navigateHistory = useCallback(
     (direction: 'back' | 'forward') => {
@@ -2828,6 +2829,7 @@ export function App() {
                 ])
                 .filter(([, error]) => error),
             )}
+            workspaceError={errors.workspace}
             identityErrors={identityErrors}
             loading={
               new Set(
@@ -3852,8 +3854,9 @@ export function App() {
         <ConnectDialog
           onClose={() => setDialog(null)}
           onConnected={(value) => {
-            for (const tab of workspaceRef.current.tabs)
+            for (const tab of allRefreshTabs)
               rootRefreshes.current.forget(refreshRootKey(tab));
+            forgetTabs(allRefreshTabs.map((tab) => tab.id));
             setConnections(value);
             // Token replacement can retain a connection ID. Refresh its transport
             // deadline while preserving limits on other authenticated connections.

@@ -798,6 +798,10 @@ try {
   ).toBeEnabled();
   const tree = page.getByRole('tree', { name: 'CAN-100 issue tree' });
   await expect(tree.getByRole('treeitem')).toHaveCount(4);
+  await tree.getByRole('treeitem').nth(1).locator('.issue-row').click();
+  await page.locator('.tree-view-menu summary').click();
+  await page.getByRole('button', { name: 'Focus selected subtree' }).click();
+  await expect(tree.getByRole('treeitem')).toHaveCount(1);
   await page
     .getByRole('button', { name: 'Saved view: Assigned to me' })
     .click();
@@ -813,6 +817,15 @@ try {
   await expect(
     tree.getByRole('treeitem', { name: /CAN-100:/ }),
   ).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.getByRole('navigation', { name: 'Issue ancestry' }),
+  ).not.toContainText('Focused subtree');
+  await page
+    .getByRole('button', { name: 'Saved view: Assigned to me' })
+    .click();
+  await page.getByRole('button', { name: 'Close CAN-100' }).click();
+  await page.keyboard.press(`${modifier}+Shift+t`);
+  await expect(tree).toBeVisible();
   await auditPickers(app, page);
   await auditSelfConnections(app, page);
   const rootSummary = 'A calmer place to get things done';

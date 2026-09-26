@@ -15,6 +15,7 @@ type Props = {
   results: ViewResult[];
   selected: string | null;
   errors: Record<string, string>;
+  workspaceError?: string;
   identityErrors: Record<string, string>;
   loading: ReadonlySet<string>;
   onSelect: (identity: string) => void;
@@ -249,6 +250,11 @@ export function SavedViewsPanel(props: Props) {
             has no configured roots.
           </p>
         ))}
+      {props.workspaceError && (
+        <div className="saved-view-error" role="alert">
+          <AlertCircle size={14} /> {props.workspaceError}
+        </div>
+      )}
       {sources.map((source) => {
         const connection = connections.find(
           (item) => item.id === source.connectionId,
