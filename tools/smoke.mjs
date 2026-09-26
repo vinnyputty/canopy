@@ -203,6 +203,257 @@ async function scrollGeometry() {
   });
 }
 
+async function auditAppearance() {
+  const root = page.locator('html');
+  await expect(root).toHaveAttribute('data-palette', 'default');
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Appearance' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('radio', { name: 'Dark' })).toBeFocused();
+  await dialog.getByRole('radio', { name: 'Ocean' }).check();
+  await page.keyboard.press(`${modifier}+/`);
+  await expect(
+    page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
+  ).toBeVisible();
+  await expect(root).toHaveAttribute('data-palette', 'default');
+  await page
+    .getByRole('dialog', { name: 'Keyboard shortcuts' })
+    .getByRole('button', { name: 'Cancel' })
+    .click();
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  for (const palette of ['Default', 'Ocean', 'Forest']) {
+    await dialog.getByRole('radio', { name: palette }).check();
+    for (const mode of ['Light', 'Dark']) {
+      await dialog.getByRole('radio', { name: mode }).check();
+      await expect(root).toHaveAttribute('data-palette', palette.toLowerCase());
+      await expect(root).toHaveAttribute('data-theme', mode.toLowerCase());
+      const contrast = await page.evaluate(() => {
+        const style = getComputedStyle(document.documentElement);
+        const token = (name) => style.getPropertyValue(`--${name}`).trim();
+        const rgb = (value) => {
+          const match = value.match(/^#([0-9a-f]{6})$/i);
+          if (!match) throw new Error(`Unexpected color: ${value}`);
+          return [0, 2, 4].map((offset) =>
+            parseInt(match[1].slice(offset, offset + 2), 16),
+          );
+        };
+        const luminance = (value) =>
+          rgb(value)
+            .map((component) => component / 255)
+            .map((component) =>
+              component <= 0.04045
+                ? component / 12.92
+                : ((component + 0.055) / 1.055) ** 2.4,
+            )
+            .reduce(
+              (sum, component, index) =>
+                sum + component * [0.2126, 0.7152, 0.0722][index],
+              0,
+            );
+        const ratio = (left, right) => {
+          const values = [luminance(left), luminance(right)].sort(
+            (a, b) => b - a,
+          );
+          return (values[0] + 0.05) / (values[1] + 0.05);
+        };
+        return {
+          text: Math.min(
+            ...['bg', 'panel', 'panel-raised', 'selected'].map((surface) =>
+              ratio(token('text'), token(surface)),
+            ),
+          ),
+          muted: Math.min(
+            ...['bg', 'panel', 'panel-raised'].map((surface) =>
+              ratio(token('muted'), token(surface)),
+            ),
+          ),
+          accent: ratio(token('accent'), token('bg')),
+          focus: Math.min(
+            ...['bg', 'panel-raised', 'selected'].map((surface) =>
+              ratio(token('selected-border'), token(surface)),
+            ),
+          ),
+          badge: Math.min(
+            ...[
+              '#2563a6',
+              '#b45309',
+              '#8749a8',
+              '#be3a52',
+              '#087f5b',
+              '#687181',
+            ].map((background) => ratio('#ffffff', background)),
+          ),
+        };
+      });
+      expect(contrast.text, `${palette} ${mode} text`).toBeGreaterThanOrEqual(
+        4.5,
+      );
+      expect(
+        contrast.muted,
+        `${palette} ${mode} muted text`,
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast.accent,
+        `${palette} ${mode} accent text`,
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(contrast.focus, `${palette} ${mode} focus`).toBeGreaterThanOrEqual(
+        3,
+      );
+      expect(
+        contrast.badge,
+        `${palette} ${mode} status badge`,
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+    await dialog.getByRole('radio', { name: 'System' }).check();
+    await page.emulateMedia({ colorScheme: 'light' });
+    const light = await root.evaluate((element) =>
+      getComputedStyle(element).getPropertyValue('--bg'),
+    );
+    await page.emulateMedia({ colorScheme: 'dark' });
+    const dark = await root.evaluate((element) =>
+      getComputedStyle(element).getPropertyValue('--bg'),
+    );
+    expect(light).not.toBe(dark);
+  }
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(root).toHaveAttribute('data-palette', 'default');
+  await expect(root).toHaveAttribute('data-theme', 'dark');
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  await dialog.getByRole('radio', { name: 'Forest' }).check();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(root).toHaveAttribute('data-palette', 'forest');
+  expect(
+    await page.evaluate(
+      async () => (await window.canopy.loadWorkspace())?.palette,
+    ),
+  ).toBe('forest');
+  await close();
+  await launch(true);
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+}
+
+async function auditAppearanceSaveFailure() {
+  const root = page.locator('html');
+  const originalPalette = await root.getAttribute('data-palette');
+  const targetPalette = originalPalette === 'forest' ? 'Ocean' : 'Forest';
+  await app.evaluate(({ ipcMain }, target) => {
+    const channel = 'canopy:saveWorkspace';
+    const original = ipcMain._invokeHandlers.get(channel);
+    if (!original) throw new Error('Workspace save handler is missing.');
+    const audit = { original, release: null };
+    globalThis.appearanceSaveFailure = audit;
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, (event, workspace) => {
+      if (workspace.palette !== target) return original(event, workspace);
+      return new Promise((_resolve, reject) => {
+        audit.release = () =>
+          reject(new Error('Injected appearance write failure'));
+      });
+    });
+  }, targetPalette.toLowerCase());
+  try {
+    await page.getByRole('button', { name: 'Appearance' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Appearance' });
+    await dialog.getByRole('radio', { name: targetPalette }).check();
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    await expect
+      .poll(() =>
+        app.evaluate(() => !!globalThis.appearanceSaveFailure.release),
+      )
+      .toBe(true);
+    await page.keyboard.press(`${modifier}+/`);
+    await expect(dialog).toBeVisible();
+    await expect(
+      page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
+    ).toHaveCount(0);
+    await app.evaluate(() => globalThis.appearanceSaveFailure.release());
+    await expect(dialog.getByRole('alert')).toContainText(
+      'Injected appearance write failure',
+    );
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(root).toHaveAttribute('data-palette', originalPalette);
+  } finally {
+    await app.evaluate(({ ipcMain }) => {
+      const channel = 'canopy:saveWorkspace';
+      const audit = globalThis.appearanceSaveFailure;
+      audit.release?.();
+      ipcMain.removeHandler(channel);
+      ipcMain.handle(channel, audit.original);
+      delete globalThis.appearanceSaveFailure;
+    });
+  }
+}
+
+async function auditAppearanceSaveOrdering() {
+  await app.evaluate(({ ipcMain }) => {
+    const channel = 'canopy:saveWorkspace';
+    const original = ipcMain._invokeHandlers.get(channel);
+    if (!original) throw new Error('Workspace save handler is missing.');
+    const audit = { original, calls: [], release: null, pending: null };
+    globalThis.appearanceSaveRace = audit;
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, (event, workspace) => {
+      audit.calls.push(workspace);
+      if (audit.calls.length !== 1) return original(event, workspace);
+      return new Promise((resolve, reject) => {
+        audit.release = () => {
+          if (!audit.pending) {
+            audit.pending = Promise.resolve().then(() =>
+              original(event, workspace),
+            );
+            audit.pending.then(resolve, reject);
+          }
+          return audit.pending;
+        };
+      });
+    });
+  });
+  try {
+    const hideDone = page.getByRole('checkbox', { name: 'Hide done' });
+    await hideDone.setChecked(!(await hideDone.isChecked()));
+    await expect
+      .poll(() =>
+        app.evaluate(() => globalThis.appearanceSaveRace.calls.length),
+      )
+      .toBe(1);
+    await page.getByRole('button', { name: 'Appearance' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Appearance' });
+    await dialog.getByRole('radio', { name: 'Ocean' }).check();
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await page.keyboard.press(`${modifier}+/`);
+    await expect(dialog).toBeVisible();
+    await expect(
+      page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
+    ).toHaveCount(0);
+    await page.waitForTimeout(250);
+    expect(
+      await app.evaluate(() => globalThis.appearanceSaveRace.calls.length),
+    ).toBe(1);
+    await app.evaluate(() => globalThis.appearanceSaveRace.release());
+    await expect(dialog).toHaveCount(0);
+    expect(
+      await app.evaluate(() => globalThis.appearanceSaveRace.calls[1]?.palette),
+    ).toBe('ocean');
+    await page.waitForTimeout(250);
+  } finally {
+    await app.evaluate(async ({ ipcMain }) => {
+      const channel = 'canopy:saveWorkspace';
+      const audit = globalThis.appearanceSaveRace;
+      try {
+        await audit.release?.();
+      } finally {
+        ipcMain.removeHandler(channel);
+        ipcMain.handle(channel, audit.original);
+        delete globalThis.appearanceSaveRace;
+      }
+    });
+  }
+}
+
 async function openIssue(key, expectTree = true) {
   await page.getByRole('button', { name: 'Open issue' }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
@@ -2701,6 +2952,7 @@ try {
   expect(await page.evaluate(() => window.canopy.connections())).toEqual([]);
   await expect(page.getByRole('tab')).toHaveCount(0);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await auditAppearance();
   await expect(
     page.getByRole('navigation', { name: 'Pinned roots' }),
   ).toHaveCount(0);
@@ -2712,6 +2964,9 @@ try {
   await auditWorkflow(app, page);
 
   await auditPreview(app, page);
+
+  await auditAppearanceSaveOrdering();
+  await auditAppearanceSaveFailure();
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

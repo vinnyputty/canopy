@@ -114,6 +114,7 @@ const EMPTY_WORKSPACE: Workspace = {
   activeTabId: null,
   shortcuts: PLATFORM_SHORTCUTS,
   theme: 'system',
+  palette: 'default',
   sidebarCollapsed: false,
   sidebarWidth: 220,
   previewWidth: 420,
@@ -194,8 +195,15 @@ export function App() {
   const tourProgressRef = useRef<HTMLProgressElement>(null);
   const tourEditor = useRef(false);
   const [dialog, setDialog] = useState<
-    'open' | 'commands' | 'shortcuts' | 'connect' | null
+    'open' | 'commands' | 'shortcuts' | 'appearance' | 'connect' | null
   >(null);
+  const [appearancePreview, setAppearancePreview] = useState<{
+    theme: Workspace['theme'];
+    palette: NonNullable<Workspace['palette']>;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (dialog !== 'appearance') setAppearancePreview(null);
+  }, [dialog]);
   const [editor, setEditor] = useState<Editor>(null);
   const [options, setOptions] = useState<Record<string, PickerOptions>>({});
   const [saving, setSaving] = useState<Set<string>>(new Set());
@@ -208,6 +216,9 @@ export function App() {
   const [history, setHistory] = useState<Navigation>({ back: [], forward: [] });
   const historyRef = useRef(history);
   const workspaceRef = useRef(workspace);
+  const workspaceSaveTimer = useRef<number | null>(null);
+  const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
+  const appearanceSaving = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
   workspaceRef.current = workspace;
@@ -601,20 +612,38 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = workspace.theme;
+    document.documentElement.dataset.theme =
+      appearancePreview?.theme ?? workspace.theme;
+    document.documentElement.dataset.palette =
+      appearancePreview?.palette ?? workspace.palette ?? 'default';
+  }, [workspace.theme, workspace.palette, appearancePreview]);
+
+  const saveWorkspace = useCallback((value: Workspace) => {
+    const save = pendingWorkspaceSave.current
+      .catch(() => {})
+      .then(() => window.canopy.saveWorkspace(value));
+    pendingWorkspaceSave.current = save;
+    return save;
+  }, []);
+
+  useEffect(() => {
     if (!ready) return;
-    const timer = window.setTimeout(
-      () =>
-        void window.canopy.saveWorkspace(workspace).catch((error) => {
-          setErrors((value) => ({
-            ...value,
-            workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
-          }));
-        }),
-      180,
-    );
-    return () => window.clearTimeout(timer);
-  }, [workspace, ready]);
+    const timer = window.setTimeout(() => {
+      workspaceSaveTimer.current = null;
+      void saveWorkspace(workspace).catch((error) => {
+        setErrors((value) => ({
+          ...value,
+          workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+      });
+    }, 180);
+    workspaceSaveTimer.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (workspaceSaveTimer.current === timer)
+        workspaceSaveTimer.current = null;
+    };
+  }, [workspace, ready, saveWorkspace]);
 
   const refreshTab = useCallback(
     async (tab: TabState, quiet = false, explicit = false) => {
@@ -1407,6 +1436,10 @@ export function App() {
         return;
       }
       if (!command) return;
+      if (appearanceSaving.current) {
+        event.preventDefault();
+        return;
+      }
       if (command === 'commandPalette') {
         event.preventDefault();
         setDialog('commands');
@@ -2346,9 +2379,16 @@ export function App() {
         </div>
         <button
           className="sidebar-settings"
-          onClick={() => setDialog('shortcuts')}
+          onClick={() => setDialog('appearance')}
         >
           <Settings2 size={16} />
+          <span>Appearance</span>
+        </button>
+        <button
+          className="sidebar-settings"
+          onClick={() => setDialog('shortcuts')}
+        >
+          <Keyboard size={16} />
           <span>Keyboard shortcuts</span>
         </button>
         {!demoMode && (
@@ -3572,6 +3612,43 @@ export function App() {
             setWorkspace((value) => ({ ...value, shortcuts }))
           }
           onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === 'appearance' && (
+        <AppearanceDialog
+          theme={workspace.theme}
+          palette={workspace.palette ?? 'default'}
+          onPreview={setAppearancePreview}
+          onClose={() => {
+            setAppearancePreview(null);
+            setDialog(null);
+          }}
+          onSave={async (theme, palette) => {
+            appearanceSaving.current = true;
+            try {
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+                void saveWorkspace(workspaceRef.current).catch(() => {});
+              }
+              await saveWorkspace({
+                ...workspaceRef.current,
+                theme,
+                palette,
+              });
+              setWorkspace((current) => ({ ...current, theme, palette }));
+              setAppearancePreview(null);
+              setDialog((current) =>
+                current === 'appearance' ? null : current,
+              );
+            } finally {
+              appearanceSaving.current = false;
+            }
+          }}
+          onShortcuts={() => {
+            setAppearancePreview(null);
+            setDialog('shortcuts');
+          }}
         />
       )}
     </div>
@@ -5297,6 +5374,146 @@ function shortcutDisplay(shortcut = '') {
     .replace('Alt', '⌥')
     .replace('Shift', '⇧')
     .replaceAll('+', '');
+}
+
+function AppearanceDialog({
+  theme,
+  palette,
+  onPreview,
+  onClose,
+  onSave,
+  onShortcuts,
+}: {
+  theme: Workspace['theme'];
+  palette: NonNullable<Workspace['palette']>;
+  onPreview: (value: {
+    theme: Workspace['theme'];
+    palette: NonNullable<Workspace['palette']>;
+  }) => void;
+  onClose: () => void;
+  onSave: (
+    theme: Workspace['theme'],
+    palette: NonNullable<Workspace['palette']>,
+  ) => Promise<void>;
+  onShortcuts: () => void;
+}) {
+  const [draftTheme, setDraftTheme] = useState(theme);
+  const [draftPalette, setDraftPalette] = useState(palette);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const initialFocus = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    initialFocus.current?.focus();
+  }, []);
+  const preview = (
+    nextTheme: Workspace['theme'],
+    nextPalette: NonNullable<Workspace['palette']>,
+  ) => {
+    setDraftTheme(nextTheme);
+    setDraftPalette(nextPalette);
+    setSaveError(null);
+    onPreview({ theme: nextTheme, palette: nextPalette });
+  };
+  const save = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      await onSave(draftTheme, draftPalette);
+    } catch (error) {
+      setSaveError(
+        `Couldn’t save appearance: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  return (
+    <Dialog title="Appearance" onClose={() => !isSaving && onClose()}>
+      <div className="appearance-dialog">
+        <p>
+          Choose a palette and appearance. Changes preview throughout the window
+          until you save.
+        </p>
+        <fieldset className="appearance-modes">
+          <legend>Appearance</legend>
+          {(['system', 'light', 'dark'] as const).map((mode) => (
+            <label key={mode} className="appearance-mode">
+              <input
+                ref={mode === theme ? initialFocus : undefined}
+                type="radio"
+                disabled={isSaving}
+                name="appearance-mode"
+                checked={draftTheme === mode}
+                onChange={() => preview(mode, draftPalette)}
+              />
+              {mode === 'system'
+                ? 'System'
+                : mode === 'light'
+                  ? 'Light'
+                  : 'Dark'}
+            </label>
+          ))}
+        </fieldset>
+        <fieldset className="appearance-palettes">
+          <legend>Palette</legend>
+          {(['default', 'ocean', 'forest'] as const).map((choice) => (
+            <label key={choice} className="appearance-palette">
+              <input
+                type="radio"
+                disabled={isSaving}
+                name="appearance-palette"
+                checked={draftPalette === choice}
+                onChange={() => preview(draftTheme, choice)}
+              />
+              <span className="palette-samples" aria-hidden="true">
+                {(['light', 'dark'] as const).map((mode) => (
+                  <span
+                    key={mode}
+                    className="palette-sample"
+                    data-palette={choice}
+                    data-theme={mode}
+                  >
+                    <i />
+                    <b />
+                    <em />
+                  </span>
+                ))}
+              </span>
+              <span>
+                {choice === 'default'
+                  ? 'Default'
+                  : choice === 'ocean'
+                    ? 'Ocean'
+                    : 'Forest'}
+              </span>
+            </label>
+          ))}
+        </fieldset>
+        {saveError && (
+          <p className="dialog-error" role="alert">
+            {saveError}
+          </p>
+        )}
+      </div>
+      <div className="dialog-footer">
+        <button className="secondary" onClick={onShortcuts} disabled={isSaving}>
+          Keyboard shortcuts
+        </button>
+        <span className="footer-spacer" />
+        <button className="secondary" onClick={onClose} disabled={isSaving}>
+          Cancel
+        </button>
+        <button
+          className="primary"
+          onClick={() => void save()}
+          disabled={isSaving}
+        >
+          Save
+        </button>
+      </div>
+    </Dialog>
+  );
 }
 
 function ShortcutsDialog({

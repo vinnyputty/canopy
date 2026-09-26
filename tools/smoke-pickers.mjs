@@ -495,25 +495,54 @@ export async function auditSelfConnections(app, page) {
     // Let the app's debounced save of the two-tab fixture reach the stub
     // before restoring the real workspace handler.
     await page.waitForTimeout(250);
-    await app.evaluate(async ({ ipcMain }) => {
-      await globalThis.canopySmoke.remoteUpdate('CAN-100', {
-        assigneeId: 'alex',
-      });
-      for (const [channel, handler] of globalThis.selfConnectionAudit
-        .handlers) {
-        ipcMain.removeHandler(channel);
-        ipcMain.handle(channel, handler);
+    await app.evaluate(async ({ ipcMain }, saved) => {
+      const audit = globalThis.selfConnectionAudit;
+      let temporarySaveHandlerInstalled = false;
+      try {
+        await globalThis.canopySmoke.remoteUpdate('CAN-100', {
+          assigneeId: 'alex',
+        });
+        for (const [channel, handler] of audit.handlers) {
+          ipcMain.removeHandler(channel);
+          // Pending renderer saves must preserve the captured workspace until reload.
+          ipcMain.handle(
+            channel,
+            channel === 'canopy:saveWorkspace'
+              ? (event) => handler(event, saved)
+              : handler,
+          );
+        }
+        temporarySaveHandlerInstalled = true;
+      } finally {
+        if (!temporarySaveHandlerInstalled) {
+          for (const [channel, handler] of audit.handlers) {
+            ipcMain.removeHandler(channel);
+            ipcMain.handle(channel, handler);
+          }
+          delete globalThis.selfConnectionAudit;
+        }
       }
-      delete globalThis.selfConnectionAudit;
-    });
-    await page.evaluate(
-      (saved) => window.canopy.saveWorkspace(saved),
-      workspace,
-    );
-    await page.reload();
-    await expect(page.getByRole('tab')).toHaveCount(workspace.tabs.length);
-    await expect(
-      page.getByRole('tree', { name: 'CAN-100 issue tree' }),
-    ).toBeVisible();
+    }, workspace);
+    try {
+      await page.evaluate(
+        (saved) => window.canopy.saveWorkspace(saved),
+        workspace,
+      );
+      await page.reload();
+      await expect(page.getByRole('tab')).toHaveCount(workspace.tabs.length);
+      await expect(
+        page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+      ).toBeVisible();
+    } finally {
+      await app.evaluate(({ ipcMain }) => {
+        const channel = 'canopy:saveWorkspace';
+        ipcMain.removeHandler(channel);
+        ipcMain.handle(
+          channel,
+          globalThis.selfConnectionAudit.handlers.get(channel),
+        );
+        delete globalThis.selfConnectionAudit;
+      });
+    }
   }
 }

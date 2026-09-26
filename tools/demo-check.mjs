@@ -76,6 +76,18 @@ try {
   await expect(
     page.getByText('Playback stopped. Explore the sample workspace freely.'),
   ).toBeVisible();
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  const appearance = page.getByRole('dialog', { name: 'Appearance' });
+  await appearance.getByRole('radio', { name: 'Forest' }).check();
+  await appearance.getByRole('radio', { name: 'Dark' }).check();
+  await appearance.getByRole('button', { name: 'Save' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect
+    .poll(() =>
+      page.evaluate(async () => (await window.canopy.loadWorkspace()).palette),
+    )
+    .toBe('forest');
   await page.waitForTimeout(3200);
   await expect(page.locator('[data-tree-key="CAN-108"]')).toHaveCount(0);
   await page.context().setOffline(true);
@@ -98,6 +110,8 @@ try {
   await page.getByRole('button', { name: 'Close issue preview' }).click();
   await page.getByRole('button', { name: 'Reset and replay' }).click();
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'default');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'system');
   await expect(page.getByText('Step 6 of 7')).toBeVisible({ timeout: 60000 });
   await expect(
     page.locator('[data-tree-key="CAN-111"] .priority-editor select'),
