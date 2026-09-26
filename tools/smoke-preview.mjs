@@ -73,6 +73,50 @@ export async function auditPreview(app, page) {
         return {
           issue: { ...issue, summary: `${connection} issue` },
           description: '<img src=x onerror="window.previewExecuted=true">',
+          ...(mode === 'success'
+            ? {
+                descriptionDocument: {
+                  type: 'doc',
+                  content: [
+                    {
+                      type: 'heading',
+                      attrs: { level: 2 },
+                      content: [{ type: 'text', text: 'Formatted details' }],
+                    },
+                    {
+                      type: 'bulletList',
+                      content: [
+                        {
+                          type: 'listItem',
+                          content: [
+                            {
+                              type: 'paragraph',
+                              content: [{ type: 'text', text: 'Top item' }],
+                            },
+                            {
+                              type: 'orderedList',
+                              content: [
+                                {
+                                  type: 'listItem',
+                                  content: [
+                                    {
+                                      type: 'paragraph',
+                                      content: [
+                                        { type: 'text', text: 'Nested item' },
+                                      ],
+                                    },
+                                  ],
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }
+            : {}),
           comments:
             mode === 'comments-permission'
               ? []
@@ -82,6 +126,50 @@ export async function auditPreview(app, page) {
                     author: '<b>Ada</b>',
                     created: '2026-01-01T12:00:00Z',
                     body: '<script>window.previewExecuted=true</script>\nDocs (https://example.com)',
+                    ...(mode === 'success'
+                      ? {
+                          bodyDocument: {
+                            type: 'doc',
+                            content: [
+                              {
+                                type: 'paragraph',
+                                content: [
+                                  {
+                                    type: 'text',
+                                    text: '<script>window.previewExecuted=true</script>',
+                                  },
+                                  {
+                                    type: 'text',
+                                    text: ' Docs',
+                                    marks: [
+                                      {
+                                        type: 'link',
+                                        attrs: { href: 'https://example.com' },
+                                      },
+                                    ],
+                                  },
+                                  {
+                                    type: 'text',
+                                    text: ' unsafe',
+                                    marks: [
+                                      {
+                                        type: 'link',
+                                        attrs: { href: 'javascript:alert(1)' },
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                              {
+                                type: 'codeBlock',
+                                content: [
+                                  { type: 'text', text: 'const safe = true;' },
+                                ],
+                              },
+                            ],
+                          },
+                        }
+                      : {}),
                   },
                 ],
           totalComments: 1,
@@ -163,6 +251,16 @@ export async function auditPreview(app, page) {
     '<script>window.previewExecuted=true</script>',
   );
   await expect(pane).toContainText('<b>Ada</b>');
+  await expect(pane.locator('.preview-text h2')).toHaveText(
+    'Formatted details',
+  );
+  await expect(pane.locator('.preview-text ul ol li')).toHaveText(
+    'Nested item',
+  );
+  await expect(pane.locator('.preview-text pre code')).toHaveText(
+    'const safe = true;',
+  );
+  await expect(pane.locator('.preview-inline-link')).toHaveText(' Docs');
   await expect(
     pane.locator('script, img, a, input, textarea, [contenteditable=true]'),
   ).toHaveCount(0);

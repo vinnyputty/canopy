@@ -44,5 +44,6 @@ const api: CanopyAPI = {
   copyIssueLink: (id, key) =>
     ipcRenderer.invoke('canopy:copyIssueLink', id, key),
   openIssue: (id, key) => ipcRenderer.invoke('canopy:openIssue', id, key),
+  openLink: (url) => ipcRenderer.invoke('canopy:openLink', url),
 };
 contextBridge.exposeInMainWorld('canopy', api);

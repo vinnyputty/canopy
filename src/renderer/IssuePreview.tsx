@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Choice, IssuePreview as Preview } from '../shared/types';
+import { PreviewText } from './PreviewText';
 
 export function IssuePreview({
   connectionId,
@@ -247,7 +248,11 @@ export function IssuePreview({
             <section>
               <h3>Description</h3>
               <div className="preview-text">
-                {data.description || 'No description.'}
+                <PreviewText
+                  document={data.descriptionDocument}
+                  fallback={data.description}
+                  empty="No description."
+                />
               </div>
             </section>
             <section>
@@ -270,7 +275,11 @@ export function IssuePreview({
                         </time>
                       )}
                       <div className="preview-text">
-                        {comment.body || 'Empty comment.'}
+                        <PreviewText
+                          document={comment.bodyDocument}
+                          fallback={comment.body}
+                          empty="Empty comment."
+                        />
                       </div>
                     </article>
                   ))}
