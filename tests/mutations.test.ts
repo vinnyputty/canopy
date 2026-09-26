@@ -178,9 +178,9 @@ describe('multi-step status transitions', () => {
     assert.equal(await pending, true);
     assert.equal(h.current.status.id, 'done');
     assert.deepEqual(writes, ['start', 'finish']);
-    const undoing = h.mutations.undo();
+    const undoing = h.mutations.undo('jira', 'A-2');
     assert.equal(h.mutations.pending('jira'), true);
-    await undoing;
+    assert.equal(await undoing, true);
     assert.equal(h.current.status.id, 'open');
     assert.deepEqual(writes, ['start', 'finish', 'back-started', 'back-open']);
   });
@@ -259,7 +259,7 @@ describe('multi-step status transitions', () => {
       tree: async () => ({ ...snapshot(), issues: [issue('A-1'), current] }),
     });
     await h.mutations.transitionPath('jira', 'A-2', issue('A-2').status, path);
-    await h.mutations.undo();
+    assert.equal(await h.mutations.undo('jira', 'A-2'), false);
     assert.deepEqual(writes, ['start', 'finish', 'back-started']);
     assert.equal(h.current.status.id, 'started');
     assert.match(

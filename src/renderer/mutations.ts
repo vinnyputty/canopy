@@ -553,10 +553,10 @@ export class Mutations {
           this.error(
             `Undo stopped after ${reversed} of ${path.length - 1} reverse transitions. ${statusLabel}: ${actual.name}. ${error instanceof Error ? error.message : String(error)}`,
           );
-          return;
+          return false;
         }
         this.history = this.history.filter((value) => value !== entry);
-        return;
+        return true;
       }
       let patch: IssuePatch | undefined;
       let options: EditOptions | undefined;
