@@ -2218,6 +2218,10 @@ kbd {
   color: var(--muted);
   font-size: 11px;
   margin-top: 2px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .issue-preview {
   position: relative;

@@ -421,6 +421,12 @@ export function App() {
   ]);
   const priorityOrder = priorityOrders[priorityCacheKey];
   const priorityError = priorityErrors[priorityCacheKey];
+  const retryPriorityOrder = () =>
+    setPriorityErrors((current) => {
+      const next = { ...current };
+      delete next[priorityCacheKey];
+      return next;
+    });
   useEffect(() => {
     if (
       !activeTab ||
@@ -3056,15 +3062,7 @@ export function App() {
                       : ' Loading Jira priority order…'}
                     {' Showing Jira rank until priority order is available.'}
                     {priorityError && (
-                      <button
-                        onClick={() =>
-                          setPriorityErrors((current) => {
-                            const next = { ...current };
-                            delete next[priorityCacheKey];
-                            return next;
-                          })
-                        }
-                      >
+                      <button onClick={retryPriorityOrder}>
                         Retry priority sort
                       </button>
                     )}
@@ -3150,6 +3148,11 @@ export function App() {
                       {activeConnection?.provider === 'github'
                         ? 'GitHub dependency data is unavailable in tree snapshots, so blocker state is unknown.'
                         : 'Jira blocker state is unknown when link data or a linked blocker status is unavailable.'}
+                      {nextTaskCriterion === 'priority' && priorityError && (
+                        <button onClick={retryPriorityOrder}>
+                          Retry priority order
+                        </button>
+                      )}
                     </p>
                     {snapshot.warnings.length > 0 && (
                       <p className="next-tasks-explanation">

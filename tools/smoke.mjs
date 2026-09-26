@@ -2609,6 +2609,19 @@ try {
     }
     await close();
     await launch(false, { CANOPY_SMOKE_PRIORITY_FAILURES: '1' });
+    await page.getByRole('button', { name: 'Next tasks' }).click();
+    const priorityNextTasks = page.getByRole('region', { name: 'Next tasks' });
+    await priorityNextTasks
+      .getByLabel('Order next tasks by')
+      .selectOption('priority');
+    await priorityNextTasks
+      .getByRole('button', { name: 'Retry priority order' })
+      .click();
+    await expect(
+      priorityNextTasks.getByRole('button', { name: 'Retry priority order' }),
+    ).toHaveCount(0);
+    await close();
+    await launch(false, { CANOPY_SMOKE_PRIORITY_FAILURES: '1' });
     await expect(
       page.getByRole('button', { name: /Reorder CAN-111/ }),
     ).toBeEnabled();
