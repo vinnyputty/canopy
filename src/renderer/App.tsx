@@ -4163,13 +4163,6 @@ export function App() {
                       preview,
                     })
                   }
-                  onOpenComment={(commentId) =>
-                    void window.canopy.openComment(
-                      activeTab.connectionId,
-                      previewKey,
-                      commentId,
-                    )
-                  }
                   onOpenComment={(commentId) => {
                     void window.canopy
                       .openComment(
