@@ -200,6 +200,12 @@ export async function auditPickers(app, page) {
       delete window.statusOpenMeasurement;
       return result;
     });
+  const matchingTransitions = page.getByRole('checkbox', {
+    name: 'Assume matching status transitions for this root',
+  });
+  await page.locator('.view-settings > summary').click();
+  await matchingTransitions.uncheck();
+  await page.locator('.view-settings > summary').click();
   const statusCount = await count('transitions');
   await fixture('hold', 'picker-status', 'transitions', 'CAN-100');
   await armStatusTiming();
@@ -303,6 +309,9 @@ export async function auditPickers(app, page) {
     .click();
   await expect(field('status')).toContainText('In Progress');
   await expect(page.getByLabel('Saving CAN-100')).toBeHidden();
+  await page.locator('.view-settings > summary').click();
+  await matchingTransitions.check();
+  await page.locator('.view-settings > summary').click();
 }
 
 export async function auditSelfConnections(app, page) {
