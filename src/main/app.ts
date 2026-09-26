@@ -315,25 +315,32 @@ async function start(
     searches.get(owner)?.abort();
     searches.delete(owner);
   };
+  let demoLaunch: symbol | null = null;
   const handlers: Record<string, (...args: any[]) => unknown> = {
     demoMode: () => demoMode,
     launchDemo: async () => {
       if (demoMode) throw new Error('The demo is already open.');
-      const directory = await mkdtemp(join(tmpdir(), 'canopy-demo-'));
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        CANOPY_USER_DATA: directory,
-        CANOPY_DEMO_TEMP: '1',
-      };
-      delete env.ELECTRON_RUN_AS_NODE;
+      if (demoLaunch) throw new Error('The demo is already open.');
+      const launch = Symbol('demo launch');
+      demoLaunch = launch;
+      let directory: string | undefined;
       try {
+        directory = await mkdtemp(join(tmpdir(), 'canopy-demo-'));
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          CANOPY_USER_DATA: directory,
+          CANOPY_DEMO_TEMP: '1',
+        };
+        delete env.ELECTRON_RUN_AS_NODE;
         const child = spawn(
           process.execPath,
           [...(app.isPackaged ? [] : [app.getAppPath()]), '--canopy-demo'],
           { env, stdio: 'ignore' },
         );
+        const childDirectory = directory;
         child.once('exit', () => {
-          void rm(directory, { recursive: true, force: true });
+          if (demoLaunch === launch) demoLaunch = null;
+          void rm(childDirectory, { recursive: true, force: true });
           if (window && !window.isDestroyed()) {
             window.show();
             window.focus();
@@ -345,7 +352,8 @@ async function start(
         });
         child.unref();
       } catch (error) {
-        await rm(directory, { recursive: true, force: true });
+        if (demoLaunch === launch) demoLaunch = null;
+        if (directory) await rm(directory, { recursive: true, force: true });
         throw error;
       }
     },

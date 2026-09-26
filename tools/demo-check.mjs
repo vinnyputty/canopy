@@ -280,6 +280,15 @@ if (process.platform !== 'win32') {
         { timeout: 10000 },
       )
       .toBeGreaterThan(0);
+    const duplicateLaunch = await page.evaluate(async () => {
+      try {
+        await window.canopy.launchDemo();
+        return 'A second demo launched.';
+      } catch (error) {
+        return String(error);
+      }
+    });
+    expect(duplicateLaunch).toContain('The demo is already open.');
     await page.waitForTimeout(1400);
     await expect(
       page.getByRole('heading', { name: 'See the whole tree.' }),
