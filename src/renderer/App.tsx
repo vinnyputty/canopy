@@ -1742,6 +1742,30 @@ export function App() {
     const controller = new AbortController();
     const signal = controller.signal;
     let finished = false;
+    const priorityToken = Symbol('demo priority edit');
+    let priorityWork: Promise<unknown> = Promise.resolve();
+    let priorityEditStarted = false;
+    const restorePriority = async () => {
+      if (!priorityEditStarted) return;
+      await priorityWork;
+      mutations.discardHistory(priorityToken);
+      const current = (await window.canopy.tree('demo', 'CAN-100')).issues.find(
+        (issue) => issue.key === 'CAN-111',
+      );
+      if (current?.priority?.id === '1')
+        await mutations.update(
+          'demo',
+          'CAN-111',
+          { priorityId: '2' },
+          undefined,
+          false,
+        );
+    };
+    signal.addEventListener('abort', () => {
+      void restorePriority().catch((error) =>
+        console.error('Could not restore demo priority:', error),
+      );
+    });
     const pause = (ms: number) =>
       new Promise<void>((resolve, reject) => {
         signal.throwIfAborted();
@@ -1874,15 +1898,16 @@ export function App() {
         tourEditor.current = false;
         const choices = await window.canopy.priorities('demo', 'CAN-111');
         signal.throwIfAborted();
-        if (
-          !(await mutations.update(
-            'demo',
-            'CAN-111',
-            { priorityId: '1' },
-            { priorities: choices },
-          ))
-        )
-          throw new Error('The priority edit failed.');
+        priorityEditStarted = true;
+        priorityWork = mutations.update(
+          'demo',
+          'CAN-111',
+          { priorityId: '1' },
+          { priorities: choices },
+          true,
+          priorityToken,
+        );
+        if (!(await priorityWork)) throw new Error('The priority edit failed.');
         await waitFor(
           () =>
             row('CAN-111')?.querySelector('.priority')?.textContent ===
@@ -1891,7 +1916,8 @@ export function App() {
         );
         await pause(1900);
         signal.throwIfAborted();
-        await mutations.undo();
+        priorityWork = mutations.undo();
+        await priorityWork;
         signal.throwIfAborted();
         await waitFor(
           () =>

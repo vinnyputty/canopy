@@ -12,6 +12,11 @@ if ((!appPath && !packagedExecutable) || !executablePath)
 
 async function openDemo() {
   const directory = await mkdtemp(join(tmpdir(), 'canopy-demo-check-'));
+  const savedWindow = JSON.stringify({
+    bounds: { x: 40, y: 50, width: 1000, height: 700 },
+    maximized: false,
+  });
+  await writeFile(join(directory, 'window.json'), savedWindow);
   const env = { ...process.env, CANOPY_USER_DATA: directory };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({
@@ -24,7 +29,7 @@ async function openDemo() {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error));
   await expect(page.getByRole('region', { name: 'Canopy demo' })).toBeVisible();
-  return { app, child, page, directory, errors };
+  return { app, child, page, directory, errors, savedWindow };
 }
 
 async function closeDemo(session) {
@@ -80,6 +85,25 @@ try {
   );
   if (stopped !== 'High')
     throw new Error(`Stop during edit left priority ${stopped}`);
+  await page.getByRole('button', { name: 'Reset and replay' }).click();
+  await expect(
+    page.getByRole('button', { name: 'Edit priority for CAN-111' }),
+  ).toContainText('Highest', { timeout: 60000 });
+  await page.getByRole('button', { name: 'Stop demo' }).click();
+  await page.waitForTimeout(1800);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        async () =>
+          (await window.canopy.tree('demo', 'CAN-100')).issues.find(
+            (issue) => issue.key === 'CAN-111',
+          )?.priority?.name,
+      ),
+    )
+    .toBe('High');
+  await expect(
+    page.getByRole('button', { name: 'Undo edit to CAN-111' }),
+  ).toHaveCount(0);
   await page.getByRole('button', { name: 'Reset and replay' }).click();
   await expect(
     page.getByText('Tour complete. The sample tree is yours to explore.'),
@@ -147,6 +171,11 @@ try {
       ),
     ),
   ]);
+  if (
+    (await readFile(join(first.directory, 'window.json'), 'utf8')) !==
+    first.savedWindow
+  )
+    throw new Error('Demo changed the saved window layout.');
   console.log(
     'Demo checks passed: immediate Stop, manual actions, Reset, Stop during edit, complete tour, manual takeover.',
   );

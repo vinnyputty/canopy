@@ -559,10 +559,12 @@ async function start(
     quitting = true;
   });
   const createWindow = async () => {
-    const saved = restoreWindow(
-      await storage.read<WindowState>('window'),
-      screen.getAllDisplays().map((display) => display.workArea),
-    );
+    const saved = demoMode
+      ? null
+      : restoreWindow(
+          await storage.read<WindowState>('window'),
+          screen.getAllDisplays().map((display) => display.workArea),
+        );
     window = new BrowserWindow({
       width: 1440,
       height: 920,
@@ -590,6 +592,7 @@ async function start(
     let closeApproved = false;
     const saveBounds = () => {
       if (
+        demoMode ||
         created.isDestroyed() ||
         created.isMinimized() ||
         created.isFullScreen()
