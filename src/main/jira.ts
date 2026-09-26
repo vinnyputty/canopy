@@ -312,15 +312,34 @@ export class JiraProvider {
             this.created.delete(key);
             continue;
           }
-          const child = entry.issue;
           if (
-            parents.includes(child.parentKey ?? '') &&
-            !visited.has(child.key)
-          ) {
-            visited.add(child.key);
-            issues.push(child);
-            nextFrontier.push(child.key);
+            !parents.includes(entry.issue.parentKey ?? '') ||
+            visited.has(key)
+          )
+            continue;
+          let child: Issue;
+          try {
+            child = await this.getIssue(key);
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message.startsWith(
+                `Unable to load Jira issue ${key}: Jira returned 404.`,
+              )
+            ) {
+              this.created.delete(key);
+              continue;
+            }
+            throw error;
           }
+          if (child.parentKey !== entry.issue.parentKey) {
+            this.created.delete(key);
+            continue;
+          }
+          this.created.set(key, { ...entry, issue: child });
+          visited.add(child.key);
+          issues.push(child);
+          nextFrontier.push(child.key);
         }
       }
       frontier = nextFrontier;

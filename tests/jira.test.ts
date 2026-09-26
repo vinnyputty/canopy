@@ -307,7 +307,8 @@ describe('JiraProvider child creation', () => {
     );
   });
 
-  it('sends parent, project, ADF description, assignee, and priority, then retains a child during search lag', async () => {
+  it('creates a child and keeps it visible through search lag while direct reads confirm it', async () => {
+    let childRead: any = rawIssue('PROJ-2', 'EPIC-1');
     const writable = recordingRequest((path, init) => {
       if (path.includes('/issue/EPIC-1?fields=project'))
         return rawIssue('EPIC-1', undefined, {
@@ -333,7 +334,10 @@ describe('JiraProvider child creation', () => {
         };
       if (path === '/rest/api/3/issue' && init?.method === 'POST')
         return { key: 'PROJ-2' };
-      if (path.includes('/issue/PROJ-2?')) return rawIssue('PROJ-2', 'EPIC-1');
+      if (path.includes('/issue/PROJ-2?')) {
+        if (childRead instanceof Error) throw childRead;
+        return childRead;
+      }
       if (path.includes('/issue/EPIC-1?')) return rawIssue('EPIC-1');
       if (path === '/rest/api/3/search/jql')
         return { issues: [], isLast: true };
@@ -370,6 +374,23 @@ describe('JiraProvider child creation', () => {
     assert.deepEqual(
       (await provider.tree('EPIC-1')).issues.map((issue) => issue.key),
       ['EPIC-1', 'PROJ-2'],
+    );
+    childRead = rawIssue('PROJ-2', 'EPIC-1', { summary: 'Updated title' });
+    assert.equal(
+      (await provider.tree('EPIC-1')).issues[1].summary,
+      'Updated title',
+    );
+    childRead = new Error('Jira returned 403.');
+    await assert.rejects(provider.tree('EPIC-1'), /Jira returned 403/);
+    childRead = new Error('Jira returned 404.');
+    assert.deepEqual(
+      (await provider.tree('EPIC-1')).issues.map((issue) => issue.key),
+      ['EPIC-1'],
+    );
+    childRead = rawIssue('PROJ-2', 'EPIC-1');
+    assert.deepEqual(
+      (await provider.tree('EPIC-1')).issues.map((issue) => issue.key),
+      ['EPIC-1'],
     );
   });
 
