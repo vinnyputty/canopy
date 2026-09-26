@@ -114,7 +114,14 @@ export class Pickers {
       if (previous?.transitions && !previous.status?.error) return;
       const pending = this.pendingStatuses.get(scope);
       if (pending) return pending;
-      const load = this.load(connection, key, field);
+      const load = this.load(
+        connection,
+        key,
+        field,
+        '',
+        false,
+        Boolean(previous?.status?.error),
+      );
       this.pendingStatuses.set(scope, load);
       try {
         await load;

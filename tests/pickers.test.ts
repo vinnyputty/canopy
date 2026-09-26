@@ -255,6 +255,26 @@ it('clears rejected choices and can retry after a failed transition load', async
   ]);
 });
 
+it('revalidates provider choices after a rejected status selection', async () => {
+  const requests: boolean[] = [];
+  let cached = [{ id: 'stale', name: 'Stale', requiresFields: false }];
+  const { pickers } = harness({
+    transitions: async (_connection, _key, refresh) => {
+      requests.push(Boolean(refresh));
+      if (refresh)
+        cached = [{ id: 'fresh', name: 'Fresh', requiresFields: false }];
+      return cached;
+    },
+  });
+  await pickers.open('a', 'ABC-1', 'status');
+  pickers.rejected('a', 'ABC-1', 'status');
+  await pickers.open('a', 'ABC-1', 'status');
+  assert.deepEqual(requests, [false, true]);
+  assert.deepEqual(pickers.values['a:ABC-1'].transitions, [
+    { id: 'fresh', name: 'Fresh', requiresFields: false },
+  ]);
+});
+
 it('keeps status choices for the same issue key separate by connection', async () => {
   const requests: string[] = [];
   const { pickers } = harness({
