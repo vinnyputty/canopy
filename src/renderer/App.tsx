@@ -3604,7 +3604,12 @@ export function App() {
             setAppearancePreview(null);
             setDialog(null);
           }}
-          onSave={(theme, palette) => {
+          onSave={async (theme, palette) => {
+            await window.canopy.saveWorkspace({
+              ...workspaceRef.current,
+              theme,
+              palette,
+            });
             setWorkspace((current) => ({ ...current, theme, palette }));
             setAppearancePreview(null);
             setDialog(null);
@@ -5358,11 +5363,13 @@ function AppearanceDialog({
   onSave: (
     theme: Workspace['theme'],
     palette: NonNullable<Workspace['palette']>,
-  ) => void;
+  ) => Promise<void>;
   onShortcuts: () => void;
 }) {
   const [draftTheme, setDraftTheme] = useState(theme);
   const [draftPalette, setDraftPalette] = useState(palette);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const initialFocus = useRef<HTMLInputElement>(null);
   useEffect(() => {
     initialFocus.current?.focus();
@@ -5373,10 +5380,25 @@ function AppearanceDialog({
   ) => {
     setDraftTheme(nextTheme);
     setDraftPalette(nextPalette);
+    setSaveError(null);
     onPreview({ theme: nextTheme, palette: nextPalette });
   };
+  const save = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      await onSave(draftTheme, draftPalette);
+    } catch (error) {
+      setSaveError(
+        `Couldn’t save appearance: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
   return (
-    <Dialog title="Appearance" onClose={onClose}>
+    <Dialog title="Appearance" onClose={() => !isSaving && onClose()}>
       <div className="appearance-dialog">
         <p>
           Choose a palette and appearance. Changes preview throughout the window
@@ -5389,6 +5411,7 @@ function AppearanceDialog({
               <input
                 ref={mode === theme ? initialFocus : undefined}
                 type="radio"
+                disabled={isSaving}
                 name="appearance-mode"
                 checked={draftTheme === mode}
                 onChange={() => preview(mode, draftPalette)}
@@ -5407,6 +5430,7 @@ function AppearanceDialog({
             <label key={choice} className="appearance-palette">
               <input
                 type="radio"
+                disabled={isSaving}
                 name="appearance-palette"
                 checked={draftPalette === choice}
                 onChange={() => preview(draftTheme, choice)}
@@ -5435,18 +5459,24 @@ function AppearanceDialog({
             </label>
           ))}
         </fieldset>
+        {saveError && (
+          <p className="dialog-error" role="alert">
+            {saveError}
+          </p>
+        )}
       </div>
       <div className="dialog-footer">
-        <button className="secondary" onClick={onShortcuts}>
+        <button className="secondary" onClick={onShortcuts} disabled={isSaving}>
           Keyboard shortcuts
         </button>
         <span className="footer-spacer" />
-        <button className="secondary" onClick={onClose}>
+        <button className="secondary" onClick={onClose} disabled={isSaving}>
           Cancel
         </button>
         <button
           className="primary"
-          onClick={() => onSave(draftTheme, draftPalette)}
+          onClick={() => void save()}
+          disabled={isSaving}
         >
           Save
         </button>

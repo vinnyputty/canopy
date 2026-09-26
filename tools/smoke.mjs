@@ -321,16 +321,38 @@ async function auditAppearance() {
   await page.getByRole('button', { name: 'Appearance' }).click();
   await dialog.getByRole('radio', { name: 'Forest' }).check();
   await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog).toHaveCount(0);
   await expect(root).toHaveAttribute('data-palette', 'forest');
-  await expect
-    .poll(() =>
-      page.evaluate(async () => (await window.canopy.loadWorkspace())?.palette),
-    )
-    .toBe('forest');
+  expect(
+    await page.evaluate(
+      async () => (await window.canopy.loadWorkspace())?.palette,
+    ),
+  ).toBe('forest');
   await close();
   await launch(true);
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+}
+
+async function auditAppearanceSaveFailure() {
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('canopy:saveWorkspace');
+    ipcMain.handle('canopy:saveWorkspace', () => {
+      throw new Error('Injected appearance write failure');
+    });
+  });
+  const root = page.locator('html');
+  const originalPalette = await root.getAttribute('data-palette');
+  await page.getByRole('button', { name: 'Appearance' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Appearance' });
+  await dialog.getByRole('radio', { name: 'Ocean' }).check();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByRole('alert')).toContainText(
+    'Injected appearance write failure',
+  );
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(root).toHaveAttribute('data-palette', originalPalette);
 }
 
 async function openIssue(key, expectTree = true) {
@@ -2843,6 +2865,8 @@ try {
   await auditWorkflow(app, page);
 
   await auditPreview(app, page);
+
+  await auditAppearanceSaveFailure();
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(
