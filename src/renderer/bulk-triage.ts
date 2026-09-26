@@ -17,7 +17,7 @@ export type BulkCandidate = {
 export type BulkChoice = Choice & { category?: Issue['status']['category'] };
 export type BulkResult = {
   issue: Issue;
-  state: 'pending' | 'saved' | 'failed' | 'undoing' | 'undone';
+  state: 'pending' | 'saved' | 'failed' | 'undoing' | 'undo-failed' | 'undone';
   reason?: string;
 };
 

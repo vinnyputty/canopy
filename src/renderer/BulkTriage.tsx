@@ -242,7 +242,7 @@ export function BulkTriage({
                 value.issue.key === issue.key
                   ? {
                       issue,
-                      state: success ? 'undone' : 'failed',
+                      state: success ? 'undone' : 'undo-failed',
                       reason: success
                         ? undefined
                         : 'Undo failed. Refresh and review this issue.',
@@ -261,11 +261,11 @@ export function BulkTriage({
                 value.issue.key === issue.key
                   ? {
                       issue,
-                      state: 'failed',
+                      state: 'undo-failed',
                       reason:
                         failure instanceof Error
-                          ? failure.message
-                          : String(failure),
+                          ? `Undo failed: ${failure.message}`
+                          : `Undo failed: ${String(failure)}`,
                     }
                   : value,
               ),
@@ -463,14 +463,15 @@ export function BulkTriage({
                       Retry
                     </button>
                   )}
-                  {state === 'saved' && canUndo(issue.key) && (
-                    <button
-                      disabled={working}
-                      onClick={() => void undoOne(issue)}
-                    >
-                      Undo
-                    </button>
-                  )}
+                  {(state === 'saved' || state === 'undo-failed') &&
+                    canUndo(issue.key) && (
+                      <button
+                        disabled={working}
+                        onClick={() => void undoOne(issue)}
+                      >
+                        Undo
+                      </button>
+                    )}
                 </span>
               </li>
             ))}

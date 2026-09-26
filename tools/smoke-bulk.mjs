@@ -10,6 +10,28 @@ export async function auditBulk(app, page, modifier) {
   await bulk.getByRole('button', { name: 'Clear selection' }).click();
   await expect(bulk).toBeHidden();
 
+  await row('CAN-101').getByRole('button', { name: 'Expand CAN-101' }).click();
+  await row('CAN-100')
+    .getByRole('button', { name: 'A calmer place to get things done' })
+    .click();
+  await row('CAN-101')
+    .getByRole('button', { name: 'Build the workspace foundation' })
+    .click({ modifiers: [modifier] });
+  await row('CAN-103')
+    .getByRole('button', { name: 'Create the tab experience' })
+    .click({ modifiers: [modifier] });
+  await expect(bulk).toContainText('3 issues selected');
+  await row('CAN-101')
+    .getByRole('button', { name: 'Collapse CAN-101' })
+    .click();
+  await expect(bulk).toContainText('2 issues selected');
+  await bulk.getByRole('button', { name: 'Copy keys and summaries' }).click();
+  expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(
+    'CAN-100 A calmer place to get things done\nCAN-101 Build the workspace foundation',
+  );
+  await bulk.getByRole('button', { name: 'Clear selection' }).click();
+  await expect(bulk).toBeHidden();
+
   await row('CAN-101')
     .getByRole('button', { name: 'Build the workspace foundation' })
     .click();
@@ -79,6 +101,40 @@ export async function auditBulk(app, page, modifier) {
   await expect(
     row('CAN-106').getByRole('button', { name: 'Edit priority for CAN-106' }),
   ).toContainText('Low');
+  await app.evaluate(() =>
+    globalThis.canopySmoke.hold('bulk-undo-failure', 'tree', 'CAN-101'),
+  );
+  await results
+    .locator('li')
+    .filter({ hasText: 'CAN-101' })
+    .getByRole('button', { name: 'Undo' })
+    .click();
+  await expect
+    .poll(() =>
+      app.evaluate(() => globalThis.canopySmoke.started('bulk-undo-failure')),
+    )
+    .toBe(true);
+  await app.evaluate(() =>
+    globalThis.canopySmoke.release(
+      'bulk-undo-failure',
+      'Temporary undo failure',
+    ),
+  );
+  await expect(
+    results.locator('li').filter({ hasText: 'CAN-101' }),
+  ).toContainText('Undo failed');
+  await expect(
+    results
+      .locator('li')
+      .filter({ hasText: 'CAN-101' })
+      .getByRole('button', { name: 'Retry' }),
+  ).toHaveCount(0);
+  await expect(
+    results
+      .locator('li')
+      .filter({ hasText: 'CAN-101' })
+      .getByRole('button', { name: 'Undo' }),
+  ).toBeEnabled();
   await results
     .locator('li')
     .filter({ hasText: 'CAN-101' })

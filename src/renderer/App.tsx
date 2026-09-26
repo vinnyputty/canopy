@@ -2058,13 +2058,15 @@ export function App() {
     if (!activeTab || !snapshot || multiSelection?.tabId !== activeTab.id)
       return [];
     const byKey = new Map(snapshot.issues.map((issue) => [issue.key, issue]));
+    const visible = new Set(flat.map((node) => node.issue.key));
     return multiSelection.keys
+      .filter((key) => visible.has(key))
       .map((key) => byKey.get(key))
       .filter(
         (issue): issue is Issue =>
           Boolean(issue) && issue?.type !== 'Repository',
       );
-  }, [activeTab?.id, snapshot, multiSelection]);
+  }, [activeTab?.id, snapshot, multiSelection, flat]);
   const selectMultiple = (key: string, range: boolean, toggle: boolean) => {
     if (!activeTab) return;
     const previous =
@@ -4838,7 +4840,12 @@ function TreeRows(props: RowsProps) {
         if (!props.suppressFocus.current) onSelect(issue.key);
       }}
       onPointerDownCapture={(event) => {
-        if (event.metaKey || event.ctrlKey || event.shiftKey)
+        if (
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          (event.target as HTMLElement).closest('.disclosure')
+        )
           props.suppressFocus.current = true;
       }}
       onClick={(event) => {
