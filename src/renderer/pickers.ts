@@ -43,6 +43,10 @@ export class Pickers {
     string,
     Map<string, EditOptions['transitions']>
   >();
+  private workflowTrees = new Map<
+    string,
+    Map<string, EditOptions['transitions']>
+  >();
   private pendingTreeStatuses = new Map<string, Promise<void>>();
   private workflowGraphAttempted = new Set<string>();
   private verifiedTreeStatuses = new Set<string>();
@@ -62,10 +66,20 @@ export class Pickers {
     const root = JSON.stringify([connection, rootKey]);
     const type = this.typeKey(issue);
     const graph: Record<string, EditOptions['transitions']> = {};
-    for (const [pair, choices] of this.statusTrees.get(root) ?? []) {
-      const [choiceType, status] = JSON.parse(pair) as [string, string];
-      if (choiceType === type) graph[status] = choices;
-    }
+    for (const tree of [
+      this.statusTrees.get(root),
+      this.workflowTrees.get(root),
+    ])
+      for (const [pair, choices] of tree ?? []) {
+        const [choiceType, status] = JSON.parse(pair) as [string, string];
+        if (choiceType !== type) continue;
+        const existing = graph[status] ?? [];
+        const ids = new Set(existing.map((choice) => choice.id));
+        graph[status] = [
+          ...existing,
+          ...choices.filter((choice) => !ids.has(choice.id)),
+        ];
+      }
     const direct = this.values[this.scoped(connection, issue.key)]?.transitions;
     return direct ? statusPaths(issue.status, direct, graph) : [];
   }
@@ -76,10 +90,10 @@ export class Pickers {
   ) {
     if (!issue.projectId || !issue.typeId || !this.api.workflowGraph) return;
     const root = JSON.stringify([connection, rootKey]);
-    let tree = this.statusTrees.get(root);
+    let tree = this.workflowTrees.get(root);
     if (!tree) {
       tree = new Map();
-      this.statusTrees.set(root, tree);
+      this.workflowTrees.set(root, tree);
     }
     const type = this.typeKey(issue);
     const scope = JSON.stringify([root, type]);
@@ -91,18 +105,10 @@ export class Pickers {
         issue.projectId,
         issue.typeId,
       );
-      if (!graph || this.statusTrees.get(root) !== tree) return;
+      if (!graph || this.workflowTrees.get(root) !== tree) return;
       for (const [status, choices] of Object.entries(graph)) {
         const pair = JSON.stringify([type, status]);
-        const existing = tree.get(pair) ?? [];
-        const ids = new Set(existing.map((choice) => choice.id));
-        const merged = [...existing];
-        for (const choice of choices)
-          if (!ids.has(choice.id)) {
-            merged.push(choice);
-            ids.add(choice.id);
-          }
-        tree.set(pair, merged);
+        tree.set(pair, choices);
       }
       this.changed({ ...this.values });
     } catch {
@@ -132,6 +138,7 @@ export class Pickers {
     this.statusChoiceContexts.clear();
     this.freshStatuses.clear();
     this.statusTrees.clear();
+    this.workflowTrees.clear();
     this.pendingTreeStatuses.clear();
     this.workflowGraphAttempted.clear();
     this.verifiedTreeStatuses.clear();

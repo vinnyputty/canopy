@@ -446,8 +446,9 @@ it('uses the active root when one issue appears in overlapping trees', async () 
   assert.equal(pickers.values['jira:ABC-2'].transitions?.[0].id, 'ABC-10');
 });
 
-it('uses workflow metadata for statuses absent from the opened tree', async () => {
+it('loads issue-specific direct choices for statuses absent from the opened tree', async () => {
   const requests: string[] = [];
+  let currentStatus = 'open';
   const { pickers } = harness({
     workflowGraph: async () => ({
       open: [{ id: 'metadata-open', name: 'Start', requiresFields: false }],
@@ -455,7 +456,13 @@ it('uses workflow metadata for statuses absent from the opened tree', async () =
     }),
     transitions: async (_connection, key) => {
       requests.push(key);
-      return [{ id: 'verified-open', name: 'Start', requiresFields: false }];
+      return [
+        {
+          id: `verified-${currentStatus}`,
+          name: 'Start',
+          requiresFields: false,
+        },
+      ];
     },
   });
   const root = { ...issue('ABC-1', 'open'), projectId: '100', typeId: '200' };
@@ -469,9 +476,13 @@ it('uses workflow metadata for statuses absent from the opened tree', async () =
   pickers.observe('jira', [
     { ...root, status: { ...root.status, id: 'done' } },
   ]);
+  currentStatus = 'done';
   await pickers.open('jira', root.key, 'status', root.key, true);
-  assert.deepEqual(requests, ['ABC-1']);
-  assert.equal(pickers.values['jira:ABC-1'].transitions?.[0].id, 'reopen');
+  assert.deepEqual(requests, ['ABC-1', 'ABC-1']);
+  assert.equal(
+    pickers.values['jira:ABC-1'].transitions?.[0].id,
+    'verified-done',
+  );
 });
 
 it('adds graph-only edges after cached status choices when workflow loading recovers', async () => {
@@ -525,5 +536,10 @@ it('adds graph-only edges after cached status choices when workflow loading reco
       ['done', ['start', 'finish']],
       ['review', ['start', 'review']],
     ],
+  );
+  await pickers.open('jira', second.key, 'status', root.key, true, second);
+  assert.deepEqual(
+    pickers.values['jira:ABC-2'].transitions?.map((choice) => choice.id),
+    ['finish'],
   );
 });
