@@ -40,6 +40,8 @@ export async function auditGithub(app, page) {
         refresh,
       );
     });
+    globalThis.githubSmokeReads = 0;
+    globalThis.githubSmokeLimitNext = false;
     globalThis.fetch = async (url, init = {}) => {
       const parsed = new URL(String(url));
       if (parsed.hostname !== 'api.github.com')
@@ -72,6 +74,16 @@ export async function auditGithub(app, page) {
       if (path === '/repos/team/b/issues/2/sub_issues')
         return Response.json([]);
       if (path === '/repos/team/a/issues/1') {
+        if (init.method !== 'PATCH') {
+          globalThis.githubSmokeReads++;
+          if (globalThis.githubSmokeLimitNext) {
+            globalThis.githubSmokeLimitNext = false;
+            return new Response('{"message":"secondary rate limit"}', {
+              status: 429,
+              headers: { 'retry-after': '1' },
+            });
+          }
+        }
         if (init.method === 'PATCH') {
           const patch = JSON.parse(String(init.body));
           globalThis.githubSmokePatches.push(patch);
@@ -423,12 +435,63 @@ export async function auditGithub(app, page) {
     expect(await statusesFit(repositoryTree)).toBe(true);
     await page.getByRole('tab', { name: /team\/a#1/ }).click();
     await expect(statusResize).toHaveAttribute('aria-valuenow', '138');
+
+    const reads = () => app.evaluate(() => globalThis.githubSmokeReads);
+    const beforeDuplicate = await reads();
+    await page.evaluate(async () => {
+      const workspace = await window.canopy.loadWorkspace();
+      const issueTab = workspace.tabs.find((tab) => tab.rootKey === 'team/a#1');
+      await window.canopy.saveWorkspace({
+        ...workspace,
+        tabs: [
+          issueTab,
+          { ...issueTab, id: 'github-duplicate', rootKey: 'TEAM/A#1' },
+        ],
+        activeTabId: issueTab.id,
+      });
+    });
+    await page.reload();
+    await expect(
+      page.getByRole('tree', { name: 'team/a#1 issue tree' }),
+    ).toBeVisible();
+    await expect.poll(reads).toBe(beforeDuplicate + 1);
+    await page.getByRole('tab').nth(1).click();
+    await expect(page.locator('.statusbar')).toContainText('Last updated');
+    expect(await reads()).toBe(beforeDuplicate + 1);
+    const timestamp = page.locator('.statusbar [title]').first();
+    const beforeManual = await timestamp.getAttribute('title');
+    await page.waitForTimeout(1100);
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await expect.poll(reads).toBe(beforeDuplicate + 2);
+    await expect(timestamp).not.toHaveAttribute('title', beforeManual);
+    const updated = await timestamp.getAttribute('title');
+    await page.getByRole('tab').nth(0).click();
+    await expect(timestamp).toHaveAttribute('title', updated);
+    expect(await reads()).toBe(beforeDuplicate + 2);
+
+    await app.evaluate(() => {
+      globalThis.githubSmokeLimitNext = true;
+    });
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await expect.poll(reads).toBe(beforeDuplicate + 3);
+    const connectionStatus = page.getByRole('status', {
+      name: 'Connection status',
+    });
+    await expect(connectionStatus).toHaveText('Rate limited');
+    await expect(
+      page.getByRole('button', { name: 'Refresh', exact: true }),
+    ).toBeDisabled();
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    expect(await reads()).toBe(beforeDuplicate + 3);
+    await expect.poll(reads, { timeout: 10_000 }).toBe(beforeDuplicate + 4);
+    await expect(connectionStatus).toHaveText('Connected');
+
     await page.getByTitle('Disconnect GitHub · tester').click();
     await expect(
       page.getByText('GitHub · tester', { exact: true }),
     ).toHaveCount(0);
     console.log(
-      'GitHub integration passed: token connection, cross-repository tree, title, assignee, state, labels, and grouped search.',
+      'GitHub integration passed: connection, tree, edits, search, duplicate-root refresh, and rate-limit recovery.',
     );
   } finally {
     await app.evaluate(({ ipcMain }) => {

@@ -168,6 +168,9 @@ function priorityTone(name?: string) {
   if (/low|lowest/.test(value)) return 'low';
   return 'medium';
 }
+function refreshRootKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {
+  return JSON.stringify([tab.connectionId, tab.rootKey.toLowerCase()]);
+}
 export function App() {
   const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
   const [connections, storeConnections] = useState<Connection[]>([]);
@@ -603,7 +606,7 @@ export function App() {
       }
       if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
       if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) return;
-      const rootKey = JSON.stringify([tab.connectionId, tab.rootKey]);
+      const rootKey = refreshRootKey(tab);
       const load = rootRefreshes.current.load(
         rootKey,
         explicit,
@@ -630,11 +633,7 @@ export function App() {
         const delivered = new Set<string>();
         if (currentRoot && !refreshBlocked.current(tab.connectionId)) {
           const targets = load.started
-            ? tabsRef.current.filter(
-                (item) =>
-                  item.connectionId === tab.connectionId &&
-                  item.rootKey === tab.rootKey,
-              )
+            ? tabsRef.current.filter((item) => refreshRootKey(item) === rootKey)
             : [tab];
           for (const target of targets) {
             if (
@@ -727,11 +726,7 @@ export function App() {
 
   useEffect(() => {
     if (!ready) return;
-    rootRefreshes.current.retain(
-      workspace.tabs.map((tab) =>
-        JSON.stringify([tab.connectionId, tab.rootKey]),
-      ),
-    );
+    rootRefreshes.current.retain(workspace.tabs.map(refreshRootKey));
     const activated = refreshSchedule.current.sync(
       workspace.tabs.map((tab) => tab.id),
       foreground ? workspace.activeTabId : null,
@@ -953,13 +948,10 @@ export function App() {
           !workspaceRef.current.tabs.some(
             (other) =>
               !ids.includes(other.id) &&
-              other.connectionId === tab.connectionId &&
-              other.rootKey === tab.rootKey,
+              refreshRootKey(other) === refreshRootKey(tab),
           )
         )
-          rootRefreshes.current.forget(
-            JSON.stringify([tab.connectionId, tab.rootKey]),
-          );
+          rootRefreshes.current.forget(refreshRootKey(tab));
       }
       for (const id of ids) {
         mutations.forget(id);
@@ -2930,9 +2922,7 @@ export function App() {
           onClose={() => setDialog(null)}
           onConnected={(value) => {
             for (const tab of workspaceRef.current.tabs)
-              rootRefreshes.current.forget(
-                JSON.stringify([tab.connectionId, tab.rootKey]),
-              );
+              rootRefreshes.current.forget(refreshRootKey(tab));
             setConnections(value);
             // Token replacement can retain a connection ID. Refresh its transport
             // deadline while preserving limits on other authenticated connections.
