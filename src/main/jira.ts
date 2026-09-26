@@ -14,7 +14,7 @@ import type {
   Status,
 } from '../shared/types';
 
-import { documentText } from './adf';
+import { documentMarkdown, documentText } from './adf';
 
 export type JiraRequest = (path: string, init?: RequestInit) => Promise<any>;
 
@@ -409,6 +409,7 @@ export class JiraProvider {
     return {
       issue: parseIssue(raw),
       description: documentText(raw.fields?.description),
+      descriptionMarkdown: documentMarkdown(raw.fields?.description),
       ...(raw.fields?.description && typeof raw.fields.description === 'object'
         ? { descriptionDocument: raw.fields.description }
         : {}),

@@ -108,6 +108,23 @@ try {
     page.getByRole('complementary', { name: 'Preview CAN-111' }),
   ).toBeVisible();
   await page.getByRole('button', { name: 'Close issue preview' }).click();
+  await page.getByRole('button', { name: 'Actions for CAN-111' }).click();
+  const actions = page.getByRole('menu', { name: 'Actions for CAN-111' });
+  await expect(
+    actions.getByRole('menuitem', { name: 'Copy link' }),
+  ).toHaveCount(0);
+  await actions.getByRole('menuitem', { name: 'Copy work brief' }).click();
+  const brief = page.getByRole('dialog', { name: 'Work brief for CAN-111' });
+  await expect(
+    brief.getByRole('button', { name: 'Close dialog' }),
+  ).toBeFocused();
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    '- Issue: Demo CAN-111',
+  );
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    '- Source: Local sample workspace',
+  );
+  await brief.getByRole('button', { name: 'Close dialog' }).click();
   await page.getByRole('button', { name: 'Reset and replay' }).click();
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'default');

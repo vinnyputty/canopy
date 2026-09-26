@@ -18,6 +18,7 @@ export async function auditPreview(app, page) {
       completed: false,
       started: false,
       release: null,
+      clipboard: '',
     };
     globalThis.previewRecovery = controls;
     const handlers = {
@@ -54,6 +55,7 @@ export async function auditPreview(app, page) {
       }),
       preview: async (_event, connection) => {
         const mode = controls.mode;
+        if (mode === 'brief-fail') throw new Error('Preview unavailable');
         if (
           connection === 'first' &&
           (mode === 'hold' || mode === 'hold-error')
@@ -181,6 +183,13 @@ export async function auditPreview(app, page) {
             : {}),
         };
       },
+      issueUrl: (_event, connection, key) => {
+        if (controls.mode === 'brief-fail') throw new Error('URL unavailable');
+        return `https://${connection}.example.invalid/browse/${key}`;
+      },
+      copyText: (_event, value) => {
+        controls.clipboard = value;
+      },
     };
     for (const [method, handler] of Object.entries(handlers)) {
       ipcMain.removeHandler(`canopy:${method}`);
@@ -265,6 +274,63 @@ export async function auditPreview(app, page) {
     pane.locator('script, img, a, input, textarea, [contenteditable=true]'),
   ).toHaveCount(0);
   expect(await page.evaluate(() => window.previewExecuted)).toBeUndefined();
+  await pane.getByRole('button', { name: 'Copy work brief' }).click();
+  const brief = page.getByRole('dialog', { name: 'Work brief for TEST-1' });
+  await expect(
+    brief.getByRole('button', { name: 'Close dialog' }),
+  ).toBeFocused();
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    '- Issue: Jira TEST-1',
+  );
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'https://second.example.invalid/browse/TEST-1',
+  );
+  await page.keyboard.press('Tab');
+  await expect(brief.getByLabel('Work brief Markdown')).toBeFocused();
+  await brief.getByRole('button', { name: 'Copy work brief' }).click();
+  await expect(brief.getByRole('status')).toHaveText('Copied');
+  expect(
+    await app.evaluate(() => globalThis.previewRecovery.clipboard),
+  ).toContain('<img src=x onerror="window.previewExecuted=true">');
+  await brief.getByRole('button', { name: 'Close dialog' }).click();
   await page.keyboard.press('Escape');
   await expect(row).toBeFocused();
+  await page.keyboard.press('Shift+F10');
+  await page
+    .getByRole('menu', { name: 'Actions for TEST-1' })
+    .getByRole('menuitem', { name: 'Copy work brief' })
+    .click();
+  await expect(
+    brief.getByRole('button', { name: 'Close dialog' }),
+  ).toBeFocused();
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    '- Issue: Jira TEST-1',
+  );
+  await brief.getByRole('button', { name: 'Close dialog' }).click();
+  await app.evaluate(() => {
+    globalThis.previewRecovery.mode = 'brief-fail';
+  });
+  await row.focus();
+  await page.keyboard.press('Shift+F10');
+  await page
+    .getByRole('menu', { name: 'Actions for TEST-1' })
+    .getByRole('menuitem', { name: 'Copy work brief' })
+    .click();
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'Unavailable: source URL could not be loaded.',
+  );
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'Unavailable: some dependency links could not be loaded.',
+  );
+  await brief.getByRole('button', { name: 'Copy work brief' }).click();
+  await expect(brief.getByText('Copied', { exact: true })).toBeVisible();
+  await app.evaluate(() => {
+    globalThis.previewRecovery.mode = 'success';
+  });
+  await brief.getByRole('button', { name: 'Retry' }).click();
+  await expect(brief.getByText('Copied', { exact: true })).toHaveCount(0);
+  await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+    'https://second.example.invalid/browse/TEST-1',
+  );
+  await brief.getByRole('button', { name: 'Close dialog' }).click();
 }

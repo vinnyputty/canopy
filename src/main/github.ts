@@ -333,6 +333,7 @@ export class GithubProvider {
     return {
       issue,
       description: String(raw.body ?? ''),
+      descriptionMarkdown: String(raw.body ?? ''),
       comments: commentsResult.value.map((item: any) => ({
         id: String(item.id),
         author: item.user?.login ?? 'Unknown',

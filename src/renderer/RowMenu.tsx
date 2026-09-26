@@ -13,7 +13,9 @@ export function RowMenu({
   provider: 'jira' | 'github' | 'demo';
   position: { x: number; y: number };
   onClose: (restore?: boolean) => void;
-  onAction: (action: 'key' | 'title' | 'key-summary' | 'link' | 'open') => void;
+  onAction: (
+    action: 'key' | 'title' | 'key-summary' | 'brief' | 'link' | 'open',
+  ) => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
   const above = position.y + 200 > window.innerHeight;
@@ -73,6 +75,7 @@ export function RowMenu({
           ['key', 'Copy key'],
           ['title', 'Copy title'],
           ['key-summary', 'Copy key and summary'],
+          ['brief', 'Copy work brief'],
           ...(provider === 'demo'
             ? []
             : ([

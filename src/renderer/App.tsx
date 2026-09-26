@@ -45,6 +45,7 @@ import type {
   Connection,
   EditOptions,
   Issue,
+  IssuePreview as IssuePreviewData,
   IssuePatch,
   RootReference,
   RootView,
@@ -74,7 +75,7 @@ import {
 import { IssuePreview } from './IssuePreview';
 import { nextTasks, type NextTaskCriterion } from './next-tasks';
 import { RowMenu } from './RowMenu';
-import { issueKeyAndSummary } from './copy-issue';
+import { issueKeyAndSummary, issueWorkBrief } from './copy-issue';
 import { StatusColors } from './status-colors';
 import {
   activateTab,
@@ -205,6 +206,13 @@ export function App() {
   useLayoutEffect(() => {
     if (dialog !== 'appearance') setAppearancePreview(null);
   }, [dialog]);
+  const [workBrief, setWorkBrief] = useState<{
+    connectionId: string;
+    issueKey: string;
+    provider: Connection['provider'];
+    knownIssues: Issue[];
+    preview?: IssuePreviewData;
+  } | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
   const [options, setOptions] = useState<Record<string, PickerOptions>>({});
   const [saving, setSaving] = useState<Set<string>>(new Set());
@@ -551,7 +559,8 @@ export function App() {
     restoreTreeFocus(activeTab?.selectedKey ?? activeTab?.rootKey);
   }, [activeTab?.selectedKey, activeTab?.rootKey, restoreTreeFocus]);
   useEffect(() => {
-    if (!previewKey || dialog || editor || rowMenu || tabMenu) return;
+    if (!previewKey || dialog || workBrief || editor || rowMenu || tabMenu)
+      return;
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented) {
         event.preventDefault();
@@ -560,7 +569,7 @@ export function App() {
     };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
-  }, [previewKey, dialog, editor, rowMenu, tabMenu, closePreview]);
+  }, [previewKey, dialog, workBrief, editor, rowMenu, tabMenu, closePreview]);
 
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
@@ -1427,6 +1436,7 @@ export function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
+      if (workBrief) return;
       const command = Object.keys(workspace.shortcuts).find((id) =>
         matchesShortcut(event, workspace.shortcuts[id]),
       );
@@ -1508,6 +1518,7 @@ export function App() {
     reopenClosedTab,
     navigateHistory,
     dialog,
+    workBrief,
     editor,
   ]);
 
@@ -1626,6 +1637,7 @@ export function App() {
       if (
         event.defaultPrevented ||
         dialog ||
+        workBrief ||
         event.shiftKey ||
         event.altKey ||
         !(event.metaKey || event.ctrlKey) ||
@@ -1644,7 +1656,7 @@ export function App() {
     };
     window.addEventListener('keydown', undo);
     return () => window.removeEventListener('keydown', undo);
-  }, [mutations, undoState.label, dialog]);
+  }, [mutations, undoState.label, dialog, workBrief]);
 
   const keyboardRank = useCallback(
     (node: IssueNode, direction: -1 | 1) => {
@@ -3524,6 +3536,15 @@ export function App() {
                   onCopyKeySummary={(issue) =>
                     void copyIssueText(issue, 'key-summary')
                   }
+                  onWorkBrief={(preview) =>
+                    setWorkBrief({
+                      connectionId: activeTab.connectionId,
+                      issueKey: preview.issue.key,
+                      provider: activeConnection?.provider ?? 'jira',
+                      knownIssues: snapshot?.issues ?? [],
+                      preview,
+                    })
+                  }
                 />
               )}
             </div>
@@ -3770,9 +3791,19 @@ export function App() {
               void copyIssueLink(activeTab.connectionId, rowMenu.issue.key);
             else if (action === 'open')
               void openExternal(activeTab.connectionId, rowMenu.issue.key);
+            else if (action === 'brief')
+              setWorkBrief({
+                connectionId: activeTab.connectionId,
+                issueKey: rowMenu.issue.key,
+                provider: activeConnection?.provider ?? 'jira',
+                knownIssues: snapshot?.issues ?? [],
+              });
             else void copyIssueText(rowMenu.issue, action);
           }}
         />
+      )}
+      {workBrief && (
+        <WorkBriefDialog {...workBrief} onClose={() => setWorkBrief(null)} />
       )}
       {dialog === 'open' && (
         <OpenIssueDialog
@@ -5829,18 +5860,136 @@ function ShortcutsDialog({
   );
 }
 
+function WorkBriefDialog({
+  connectionId,
+  issueKey,
+  provider,
+  knownIssues,
+  preview,
+  onClose,
+}: {
+  connectionId: string;
+  issueKey: string;
+  provider: Connection['provider'];
+  knownIssues: Issue[];
+  preview?: IssuePreviewData;
+  onClose: () => void;
+}) {
+  const [brief, setBrief] = useState('');
+  const [error, setError] = useState('');
+  const [partial, setPartial] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setBrief('');
+    setError('');
+    setPartial(false);
+    setCopied(false);
+    Promise.allSettled([
+      preview && attempt === 0
+        ? Promise.resolve(preview)
+        : window.canopy.preview(connectionId, issueKey),
+      provider === 'demo'
+        ? Promise.resolve('Local sample workspace')
+        : window.canopy.issueUrl(connectionId, issueKey),
+    ]).then(([details, sourceUrl]) => {
+      if (!live) return;
+      try {
+        setBrief(
+          issueWorkBrief({
+            preview: details.status === 'fulfilled' ? details.value : undefined,
+            provider,
+            sourceUrl:
+              sourceUrl.status === 'fulfilled' ? sourceUrl.value : undefined,
+            knownIssues,
+            issueKey,
+          }),
+        );
+        setPartial(
+          details.status === 'rejected' ||
+            sourceUrl.status === 'rejected' ||
+            Boolean(details.status === 'fulfilled' && details.value.linksError),
+        );
+      } catch (reason) {
+        setError(`Couldn’t load work brief: ${String(reason)}`);
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [connectionId, issueKey, provider, knownIssues, preview, attempt]);
+  const copy = async () => {
+    try {
+      await window.canopy.copyText(brief);
+      setCopied(true);
+      setError('');
+    } catch (reason) {
+      setError(`Couldn’t copy work brief: ${String(reason)}`);
+    }
+  };
+  return (
+    <Dialog
+      title={`Work brief for ${issueKey}`}
+      onClose={onClose}
+      wide
+      initialFocus
+    >
+      <div className="work-brief-dialog">
+        <p className="dialog-note">
+          Review the exact Markdown before copying it.
+        </p>
+        {error && (
+          <p role="alert" className="dialog-error">
+            {error}
+          </p>
+        )}
+        {partial && (
+          <p role="status" className="dialog-note">
+            Some work brief details are unavailable. Retry to load them.
+          </p>
+        )}
+        {brief ? (
+          <pre aria-label="Work brief Markdown" tabIndex={0}>
+            {brief}
+          </pre>
+        ) : !error ? (
+          <p role="status">Loading work brief…</p>
+        ) : null}
+        <div className="dialog-footer">
+          {(error || partial) && (
+            <button onClick={() => setAttempt((value) => value + 1)}>
+              Retry
+            </button>
+          )}
+          {copied && <span role="status">Copied</span>}
+          <button
+            className="primary"
+            disabled={!brief}
+            onClick={() => void copy()}
+          >
+            Copy work brief
+          </button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
 function Dialog({
   title,
   onClose,
   children,
   compact,
   wide,
+  initialFocus,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   compact?: boolean;
   wide?: boolean;
+  initialFocus?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -5889,6 +6038,7 @@ function Dialog({
             className="icon-button"
             onClick={onClose}
             aria-label="Close dialog"
+            autoFocus={initialFocus}
           >
             <X size={16} />
           </button>

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Choice, IssuePreview as Preview } from '../shared/types';
 import { PreviewText } from './PreviewText';
@@ -15,6 +15,7 @@ export function IssuePreview({
   onOpenTab,
   onOpenExternal,
   onCopyKeySummary,
+  onWorkBrief,
 }: {
   connectionId: string;
   provider: 'jira' | 'github' | 'demo';
@@ -27,6 +28,7 @@ export function IssuePreview({
   onOpenTab: (key: string) => void;
   onOpenExternal: (key: string) => void;
   onCopyKeySummary: (issue: Preview['issue']) => void;
+  onWorkBrief: (preview: Preview) => void;
 }) {
   const [data, setData] = useState<Preview>();
   const [error, setError] = useState('');
@@ -36,6 +38,10 @@ export function IssuePreview({
   const [editingLabels, setEditingLabels] = useState(false);
   const [savingLabels, setSavingLabels] = useState(false);
   const identity = useRef('');
+  const currentIssue = useRef('');
+  useLayoutEffect(() => {
+    currentIssue.current = `${connectionId}:${issueKey}`;
+  }, [connectionId, issueKey]);
   const [dragWidth, setDragWidth] = useState<number>();
   const pane = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; width: number; next: number } | undefined>(
@@ -85,6 +91,7 @@ export function IssuePreview({
   }, [provider, editingLabels, connectionId, issueKey]);
   const toggleLabel = async (name: string) => {
     if (!data || savingLabels) return;
+    const requestIdentity = currentIssue.current;
     setSavingLabels(true);
     setError('');
     const current = data.issue.labels?.map((item) => item.name) ?? [];
@@ -102,11 +109,15 @@ export function IssuePreview({
       const issue = await window.canopy.update(connectionId, issueKey, {
         labels: next,
       });
-      setData({ ...data, issue: { ...issue, links: data.issue.links } });
-      onChanged();
+      if (currentIssue.current === requestIdentity) {
+        setData({ ...data, issue: { ...issue, links: data.issue.links } });
+        onChanged();
+      }
     } catch (reason) {
-      setData(data);
-      setError(String(reason));
+      if (currentIssue.current === requestIdentity) {
+        setData(data);
+        setError(String(reason));
+      }
     } finally {
       setSavingLabels(false);
     }
@@ -210,6 +221,9 @@ export function IssuePreview({
               onClick={() => onCopyKeySummary(data.issue)}
             >
               Copy key and summary
+            </button>
+            <button className="tool-button" onClick={() => onWorkBrief(data)}>
+              Copy work brief
             </button>
             {provider === 'github' && (
               <section>
