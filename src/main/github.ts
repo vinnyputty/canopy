@@ -407,8 +407,18 @@ export class GithubProvider {
   }
   async transitions(): Promise<EditOptions['transitions']> {
     return [
-      { id: 'open', name: 'Open', requiresFields: false },
-      { id: 'closed', name: 'Closed', requiresFields: false },
+      {
+        id: 'open',
+        name: 'Open',
+        requiresFields: false,
+        to: { id: 'open', name: 'Open', category: 'new' },
+      },
+      {
+        id: 'closed',
+        name: 'Closed',
+        requiresFields: false,
+        to: { id: 'closed', name: 'Closed', category: 'done' },
+      },
     ];
   }
   invalidateChoices() {}

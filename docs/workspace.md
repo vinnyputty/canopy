@@ -21,3 +21,11 @@ Drag the sidebar divider to resize it between 180 and 400 pixels (220 by default
 Window size, position, and maximized state survive restarts. Saved bounds are clamped to an available monitor's work area when display arrangements change. Fullscreen state is not restored.
 
 Workspace saves replace the previous file atomically. On Windows, temporary file-lock errors retry with bounded backoff; persistent failures remain visible and leave the previous saved file intact.
+
+## Bulk triage
+
+Select several visible rows in one issue tree with Command-click on macOS or Control-click elsewhere. Shift-click selects a visible range; Shift-Up and Shift-Down extend the range from the focused row. A plain click or arrow key returns to ordinary single-issue navigation. Bulk selection stays in the active tab and is cleared explicitly or by single-issue navigation.
+
+The bulk bar can copy selected issue keys and summaries as separate lines, assign a person, change Jira priority, or transition status. Search for an assignee from the first selected issue; Canopy checks that person's eligibility for every selected issue. Jira transition choices are shared destination statuses, while each issue uses its own workflow transition. Choices requiring extra fields are unavailable. GitHub supports assignment and Open/Closed state, but not Jira priority.
+
+Select an action and value, then use **Preview changes**. The preview lists every selected issue and explains unavailable fields. If only some issues are eligible, **Apply to eligible issues** explicitly limits the write to those issues. Each issue's options are checked again before writing. Results stay available in that tab after selection clears or you visit another tab, until you choose **Dismiss results**. Dismiss the report before previewing another bulk change. Failures have Retry, and a saved issue has Undo when its prior value can safely be restored. Undo checks the current provider state and may fail if another edit or workflow change intervened.

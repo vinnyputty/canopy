@@ -5,6 +5,7 @@ import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
 import { auditWorkflow } from './smoke-workflow.mjs';
 import { auditPreview } from './smoke-preview.mjs';
 import { auditGithub } from './smoke-github.mjs';
+import { auditBulk } from './smoke-bulk.mjs';
 import { createRequire } from 'node:module';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1093,6 +1094,7 @@ try {
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(tree).toBeVisible();
   await auditPickers(app, page);
+  await auditBulk(app, page, modifier);
   await auditSelfConnections(app, page);
   const rootSummary = 'A calmer place to get things done';
   const rootTitle = `CAN-100: ${rootSummary} · Canopy demo`;
