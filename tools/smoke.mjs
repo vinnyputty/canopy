@@ -339,61 +339,91 @@ async function auditAppearanceSaveFailure() {
   const originalPalette = await root.getAttribute('data-palette');
   const targetPalette = originalPalette === 'forest' ? 'Ocean' : 'Forest';
   await app.evaluate(({ ipcMain }, target) => {
-    globalThis.releaseAppearanceFailure = null;
-    ipcMain.removeHandler('canopy:saveWorkspace');
-    ipcMain.handle('canopy:saveWorkspace', (_event, workspace) => {
-      if (workspace.palette !== target) return;
+    const channel = 'canopy:saveWorkspace';
+    const original = ipcMain._invokeHandlers.get(channel);
+    if (!original) throw new Error('Workspace save handler is missing.');
+    const audit = { original, release: null };
+    globalThis.appearanceSaveFailure = audit;
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, (event, workspace) => {
+      if (workspace.palette !== target) return original(event, workspace);
       return new Promise((_resolve, reject) => {
-        globalThis.releaseAppearanceFailure = () =>
+        audit.release = () =>
           reject(new Error('Injected appearance write failure'));
       });
     });
   }, targetPalette.toLowerCase());
-  await page.getByRole('button', { name: 'Appearance' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Appearance' });
-  await dialog.getByRole('radio', { name: targetPalette }).check();
-  await dialog.getByRole('button', { name: 'Save' }).click();
-  await expect
-    .poll(() => app.evaluate(() => !!globalThis.releaseAppearanceFailure))
-    .toBe(true);
-  await page.keyboard.press(`${modifier}+/`);
-  await expect(dialog).toBeVisible();
-  await expect(
-    page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
-  ).toHaveCount(0);
-  await app.evaluate(() => globalThis.releaseAppearanceFailure());
-  await expect(dialog.getByRole('alert')).toContainText(
-    'Injected appearance write failure',
-  );
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole('button', { name: 'Cancel' }).click();
-  await expect(root).toHaveAttribute('data-palette', originalPalette);
+  try {
+    await page.getByRole('button', { name: 'Appearance' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Appearance' });
+    await dialog.getByRole('radio', { name: targetPalette }).check();
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    await expect
+      .poll(() =>
+        app.evaluate(() => !!globalThis.appearanceSaveFailure.release),
+      )
+      .toBe(true);
+    await page.keyboard.press(`${modifier}+/`);
+    await expect(dialog).toBeVisible();
+    await expect(
+      page.getByRole('dialog', { name: 'Keyboard shortcuts' }),
+    ).toHaveCount(0);
+    await app.evaluate(() => globalThis.appearanceSaveFailure.release());
+    await expect(dialog.getByRole('alert')).toContainText(
+      'Injected appearance write failure',
+    );
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(root).toHaveAttribute('data-palette', originalPalette);
+  } finally {
+    await app.evaluate(({ ipcMain }) => {
+      const channel = 'canopy:saveWorkspace';
+      const audit = globalThis.appearanceSaveFailure;
+      audit.release?.();
+      ipcMain.removeHandler(channel);
+      ipcMain.handle(channel, audit.original);
+      delete globalThis.appearanceSaveFailure;
+    });
+  }
 }
 
 async function auditAppearanceSaveOrdering() {
   await app.evaluate(({ ipcMain }) => {
-    globalThis.appearanceSaveRace = { calls: [], release: null };
-    ipcMain.removeHandler('canopy:saveWorkspace');
-    ipcMain.handle('canopy:saveWorkspace', (_event, workspace) => {
-      const race = globalThis.appearanceSaveRace;
-      race.calls.push(workspace);
-      if (race.calls.length === 1)
-        return new Promise((resolve) => {
-          race.release = resolve;
-        });
+    const channel = 'canopy:saveWorkspace';
+    const original = ipcMain._invokeHandlers.get(channel);
+    if (!original) throw new Error('Workspace save handler is missing.');
+    const audit = { original, calls: [], release: null, pending: null };
+    globalThis.appearanceSaveRace = audit;
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, (event, workspace) => {
+      audit.calls.push(workspace);
+      if (audit.calls.length !== 1) return original(event, workspace);
+      return new Promise((resolve, reject) => {
+        audit.release = () => {
+          if (!audit.pending) {
+            audit.pending = Promise.resolve().then(() =>
+              original(event, workspace),
+            );
+            audit.pending.then(resolve, reject);
+          }
+          return audit.pending;
+        };
+      });
     });
   });
-  const hideDone = page.getByRole('checkbox', { name: 'Hide done' });
-  await hideDone.setChecked(!(await hideDone.isChecked()));
-  await expect
-    .poll(() => app.evaluate(() => globalThis.appearanceSaveRace.calls.length))
-    .toBe(1);
-  await page.getByRole('button', { name: 'Appearance' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Appearance' });
-  await dialog.getByRole('radio', { name: 'Ocean' }).check();
-  await dialog.getByRole('button', { name: 'Save' }).click();
-  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
   try {
+    const hideDone = page.getByRole('checkbox', { name: 'Hide done' });
+    await hideDone.setChecked(!(await hideDone.isChecked()));
+    await expect
+      .poll(() =>
+        app.evaluate(() => globalThis.appearanceSaveRace.calls.length),
+      )
+      .toBe(1);
+    await page.getByRole('button', { name: 'Appearance' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Appearance' });
+    await dialog.getByRole('radio', { name: 'Ocean' }).check();
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
     await page.keyboard.press(`${modifier}+/`);
     await expect(dialog).toBeVisible();
     await expect(
@@ -403,14 +433,25 @@ async function auditAppearanceSaveOrdering() {
     expect(
       await app.evaluate(() => globalThis.appearanceSaveRace.calls.length),
     ).toBe(1);
-  } finally {
     await app.evaluate(() => globalThis.appearanceSaveRace.release());
+    await expect(dialog).toHaveCount(0);
+    expect(
+      await app.evaluate(() => globalThis.appearanceSaveRace.calls[1]?.palette),
+    ).toBe('ocean');
+    await page.waitForTimeout(250);
+  } finally {
+    await app.evaluate(async ({ ipcMain }) => {
+      const channel = 'canopy:saveWorkspace';
+      const audit = globalThis.appearanceSaveRace;
+      try {
+        await audit.release?.();
+      } finally {
+        ipcMain.removeHandler(channel);
+        ipcMain.handle(channel, audit.original);
+        delete globalThis.appearanceSaveRace;
+      }
+    });
   }
-  await expect(dialog).toHaveCount(0);
-  expect(
-    await app.evaluate(() => globalThis.appearanceSaveRace.calls[1]?.palette),
-  ).toBe('ocean');
-  await page.waitForTimeout(250);
 }
 
 async function openIssue(key, expectTree = true) {
