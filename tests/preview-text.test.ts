@@ -110,5 +110,25 @@ it('escapes remote text and leaves unsafe links and embedded nodes inert', () =>
 it('keeps absent content distinct from a readable fallback', () => {
   assert.equal(render(null), 'No description.');
   assert.equal(render({ type: 'doc', content: [] }), 'No description.');
+  assert.equal(
+    render({ type: 'doc', content: [{ type: 'paragraph', content: [] }] }),
+    'No description.',
+  );
+  assert.equal(
+    render({
+      type: 'doc',
+      content: [
+        {
+          type: 'bulletList',
+          content: [{ type: 'listItem', content: [paragraph('')] }],
+        },
+      ],
+    }),
+    'No description.',
+  );
+  assert.equal(
+    render({ type: 'doc', content: [{ type: 'extension' }] }),
+    '[Unsupported content]',
+  );
   assert.equal(render({ type: 'broken' }, 'Plain fallback'), 'Plain fallback');
 });

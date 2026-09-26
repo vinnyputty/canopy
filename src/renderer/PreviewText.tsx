@@ -9,6 +9,27 @@ function object(value: unknown): Node | null {
     : null;
 }
 
+function hasVisibleContent(value: unknown): boolean {
+  const node = object(value);
+  if (!node) return false;
+  if (node.type === 'text')
+    return typeof node.text === 'string' && Boolean(node.text.trim());
+  if (node.type === 'hardBreak') return false;
+  if (
+    [
+      'doc',
+      'paragraph',
+      'heading',
+      'bulletList',
+      'orderedList',
+      'listItem',
+      'codeBlock',
+    ].includes(node.type)
+  )
+    return Array.isArray(node.content) && node.content.some(hasVisibleContent);
+  return true;
+}
+
 export function safePreviewLink(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   try {
@@ -124,7 +145,6 @@ export function PreviewText({
   if (!document) return <>{fallback || empty}</>;
   const node = object(document);
   if (!node || node.type !== 'doc') return <>{fallback || empty}</>;
-  if (!Array.isArray(node.content) || node.content.length === 0)
-    return <>{fallback || empty}</>;
+  if (!hasVisibleContent(node)) return <>{fallback || empty}</>;
   return <>{render(node)}</>;
 }
