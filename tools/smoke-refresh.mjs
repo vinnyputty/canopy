@@ -20,6 +20,13 @@ export async function auditRefresh(app, page, resizeWindow) {
     );
   const status = page.getByRole('status', { name: 'Connection status' });
   const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  const commandRefresh = async () => {
+    await page.getByRole('button', { name: 'More commands' }).click();
+    await page
+      .getByRole('dialog', { name: 'Command palette' })
+      .getByRole('button', { name: /Refresh current tree/ })
+      .click();
+  };
   const checking = page.getByText('Checking for changes');
   const row = (key) => page.locator(`[data-tree-key="${key}"]`);
   const summary = (key) =>
@@ -54,9 +61,16 @@ export async function auditRefresh(app, page, resizeWindow) {
   ).toBeVisible();
   await idle();
   await page.clock.pauseAt(new Date(Date.now() + 1000));
+  const initial100 = await calls('CAN-100');
+  const initial200 = await calls('CAN-200');
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  expect(await calls('CAN-100')).toBe(initial100);
+  await expect(page.locator('.statusbar')).toContainText('Last updated');
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  expect(await calls('CAN-200')).toBe(initial200);
   let gate = 0;
   const activate = async (key) => {
-    await page.clock.runFor(2000);
+    await page.clock.runFor(31_000);
     const id = `activation-${++gate}`;
     await hold(id, 'tree', key);
     await page.getByRole('tab', { name: new RegExp(key) }).click();
@@ -154,6 +168,7 @@ export async function auditRefresh(app, page, resizeWindow) {
     page.getByRole('button', { name: 'Retry', exact: true }),
   ).toBeDisabled();
   const limitedCalls = await calls(key);
+  const backgroundCalls = await calls('CAN-100');
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.clock.runFor(5000);
   expect(await calls(key)).toBe(limitedCalls);
@@ -167,6 +182,7 @@ export async function auditRefresh(app, page, resizeWindow) {
   await idle();
   await expect(status).toHaveText('Connected');
   await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(await calls('CAN-100')).toBe(backgroundCalls);
 
   // Replacing credentials under the same ID clears the renderer's old deadline.
   const replacementDeadline = await page.evaluate(() => Date.now() + 60_000);
@@ -275,11 +291,14 @@ export async function auditRefresh(app, page, resizeWindow) {
   await expect(summary(key)).toHaveText(baseline);
   const undoCalls = await calls();
   await refresh.click();
-  await page.clock.runFor(61_000);
+  await page.clock.runFor(1000);
   expect(await calls()).toBe(undoCalls);
+  await hold('undo-forced-tree', 'tree', key);
   await release('undo-write');
   await saved(key);
   await page.clock.runFor(1000);
+  await started('undo-forced-tree');
+  await release('undo-forced-tree');
   await expect.poll(calls).toBeGreaterThan(undoCalls);
   await idle();
   await expect(summary(key)).toHaveText(baseline);
@@ -309,9 +328,11 @@ export async function auditRefresh(app, page, resizeWindow) {
   }
 
   await page.clock.runFor(2000);
-  await hold('coalesced', 'tree', 'CAN-100');
   const coordinated = await counts();
   await page.getByRole('tab', { name: /CAN-100/ }).click();
+  expect(await counts()).toEqual(coordinated);
+  await hold('coalesced', 'tree', 'CAN-100');
+  await page.clock.runFor(31_000);
   await started('coalesced');
   await expect(checking).toBeVisible();
   await page.evaluate(() => {
@@ -319,11 +340,20 @@ export async function auditRefresh(app, page, resizeWindow) {
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await page.clock.runFor(31_000);
-  expect(await counts()).toEqual([coordinated[0] + 1, coordinated[1]]);
+  expect(await calls('CAN-100')).toBe(coordinated[0] + 1);
+  await commandRefresh();
+  await hold('queued-manual', 'tree', 'CAN-100');
   await release('coalesced');
+  await page.clock.runFor(1000);
+  await started('queued-manual');
+  expect(await calls('CAN-100')).toBe(coordinated[0] + 2);
+  await commandRefresh();
+  await release('queued-manual');
   await idle();
+  await page.clock.runFor(1000);
+  expect(await calls('CAN-100')).toBe(coordinated[0] + 2);
   await page.clock.runFor(31_000);
-  await expect.poll(counts).toEqual([coordinated[0] + 2, coordinated[1] + 1]);
+  await expect.poll(() => calls('CAN-100')).toBe(coordinated[0] + 3);
   await idle();
 
   await offline(true);
@@ -337,6 +367,58 @@ export async function auditRefresh(app, page, resizeWindow) {
   await idle();
   await expect(status).toHaveText('Connected');
   await page.clock.resume();
+
+  // Restored duplicate tabs share their first request and receive manual updates.
+  const beforeDuplicate = await calls('CAN-100');
+  await hold('duplicate-initial', 'tree', 'CAN-100');
+  await page.evaluate(async () => {
+    const workspace = await window.canopy.loadWorkspace();
+    const first = workspace.tabs.find((tab) => tab.rootKey === 'CAN-100');
+    await window.canopy.saveWorkspace({
+      ...workspace,
+      tabs: [first, { ...first, id: 'refresh-duplicate-CAN-100' }],
+      activeTabId: first.id,
+    });
+  });
+  await page.reload();
+  await started('duplicate-initial');
+  expect(await calls('CAN-100')).toBe(beforeDuplicate + 1);
+  await release('duplicate-initial');
+  await expect(
+    page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+  ).toBeVisible();
+  await idle();
+  await page.getByRole('tab').nth(1).click();
+  await expect(page.locator('.statusbar')).toContainText('Last updated');
+  expect(await calls('CAN-100')).toBe(beforeDuplicate + 1);
+  await hold('duplicate-error', 'tree', 'CAN-100');
+  await refresh.click();
+  await started('duplicate-error');
+  await release('duplicate-error', 'Duplicate refresh failure');
+  await expect(page.getByRole('alert')).toContainText(
+    'Duplicate refresh failure',
+  );
+  await expect(status).toHaveText('Connection error');
+  await page.getByRole('tab').nth(0).click();
+  await page.waitForTimeout(1100);
+  await hold('duplicate-manual', 'tree', 'CAN-100');
+  await refresh.click();
+  await started('duplicate-manual');
+  await release('duplicate-manual');
+  await idle();
+  const updated = await page
+    .locator('.statusbar [title]')
+    .first()
+    .getAttribute('title');
+  await page.getByRole('tab').nth(1).click();
+  await expect(page.locator('.statusbar [title]').first()).toHaveAttribute(
+    'title',
+    updated,
+  );
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(status).toHaveText('Connected');
+  expect(await calls('CAN-100')).toBe(beforeDuplicate + 3);
+
   console.log(
     'Adaptive refresh integration passed: preserved views, pending edits/undo, offline recovery, background cadence, and coalesced activation.',
   );
