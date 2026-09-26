@@ -626,20 +626,31 @@ export function App() {
       setter((current) => new Set(current).add(tab.id));
       try {
         const next = await load.promise;
-        const currentRoot = rootRefreshes.current.isCurrent(
-          rootKey,
-          load.generation,
-        );
+        const targets = load.started
+          ? tabsRef.current.filter((item) => refreshRootKey(item) === rootKey)
+          : [tab];
+        if (
+          rootRefreshes.current.isCurrent(rootKey, load.generation) &&
+          !refreshBlocked.current(tab.connectionId) &&
+          connectionsRef.current.find((item) => item.id === tab.connectionId)
+            ?.provider === 'jira' &&
+          targets.some(
+            (target) =>
+              rootView(workspaceRef.current, target)
+                .assumeMatchingStatusTransitions,
+          )
+        )
+          await pickers.prime(tab.connectionId, tab.rootKey, next.issues);
         const delivered = new Set<string>();
-        if (currentRoot && !refreshBlocked.current(tab.connectionId)) {
-          const targets = load.started
-            ? tabsRef.current.filter((item) => refreshRootKey(item) === rootKey)
-            : [tab];
+        if (
+          rootRefreshes.current.isCurrent(rootKey, load.generation) &&
+          !refreshBlocked.current(tab.connectionId)
+        ) {
           for (const target of targets) {
             if (
               target.id === tab.id &&
               refreshSequences.current[tab.id] !== sequence
-              )
+            )
               continue;
             mutations.receive(target, next, epoch);
             delivered.add(target.id);
