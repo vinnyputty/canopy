@@ -322,7 +322,11 @@ async function auditAppearance() {
   await dialog.getByRole('radio', { name: 'Forest' }).check();
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(root).toHaveAttribute('data-palette', 'forest');
-  await page.waitForTimeout(350);
+  await expect
+    .poll(() =>
+      page.evaluate(async () => (await window.canopy.loadWorkspace())?.palette),
+    )
+    .toBe('forest');
   await close();
   await launch(true);
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');

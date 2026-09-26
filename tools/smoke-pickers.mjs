@@ -496,19 +496,31 @@ export async function auditSelfConnections(app, page) {
     // before restoring the real workspace handler.
     await page.waitForTimeout(250);
     await app.evaluate(async ({ ipcMain }, saved) => {
-      await globalThis.canopySmoke.remoteUpdate('CAN-100', {
-        assigneeId: 'alex',
-      });
-      for (const [channel, handler] of globalThis.selfConnectionAudit
-        .handlers) {
-        ipcMain.removeHandler(channel);
-        // Pending renderer saves must preserve the captured workspace until reload.
-        ipcMain.handle(
-          channel,
-          channel === 'canopy:saveWorkspace'
-            ? (event) => handler(event, saved)
-            : handler,
-        );
+      const audit = globalThis.selfConnectionAudit;
+      let temporarySaveHandlerInstalled = false;
+      try {
+        await globalThis.canopySmoke.remoteUpdate('CAN-100', {
+          assigneeId: 'alex',
+        });
+        for (const [channel, handler] of audit.handlers) {
+          ipcMain.removeHandler(channel);
+          // Pending renderer saves must preserve the captured workspace until reload.
+          ipcMain.handle(
+            channel,
+            channel === 'canopy:saveWorkspace'
+              ? (event) => handler(event, saved)
+              : handler,
+          );
+        }
+        temporarySaveHandlerInstalled = true;
+      } finally {
+        if (!temporarySaveHandlerInstalled) {
+          for (const [channel, handler] of audit.handlers) {
+            ipcMain.removeHandler(channel);
+            ipcMain.handle(channel, handler);
+          }
+          delete globalThis.selfConnectionAudit;
+        }
       }
     }, workspace);
     try {
