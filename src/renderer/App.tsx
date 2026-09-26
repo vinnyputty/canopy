@@ -2046,27 +2046,26 @@ export function App() {
     () => flattenVisible(shownTree, expandedSet),
     [shownTree, expandedSet],
   );
+  const visibleKeys = useMemo(
+    () => new Set(flat.map((node) => node.issue.key)),
+    [flat],
+  );
   const selectedKeys =
     activeTab && multiSelection?.tabId === activeTab.id
-      ? new Set(
-          multiSelection.keys.filter((key) =>
-            flat.some((node) => node.issue.key === key),
-          ),
-        )
+      ? new Set(multiSelection.keys.filter((key) => visibleKeys.has(key)))
       : new Set<string>();
   const bulkIssues = useMemo(() => {
     if (!activeTab || !snapshot || multiSelection?.tabId !== activeTab.id)
       return [];
     const byKey = new Map(snapshot.issues.map((issue) => [issue.key, issue]));
-    const visible = new Set(flat.map((node) => node.issue.key));
     return multiSelection.keys
-      .filter((key) => visible.has(key))
+      .filter((key) => visibleKeys.has(key))
       .map((key) => byKey.get(key))
       .filter(
         (issue): issue is Issue =>
           Boolean(issue) && issue?.type !== 'Repository',
       );
-  }, [activeTab?.id, snapshot, multiSelection, flat]);
+  }, [activeTab?.id, snapshot, multiSelection, visibleKeys]);
   const selectMultiple = (key: string, range: boolean, toggle: boolean) => {
     if (!activeTab) return;
     const previous =

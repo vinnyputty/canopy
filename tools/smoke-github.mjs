@@ -354,7 +354,7 @@ export async function auditGithub(app, page) {
     await expect
       .poll(() => app.evaluate(() => globalThis.githubLabelHold.started))
       .toBe(true);
-    await tree.getByRole('treeitem', { name: /team\/b#2/ }).click();
+    await tree.getByRole('treeitem', { name: /team\/b#2/ }).focus();
     const nextPreview = page.getByRole('complementary', {
       name: 'Preview team/b#2',
     });
