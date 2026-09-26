@@ -1,5 +1,5 @@
 import type { Choice, IssuePatch } from '../../src/shared/types';
-import { DemoProvider } from './demo';
+import { DemoProvider } from '../../src/main/demo-provider';
 
 type Operation =
   | 'tree'

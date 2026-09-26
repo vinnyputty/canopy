@@ -179,6 +179,20 @@ export function App() {
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [ready, setReady] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
+  const [tour, setTour] = useState<{
+    phase: 'playing' | 'paused' | 'stopped' | 'complete' | 'failed';
+    step: number;
+    caption: string;
+  } | null>(null);
+  const tourStarted = useRef(false);
+  const stopTourRef = useRef<(() => void) | null>(null);
+  const seekTourRef = useRef<((step: number, paused?: boolean) => void) | null>(
+    null,
+  );
+  const toggleTourPauseRef = useRef<(() => void) | null>(null);
+  const tourProgressRef = useRef<HTMLProgressElement>(null);
+  const tourEditor = useRef(false);
   const [dialog, setDialog] = useState<
     'open' | 'commands' | 'shortcuts' | 'connect' | null
   >(null);
@@ -532,9 +546,15 @@ export function App() {
 
   useEffect(() => {
     let live = true;
-    Promise.all([window.canopy.connections(), window.canopy.loadWorkspace()])
-      .then(([nextConnections, saved]) => {
+    Promise.all([
+      window.canopy.connections(),
+      window.canopy.loadWorkspace(),
+      window.canopy.demoMode(),
+    ])
+      .then(([nextConnections, saved, isDemo]) => {
         if (!live) return;
+        setDemoMode(isDemo);
+        document.title = isDemo ? 'Canopy — Demo' : 'Canopy';
         setConnections(nextConnections);
         // Remove the retired demo without dropping Jira tabs if a keyring is locked.
         const hasDemo = nextConnections.some(
@@ -600,7 +620,10 @@ export function App() {
     async (tab: TabState, quiet = false, explicit = false) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       explicit ||= forcedRefreshes.current.has(tab.id);
-      if (!navigator.onLine || refreshBlocked.current(tab.connectionId)) {
+      if (
+        (!navigator.onLine && !demoMode) ||
+        refreshBlocked.current(tab.connectionId)
+      ) {
         if (explicit) forcedRefreshes.current.add(tab.id);
         deferredRefreshes.current.add(tab.id);
         return;
@@ -710,7 +733,7 @@ export function App() {
         }
       }
     },
-    [],
+    [demoMode],
   );
 
   const finishWorkflowReturn = useCallback(() => {
@@ -788,7 +811,7 @@ export function App() {
       if (Object.keys(cooldowns.current).length || recovered.size)
         setSyncNow(now);
       if (recovered.size) setCooldownTimes({ ...cooldowns.current });
-      if (!navigator.onLine) return;
+      if (!navigator.onLine && !demoMode) return;
       const due = new Set(refreshSchedule.current.due(Date.now()));
       for (const tab of [...tabsRef.current].sort(
         (a, b) =>
@@ -844,7 +867,7 @@ export function App() {
       window.removeEventListener('online', connectivity);
       window.removeEventListener('offline', connectivity);
     };
-  }, [ready, refreshTab, finishWorkflowReturn]);
+  }, [ready, refreshTab, finishWorkflowReturn, demoMode]);
 
   useEffect(() => {
     for (const tab of workspace.tabs) {
@@ -1704,6 +1727,464 @@ export function App() {
         ?.focus();
   };
 
+  const launchDemo = () =>
+    void window.canopy.launchDemo().catch((error: unknown) =>
+      setErrors((current) => ({
+        ...current,
+        app: `Couldn’t open demo: ${error instanceof Error ? error.message : String(error)}`,
+      })),
+    );
+
+  useEffect(() => {
+    if (
+      !demoMode ||
+      !ready ||
+      !snapshots['demo-can-100'] ||
+      tourStarted.current
+    )
+      return;
+    tourStarted.current = true;
+    const requestedStep = Number(
+      sessionStorage.getItem('canopy-demo-step') ?? 0,
+    );
+    const startStep = Number.isInteger(requestedStep)
+      ? Math.max(0, Math.min(7, requestedStep))
+      : 0;
+    const startPaused = sessionStorage.getItem('canopy-demo-paused') === 'true';
+    sessionStorage.removeItem('canopy-demo-step');
+    sessionStorage.removeItem('canopy-demo-paused');
+    const controller = new AbortController();
+    const signal = controller.signal;
+    let finished = false;
+    let currentStep = 0;
+    let navigating = false;
+    let restoreWork: Promise<void> | null = null;
+    const priorityToken = Symbol('demo priority edit');
+    let priorityWork: Promise<unknown> = Promise.resolve();
+    let priorityEditStarted = false;
+    const restorePriority = async () => {
+      if (!priorityEditStarted) return;
+      await priorityWork;
+      mutations.discardHistory(priorityToken);
+      await mutations.update(
+        'demo',
+        'CAN-111',
+        { priorityId: '2' },
+        undefined,
+        false,
+        undefined,
+        (issue) => issue?.priority?.id === '1',
+      );
+    };
+    signal.addEventListener('abort', () => {
+      restoreWork = restorePriority().catch((error) =>
+        console.error('Could not restore demo priority:', error),
+      );
+    });
+    let paused = false;
+    let pausedAt = 0;
+    let totalPaused = 0;
+    let resume: (() => void) | null = null;
+    let resumeGate: Promise<void> | null = null;
+    let stepElapsed = 0;
+    let stepDuration = 1;
+    let highlighted: HTMLElement | null = null;
+    const activeNow = () =>
+      performance.now() -
+      totalPaused -
+      (paused ? performance.now() - pausedAt : 0);
+    const waitUntilPlaying = async () => {
+      if (resumeGate) await resumeGate;
+      signal.throwIfAborted();
+    };
+    const setProgress = (elapsed: number) => {
+      if (tourProgressRef.current)
+        tourProgressRef.current.value = Math.min(
+          100,
+          (100 * elapsed) / stepDuration,
+        );
+    };
+    const delay = async (ms: number, count = true) => {
+      if (currentStep < startStep && count) return;
+      const start = activeNow();
+      const before = stepElapsed;
+      while (activeNow() - start < ms) {
+        await waitUntilPlaying();
+        if (count) setProgress(before + activeNow() - start);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+      }
+      await waitUntilPlaying();
+      if (count) {
+        stepElapsed = before + ms;
+        setProgress(stepElapsed);
+      }
+    };
+    const clearHighlight = () => {
+      highlighted?.classList.remove('demo-target-highlight');
+      highlighted = null;
+    };
+    const highlight = (target: HTMLElement | null, label: string) => {
+      clearHighlight();
+      if (currentStep < startStep) return;
+      if (!target) throw new Error(`${label} did not appear.`);
+      target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      target.classList.add('demo-target-highlight');
+      highlighted = target;
+    };
+    const togglePause = () => {
+      if (finished || signal.aborted) return;
+      if (paused) {
+        paused = false;
+        totalPaused += performance.now() - pausedAt;
+        resume?.();
+        resume = null;
+        resumeGate = null;
+        setTour((current) =>
+          current?.phase === 'paused'
+            ? { ...current, phase: 'playing' }
+            : current,
+        );
+      } else {
+        paused = true;
+        pausedAt = performance.now();
+        resumeGate = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+        setTour((current) =>
+          current?.phase === 'playing'
+            ? { ...current, phase: 'paused' }
+            : current,
+        );
+      }
+    };
+    toggleTourPauseRef.current = togglePause;
+    signal.addEventListener('abort', () => resume?.());
+    const waitFor = async (check: () => boolean, label: string) => {
+      const deadline = activeNow() + 8000;
+      while (!check()) {
+        await waitUntilPlaying();
+        if (activeNow() > deadline) throw new Error(`${label} did not appear.`);
+        await delay(100, false);
+      }
+      await waitUntilPlaying();
+    };
+    const row = (key: string) =>
+      document.querySelector<HTMLElement>(`[data-tree-key="${key}"]`);
+    const show = (step: number, caption: string, duration: number) => {
+      currentStep = step;
+      clearHighlight();
+      stepElapsed = 0;
+      stepDuration = duration;
+      setProgress(0);
+      if (step < startStep) return;
+      if (step === startStep && startPaused) {
+        paused = true;
+        pausedAt = performance.now();
+        resumeGate = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+      }
+      setTour({ phase: paused ? 'paused' : 'playing', step, caption });
+    };
+    const stop = (manual = false, target?: EventTarget | null) => {
+      if (finished || signal.aborted) return;
+      controller.abort(new Error('Demo stopped.'));
+      finished = true;
+      clearHighlight();
+      if (
+        tourEditor.current &&
+        !(target instanceof Element && target.closest('.priority-editor'))
+      ) {
+        setEditor(null);
+        tourEditor.current = false;
+      }
+      setTour({
+        phase: 'stopped',
+        step: 0,
+        caption: manual
+          ? 'Playback stopped because you took control. Explore the sample workspace freely.'
+          : 'Playback stopped. Explore the sample workspace freely.',
+      });
+    };
+    stopTourRef.current = () => stop();
+    const seek = async (step: number, keepPaused = paused) => {
+      if (navigating || step < 0 || step > 7) return;
+      navigating = true;
+      try {
+        stop();
+        if (restoreWork) await restoreWork;
+        sessionStorage.setItem('canopy-demo-step', String(step));
+        sessionStorage.setItem('canopy-demo-paused', String(keepPaused));
+        await window.canopy.resetDemo();
+      } catch (error) {
+        navigating = false;
+        sessionStorage.removeItem('canopy-demo-step');
+        sessionStorage.removeItem('canopy-demo-paused');
+        throw error;
+      }
+    };
+    seekTourRef.current = (step, keepPaused) => {
+      void seek(step, keepPaused).catch((error: unknown) =>
+        setTour({
+          phase: 'failed',
+          step: 0,
+          caption: `Couldn’t reset the demo: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
+    };
+    const manual = (event: Event) => {
+      if (
+        signal.aborted ||
+        finished ||
+        !event.isTrusted ||
+        !(event.target instanceof Element)
+      )
+        return;
+      if (
+        event instanceof KeyboardEvent &&
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) &&
+        !event.target.closest('[contenteditable="true"]')
+      ) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        seekTourRef.current?.(
+          currentStep + (event.key === 'ArrowRight' ? 1 : -1),
+        );
+        return;
+      }
+      if (event.target.closest('.demo-tour')) return;
+      stop(true, event.target);
+    };
+    for (const name of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+      document.addEventListener(name, manual, true);
+    const run = async () => {
+      try {
+        show(
+          0,
+          'This is a local sample workspace. We’ll follow one issue tree, then leave it ready for you.',
+          6000,
+        );
+        highlight(
+          document.querySelector('[aria-label="CAN-100 issue tree"]'),
+          'Sample tree',
+        );
+        await delay(6000);
+        show(
+          1,
+          'Expand CAN-100 to see stories, tasks, and an unfinished descendant.',
+          6000,
+        );
+        highlight(
+          document.querySelector('[aria-label="Expand CAN-100"]'),
+          'Expand CAN-100',
+        );
+        await delay(2000);
+        updateTab('demo-can-100', {
+          expanded: ['CAN-100', 'CAN-106', 'CAN-107'],
+        });
+        await waitFor(() => Boolean(row('CAN-108')), 'CAN-108');
+        row('CAN-108')?.scrollIntoView({ block: 'center' });
+        highlight(row('CAN-108'), 'Expanded issue');
+        await delay(4000);
+
+        show(
+          2,
+          'Hide done narrows the tree. Turning it off restores the full hierarchy.',
+          8000,
+        );
+        highlight(document.querySelector('.toolbar .checkbox'), 'Hide done');
+        await delay(2000);
+        updateTab('demo-can-100', { hideDone: true });
+        await waitFor(() => !row('CAN-113'), 'Filtered tree');
+        highlight(
+          document.querySelector('[aria-label="CAN-100 issue tree"]'),
+          'Filtered tree',
+        );
+        await delay(2000);
+        highlight(document.querySelector('.toolbar .checkbox'), 'Hide done');
+        await delay(2000);
+        updateTab('demo-can-100', { hideDone: false });
+        await waitFor(() => Boolean(row('CAN-113')), 'Restored tree');
+        highlight(row('CAN-113'), 'Restored issue');
+        await delay(2000);
+
+        show(
+          3,
+          'Preview CAN-108 for its description, comment, and related work.',
+          6000,
+        );
+        highlight(row('CAN-108'), 'CAN-108');
+        await delay(2000);
+        setPreviewKey('CAN-108');
+        await waitFor(
+          () =>
+            Boolean(
+              document.querySelector('[aria-label="Preview CAN-108"] h2'),
+            ),
+          'CAN-108 preview',
+        );
+        highlight(
+          document.querySelector('[aria-label="Preview CAN-108"]'),
+          'CAN-108 preview',
+        );
+        await delay(4000);
+
+        show(4, 'The linked CAN-200 issue opens in a separate tab.', 6000);
+        highlight(
+          Array.from(document.querySelectorAll<HTMLElement>('.preview-link'))
+            .find((link) => link.textContent?.includes('CAN-200'))
+            ?.querySelector<HTMLElement>('button.tool-button') ?? null,
+          'Open CAN-200',
+        );
+        await delay(2000);
+        openTab('demo', 'CAN-200');
+        await waitFor(
+          () =>
+            Boolean(
+              document.querySelector(
+                '[role="tree"][aria-label="CAN-200 issue tree"]',
+              ),
+            ),
+          'CAN-200 tree',
+        );
+        highlight(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[role="tab"]'),
+          ).find((tab) => tab.textContent?.includes('CAN-200')) ?? null,
+          'CAN-200 tab',
+        );
+        await delay(4000);
+
+        show(5, 'Return to CAN-100 without losing its place.', 6000);
+        highlight(
+          document.querySelector('[data-tab-id="demo-can-100"]'),
+          'CAN-100 tab',
+        );
+        await delay(2000);
+        selectTab('demo-can-100');
+        await waitFor(() => Boolean(row('CAN-108')), 'CAN-100 tree');
+        updateTab('demo-can-100', { expanded: ['CAN-100', 'CAN-110'] });
+        await waitFor(() => Boolean(row('CAN-111')), 'CAN-111');
+        row('CAN-111')?.scrollIntoView({ block: 'center' });
+        highlight(row('CAN-111'), 'CAN-111 issue');
+        await delay(4000);
+
+        show(6, 'Raise CAN-111’s priority, then use Undo to restore it.', 9000);
+        highlight(
+          document.querySelector('[aria-label="Edit priority for CAN-111"]'),
+          'CAN-111 priority',
+        );
+        await delay(2000);
+        setEditor({ connectionId: 'demo', key: 'CAN-111', field: 'priority' });
+        tourEditor.current = true;
+        await pickers.open('demo', 'CAN-111', 'priority');
+        await waitFor(
+          () =>
+            Boolean(row('CAN-111')?.querySelector('.priority-editor select')),
+          'Priority editor',
+        );
+        highlight(
+          row('CAN-111')?.querySelector('.priority-editor select') ?? null,
+          'Priority editor',
+        );
+        await delay(1500);
+        setEditor(null);
+        tourEditor.current = false;
+        highlight(row('CAN-111'), 'CAN-111 priority');
+        const choices = await window.canopy.priorities('demo', 'CAN-111');
+        signal.throwIfAborted();
+        priorityEditStarted = true;
+        priorityWork = mutations.update(
+          'demo',
+          'CAN-111',
+          { priorityId: '1' },
+          { priorities: choices },
+          true,
+          priorityToken,
+        );
+        if (!(await priorityWork)) throw new Error('The priority edit failed.');
+        await waitFor(
+          () =>
+            row('CAN-111')?.querySelector('.priority')?.textContent ===
+            'Highest',
+          'Updated priority',
+        );
+        await delay(2000);
+        highlight(
+          document.querySelector('.undo-banner button'),
+          'Undo priority edit',
+        );
+        await delay(1500);
+        priorityWork = mutations.undo();
+        await priorityWork;
+        signal.throwIfAborted();
+        await waitFor(
+          () =>
+            row('CAN-111')?.querySelector('.priority')?.textContent === 'High',
+          'Restored priority',
+        );
+        highlight(row('CAN-111'), 'Restored priority');
+        await delay(2000);
+
+        show(
+          7,
+          'Move CAN-112 above its sibling CAN-111. You can keep editing after the tour.',
+          6000,
+        );
+        highlight(
+          document.querySelector('[aria-label^="Reorder CAN-112"]'),
+          'Reorder CAN-112',
+        );
+        await delay(2000);
+        if (!(await mutations.rank('demo', 'CAN-112', 'CAN-111')))
+          throw new Error('The sibling reorder failed.');
+        signal.throwIfAborted();
+        await waitFor(() => {
+          const first = row('CAN-112')?.getBoundingClientRect().top;
+          const second = row('CAN-111')?.getBoundingClientRect().top;
+          return first !== undefined && second !== undefined && first < second;
+        }, 'Reordered siblings');
+        highlight(row('CAN-112'), 'Reordered issue');
+        await delay(4000);
+        signal.throwIfAborted();
+        clearHighlight();
+        setPreviewKey(null);
+        setEditor(null);
+        setDialog(null);
+        finished = true;
+        setTour({
+          phase: 'complete',
+          step: 7,
+          caption: 'Tour complete. The sample tree is yours to explore.',
+        });
+      } catch (error) {
+        if (signal.aborted) return;
+        finished = true;
+        setEditor(null);
+        setDialog(null);
+        setTour({
+          phase: 'failed',
+          step: 0,
+          caption: `The tour stopped: ${error instanceof Error ? error.message : String(error)} The sample workspace is still available.`,
+        });
+      }
+    };
+    void run();
+    return () => {
+      controller.abort();
+      stopTourRef.current = null;
+      seekTourRef.current = null;
+      toggleTourPauseRef.current = null;
+      clearHighlight();
+      for (const name of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+        document.removeEventListener(name, manual, true);
+    };
+  }, [demoMode, ready, Boolean(snapshots['demo-can-100'])]);
+
   if (!ready)
     return (
       <div className="boot">
@@ -1824,6 +2305,7 @@ export function App() {
           </nav>
           <Connections
             connections={connections}
+            demoMode={demoMode}
             setConnections={(nextConnections) => {
               setConnections(nextConnections);
               const removed = connections.filter(
@@ -1869,6 +2351,12 @@ export function App() {
           <Settings2 size={16} />
           <span>Keyboard shortcuts</span>
         </button>
+        {!demoMode && (
+          <button className="sidebar-settings" onClick={launchDemo}>
+            <CircleDot size={16} />
+            <span>Try demo</span>
+          </button>
+        )}
         <div
           className="sidebar-resizer"
           role="separator"
@@ -2444,7 +2932,7 @@ export function App() {
                   <button
                     onClick={() => void refreshTab(activeTab, true, true)}
                     disabled={
-                      !online ||
+                      (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
                       refreshing.has(activeTab.id) ||
                       loading.has(activeTab.id)
@@ -2734,15 +3222,17 @@ export function App() {
                   )}
                   <span className="status-spacer" />
                   <span role="status" aria-label="Connection status">
-                    {!online
-                      ? 'Offline'
-                      : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
-                        ? 'Rate limited'
-                        : connectionErrors.has(activeTab.id)
-                          ? 'Connection error'
-                          : snapshot
-                            ? 'Connected'
-                            : 'Connecting'}
+                    {demoMode
+                      ? 'Local sample'
+                      : !online
+                        ? 'Offline'
+                        : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                          ? 'Rate limited'
+                          : connectionErrors.has(activeTab.id)
+                            ? 'Connection error'
+                            : snapshot
+                              ? 'Connected'
+                              : 'Connecting'}
                   </span>
                   <span>
                     {foreground ? 'Auto-refresh 30s' : 'Background refresh'}
@@ -2804,11 +3294,95 @@ export function App() {
           <Welcome
             onOpen={() => setDialog('open')}
             onConnect={() => setDialog('connect')}
+            onDemo={launchDemo}
+            demoMode={demoMode}
             hasConnections={connections.length > 0}
             error={errors.app ?? errors.workspace}
           />
         )}
       </main>
+
+      {demoMode && (
+        <section className="demo-tour" aria-label="Canopy demo">
+          <div className="demo-tour-copy">
+            <strong>Canopy demo</strong>
+            <span role="status" aria-live="polite">
+              {tour?.caption ?? 'Loading the sample workspace…'}
+            </span>
+            {(tour?.phase === 'playing' || tour?.phase === 'paused') && (
+              <span className="demo-tour-progress">
+                {tour.step === 0 ? 'Starting tour' : `Step ${tour.step} of 7`}
+                {tour.phase === 'paused' ? ' · Paused' : ''}
+              </span>
+            )}
+            {(tour?.phase === 'playing' || tour?.phase === 'paused') && (
+              <progress
+                ref={tourProgressRef}
+                className="demo-tour-meter"
+                max={100}
+                value={0}
+                aria-label="Step progress"
+              />
+            )}
+          </div>
+          {(tour?.phase === 'playing' ||
+            tour?.phase === 'paused' ||
+            tour?.phase === 'complete') && (
+            <div className="demo-tour-navigation">
+              <button
+                className="secondary"
+                disabled={tour.step === 0}
+                onClick={() =>
+                  seekTourRef.current?.(tour.step - 1, tour.phase === 'paused')
+                }
+                aria-label="Previous demo step"
+                title="Previous step (Left arrow)"
+              >
+                <ArrowLeft size={15} />
+              </button>
+              <button
+                className="secondary"
+                disabled={tour.step === 7}
+                onClick={() =>
+                  seekTourRef.current?.(tour.step + 1, tour.phase === 'paused')
+                }
+                aria-label="Next demo step"
+                title="Next step (Right arrow)"
+              >
+                <ArrowRight size={15} />
+              </button>
+            </div>
+          )}
+          {(tour?.phase === 'playing' || tour?.phase === 'paused') && (
+            <>
+              <button
+                className="secondary"
+                onClick={() => toggleTourPauseRef.current?.()}
+              >
+                {tour.phase === 'paused' ? 'Resume demo' : 'Pause demo'}
+              </button>
+              <button
+                className="secondary"
+                onClick={() => stopTourRef.current?.()}
+              >
+                Stop demo
+              </button>
+            </>
+          )}
+          <button
+            className="secondary"
+            onClick={() => seekTourRef.current?.(0, false)}
+          >
+            Reset and replay
+          </button>
+          <button
+            className="secondary"
+            onClick={() => void window.canopy.closeDemo()}
+          >
+            Close demo
+          </button>
+        </section>
+      )}
 
       {tabMenu &&
         (() => {
@@ -2892,28 +3466,34 @@ export function App() {
               >
                 {pinned ? 'Unpin root' : 'Pin root'}
               </button>
-              <button
-                role="menuitem"
-                onClick={() =>
-                  action(
-                    () => void copyIssueLink(tab.connectionId, tab.rootKey),
-                  )
-                }
-              >
-                Copy root link
-              </button>
-              <button
-                role="menuitem"
-                onClick={() =>
-                  action(() => void openExternal(tab.connectionId, tab.rootKey))
-                }
-              >
-                Open in{' '}
-                {connections.find((item) => item.id === tab.connectionId)
-                  ?.provider === 'github'
-                  ? 'GitHub'
-                  : 'Jira'}
-              </button>
+              {!demoMode && (
+                <button
+                  role="menuitem"
+                  onClick={() =>
+                    action(
+                      () => void copyIssueLink(tab.connectionId, tab.rootKey),
+                    )
+                  }
+                >
+                  Copy root link
+                </button>
+              )}
+              {!demoMode && (
+                <button
+                  role="menuitem"
+                  onClick={() =>
+                    action(
+                      () => void openExternal(tab.connectionId, tab.rootKey),
+                    )
+                  }
+                >
+                  Open in{' '}
+                  {connections.find((item) => item.id === tab.connectionId)
+                    ?.provider === 'github'
+                    ? 'GitHub'
+                    : 'Jira'}
+                </button>
+              )}
             </div>
           );
         })()}
@@ -3000,11 +3580,13 @@ export function App() {
 
 function Connections({
   connections,
+  demoMode,
   setConnections,
   onConnect,
   onError,
 }: {
   connections: Connection[];
+  demoMode: boolean;
   setConnections: (value: Connection[]) => void;
   onConnect: () => void;
   onError: (value: string) => void;
@@ -3025,14 +3607,16 @@ function Connections({
     <section className="connections">
       <div className="side-heading">
         <span>CONNECTIONS</span>
-        <button
-          className="icon-button"
-          onClick={onConnect}
-          disabled={busy}
-          aria-label="Connect Jira or GitHub"
-        >
-          {busy ? <Loader2 className="spin" size={14} /> : <Plus size={15} />}
-        </button>
+        {!demoMode && (
+          <button
+            className="icon-button"
+            onClick={onConnect}
+            disabled={busy}
+            aria-label="Connect Jira or GitHub"
+          >
+            {busy ? <Loader2 className="spin" size={14} /> : <Plus size={15} />}
+          </button>
+        )}
       </div>
       {connections.map((connection) => (
         <div className="connection" key={connection.id}>
@@ -3045,16 +3629,18 @@ function Connections({
                 : (connection.accountName ?? connection.url)}
             </small>
           </span>
-          <button
-            className="icon-button disconnect"
-            title={`Disconnect ${connection.name}`}
-            onClick={() => void disconnect(connection.id)}
-          >
-            <LogOut size={14} />
-          </button>
+          {!demoMode && (
+            <button
+              className="icon-button disconnect"
+              title={`Disconnect ${connection.name}`}
+              onClick={() => void disconnect(connection.id)}
+            >
+              <LogOut size={14} />
+            </button>
+          )}
         </div>
       ))}
-      {connections.length === 0 && (
+      {!demoMode && connections.length === 0 && (
         <button className="connect-quiet" onClick={onConnect}>
           <LogIn size={15} />
           Connect Jira or GitHub
@@ -3255,21 +3841,27 @@ function TreeRows(props: RowsProps) {
           {issue.type.slice(0, 1).toUpperCase()}
         </span>
         <div className="issue-title">
-          <button
-            className="key"
-            onClick={() => props.onOpenExternal(issue.key)}
-            title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
-          >
-            {issue.key}
-          </button>
-          <button
-            className="copy-key"
-            onClick={() => props.onCopyLink(issue.key)}
-            title={`Copy link to ${issue.key}`}
-            aria-label={`Copy link to ${issue.key}`}
-          >
-            <Copy size={11} />
-          </button>
+          {props.provider === 'demo' ? (
+            <span className="key">{issue.key}</span>
+          ) : (
+            <button
+              className="key"
+              onClick={() => props.onOpenExternal(issue.key)}
+              title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
+            >
+              {issue.key}
+            </button>
+          )}
+          {props.provider !== 'demo' && (
+            <button
+              className="copy-key"
+              onClick={() => props.onCopyLink(issue.key)}
+              title={`Copy link to ${issue.key}`}
+              aria-label={`Copy link to ${issue.key}`}
+            >
+              <Copy size={11} />
+            </button>
+          )}
           {repositoryRoot ? (
             <span className="summary">{issue.summary}</span>
           ) : props.editor?.key === issue.key &&
@@ -3280,7 +3872,7 @@ function TreeRows(props: RowsProps) {
               save={props.updateIssue}
               cancel={props.cancelEdit}
             />
-          ) : (
+          ) : props.provider !== 'demo' ? (
             <button
               className="summary"
               onKeyDown={(event) => {
@@ -3296,6 +3888,8 @@ function TreeRows(props: RowsProps) {
             >
               {issue.summary}
             </button>
+          ) : (
+            <span className="summary">{issue.summary}</span>
           )}
         </div>
         {!open && count && count.total > 0 && (
@@ -3485,7 +4079,7 @@ function TreeRows(props: RowsProps) {
               size={14}
               aria-label={`Saving ${issue.key}`}
             />
-          ) : (
+          ) : props.provider !== 'demo' ? (
             <button
               className="icon-button"
               title={`Open in ${props.provider === 'github' ? 'GitHub' : 'Jira'}`}
@@ -3493,7 +4087,7 @@ function TreeRows(props: RowsProps) {
             >
               <ExternalLink size={14} />
             </button>
-          )}
+          ) : null}
         </div>
       </div>
       {linksOpen && (
@@ -3502,6 +4096,7 @@ function TreeRows(props: RowsProps) {
           depth={depth}
           openTab={props.onOpenTab}
           openExternal={props.onOpenExternal}
+          provider={props.provider}
         />
       )}
       {hasChildren && open && (
@@ -3959,11 +4554,13 @@ function LinkedIssues({
   depth,
   openTab,
   openExternal,
+  provider,
 }: {
   issue: Issue;
   depth: number;
   openTab: (key: string) => void;
   openExternal: (key: string) => void;
+  provider: Connection['provider'];
 }) {
   const groups = issue.links.reduce<Record<string, typeof issue.links>>(
     (all, link) => {
@@ -3988,9 +4585,16 @@ function LinkedIssues({
             {(links ?? []).map((link) => (
               <div className="linked-row" key={`${relationship}-${link.key}`}>
                 <Link2 size={12} />
-                <button className="key" onClick={() => openExternal(link.key)}>
-                  {link.key}
-                </button>
+                {provider === 'demo' ? (
+                  <span className="key">{link.key}</span>
+                ) : (
+                  <button
+                    className="key"
+                    onClick={() => openExternal(link.key)}
+                  >
+                    {link.key}
+                  </button>
+                )}
                 <span title={link.summary}>{link.summary}</span>
                 <button
                   className="open-linked"
@@ -4899,11 +5503,15 @@ function EmptyState({
 function Welcome({
   onOpen,
   onConnect,
+  onDemo,
+  demoMode,
   hasConnections,
   error,
 }: {
   onOpen: () => void;
   onConnect: () => void;
+  onDemo: () => void;
+  demoMode: boolean;
   hasConnections: boolean;
   error?: string;
 }) {
@@ -4936,12 +5544,23 @@ function Welcome({
         <div className="welcome-actions">
           <button
             className="primary"
-            onClick={hasConnections ? onOpen : onConnect}
+            onClick={hasConnections || demoMode ? onOpen : onConnect}
           >
-            {hasConnections ? <Search size={16} /> : <LogIn size={16} />}
-            {hasConnections ? 'Open an issue' : 'Connect Jira or GitHub'}
+            {hasConnections || demoMode ? (
+              <Search size={16} />
+            ) : (
+              <LogIn size={16} />
+            )}
+            {hasConnections || demoMode
+              ? 'Open an issue'
+              : 'Connect Jira or GitHub'}
           </button>
-          {hasConnections && (
+          {!demoMode && (
+            <button className="secondary" onClick={onDemo}>
+              Try demo
+            </button>
+          )}
+          {hasConnections && !demoMode && (
             <button className="secondary" onClick={onConnect}>
               <Plus size={15} />
               Add connection

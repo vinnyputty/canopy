@@ -33,7 +33,9 @@ bazel(
 );
 if (process.platform === 'linux' && !env.DISPLAY) {
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke']);
+  run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:demo_check']);
 } else {
   bazel('run', '//:smoke');
+  bazel('run', '//:demo_check');
 }
 bazel('run', '//:package');

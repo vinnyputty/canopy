@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { IssueSearch, rankSearchIssues } from '../src/renderer/issue-search';
-import { demoSeeds } from './fixtures/demo';
+import { demoSeeds } from '../src/main/demo-provider';
 import type { SearchPage } from '../src/shared/types';
 
 const issue = (key: string, summary: string, updated = '') => ({

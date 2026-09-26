@@ -10,6 +10,10 @@ import {
   screen,
 } from 'electron';
 import { join } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import type {
   Connection,
@@ -29,6 +33,7 @@ import {
 import { Storage } from './storage';
 import { restoreWindow, type WindowState } from './window-state';
 import { configureLinuxCredentialStore } from './credentials';
+import { demoWorkspace } from './demo';
 import {
   recoverWorkspaceViews,
   validViewMap,
@@ -41,6 +46,16 @@ configureLinuxCredentialStore((store) =>
 );
 if (process.env.CANOPY_USER_DATA)
   app.setPath('userData', process.env.CANOPY_USER_DATA);
+if (process.env.CANOPY_DEMO_TEMP === '1' && process.env.CANOPY_USER_DATA) {
+  const directory = process.env.CANOPY_USER_DATA;
+  process.on('exit', () => {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // The launching app also removes this directory after the demo exits.
+    }
+  });
+}
 let window: BrowserWindow | null = null;
 const html = join(__dirname, 'renderer/index.html');
 function text(value: unknown, limit = 500): string {
@@ -225,19 +240,23 @@ type Fixture = {
 
 async function start(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
+  demoMode = false,
 ) {
   const storage = new Storage(app.getPath('userData'));
   const auth = new Auth(storage, (url) => shell.openExternal(url));
   let authError: string | undefined;
-  try {
-    await auth.load();
-  } catch (e) {
-    authError = (e as Error).message;
+  if (!demoMode) {
+    try {
+      await auth.load();
+    } catch (e) {
+      authError = (e as Error).message;
+    }
   }
   let fixture = await createFixture?.(storage);
+  let demoWorkspaceState: Workspace = structuredClone(demoWorkspace);
   const connections = () => [
     ...(fixture ? [fixture.connection] : []),
-    ...auth.connections(),
+    ...(demoMode ? [] : auth.connections()),
   ];
   const providers = new Providers(
     () => auth.connections(),
@@ -296,7 +315,59 @@ async function start(
     searches.get(owner)?.abort();
     searches.delete(owner);
   };
+  let demoLaunch: symbol | null = null;
   const handlers: Record<string, (...args: any[]) => unknown> = {
+    demoMode: () => demoMode,
+    launchDemo: async () => {
+      if (demoMode) throw new Error('The demo is already open.');
+      if (demoLaunch) throw new Error('The demo is already open.');
+      const launch = Symbol('demo launch');
+      demoLaunch = launch;
+      let directory: string | undefined;
+      try {
+        directory = await mkdtemp(join(tmpdir(), 'canopy-demo-'));
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          CANOPY_USER_DATA: directory,
+          CANOPY_DEMO_TEMP: '1',
+        };
+        delete env.ELECTRON_RUN_AS_NODE;
+        const child = spawn(
+          process.execPath,
+          [...(app.isPackaged ? [] : [app.getAppPath()]), '--canopy-demo'],
+          { env, stdio: 'ignore' },
+        );
+        const childDirectory = directory;
+        child.once('exit', () => {
+          if (demoLaunch === launch) demoLaunch = null;
+          void rm(childDirectory, { recursive: true, force: true });
+          if (window && !window.isDestroyed()) {
+            window.show();
+            window.focus();
+          }
+        });
+        await new Promise<void>((resolve, reject) => {
+          child.once('spawn', resolve);
+          child.once('error', reject);
+        });
+        child.unref();
+      } catch (error) {
+        if (demoLaunch === launch) demoLaunch = null;
+        if (directory) await rm(directory, { recursive: true, force: true });
+        throw error;
+      }
+    },
+    closeDemo: () => {
+      if (!demoMode) throw new Error('No demo is open in this window.');
+      window?.close();
+    },
+    resetDemo: async () => {
+      if (!demoMode || !createFixture)
+        throw new Error('Reset is available in the demo workspace.');
+      fixture = await createFixture(storage);
+      demoWorkspaceState = structuredClone(demoWorkspace);
+      window?.webContents.reload();
+    },
     connections,
     currentUser: async (id: string) => {
       provider(id);
@@ -313,6 +384,7 @@ async function start(
       };
     },
     connect: async (input?: TokenConnectionInput) => {
+      if (demoMode) throw new Error('Close the demo to connect an account.');
       if (authError) throw new Error(authError);
       try {
         await auth.connect(input);
@@ -322,6 +394,7 @@ async function start(
       return connections();
     },
     connectGithub: async (input: GithubConnectionInput) => {
+      if (demoMode) throw new Error('Close the demo to connect an account.');
       if (authError) throw new Error(authError);
       try {
         await auth.connectGithub(input);
@@ -331,6 +404,7 @@ async function start(
       return connections();
     },
     disconnect: async (id: string) => {
+      if (demoMode) throw new Error('Close the demo to manage connections.');
       text(id);
       for (const [owner, controller] of searches) {
         if (JSON.parse(owner)[0] === id) {
@@ -457,13 +531,22 @@ async function start(
       );
     },
     loadWorkspace: async () => {
+      if (demoMode) return structuredClone(demoWorkspaceState);
       const saved = await storage.read<Workspace>('workspace');
       return saved ? recoverWorkspaceViews(saved) : null;
     },
-    saveWorkspace: (value: Workspace) =>
-      storage.write('workspace', workspace(value)),
+    saveWorkspace: (value: Workspace) => {
+      const valid = workspace(value);
+      if (demoMode) {
+        demoWorkspaceState = structuredClone(valid);
+        return;
+      }
+      return storage.write('workspace', valid);
+    },
     copyIssueLink: (id: string, issue: string) =>
-      clipboard.writeText(issueUrl(id, issue)),
+      demoMode && id === fixture?.connection.id
+        ? Promise.reject(new Error('Demo issues have no Jira link.'))
+        : clipboard.writeText(issueUrl(id, issue)),
     openIssue: async (id: string, issue: string) => {
       if (id === fixture?.connection.id) fixture.openIssue();
       await shell.openExternal(issueUrl(id, issue));
@@ -484,17 +567,19 @@ async function start(
     quitting = true;
   });
   const createWindow = async () => {
-    const saved = restoreWindow(
-      await storage.read<WindowState>('window'),
-      screen.getAllDisplays().map((display) => display.workArea),
-    );
+    const saved = demoMode
+      ? null
+      : restoreWindow(
+          await storage.read<WindowState>('window'),
+          screen.getAllDisplays().map((display) => display.workArea),
+        );
     window = new BrowserWindow({
       width: 1440,
       height: 920,
       minWidth: Math.min(920, saved?.bounds.width ?? 920),
       minHeight: Math.min(600, saved?.bounds.height ?? 600),
       ...(saved?.bounds ?? {}),
-      title: 'Canopy',
+      title: demoMode ? 'Canopy — Demo' : 'Canopy',
       backgroundColor: '#141719',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
       webPreferences: {
@@ -515,6 +600,7 @@ async function start(
     let closeApproved = false;
     const saveBounds = () => {
       if (
+        demoMode ||
         created.isDestroyed() ||
         created.isMinimized() ||
         created.isFullScreen()
@@ -568,6 +654,13 @@ async function start(
     });
     await window.loadFile(html);
   };
+  const openDemoFromMenu = () =>
+    void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
+      dialog.showErrorBox(
+        'Could not open demo',
+        error instanceof Error ? error.message : String(error),
+      ),
+    );
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       ...(process.platform === 'darwin'
@@ -576,6 +669,14 @@ async function start(
               label: 'Canopy',
               submenu: [
                 { role: 'about' as const },
+                ...(!demoMode
+                  ? [
+                      {
+                        label: 'Try demo',
+                        click: openDemoFromMenu,
+                      },
+                    ]
+                  : [{ label: 'Close demo', click: () => window?.close() }]),
                 { type: 'separator' as const },
                 { role: 'hide' as const },
                 { role: 'quit' as const },
@@ -586,6 +687,14 @@ async function start(
             {
               label: 'File',
               submenu: [
+                ...(!demoMode
+                  ? [
+                      {
+                        label: 'Try demo',
+                        click: openDemoFromMenu,
+                      },
+                    ]
+                  : [{ label: 'Close demo', click: () => window?.close() }]),
                 { role: 'quit' as const, accelerator: 'CommandOrControl+Q' },
               ],
             },
@@ -621,15 +730,16 @@ async function start(
 }
 export function launch(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
+  demoMode = false,
 ) {
   app
     .whenReady()
-    .then(() => start(createFixture))
+    .then(() => start(createFixture, demoMode))
     .catch((error) => {
       dialog.showErrorBox('Canopy could not start', (error as Error).message);
       app.quit();
     });
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    if (demoMode || process.platform !== 'darwin') app.quit();
   });
 }

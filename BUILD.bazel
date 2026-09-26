@@ -57,6 +57,24 @@ js_binary(
 )
 
 js_binary(
+    name = "demo",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", "package.json"],
+    args = ["demo"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "demo_check",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", "package.json", "tools/demo-check.mjs"],
+    args = ["demo-check"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
     name = "smoke",
     entry_point = "tools/desktop.mjs",
     data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs"],

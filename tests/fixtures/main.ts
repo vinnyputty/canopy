@@ -67,7 +67,7 @@ launch(async (storage) => {
       id: 'demo',
       name: 'Canopy demo',
       url: 'https://example.invalid',
-      provider: 'demo',
+      provider: 'jira',
     },
     provider: {
       tree: async (key) => {

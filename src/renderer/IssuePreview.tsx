@@ -196,12 +196,14 @@ export function IssuePreview({
         ) : (
           <>
             <h2>{data.issue.summary}</h2>
-            <button
-              className="tool-button"
-              onClick={() => onOpenExternal(issueKey)}
-            >
-              Open in {provider === 'github' ? 'GitHub' : 'Jira'}
-            </button>
+            {provider !== 'demo' && (
+              <button
+                className="tool-button"
+                onClick={() => onOpenExternal(issueKey)}
+              >
+                Open in {provider === 'github' ? 'GitHub' : 'Jira'}
+              </button>
+            )}
             <button
               className="tool-button"
               onClick={() => onCopyKeySummary(data.issue)}
@@ -319,12 +321,14 @@ export function IssuePreview({
                     >
                       Open tree in new tab
                     </button>
-                    <button
-                      className="tool-button"
-                      onClick={() => onOpenExternal(link.key)}
-                    >
-                      Open in {provider === 'github' ? 'GitHub' : 'Jira'}
-                    </button>
+                    {provider !== 'demo' && (
+                      <button
+                        className="tool-button"
+                        onClick={() => onOpenExternal(link.key)}
+                      >
+                        Open in {provider === 'github' ? 'GitHub' : 'Jira'}
+                      </button>
+                    )}
                   </div>
                 </article>
               ))}

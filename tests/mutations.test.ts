@@ -102,6 +102,39 @@ function harness(overrides: Partial<CanopyAPI> = {}) {
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 describe('optimistic mutation reconciliation', () => {
+  it('skips a queued restoration when a manual edit saved first', async () => {
+    const manual = deferred<Issue>();
+    const writes: string[] = [];
+    const h = harness({
+      update: async (_connection, _key, patch) => {
+        writes.push(patch.priorityId!);
+        return manual.promise;
+      },
+    });
+    const edit = h.mutations.update(
+      'jira',
+      'A-2',
+      { priorityId: '2' },
+      options,
+    );
+    const restore = h.mutations.update(
+      'jira',
+      'A-2',
+      { priorityId: '1' },
+      undefined,
+      false,
+      undefined,
+      (current) => current?.priority?.id === '1',
+    );
+    manual.resolve({
+      ...issue('A-2', 'A-1'),
+      priority: options.priorities[1],
+    });
+    await Promise.all([edit, restore]);
+    assert.deepEqual(writes, ['2']);
+    assert.equal(h.current.priority?.id, '2');
+  });
+
   it('applies fields to every matching tab, scopes pending by connection, and restores a failed edit', async () => {
     const request = deferred<Issue>();
     const h = harness({ update: () => request.promise });

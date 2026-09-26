@@ -867,14 +867,24 @@ try {
     preview.getByText('Comments temporarily unavailable.'),
   ).toBeVisible();
   await expect(
-    preview.getByText('Details for CAN-108.', { exact: false }),
+    preview.getByText(
+      'A completed parent can still contain work in progress.',
+      { exact: false },
+    ),
   ).toBeVisible();
   await preview.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(preview.getByText('Retrying comments…')).toBeVisible();
   await expect(
-    preview.getByText('Details for CAN-108.', { exact: false }),
+    preview.getByText(
+      'A completed parent can still contain work in progress.',
+      { exact: false },
+    ),
   ).toBeVisible();
-  await expect(preview.getByText('Ready for review.')).toBeVisible();
+  await expect(
+    preview.getByText(
+      'The tree now retains the parent path while hiding completed sibling work.',
+    ),
+  ).toBeVisible();
   await expect(
     preview.getByText('CAN-108 blocks', { exact: true }),
   ).toBeVisible();
