@@ -42,6 +42,30 @@ const first = await openDemo();
 try {
   const { page } = first;
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
+  const progress = page.getByRole('progressbar', { name: 'Step progress' });
+  await expect(progress).toBeVisible();
+  await expect(
+    page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+  ).toHaveClass(/demo-target-highlight/);
+  await page.getByRole('button', { name: 'Pause demo' }).click();
+  const pausedProgress = await progress.evaluate((bar) => bar.value);
+  await page.waitForTimeout(800);
+  if ((await progress.evaluate((bar) => bar.value)) !== pausedProgress)
+    throw new Error('Step progress advanced while paused.');
+  await page.getByRole('button', { name: 'Next demo step' }).click();
+  await expect(page.getByText('Step 1 of 7 · Paused')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Expand CAN-100' }),
+  ).toHaveClass(/demo-target-highlight/);
+  await expect(page.locator('[data-tree-key="CAN-108"]')).toHaveCount(0);
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.getByText('Starting tour · Paused')).toBeVisible();
+  await page.getByRole('button', { name: 'Resume demo' }).click();
+  await expect(page.getByRole('button', { name: 'Pause demo' })).toBeVisible();
+  const resumedProgress = await progress.evaluate((bar) => bar.value);
+  await page.waitForTimeout(700);
+  if ((await progress.evaluate((bar) => bar.value)) <= resumedProgress)
+    throw new Error('Step progress did not advance after Resume.');
   await page.getByRole('button', { name: 'Stop demo' }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-100 issue tree' }),
@@ -121,6 +145,23 @@ try {
     throw new Error(
       `Tour left unexpected sample data: ${JSON.stringify(final)}`,
     );
+  await page.getByRole('button', { name: 'Previous demo step' }).click();
+  await expect(page.getByText('Step 6 of 7')).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(async () =>
+        (await window.canopy.tree('demo', 'CAN-100')).issues
+          .filter((issue) => issue.parentKey === 'CAN-110')
+          .map((issue) => issue.key)
+          .join(','),
+      ),
+    )
+    .toBe('CAN-111,CAN-112');
+  await page.getByRole('button', { name: 'Next demo step' }).click();
+  await expect(page.getByText('Step 7 of 7')).toBeVisible();
+  await expect(
+    page.getByText('Tour complete. The sample tree is yours to explore.'),
+  ).toBeVisible({ timeout: 20000 });
   await expect(page.getByRole('button', { name: 'Open in Jira' })).toHaveCount(
     0,
   );
@@ -177,7 +218,7 @@ try {
   )
     throw new Error('Demo changed the saved window layout.');
   console.log(
-    'Demo checks passed: immediate Stop, manual actions, Reset, Stop during edit, complete tour, manual takeover.',
+    'Demo checks passed: pause and progress, highlighted targets, step navigation, Stop, Reset, complete tour, manual takeover.',
   );
 } finally {
   await closeDemo(first);

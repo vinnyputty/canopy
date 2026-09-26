@@ -181,12 +181,17 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   const [tour, setTour] = useState<{
-    phase: 'playing' | 'stopped' | 'complete' | 'failed';
+    phase: 'playing' | 'paused' | 'stopped' | 'complete' | 'failed';
     step: number;
     caption: string;
   } | null>(null);
   const tourStarted = useRef(false);
   const stopTourRef = useRef<(() => void) | null>(null);
+  const seekTourRef = useRef<((step: number, paused?: boolean) => void) | null>(
+    null,
+  );
+  const toggleTourPauseRef = useRef<(() => void) | null>(null);
+  const tourProgressRef = useRef<HTMLProgressElement>(null);
   const tourEditor = useRef(false);
   const [dialog, setDialog] = useState<
     'open' | 'commands' | 'shortcuts' | 'connect' | null
@@ -1739,9 +1744,21 @@ export function App() {
     )
       return;
     tourStarted.current = true;
+    const requestedStep = Number(
+      sessionStorage.getItem('canopy-demo-step') ?? 0,
+    );
+    const startStep = Number.isInteger(requestedStep)
+      ? Math.max(0, Math.min(7, requestedStep))
+      : 0;
+    const startPaused = sessionStorage.getItem('canopy-demo-paused') === 'true';
+    sessionStorage.removeItem('canopy-demo-step');
+    sessionStorage.removeItem('canopy-demo-paused');
     const controller = new AbortController();
     const signal = controller.signal;
     let finished = false;
+    let currentStep = 0;
+    let navigating = false;
+    let restoreWork: Promise<void> | null = null;
     const priorityToken = Symbol('demo priority edit');
     let priorityWork: Promise<unknown> = Promise.resolve();
     let priorityEditStarted = false;
@@ -1762,39 +1779,120 @@ export function App() {
         );
     };
     signal.addEventListener('abort', () => {
-      void restorePriority().catch((error) =>
+      restoreWork = restorePriority().catch((error) =>
         console.error('Could not restore demo priority:', error),
       );
     });
-    const pause = (ms: number) =>
-      new Promise<void>((resolve, reject) => {
-        signal.throwIfAborted();
-        const timer = window.setTimeout(resolve, ms);
-        signal.addEventListener(
-          'abort',
-          () => {
-            window.clearTimeout(timer);
-            reject(signal.reason);
-          },
-          { once: true },
+    let paused = false;
+    let pausedAt = 0;
+    let totalPaused = 0;
+    let resume: (() => void) | null = null;
+    let resumeGate: Promise<void> | null = null;
+    let stepElapsed = 0;
+    let stepDuration = 1;
+    let highlighted: HTMLElement | null = null;
+    const activeNow = () =>
+      performance.now() -
+      totalPaused -
+      (paused ? performance.now() - pausedAt : 0);
+    const waitUntilPlaying = async () => {
+      if (resumeGate) await resumeGate;
+      signal.throwIfAborted();
+    };
+    const setProgress = (elapsed: number) => {
+      if (tourProgressRef.current)
+        tourProgressRef.current.value = Math.min(
+          100,
+          (100 * elapsed) / stepDuration,
         );
-      });
-    const waitFor = async (check: () => boolean, label: string) => {
-      const deadline = Date.now() + 8000;
-      while (!check()) {
-        signal.throwIfAborted();
-        if (Date.now() > deadline) throw new Error(`${label} did not appear.`);
-        await pause(100);
+    };
+    const delay = async (ms: number, count = true) => {
+      if (currentStep < startStep && count) return;
+      const start = activeNow();
+      const before = stepElapsed;
+      while (activeNow() - start < ms) {
+        await waitUntilPlaying();
+        if (count) setProgress(before + activeNow() - start);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
       }
+      await waitUntilPlaying();
+      if (count) {
+        stepElapsed = before + ms;
+        setProgress(stepElapsed);
+      }
+    };
+    const clearHighlight = () => {
+      highlighted?.classList.remove('demo-target-highlight');
+      highlighted = null;
+    };
+    const highlight = (target: HTMLElement | null, label: string) => {
+      clearHighlight();
+      if (currentStep < startStep) return;
+      if (!target) throw new Error(`${label} did not appear.`);
+      target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      target.classList.add('demo-target-highlight');
+      highlighted = target;
+    };
+    const togglePause = () => {
+      if (finished || signal.aborted) return;
+      if (paused) {
+        paused = false;
+        totalPaused += performance.now() - pausedAt;
+        resume?.();
+        resume = null;
+        resumeGate = null;
+        setTour((current) =>
+          current?.phase === 'paused'
+            ? { ...current, phase: 'playing' }
+            : current,
+        );
+      } else {
+        paused = true;
+        pausedAt = performance.now();
+        resumeGate = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+        setTour((current) =>
+          current?.phase === 'playing'
+            ? { ...current, phase: 'paused' }
+            : current,
+        );
+      }
+    };
+    toggleTourPauseRef.current = togglePause;
+    signal.addEventListener('abort', () => resume?.());
+    const waitFor = async (check: () => boolean, label: string) => {
+      const deadline = activeNow() + 8000;
+      while (!check()) {
+        await waitUntilPlaying();
+        if (activeNow() > deadline) throw new Error(`${label} did not appear.`);
+        await delay(100, false);
+      }
+      await waitUntilPlaying();
     };
     const row = (key: string) =>
       document.querySelector<HTMLElement>(`[data-tree-key="${key}"]`);
-    const show = (step: number, caption: string) =>
-      setTour({ phase: 'playing', step, caption });
+    const show = (step: number, caption: string, duration: number) => {
+      currentStep = step;
+      clearHighlight();
+      stepElapsed = 0;
+      stepDuration = duration;
+      setProgress(0);
+      if (step < startStep) return;
+      if (step === startStep && startPaused) {
+        paused = true;
+        pausedAt = performance.now();
+        resumeGate = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+      }
+      setTour({ phase: paused ? 'paused' : 'playing', step, caption });
+    };
     const stop = (manual = false, target?: EventTarget | null) => {
       if (finished || signal.aborted) return;
       controller.abort(new Error('Demo stopped.'));
       finished = true;
+      clearHighlight();
       if (
         tourEditor.current &&
         !(target instanceof Element && target.closest('.priority-editor'))
@@ -1811,8 +1909,54 @@ export function App() {
       });
     };
     stopTourRef.current = () => stop();
+    const seek = async (step: number, keepPaused = paused) => {
+      if (navigating || step < 0 || step > 7) return;
+      navigating = true;
+      try {
+        stop();
+        if (restoreWork) await restoreWork;
+        sessionStorage.setItem('canopy-demo-step', String(step));
+        sessionStorage.setItem('canopy-demo-paused', String(keepPaused));
+        await window.canopy.resetDemo();
+      } catch (error) {
+        navigating = false;
+        sessionStorage.removeItem('canopy-demo-step');
+        sessionStorage.removeItem('canopy-demo-paused');
+        throw error;
+      }
+    };
+    seekTourRef.current = (step, keepPaused) => {
+      void seek(step, keepPaused).catch((error: unknown) =>
+        setTour({
+          phase: 'failed',
+          step: 0,
+          caption: `Couldn’t reset the demo: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
+    };
     const manual = (event: Event) => {
-      if (!event.isTrusted || !(event.target instanceof Element)) return;
+      if (
+        signal.aborted ||
+        !event.isTrusted ||
+        !(event.target instanceof Element)
+      )
+        return;
+      if (
+        event instanceof KeyboardEvent &&
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) &&
+        !event.target.closest('[contenteditable="true"]')
+      ) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        seekTourRef.current?.(
+          currentStep + (event.key === 'ArrowRight' ? 1 : -1),
+        );
+        return;
+      }
       if (event.target.closest('.demo-tour')) return;
       stop(true, event.target);
     };
@@ -1823,35 +1967,59 @@ export function App() {
         show(
           0,
           'This is a local sample workspace. We’ll follow one issue tree, then leave it ready for you.',
+          6000,
         );
-        await pause(2800);
+        highlight(
+          document.querySelector('[aria-label="CAN-100 issue tree"]'),
+          'Sample tree',
+        );
+        await delay(6000);
         show(
           1,
           'Expand CAN-100 to see stories, tasks, and an unfinished descendant.',
+          6000,
         );
+        highlight(
+          document.querySelector('[aria-label="Expand CAN-100"]'),
+          'Expand CAN-100',
+        );
+        await delay(2000);
         updateTab('demo-can-100', {
           expanded: ['CAN-100', 'CAN-106', 'CAN-107'],
         });
         await waitFor(() => Boolean(row('CAN-108')), 'CAN-108');
         row('CAN-108')?.scrollIntoView({ block: 'center' });
-        await pause(3000);
+        highlight(row('CAN-108'), 'Expanded issue');
+        await delay(4000);
 
         show(
           2,
           'Hide done narrows the tree. Turning it off restores the full hierarchy.',
+          8000,
         );
+        highlight(document.querySelector('.toolbar .checkbox'), 'Hide done');
+        await delay(2000);
         updateTab('demo-can-100', { hideDone: true });
         await waitFor(() => !row('CAN-113'), 'Filtered tree');
-        await pause(2000);
-        signal.throwIfAborted();
+        highlight(
+          document.querySelector('[aria-label="CAN-100 issue tree"]'),
+          'Filtered tree',
+        );
+        await delay(2000);
+        highlight(document.querySelector('.toolbar .checkbox'), 'Hide done');
+        await delay(2000);
         updateTab('demo-can-100', { hideDone: false });
         await waitFor(() => Boolean(row('CAN-113')), 'Restored tree');
-        await pause(1800);
+        highlight(row('CAN-113'), 'Restored issue');
+        await delay(2000);
 
         show(
           3,
           'Preview CAN-108 for its description, comment, and related work.',
+          6000,
         );
+        highlight(row('CAN-108'), 'CAN-108');
+        await delay(2000);
         setPreviewKey('CAN-108');
         await waitFor(
           () =>
@@ -1860,9 +2028,20 @@ export function App() {
             ),
           'CAN-108 preview',
         );
-        await pause(3500);
+        highlight(
+          document.querySelector('[aria-label="Preview CAN-108"]'),
+          'CAN-108 preview',
+        );
+        await delay(4000);
 
-        show(4, 'The linked CAN-200 issue opens in a separate tab.');
+        show(4, 'The linked CAN-200 issue opens in a separate tab.', 6000);
+        highlight(
+          Array.from(document.querySelectorAll<HTMLElement>('.preview-link'))
+            .find((link) => link.textContent?.includes('CAN-200'))
+            ?.querySelector<HTMLElement>('button.tool-button') ?? null,
+          'Open CAN-200',
+        );
+        await delay(2000);
         openTab('demo', 'CAN-200');
         await waitFor(
           () =>
@@ -1873,17 +2052,34 @@ export function App() {
             ),
           'CAN-200 tree',
         );
-        await pause(2900);
+        highlight(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[role="tab"]'),
+          ).find((tab) => tab.textContent?.includes('CAN-200')) ?? null,
+          'CAN-200 tab',
+        );
+        await delay(4000);
 
-        show(5, 'Return to CAN-100 without losing its place.');
+        show(5, 'Return to CAN-100 without losing its place.', 6000);
+        highlight(
+          document.querySelector('[data-tab-id="demo-can-100"]'),
+          'CAN-100 tab',
+        );
+        await delay(2000);
         selectTab('demo-can-100');
         await waitFor(() => Boolean(row('CAN-108')), 'CAN-100 tree');
         updateTab('demo-can-100', { expanded: ['CAN-100', 'CAN-110'] });
         await waitFor(() => Boolean(row('CAN-111')), 'CAN-111');
         row('CAN-111')?.scrollIntoView({ block: 'center' });
-        await pause(2600);
+        highlight(row('CAN-111'), 'CAN-111 issue');
+        await delay(4000);
 
-        show(6, 'Raise CAN-111’s priority, then use Undo to restore it.');
+        show(6, 'Raise CAN-111’s priority, then use Undo to restore it.', 9000);
+        highlight(
+          document.querySelector('[aria-label="Edit priority for CAN-111"]'),
+          'CAN-111 priority',
+        );
+        await delay(2000);
         setEditor({ connectionId: 'demo', key: 'CAN-111', field: 'priority' });
         tourEditor.current = true;
         await pickers.open('demo', 'CAN-111', 'priority');
@@ -1892,10 +2088,14 @@ export function App() {
             Boolean(row('CAN-111')?.querySelector('.priority-editor select')),
           'Priority editor',
         );
-        await pause(1300);
-        signal.throwIfAborted();
+        highlight(
+          row('CAN-111')?.querySelector('.priority-editor select') ?? null,
+          'Priority editor',
+        );
+        await delay(1500);
         setEditor(null);
         tourEditor.current = false;
+        highlight(row('CAN-111'), 'CAN-111 priority');
         const choices = await window.canopy.priorities('demo', 'CAN-111');
         signal.throwIfAborted();
         priorityEditStarted = true;
@@ -1914,8 +2114,12 @@ export function App() {
             'Highest',
           'Updated priority',
         );
-        await pause(1900);
-        signal.throwIfAborted();
+        await delay(2000);
+        highlight(
+          document.querySelector('.undo-banner button'),
+          'Undo priority edit',
+        );
+        await delay(1500);
         priorityWork = mutations.undo();
         await priorityWork;
         signal.throwIfAborted();
@@ -1924,12 +2128,19 @@ export function App() {
             row('CAN-111')?.querySelector('.priority')?.textContent === 'High',
           'Restored priority',
         );
-        await pause(1900);
+        highlight(row('CAN-111'), 'Restored priority');
+        await delay(2000);
 
         show(
           7,
           'Move CAN-112 above its sibling CAN-111. You can keep editing after the tour.',
+          6000,
         );
+        highlight(
+          document.querySelector('[aria-label^="Reorder CAN-112"]'),
+          'Reorder CAN-112',
+        );
+        await delay(2000);
         if (!(await mutations.rank('demo', 'CAN-112', 'CAN-111')))
           throw new Error('The sibling reorder failed.');
         signal.throwIfAborted();
@@ -1938,8 +2149,10 @@ export function App() {
           const second = row('CAN-111')?.getBoundingClientRect().top;
           return first !== undefined && second !== undefined && first < second;
         }, 'Reordered siblings');
-        await pause(2600);
+        highlight(row('CAN-112'), 'Reordered issue');
+        await delay(4000);
         signal.throwIfAborted();
+        clearHighlight();
         setPreviewKey(null);
         setEditor(null);
         setDialog(null);
@@ -1965,6 +2178,9 @@ export function App() {
     return () => {
       controller.abort();
       stopTourRef.current = null;
+      seekTourRef.current = null;
+      toggleTourPauseRef.current = null;
+      clearHighlight();
       for (const name of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
         document.removeEventListener(name, manual, true);
     };
@@ -3094,32 +3310,69 @@ export function App() {
             <span role="status" aria-live="polite">
               {tour?.caption ?? 'Loading the sample workspace…'}
             </span>
-            {tour?.phase === 'playing' && (
+            {(tour?.phase === 'playing' || tour?.phase === 'paused') && (
               <span className="demo-tour-progress">
                 {tour.step === 0 ? 'Starting tour' : `Step ${tour.step} of 7`}
+                {tour.phase === 'paused' ? ' · Paused' : ''}
               </span>
             )}
+            {(tour?.phase === 'playing' || tour?.phase === 'paused') && (
+              <progress
+                ref={tourProgressRef}
+                className="demo-tour-meter"
+                max={100}
+                value={0}
+                aria-label="Step progress"
+              />
+            )}
           </div>
-          {tour?.phase === 'playing' && (
-            <button
-              className="secondary"
-              onClick={() => stopTourRef.current?.()}
-            >
-              Stop demo
-            </button>
+          {(tour?.phase === 'playing' ||
+            tour?.phase === 'paused' ||
+            tour?.phase === 'complete') && (
+            <div className="demo-tour-navigation">
+              <button
+                className="secondary"
+                disabled={tour.step === 0}
+                onClick={() =>
+                  seekTourRef.current?.(tour.step - 1, tour.phase === 'paused')
+                }
+                aria-label="Previous demo step"
+                title="Previous step (Left arrow)"
+              >
+                <ArrowLeft size={15} />
+              </button>
+              <button
+                className="secondary"
+                disabled={tour.step === 7}
+                onClick={() =>
+                  seekTourRef.current?.(tour.step + 1, tour.phase === 'paused')
+                }
+                aria-label="Next demo step"
+                title="Next step (Right arrow)"
+              >
+                <ArrowRight size={15} />
+              </button>
+            </div>
+          )}
+          {(tour?.phase === 'playing' || tour?.phase === 'paused') && (
+            <>
+              <button
+                className="secondary"
+                onClick={() => toggleTourPauseRef.current?.()}
+              >
+                {tour.phase === 'paused' ? 'Resume demo' : 'Pause demo'}
+              </button>
+              <button
+                className="secondary"
+                onClick={() => stopTourRef.current?.()}
+              >
+                Stop demo
+              </button>
+            </>
           )}
           <button
             className="secondary"
-            onClick={() => {
-              stopTourRef.current?.();
-              void window.canopy.resetDemo().catch((error: unknown) =>
-                setTour({
-                  phase: 'failed',
-                  step: 0,
-                  caption: `Couldn’t reset the demo: ${error instanceof Error ? error.message : String(error)}`,
-                }),
-              );
-            }}
+            onClick={() => seekTourRef.current?.(0, false)}
           >
             Reset and replay
           </button>
