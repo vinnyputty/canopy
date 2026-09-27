@@ -1859,7 +1859,9 @@ try {
   await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();
 
   await issue('CAN-111').getByLabel('Edit status for CAN-111').click();
-  await page.getByRole('menuitem', { name: 'In Progress' }).click();
+  await page
+    .getByRole('menuitem', { name: 'In Progress', exact: true })
+    .click();
   await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
 
   // Enter edits a focused summary; Escape cancels without saving on blur.

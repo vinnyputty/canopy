@@ -84,6 +84,11 @@ export async function auditWorkflow(app, page) {
             {
               id: 'required',
               name: controls.version ? 'Updated workflow' : 'Finish',
+              to: {
+                id: 'done',
+                name: 'Done',
+                statusCategory: { key: 'done' },
+              },
               fields: { resolution: { required: true } },
             },
           ],
@@ -216,7 +221,10 @@ export async function auditWorkflow(app, page) {
   const oldCount = (await controls()).trees.length;
   await field.click();
   await expect(
-    page.getByRole('menuitem', { name: 'Finish Requires fields', exact: true }),
+    page.getByRole('menuitem', {
+      name: 'Finish → Done Requires fields',
+      exact: true,
+    }),
   ).toBeDisabled();
   await expect(shortcut('Finish')).toBeFocused();
   // Measure the shortcut itself after picker autofocus/layout. Keep the row

@@ -49,6 +49,38 @@ const issue = (key: string, statusId: string, type = 'Task'): Issue => ({
   links: [],
   status: { id: statusId, name: statusId, category: 'new' },
 });
+it('loads destination paths on demand when status sharing is disabled', async () => {
+  const open = issue('ABC-1', 'open');
+  open.projectId = 'project';
+  open.typeId = 'task';
+  const started = {
+    id: 'started',
+    name: 'Started',
+    category: 'indeterminate' as const,
+  };
+  const done = { id: 'done', name: 'Done', category: 'done' as const };
+  const { pickers } = harness({
+    transitions: async () => [
+      { id: 'start', name: 'Start', to: started, requiresFields: false },
+    ],
+    workflowGraph: async () => ({
+      open: [
+        { id: 'start', name: 'Start', to: started, requiresFields: false },
+      ],
+      started: [
+        { id: 'finish', name: 'Finish', to: done, requiresFields: false },
+      ],
+    }),
+  });
+  await pickers.open('a', open.key, 'status', 'ABC-1', false, open);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    pickers
+      .paths('a', 'ABC-1', open)
+      .routes.map((path) => path.steps.map((step) => step.id)),
+    [['start', 'finish']],
+  );
+});
 it('shows cached suggestions on opening without loading unrelated fields or directory search', async () => {
   const { pickers, calls } = harness();
   await pickers.open('a', 'ABC-1', 'assignee');
@@ -414,8 +446,9 @@ it('uses the active root when one issue appears in overlapping trees', async () 
   assert.equal(pickers.values['jira:ABC-2'].transitions?.[0].id, 'ABC-10');
 });
 
-it('uses workflow metadata for statuses absent from the opened tree', async () => {
+it('loads issue-specific direct choices for statuses absent from the opened tree', async () => {
   const requests: string[] = [];
+  let currentStatus = 'open';
   const { pickers } = harness({
     workflowGraph: async () => ({
       open: [{ id: 'metadata-open', name: 'Start', requiresFields: false }],
@@ -423,7 +456,13 @@ it('uses workflow metadata for statuses absent from the opened tree', async () =
     }),
     transitions: async (_connection, key) => {
       requests.push(key);
-      return [{ id: 'verified-open', name: 'Start', requiresFields: false }];
+      return [
+        {
+          id: `verified-${currentStatus}`,
+          name: 'Start',
+          requiresFields: false,
+        },
+      ];
     },
   });
   const root = { ...issue('ABC-1', 'open'), projectId: '100', typeId: '200' };
@@ -437,7 +476,73 @@ it('uses workflow metadata for statuses absent from the opened tree', async () =
   pickers.observe('jira', [
     { ...root, status: { ...root.status, id: 'done' } },
   ]);
+  currentStatus = 'done';
   await pickers.open('jira', root.key, 'status', root.key, true);
-  assert.deepEqual(requests, ['ABC-1']);
-  assert.equal(pickers.values['jira:ABC-1'].transitions?.[0].id, 'reopen');
+  assert.deepEqual(requests, ['ABC-1', 'ABC-1']);
+  assert.equal(
+    pickers.values['jira:ABC-1'].transitions?.[0].id,
+    'verified-done',
+  );
+});
+
+it('adds graph-only edges after cached status choices when workflow loading recovers', async () => {
+  const started = {
+    id: 'started',
+    name: 'Started',
+    category: 'indeterminate' as const,
+  };
+  const done = { id: 'done', name: 'Done', category: 'done' as const };
+  const review = {
+    id: 'review',
+    name: 'In review',
+    category: 'indeterminate' as const,
+  };
+  let graphCalls = 0;
+  const { pickers } = harness({
+    workflowGraph: async () => {
+      if (++graphCalls === 1) throw new Error('Workflow metadata unavailable');
+      return {
+        started: [
+          {
+            id: 'finish',
+            name: 'Graph finish',
+            to: review,
+            requiresFields: false,
+          },
+          { id: 'review', name: 'Review', to: review, requiresFields: false },
+        ],
+      };
+    },
+    transitions: async (_connection, key) =>
+      key === 'ABC-1'
+        ? [{ id: 'start', name: 'Start', to: started, requiresFields: false }]
+        : [{ id: 'finish', name: 'Finish', to: done, requiresFields: false }],
+  });
+  const root = { ...issue('ABC-1', 'open'), projectId: '100', typeId: '200' };
+  const second = {
+    ...issue('ABC-2', 'started'),
+    projectId: '100',
+    typeId: '200',
+  };
+  await pickers.prime('jira', root.key, [root, second]);
+  await pickers.open('jira', root.key, 'status', root.key, true, root);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(graphCalls, 2);
+  assert.deepEqual(
+    pickers
+      .paths('jira', root.key, root)
+      .routes.map((path) => [
+        path.destination.id,
+        path.steps.map((step) => step.id),
+      ]),
+    [
+      ['done', ['start', 'finish']],
+      ['review', ['start', 'review']],
+    ],
+  );
+  await pickers.open('jira', second.key, 'status', root.key, true, second);
+  assert.deepEqual(
+    pickers.values['jira:ABC-2'].transitions?.map((choice) => choice.id),
+    ['finish'],
+  );
 });
