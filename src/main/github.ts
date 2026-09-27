@@ -2,6 +2,7 @@ import type {
   AssigneePage,
   Choice,
   Connection,
+  DevelopmentLinks,
   EditOptions,
   Issue,
   IssuePatch,
@@ -55,6 +56,22 @@ export function githubKey(value: string): string {
 export function githubIssueUrl(key: string) {
   const match = githubKey(key).match(reference)!;
   return `https://github.com/${match[1]}/${match[2]}/issues/${match[3]}`;
+}
+export function githubDevelopmentUrl(value: string): string {
+  const url = new URL(value);
+  if (
+    url.protocol !== 'https:' ||
+    url.host !== 'github.com' ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    !/^\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(?:pull\/[1-9]\d*|commit\/[a-f0-9]{7,64})\/?$/i.test(
+      url.pathname,
+    )
+  )
+    throw new Error('Invalid GitHub development link.');
+  return url.href;
 }
 function parts(key: string) {
   const match = githubKey(key).match(reference)!;
@@ -346,6 +363,13 @@ export class GithubProvider {
     ];
     return {
       issue,
+      metadata: {
+        reporter: raw.user?.login ?? (raw.user === null ? null : undefined),
+        created: raw.created_at,
+        updated: raw.updated_at,
+        milestone:
+          raw.milestone?.title ?? (raw.milestone === null ? null : undefined),
+      },
       description: String(raw.body ?? ''),
       descriptionMarkdown: String(raw.body ?? ''),
       comments: commentsResult.value.map((item: any) => ({
@@ -357,6 +381,70 @@ export class GithubProvider {
       totalComments: raw.comments ?? commentsResult.value.length,
       commentsError: commentsResult.error || undefined,
       linksError: blockedByResult.error || blockingResult.error || undefined,
+    };
+  }
+  async development(key: string): Promise<DevelopmentLinks> {
+    const events = await this.all(this.path(key, '/timeline'));
+    const pullRequests = new Map<
+      string,
+      DevelopmentLinks['pullRequests'][number]
+    >();
+    const commits = new Map<string, DevelopmentLinks['commits'][number]>();
+    for (const event of events) {
+      if (
+        event.event === 'cross-referenced' &&
+        event.source?.issue?.pull_request
+      ) {
+        const source = event.source.issue;
+        try {
+          const url = githubDevelopmentUrl(
+            String(source.pull_request.html_url ?? source.html_url),
+          );
+          if (!/\/pull\//.test(new URL(url).pathname)) continue;
+          pullRequests.set(url, {
+            title: String(
+              source.title || `Pull request #${source.number ?? ''}`,
+            ),
+            url,
+            state: source.pull_request.merged_at
+              ? 'Merged'
+              : source.state === 'closed'
+                ? 'Closed'
+                : source.state === 'open'
+                  ? 'Open'
+                  : 'State unavailable',
+          });
+        } catch {}
+      }
+      if (
+        event.event === 'referenced' &&
+        /^[a-f0-9]{7,64}$/i.test(String(event.commit_id ?? ''))
+      ) {
+        const api =
+          /^https:\/\/api\.github\.com\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/commits\/([a-f0-9]{7,64})$/i.exec(
+            String(event.commit_url ?? ''),
+          );
+        if (!api) continue;
+        const url = githubDevelopmentUrl(
+          `https://github.com/${api[1]}/${api[2]}/commit/${api[3]}`,
+        );
+        commits.set(url, {
+          title: api[3].slice(0, 7),
+          url,
+          state: 'Referenced',
+        });
+      }
+    }
+    return {
+      state: 'available',
+      source: 'github-timeline',
+      branches: {
+        state: 'unavailable',
+        reason:
+          'GitHub does not expose issue branch associations through this connection.',
+      },
+      pullRequests: [...pullRequests.values()],
+      commits: [...commits.values()],
     };
   }
   async search(

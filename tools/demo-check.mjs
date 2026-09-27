@@ -107,6 +107,10 @@ try {
   await expect(
     page.getByRole('complementary', { name: 'Preview CAN-111' }),
   ).toBeVisible();
+  await page.getByRole('button', { name: 'Show development' }).click();
+  await expect(
+    page.getByText('Development links are unavailable in the demo workspace.'),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Close issue preview' }).click();
   await page.getByRole('button', { name: 'Actions for CAN-111' }).click();
   const actions = page.getByRole('menu', { name: 'Actions for CAN-111' });
