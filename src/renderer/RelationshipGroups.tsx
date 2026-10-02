@@ -18,7 +18,8 @@ export function RelationshipGroups({
       <p className="preview-hint">
         {identity} · Relationships from {graph.key}. Only issues visible to this
         connection are returned; inaccessible issues may be omitted by the
-        provider.
+        provider. Results reflect the last inspection. Inspect again to refresh;
+        tree polling does not recheck provider relationships.
       </p>
       {graph.groups.map((group) => (
         <section key={group.kind} aria-label={relationshipTitles[group.kind]}>

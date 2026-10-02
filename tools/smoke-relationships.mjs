@@ -3,6 +3,7 @@ import { expect } from '@playwright/test';
 // Run only inside the lead-token-protected smoke launcher and disposable profile.
 export async function auditRelationships(app, page) {
   let originalBounds;
+  let clockPaused = false;
   await app.evaluate(({ ipcMain }) => {
     const issue = (key, parentKey, done = false) => ({
       id: key,
@@ -49,10 +50,12 @@ export async function auditRelationships(app, page) {
       release: null,
       completed: 0,
       treeReads: 0,
+      treeCalls: [],
       includeCompletedBlocker: false,
       heldTreeConnection: null,
       treeRelease: null,
       backgroundMarker: null,
+      pollTargetUnavailable: false,
     };
     globalThis.relationshipAudit = controls;
     const handlers = {
@@ -84,6 +87,7 @@ export async function auditRelationships(app, page) {
       },
       tree: (_event, _connection, key) => {
         controls.treeReads++;
+        controls.treeCalls.push({ connection: _connection, key });
         const read = () => ({
           rootKey: key,
           issues:
@@ -95,7 +99,11 @@ export async function auditRelationships(app, page) {
                   controls.backgroundMarker &&
                   _connection === controls.heldTreeConnection
                     ? { ...value, summary: controls.backgroundMarker }
-                    : value,
+                    : value.key === 'team/a#11' &&
+                        _connection === 'work' &&
+                        controls.pollTargetUnavailable
+                      ? { ...value, unavailableFields: ['status'] }
+                      : value,
                 ),
           fetchedAt: Date.now() + controls.treeReads,
           warnings: [],
@@ -256,6 +264,7 @@ export async function auditRelationships(app, page) {
       window.setBounds({ ...bounds, width: 1008, height: 640 });
       return bounds;
     });
+    await page.clock.install();
     await page.reload();
     const source = page.locator('[data-tree-key="team/a#1"]');
     await expect(source).toBeVisible();
@@ -420,6 +429,133 @@ export async function auditRelationships(app, page) {
     const tasks = page.getByRole('region', { name: 'Next tasks', exact: true });
     await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
     await expect(tasks).toContainText('Sample team/a#11');
+    await expect(tasks).toContainText('Blocked by team/a#11');
+    // Exercise the real production scheduler; provider data, not rendered state,
+    // controls whether polling preserves or invalidates inspection authority.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    clockPaused = true;
+    const poll = async (milliseconds) => {
+      const before = await app.evaluate(
+        () =>
+          globalThis.relationshipAudit.treeCalls.filter(
+            (call) => call.connection === 'work' && call.key === 'team/a#1',
+          ).length,
+      );
+      await page.clock.runFor(milliseconds);
+      await expect
+        .poll(() =>
+          app.evaluate(
+            () =>
+              globalThis.relationshipAudit.treeCalls.filter(
+                (call) => call.connection === 'work' && call.key === 'team/a#1',
+              ).length,
+          ),
+        )
+        .toBeGreaterThan(before);
+      await expect(page.locator('[role="tab"] .spin')).toHaveCount(0);
+    };
+    await poll(31_000);
+    await expect(tasks).toContainText('Blocked by team/a#11');
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.mode = 'background-hold';
+      globalThis.relationshipAudit.release = null;
+    });
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await expect
+      .poll(() =>
+        app.evaluate(() => typeof globalThis.relationshipAudit.release),
+      )
+      .toBe('function');
+    const pollHeld = await app.evaluate(() => ({
+      call: globalThis.relationshipAudit.calls.at(-1),
+      cancelledBefore: globalThis.relationshipAudit.cancelled.length,
+    }));
+    expect(pollHeld.call).toMatchObject({
+      connection: 'work',
+      key: 'team/a#1',
+    });
+    expect(pollHeld.call.requestId).toEqual(expect.any(String));
+    await poll(31_000);
+    await expect(
+      tasks.getByRole('button', { name: 'Loading relationships…' }),
+    ).toBeVisible();
+    expect(
+      await app.evaluate(
+        (_electron, { call, cancelledBefore }) =>
+          globalThis.relationshipAudit.cancelled
+            .slice(cancelledBefore)
+            .some(
+              (cancelled) =>
+                cancelled.connection === call.connection &&
+                cancelled.requestId === call.requestId,
+            ),
+        pollHeld,
+      ),
+    ).toBe(false);
+    await app.evaluate(() => globalThis.relationshipAudit.release());
+    await expect(tasks).toContainText('Background inspection retained');
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await expect(tasks).toContainText('Blocker state unknown');
+    await expect(tasks).not.toContainText('Background inspection retained');
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.mode = 'normal';
+    });
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await expect(tasks).toContainText('Blocked by team/a#11');
+    await app.evaluate(() => {
+      const state = globalThis.relationshipAudit;
+      state.mode = 'background-hold';
+      state.release = null;
+      state.pollTargetUnavailable = true;
+    });
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await expect
+      .poll(() =>
+        app.evaluate(() => typeof globalThis.relationshipAudit.release),
+      )
+      .toBe('function');
+    const changedHeld = await app.evaluate(() => ({
+      call: globalThis.relationshipAudit.calls.at(-1),
+      cancelledBefore: globalThis.relationshipAudit.cancelled.length,
+    }));
+    expect(changedHeld.call).toMatchObject({
+      connection: 'work',
+      key: 'team/a#1',
+    });
+    expect(changedHeld.call.requestId).toEqual(expect.any(String));
+    await poll(121_000);
+    await expect(tasks).toContainText('Blocker state unknown');
+    expect(
+      await app.evaluate(
+        (_electron, { call, cancelledBefore }) =>
+          globalThis.relationshipAudit.cancelled
+            .slice(cancelledBefore)
+            .some(
+              (cancelled) =>
+                cancelled.connection === call.connection &&
+                cancelled.requestId === call.requestId,
+            ),
+        changedHeld,
+      ),
+    ).toBe(true);
+    const changedCompleted = await app.evaluate(
+      () => globalThis.relationshipAudit.completed,
+    );
+    await app.evaluate(() => globalThis.relationshipAudit.release());
+    await expect
+      .poll(() => app.evaluate(() => globalThis.relationshipAudit.completed))
+      .toBeGreaterThan(changedCompleted);
+    await expect(tasks).not.toContainText('Background inspection retained');
+    await app.evaluate(() => {
+      const state = globalThis.relationshipAudit;
+      state.mode = 'normal';
+      state.pollTargetUnavailable = false;
+    });
+    // Confirm restored target evidence before testing unrelated refreshes.
+    await poll(241_000);
+    await page.clock.resume();
+    clockPaused = false;
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
     await expect(tasks).toContainText('Blocked by team/a#11');
     // Deliver a real held tree response after returning to the source, without
     // navigation during its pending relationship inspection. Exercise both
@@ -670,6 +806,7 @@ export async function auditRelationships(app, page) {
     await expect(tasks).toContainText('Blocker state unknown');
     await expect(tasks).not.toContainText('No active visible blockers found');
   } finally {
+    if (clockPaused) await page.clock.resume();
     await app.evaluate(({ ipcMain }) => {
       for (const [channel, handler] of globalThis.relationshipAuditHandlers) {
         ipcMain.removeHandler(channel);

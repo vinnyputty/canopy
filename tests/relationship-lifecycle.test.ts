@@ -5,7 +5,10 @@ import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { issueWorkBrief } from '../src/renderer/copy-issue';
-import { relationshipBlockers } from '../src/renderer/relationships';
+import {
+  relationshipBlockers,
+  relationshipChangedKeys,
+} from '../src/renderer/relationships';
 import { DemoProvider } from '../src/main/demo-provider';
 import {
   issueRelationships,
@@ -233,6 +236,11 @@ function rendererRequests() {
     'relationshipGraphs',
     'relationshipLoading',
     'relationshipRequests',
+    'relationshipRequestChanges',
+    'relationshipGraphsRef',
+    'relationshipConfirmedSnapshots',
+    'updateRelationshipGraphs',
+    'manualRelationshipRefreshes',
     'relationshipGeneration',
     'relationshipIdentity',
     'inspectRelationships',
@@ -289,6 +297,8 @@ function rendererRequests() {
   const mounted: { deps: unknown[]; cleanup?: () => void }[] = [];
   const setter = () => {};
   const context: any = {
+    relationshipChangedKeys,
+    relationshipKinds,
     crypto: { randomUUID: () => `request-${pending.length}` },
     useState: (value: unknown) => {
       const index = stateIndex++;
@@ -346,6 +356,10 @@ function rendererRequests() {
         { id: 'other', provider: 'github' },
       ],
     },
+    setSnapshots: setter,
+    setConfirmedSnapshots: setter,
+    setSaving: setter,
+    setUndoState: setter,
     setRefreshing: setter,
     setLoading: setter,
     setWorkspace: setter,
@@ -354,10 +368,16 @@ function rendererRequests() {
     mutations: {
       beginRefresh: () => 1,
       endRefresh: setter,
-      confirmedSnapshot: () => undefined,
+      confirmedSnapshot: (id: string) => context.snapshotsRef.current[id],
       receive: (tab: TabState, snapshot: TreeSnapshot) => {
         context.snapshots = { ...context.snapshots, [tab.id]: snapshot };
         context.snapshotsRef.current = context.snapshots;
+        context.api.publish({
+          snapshots: context.snapshots,
+          confirmedSnapshots: context.snapshots,
+          saving: new Set(),
+          undoBusy: false,
+        });
       },
     },
     window: {
@@ -379,9 +399,17 @@ function rendererRequests() {
       },
     },
   };
+  const publish = nodes(
+    source,
+    (n) =>
+      ts.isArrowFunction(n) &&
+      ts.isBlock(n.body) &&
+      n.body.getText(source).includes('setSnapshots(view.snapshots)'),
+  )[0];
+  assert.ok(publish, 'production mutation snapshot callback');
   runInNewContext(
     js(
-      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab };`,
+      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab, publish: ${publish.getText(source)} };`,
     ),
     context,
   );
@@ -390,6 +418,12 @@ function rendererRequests() {
     runInNewContext(js(effects), context);
   };
   renderEffects();
+  context.api.publish({
+    snapshots,
+    confirmedSnapshots: snapshots,
+    saving: new Set(),
+    undoBusy: false,
+  });
   return {
     ...context.api,
     pending,
@@ -397,12 +431,40 @@ function rendererRequests() {
     tabs,
     graphs: () => states[0] as Record<string, IssueRelationships>,
     loading: () => states[1],
-    refresh: async (tab: TabState) => {
-      await context.api.refresh(tab, true, true);
+    refresh: async (tab: TabState, userRequested = true, explicit = true) => {
+      await context.api.refresh(tab, true, explicit, userRequested);
       renderEffects();
+    },
+    seed: (tab: TabState, issues: Issue[]) => {
+      context.snapshotsRef.current[tab.id] = {
+        rootKey: tab.rootKey,
+        issues,
+        fetchedAt: 1,
+        warnings: [],
+      };
+      context.api.publish({
+        snapshots: context.snapshotsRef.current,
+        confirmedSnapshots: context.snapshotsRef.current,
+        saving: new Set(),
+        undoBusy: false,
+      });
+    },
+    confirmed: (tab: TabState, issues: Issue[]) =>
+      context.mutations.receive(tab, treeSnapshot(tab.rootKey, issues)),
+    blocked: (value: boolean) => {
+      context.refreshBlocked.current = () => value;
+    },
+    next: (snapshot: TreeSnapshot) => {
+      context.window.canopy.tree = async () => snapshot;
     },
     optimistic: () => {
       context.snapshots = { ...context.snapshots };
+      context.api.publish({
+        snapshots: context.snapshots,
+        confirmedSnapshots: context.snapshotsRef.current,
+        saving: new Set(),
+        undoBusy: false,
+      });
       renderEffects();
     },
   };
@@ -491,6 +553,440 @@ test('own confirmed refresh invalidates old results and excludes stale completio
   api.pending[3].resolve(graph('A-1'));
   await stale;
   assert.equal(api.graphs()['["work","A-1"]'], undefined);
+});
+
+test('deferred manual refresh retains its intent while automatic recovery alone preserves inspections', async () => {
+  const api = rendererRequests();
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1'));
+  await inspected;
+  const held = api.inspect('work', 'A-1');
+  api.blocked(true);
+  await api.refresh(api.tabs[0], true);
+  assert.equal(api.cancelled.length, 0);
+  assert.equal(api.graphs()['["work","A-1"]']?.key, 'A-1');
+  api.blocked(false);
+  await api.refresh(api.tabs[0], false, false);
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  assert.deepEqual(api.cancelled, ['work:request-1']);
+  api.pending[1].resolve(blockerGraph('A-1'));
+  await held;
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+});
+
+test('confirmed edit publication invalidates affected inspection before an unchanged poll can hide the change', async () => {
+  const api = rendererRequests();
+  api.seed(api.tabs[0], [issue('A-1'), issue('B-2', 'A-1')]);
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1'));
+  await inspected;
+  const held = api.inspect('work', 'A-1');
+  api.optimistic();
+  assert.equal(api.cancelled.length, 0);
+  api.confirmed(api.tabs[0], [
+    issue('A-1'),
+    {
+      ...issue('B-2', 'A-1'),
+      status: { id: 'done', name: 'Done', category: 'done' },
+    },
+  ]);
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  assert.deepEqual(api.cancelled, ['work:request-1']);
+  api.pending[1].resolve(blockerGraph('A-1'));
+  await held;
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+});
+
+test('unchanged polling retains explicit partial and missing-status uncertainty', async () => {
+  const api = rendererRequests();
+  const inspected = api.inspect('work', 'A-1');
+  const partial = blockerGraph('A-1');
+  partial.groups[0].state = 'partial';
+  delete partial.groups[0].items[0].statusCategory;
+  api.pending[0].resolve(partial);
+  await inspected;
+  await api.refresh(api.tabs[0], false);
+  assert.equal(api.graphs()['["work","A-1"]']?.groups[0].state, 'partial');
+  assert.equal(
+    relationshipBlockers(
+      issue('A-1'),
+      api.graphs()['["work","A-1"]'],
+      new Map([
+        [
+          'B-2',
+          {
+            ...issue('B-2'),
+            status: { id: 'done', name: 'Done', category: 'done' },
+          },
+        ],
+      ]),
+    ).blocker,
+    'unknown',
+  );
+});
+
+test('conflicting or unavailable Jira fallback status is unknown while inspected status remains authoritative', () => {
+  const source = {
+    ...issue('A-1'),
+    linksAvailable: true,
+    links: [
+      {
+        key: 'B-2',
+        summary: 'B-2',
+        relationship: 'depends on',
+        direction: 'inward' as const,
+        statusCategory: 'done' as const,
+      },
+    ],
+  };
+  for (const target of [
+    issue('B-2'),
+    { ...issue('B-2'), unavailableFields: ['status'] },
+  ]) {
+    assert.equal(
+      relationshipBlockers(source, undefined, new Map([['B-2', target]]))
+        .blocker,
+      'unknown',
+    );
+    assert.equal(
+      relationshipBlockers(
+        source,
+        blockerGraph('A-1', 'B-2', 'done'),
+        new Map([['B-2', target]]),
+      ).blocker,
+      'clear',
+      'inspected result determines authority',
+    );
+  }
+});
+
+test('relationship comparison treats link direction, availability, and child additions as evidence, not array order or labels', () => {
+  const source = {
+    ...issue('A-1'),
+    linksAvailable: true,
+    links: [
+      {
+        key: 'B-2',
+        summary: 'B-2',
+        relationship: 'depends on',
+        direction: 'inward' as const,
+        statusCategory: 'new' as const,
+      },
+      {
+        key: 'B-3',
+        summary: 'B-3',
+        relationship: 'relates to',
+        direction: 'outward' as const,
+      },
+    ],
+  };
+  const before = treeSnapshot('A-1', [source]);
+  assert.equal(
+    relationshipChangedKeys(
+      before,
+      treeSnapshot('A-1', [
+        {
+          ...source,
+          links: [...source.links].reverse(),
+          labels: [{ id: 'blocker', name: 'blocker' }],
+          updated: 'later',
+        },
+      ]),
+    ).size,
+    0,
+  );
+  assert.ok(
+    relationshipChangedKeys(
+      before,
+      treeSnapshot('A-1', [{ ...source, linksAvailable: false }]),
+    ).has('A-1'),
+  );
+  assert.ok(
+    relationshipChangedKeys(
+      before,
+      treeSnapshot('A-1', [
+        { ...source, links: [{ ...source.links[0], direction: 'outward' }] },
+      ]),
+    ).has('A-1'),
+  );
+  const added = relationshipChangedKeys(
+    before,
+    treeSnapshot('A-1', [source, issue('CHILD-1', 'A-1')]),
+  );
+  assert.ok(added.has('A-1'));
+  assert.ok(added.has('CHILD-1'));
+});
+
+const blockerGraph = (
+  key: string,
+  target = 'B-2',
+  statusCategory: 'new' | 'done' | undefined = 'new',
+) => {
+  const result = graph(key);
+  result.groups[0].items = [
+    {
+      key: target,
+      summary: target,
+      relationship: 'blocked by',
+      direction: 'inward',
+      access: 'available',
+      statusCategory,
+    },
+  ];
+  return result;
+};
+const treeSnapshot = (
+  rootKey: string,
+  issues: Issue[],
+  warnings: string[] = [],
+): TreeSnapshot => ({ rootKey, issues, warnings, fetchedAt: 2 });
+
+for (const mode of ['scheduled', 'focus/reconnect', 'forced recovery']) {
+  test(`${mode} unchanged confirmed poll preserves inspected and held blocker authority`, async () => {
+    const api = rendererRequests();
+    api.seed(api.tabs[0], [
+      issue('A-1'),
+      {
+        ...issue('B-2', 'A-1'),
+        status: { id: 'done', name: 'Done', category: 'done' },
+      },
+    ]);
+    api.next(
+      treeSnapshot('A-1', [
+        issue('A-1'),
+        {
+          ...issue('B-2', 'A-1'),
+          status: { id: 'done', name: 'Done', category: 'done' },
+        },
+      ]),
+    );
+    const inspected = api.inspect('work', 'A-1');
+    api.pending[0].resolve(blockerGraph('A-1'));
+    await inspected;
+    const held = api.inspect('work', 'A-1');
+    await api.refresh(api.tabs[0], false, mode === 'forced recovery');
+    assert.equal(api.cancelled.length, 0);
+    assert.equal(
+      relationshipBlockers(issue('A-1'), api.graphs()['["work","A-1"]'])
+        .blocker,
+      'blocked',
+      'unchanged stale completed tree cannot replace inspected active blocker',
+    );
+    assert.equal(api.loading()['["work","A-1"]'], true);
+    api.pending[1].resolve(blockerGraph('A-1'));
+    await held;
+    assert.equal(
+      relationshipBlockers(issue('A-1'), api.graphs()['["work","A-1"]'])
+        .blocker,
+      'blocked',
+    );
+  });
+}
+
+for (const change of [
+  'status',
+  'missing status',
+  'removed target',
+  'source parent',
+  'links missing',
+  'incomplete tree',
+]) {
+  test(`quiet ${change} invalidates affected authority and rejects stale completion`, async () => {
+    const api = rendererRequests();
+    api.seed(api.tabs[0], [issue('A-1'), issue('B-2', 'A-1')]);
+    const inspected = api.inspect('work', 'A-1');
+    api.pending[0].resolve(blockerGraph('A-1'));
+    await inspected;
+    const held = api.inspect('work', 'A-1');
+    let issues = [issue('A-1'), issue('B-2', 'A-1')];
+    if (change === 'status')
+      issues[1].status = { id: 'done', name: 'Done', category: 'done' };
+    if (change === 'missing status') issues[1].unavailableFields = ['status'];
+    if (change === 'removed target') issues = [issue('A-1')];
+    if (change === 'source parent') issues[0].parentKey = 'NEW-1';
+    if (change === 'links missing') issues[0].unavailableFields = ['links'];
+    api.next(
+      treeSnapshot(
+        'A-1',
+        issues,
+        change === 'incomplete tree' ? ['Partial hierarchy'] : [],
+      ),
+    );
+    await api.refresh(api.tabs[0], false, true);
+    assert.equal(api.graphs()['["work","A-1"]'], undefined);
+    assert.equal(api.cancelled.length, 1);
+    const fresh = api.inspect('work', 'A-1');
+    api.pending[1].resolve(blockerGraph('A-1', 'B-2', 'done'));
+    await held;
+    assert.equal(api.graphs()['["work","A-1"]'], undefined);
+    assert.equal(api.loading()['["work","A-1"]'], true);
+    const unknown = blockerGraph('A-1');
+    delete unknown.groups[0].items[0].statusCategory;
+    api.pending[2].resolve(unknown);
+    await fresh;
+    assert.equal(
+      relationshipBlockers(
+        issue('A-1'),
+        api.graphs()['["work","A-1"]'],
+        new Map([
+          [
+            'B-2',
+            {
+              ...issue('B-2'),
+              status: { id: 'done', name: 'Done', category: 'done' },
+            },
+          ],
+        ]),
+      ).blocker,
+      'unknown',
+    );
+  });
+}
+
+test('changed target in another same-account root invalidates its inspected source only', async () => {
+  const api = rendererRequests();
+  api.seed(api.tabs[1], [issue('B-1'), issue('B-2', 'B-1')]);
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1'));
+  await inspected;
+  const unrelated = api.inspect('other', 'A-1');
+  api.pending[1].resolve(blockerGraph('A-1'));
+  await unrelated;
+  const held = api.inspect('work', 'A-1');
+  api.next(
+    treeSnapshot('B-1', [
+      issue('B-1'),
+      {
+        ...issue('B-2', 'B-1'),
+        status: { id: 'done', name: 'Done', category: 'done' },
+      },
+    ]),
+  );
+  await api.refresh(api.tabs[1], false);
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  assert.equal(api.graphs()['["other","A-1"]']?.groups[0].state, 'visible');
+  assert.deepEqual(api.cancelled, ['work:request-2']);
+  api.pending[2].resolve(blockerGraph('A-1'));
+  await held;
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+});
+
+test('quiet nonrelationship changes and unrelated changed roots preserve inspections', async () => {
+  const api = rendererRequests();
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1'));
+  await inspected;
+  const held = api.inspect('work', 'A-1');
+  api.next(
+    treeSnapshot('A-1', [
+      {
+        ...issue('A-1'),
+        updated: 'new',
+        commentCount: 9,
+        labels: [{ id: 'x', name: 'label' }],
+        priority: { id: 'high', name: 'High' },
+      },
+    ]),
+  );
+  await api.refresh(api.tabs[0], false);
+  api.next(
+    treeSnapshot('B-1', [
+      {
+        ...issue('B-1'),
+        status: { id: 'done', name: 'Done', category: 'done' },
+      },
+    ]),
+  );
+  await api.refresh(api.tabs[1], false);
+  assert.equal(api.cancelled.length, 0);
+  assert.equal(api.graphs()['["work","A-1"]']?.key, 'A-1');
+  api.pending[1].resolve(blockerGraph('A-1'));
+  await held;
+  assert.equal(api.graphs()['["work","A-1"]']?.groups[0].state, 'visible');
+});
+
+for (const connection of ['work', 'other']) {
+  test(`pending newly discovered target change is guarded by ${connection} account identity`, async () => {
+    const api = rendererRequests();
+    const tab = connection === 'work' ? api.tabs[1] : api.tabs[2];
+    api.seed(tab, [issue(tab.rootKey), issue('B-2', tab.rootKey)]);
+    const held = api.inspect('work', 'A-1');
+    api.next(
+      treeSnapshot(tab.rootKey, [
+        issue(tab.rootKey),
+        {
+          ...issue('B-2', tab.rootKey),
+          status: { id: 'done', name: 'Done', category: 'done' },
+        },
+      ]),
+    );
+    await api.refresh(tab, false);
+    assert.equal(
+      api.cancelled.length,
+      0,
+      'unrelated source is retained until its unknown targets are returned',
+    );
+    api.pending[0].resolve(blockerGraph('A-1'));
+    await held;
+    const result = api.graphs()['["work","A-1"]'];
+    assert.equal(
+      result.groups[0].state,
+      connection === 'work' ? 'partial' : 'visible',
+    );
+    if (connection === 'work') {
+      assert.equal(result.groups[0].problem, 'invalid');
+      assert.match(result.groups[0].reason!, /changed.*Inspect again/);
+      assert.equal(
+        relationshipBlockers(issue('A-1'), result).blocker,
+        'unknown',
+      );
+      const fresh = api.inspect('work', 'A-1');
+      api.pending[1].resolve(blockerGraph('A-1', 'B-2', 'done'));
+      await fresh;
+      assert.equal(
+        relationshipBlockers(issue('A-1'), api.graphs()['["work","A-1"]'])
+          .blocker,
+        'clear',
+      );
+    }
+  });
+}
+
+test('late target conflict preserves unaffected active blockers and outside-connection privacy', async () => {
+  const api = rendererRequests();
+  api.seed(api.tabs[1], [issue('B-1'), issue('B-3', 'B-1')]);
+  const held = api.inspect('work', 'A-1');
+  api.next(
+    treeSnapshot('B-1', [
+      issue('B-1'),
+      {
+        ...issue('B-3', 'B-1'),
+        status: { id: 'done', name: 'Done', category: 'done' },
+      },
+    ]),
+  );
+  await api.refresh(api.tabs[1], false);
+  const result = blockerGraph('A-1');
+  result.groups[0].items.push({
+    key: 'B-3',
+    summary: 'Changed blocker',
+    relationship: 'blocked by',
+    direction: 'inward',
+    statusCategory: 'done',
+    access: 'outside-connection',
+    crossRepository: true,
+  });
+  api.pending[0].resolve(result);
+  await held;
+  const inspected = api.graphs()['["work","A-1"]'];
+  assert.equal(inspected.groups[0].state, 'partial');
+  assert.equal(inspected.groups[0].items[1].statusCategory, undefined);
+  assert.equal(inspected.groups[0].items[1].access, 'outside-connection');
+  assert.equal(inspected.groups[0].items[1].crossRepository, true);
+  const blockers = relationshipBlockers(issue('A-1'), inspected);
+  assert.equal(blockers.blocker, 'blocked');
+  assert.equal(blockers.incomplete, true);
+  assert.deepEqual(blockers.blockers, ['B-2']);
 });
 
 test('demo related-work step inspects the lazy graph before highlighting CAN-200', async () => {

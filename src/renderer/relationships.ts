@@ -7,6 +7,59 @@ import type {
 import { ancestorPath, buildIssueTree } from './tree';
 import { issueRelationships } from '../shared/relationships';
 
+/** Compare confirmed tree evidence, excluding polling timestamps and optimistic fields. */
+export function relationshipChangedKeys(
+  previous: TreeSnapshot | undefined,
+  next: TreeSnapshot,
+): Set<string> {
+  const before = new Map(previous?.issues.map((issue) => [issue.key, issue]));
+  const after = new Map(next.issues.map((issue) => [issue.key, issue]));
+  const signature = (issue: Issue | undefined) =>
+    issue &&
+    JSON.stringify([
+      issue.id,
+      issue.summary,
+      issue.parentKey,
+      issue.status.id,
+      issue.status.name,
+      issue.status.category,
+      issue.linksAvailable === true,
+      issue.links
+        .map((link) =>
+          JSON.stringify([
+            link.key,
+            link.summary,
+            link.relationship,
+            link.direction,
+            link.statusCategory,
+          ]),
+        )
+        .sort(),
+      issue.unavailableFields
+        ?.filter((field) =>
+          ['summary', 'parent', 'status', 'links'].includes(field),
+        )
+        .sort() ?? [],
+    ]);
+  const changed = new Set<string>();
+  for (const key of new Set([...before.keys(), ...after.keys()])) {
+    const old = before.get(key);
+    const current = after.get(key);
+    if (signature(old) !== signature(current)) changed.add(key);
+    if (!old || !current || old.parentKey !== current.parentKey) {
+      if (old?.parentKey) changed.add(old.parentKey);
+      if (current?.parentKey) changed.add(current.parentKey);
+    }
+  }
+  if (
+    JSON.stringify([...(previous?.warnings ?? [])].sort()) !==
+    JSON.stringify([...next.warnings].sort())
+  )
+    for (const key of new Set([...before.keys(), ...after.keys()]))
+      changed.add(key);
+  return changed;
+}
+
 export function relationshipBlockers(
   issue: Issue,
   graph?: IssueRelationships,
@@ -20,6 +73,12 @@ export function relationshipBlockers(
     // A fresh graph is authoritative even when its target status is missing.
     if (graph) return fallback;
     const target = known.get(key);
+    if (
+      target &&
+      (target.unavailableFields?.includes('status') ||
+        (fallback !== undefined && fallback !== target.status.category))
+    )
+      return undefined;
     return (
       fallback ??
       (target && !target.unavailableFields?.includes('status')

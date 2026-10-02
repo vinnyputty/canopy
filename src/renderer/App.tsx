@@ -1,4 +1,7 @@
-import { relationshipDestination } from './relationships';
+import {
+  relationshipChangedKeys,
+  relationshipDestination,
+} from './relationships';
 import { relationshipKinds } from '../shared/relationships';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
@@ -320,6 +323,19 @@ export function App() {
     Record<string, boolean>
   >({});
   const relationshipRequests = useRef(new Map<string, string>());
+  const relationshipRequestChanges = useRef(new Map<string, Set<string>>());
+  const relationshipGraphsRef = useRef(relationshipGraphs);
+  const relationshipConfirmedSnapshots = useRef<Record<string, TreeSnapshot>>(
+    {},
+  );
+  const updateRelationshipGraphs = (
+    update: (
+      current: Record<string, IssueRelationships>,
+    ) => Record<string, IssueRelationships>,
+  ) => {
+    relationshipGraphsRef.current = update(relationshipGraphsRef.current);
+    setRelationshipGraphs(relationshipGraphsRef.current);
+  };
   const relationshipGeneration = useRef(0);
   const relationshipIdentity = (connectionId: string, key: string) =>
     JSON.stringify([connectionId, key]);
@@ -329,6 +345,7 @@ export function App() {
     const requestId = crypto.randomUUID();
     const generation = relationshipGeneration.current;
     relationshipRequests.current.set(identity, requestId);
+    relationshipRequestChanges.current.set(identity, new Set());
     setRelationshipLoading((current) => ({ ...current, [identity]: true }));
     try {
       const graph = await window.canopy.relationships(
@@ -340,13 +357,46 @@ export function App() {
         generation === relationshipGeneration.current &&
         relationshipRequests.current.get(identity) === requestId
       )
-        setRelationshipGraphs((current) => ({ ...current, [identity]: graph }));
+        updateRelationshipGraphs((current) => ({
+          ...current,
+          [identity]: {
+            ...graph,
+            groups: graph.groups.map((group) =>
+              group.items.some((link) =>
+                relationshipRequestChanges.current.get(identity)?.has(link.key),
+              )
+                ? {
+                    ...group,
+                    state:
+                      group.state === 'unavailable' ? 'unavailable' : 'partial',
+                    problem: 'invalid',
+                    reason:
+                      'Target data changed while relationships were loading. Inspect again for current results.',
+                    items: group.items.map((link) =>
+                      relationshipRequestChanges.current
+                        .get(identity)
+                        ?.has(link.key)
+                        ? {
+                            ...link,
+                            statusCategory: undefined,
+                            access:
+                              link.access === 'outside-connection'
+                                ? 'outside-connection'
+                                : 'unknown',
+                          }
+                        : link,
+                    ),
+                  }
+                : group,
+            ),
+          },
+        }));
     } catch {
       if (
         generation === relationshipGeneration.current &&
         relationshipRequests.current.get(identity) === requestId
       )
-        setRelationshipGraphs((current) => ({
+        updateRelationshipGraphs((current) => ({
           ...current,
           [identity]: {
             key,
@@ -363,6 +413,7 @@ export function App() {
     } finally {
       if (relationshipRequests.current.get(identity) === requestId) {
         relationshipRequests.current.delete(identity);
+        relationshipRequestChanges.current.delete(identity);
         setRelationshipLoading((current) => ({
           ...current,
           [identity]: false,
@@ -371,20 +422,41 @@ export function App() {
     }
   };
   const invalidateRelationships = useCallback(
-    (connectionId: string, keys: string[]) => {
+    (
+      connectionId: string,
+      keys: string[],
+      changed: Set<string> = new Set(keys),
+    ) => {
+      if (!keys.length && !changed.size) return;
       const affected = new Set(
         keys.map((key) => relationshipIdentity(connectionId, key)),
       );
+      for (const [identity, graph] of Object.entries(
+        relationshipGraphsRef.current,
+      )) {
+        if (
+          JSON.parse(identity)[0] === connectionId &&
+          graph.groups.some((group) =>
+            group.items.some((link) => changed.has(link.key)),
+          )
+        )
+          affected.add(identity);
+      }
+      for (const [identity, changes] of relationshipRequestChanges.current) {
+        if (JSON.parse(identity)[0] === connectionId)
+          for (const key of changed) changes.add(key);
+      }
       for (const identity of affected) {
         const requestId = relationshipRequests.current.get(identity);
         if (requestId) {
           relationshipRequests.current.delete(identity);
+          relationshipRequestChanges.current.delete(identity);
           void window.canopy
             .cancelRelationships(connectionId, requestId)
             .catch(() => {});
         }
       }
-      setRelationshipGraphs((current) =>
+      updateRelationshipGraphs((current) =>
         Object.fromEntries(
           Object.entries(current).filter(
             ([identity]) => !affected.has(identity),
@@ -497,6 +569,7 @@ export function App() {
   const [syncNow, setSyncNow] = useState(Date.now());
   const deferredRefreshes = useRef(new Set<string>());
   const forcedRefreshes = useRef(new Set<string>());
+  const manualRelationshipRefreshes = useRef(new Set<string>());
   const runningExplicitRefreshes = useRef(new Map<string, number>());
   const refreshBlocked = useRef<(connectionId: string) => boolean>(() => false);
   const [online, setOnline] = useState(navigator.onLine);
@@ -515,6 +588,20 @@ export function App() {
       new Mutations(
         window.canopy,
         (view) => {
+          for (const tab of tabsRef.current) {
+            const next = view.confirmedSnapshots[tab.id];
+            if (
+              next &&
+              next !== relationshipConfirmedSnapshots.current[tab.id]
+            ) {
+              const changed = relationshipChangedKeys(
+                relationshipConfirmedSnapshots.current[tab.id],
+                next,
+              );
+              invalidateRelationships(tab.connectionId, [...changed]);
+            }
+          }
+          relationshipConfirmedSnapshots.current = view.confirmedSnapshots;
           setSnapshots(view.snapshots);
           setConfirmedSnapshots(view.confirmedSnapshots);
           setSaving(view.saving);
@@ -1093,8 +1180,14 @@ export function App() {
   }, [workspace, ready, saveWorkspace]);
 
   const refreshTab = useCallback(
-    async (tab: TabState, quiet = false, explicit = false) => {
+    async (
+      tab: TabState,
+      quiet = false,
+      explicit = false,
+      userRequested = false,
+    ) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
+      if (userRequested) manualRelationshipRefreshes.current.add(tab.id);
       explicit ||= forcedRefreshes.current.has(tab.id);
       if (
         (!navigator.onLine && !demoMode) ||
@@ -1113,6 +1206,9 @@ export function App() {
         return;
       }
       const rootKey = refreshRootKey(tab);
+      const manualRelationships = manualRelationshipRefreshes.current.delete(
+        tab.id,
+      );
       const load = rootRefreshes.current.load(
         rootKey,
         explicit,
@@ -1161,14 +1257,21 @@ export function App() {
                 refreshSequences.current[tab.id] !== sequence)
             )
               continue;
-            invalidateRelationships(
-              target.connectionId,
-              [
-                ...next.issues,
-                ...(snapshotsRef.current[target.id]?.issues ?? []),
-              ].map((issue) => issue.key),
-            );
+            const previous = mutations.confirmedSnapshot(target.id);
             mutations.receive(target, next, epoch);
+            const confirmed = mutations.confirmedSnapshot(target.id) ?? next;
+            if (manualRelationships)
+              invalidateRelationships(
+                target.connectionId,
+                [
+                  ...new Set(
+                    [...confirmed.issues, ...(previous?.issues ?? [])].map(
+                      (issue) => issue.key,
+                    ),
+                  ),
+                ],
+                new Set(),
+              );
             delivered.add(target.id);
           }
           if (delivered.size) {
@@ -1560,6 +1663,7 @@ export function App() {
         refreshSchedule.current.forget(id);
         deferredRefreshes.current.delete(id);
         forcedRefreshes.current.delete(id);
+        manualRelationshipRefreshes.current.delete(id);
         runningExplicitRefreshes.current.delete(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
@@ -1924,7 +2028,7 @@ export function App() {
         id: 'refresh',
         label: 'Refresh current tree',
         icon: RefreshCw,
-        run: () => activeTab && void refreshTab(activeTab, true, true),
+        run: () => activeTab && void refreshTab(activeTab, true, true, true),
       },
       {
         id: 'expandAll',
@@ -2930,6 +3034,7 @@ export function App() {
         void window.canopy.cancelRelationships(id, requestId).catch(() => {});
       }
       relationshipRequests.current.clear();
+      relationshipRequestChanges.current.clear();
       setRelationshipLoading({});
     };
   }, [activeTab?.id, previewRoute?.connectionId, previewKey]);
@@ -3463,7 +3568,7 @@ export function App() {
                     const tab = allRefreshTabs.find((item) =>
                       sameRoot(item, source),
                     );
-                    if (tab) void refreshTab(tab, true, true);
+                    if (tab) void refreshTab(tab, true, true, true);
                   }
                 }}
               />
@@ -3580,7 +3685,7 @@ export function App() {
                     refreshing.has(activeTab.id) ||
                     (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                   }
-                  onClick={() => void refreshTab(activeTab, true, true)}
+                  onClick={() => void refreshTab(activeTab, true, true, true)}
                   title="Refresh"
                 >
                   <RefreshCw
@@ -3894,7 +3999,7 @@ export function App() {
                 </span>
                 {errors[activeTab.id] && (
                   <button
-                    onClick={() => void refreshTab(activeTab, true, true)}
+                    onClick={() => void refreshTab(activeTab, true, true, true)}
                     disabled={
                       (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
@@ -4114,7 +4219,10 @@ export function App() {
                       Blocked issues always follow clear and unknown issues.{' '}
                       {activeConnection?.provider === 'github'
                         ? 'Inspect relationships to load GitHub blockers for a task.'
-                        : 'Blocker state is unknown when link data or a linked blocker status is unavailable.'}
+                        : 'Blocker state is unknown when link data or a linked blocker status is unavailable.'}{' '}
+                      Inspected blockers reflect the last inspection. Inspect
+                      again to refresh; tree polling does not recheck provider
+                      relationships.
                       {nextTaskCriterion === 'priority' && priorityError && (
                         <button onClick={retryPriorityOrder}>
                           Retry priority order
@@ -4296,7 +4404,9 @@ export function App() {
                       title="This tree couldn’t be loaded"
                       detail={errors[activeTab.id]}
                       action="Try again"
-                      onAction={() => void refreshTab(activeTab, false, true)}
+                      onAction={() =>
+                        void refreshTab(activeTab, false, true, true)
+                      }
                     />
                   ) : shownTree ? (
                     <div

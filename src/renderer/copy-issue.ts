@@ -165,6 +165,12 @@ export function issueWorkBrief({
     '',
     '## Dependency links',
     '',
+    ...(graph
+      ? [
+          'Results reflect the last inspection; tree polling does not recheck provider relationships. Inspect again to refresh.',
+          '',
+        ]
+      : []),
     links,
   ].join('\n');
 }
