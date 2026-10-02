@@ -2,7 +2,7 @@
 
 ## Settings and reading scope
 
-Sidebar **Settings** exposes Reading, Appearance, keyboard shortcuts, and connection setup. Reading changes apply immediately to all tabs, newly opened roots, reopened tabs, and saved-view results, and save with the workspace. **Reset reading to Medium / Compact** resets only text size and row spacing. Appearance reset previews System / Default until saved; shortcut reset restores the keyboard defaults. Manage existing connections in the sidebar.
+Sidebar **Settings** exposes Updates, Reading, Appearance, keyboard shortcuts, and connection setup. [Update preferences](updates.md) persist independently of issue workspace state; notices default off. Reading changes apply immediately to all tabs, newly opened roots, reopened tabs, and saved-view results, and save with the workspace. **Reset reading to Medium / Compact** resets only text size and row spacing. Appearance reset previews System / Default until saved; shortcut reset restores the keyboard defaults. Manage existing connections in the sidebar.
 
 Columns, widths, sort, filters, hide-done, and status-transition sharing remain root choices with connection defaults. Root reset, connection defaults, Back/Forward, and reopening tabs retain the current app-wide reading preference.
 

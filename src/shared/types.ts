@@ -224,6 +224,14 @@ export type TokenConnectionInput = {
 };
 export type GithubConnectionInput = { token: string; repositories: string[] };
 export interface CanopyAPI {
+  updateState(): Promise<import('./updates').UpdateState>;
+  updatePreferences(
+    value: import('./updates').UpdatePreferences,
+  ): Promise<import('./updates').UpdateState>;
+  checkUpdates(background?: boolean): Promise<import('./updates').UpdateState>;
+  cancelUpdateCheck(): Promise<void>;
+  dismissUpdateNotice(): Promise<import('./updates').UpdateState>;
+  openRelease(tag: string): Promise<void>;
   demoMode(): Promise<boolean>;
   demoTimeScale(): Promise<number>;
   launchDemo(): Promise<void>;

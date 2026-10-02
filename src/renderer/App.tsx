@@ -105,6 +105,7 @@ import {
   type Navigation,
 } from './workspace';
 import { Settings } from './Settings';
+import { UpdateSettings, UpdateNotice, useUpdates } from './Updates';
 import { SidebarWork } from './SidebarWork';
 import {
   emptySidebarSession,
@@ -208,6 +209,7 @@ function refreshRootKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {
   return JSON.stringify([tab.connectionId, tab.rootKey.toLowerCase()]);
 }
 export function App() {
+  const updates = useUpdates();
   const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
   const [selectedViewIssue, setSelectedViewIssue] = useState<string | null>(
     null,
@@ -4630,9 +4632,17 @@ export function App() {
           onClose={() => setDialog(null)}
         />
       )}
+      <UpdateNotice
+        updates={updates}
+        onDetails={() => {
+          settingsFlow.current = true;
+          setDialog('settings');
+        }}
+      />
       {dialog === 'settings' && (
         <Dialog title="Settings" onClose={() => setDialog(null)} initialFocus>
           <Settings
+            updates={<UpdateSettings updates={updates} />}
             reading={workspace.reading ?? DEFAULT_READING}
             onReading={(reading) =>
               setWorkspace((value) => ({ ...value, reading }))

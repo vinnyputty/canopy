@@ -3,12 +3,14 @@ import type { ReadingSettings } from '../shared/types';
 import { DEFAULT_READING } from '../shared/views';
 
 export function Settings({
+  updates,
   reading,
   onReading,
   onAppearance,
   onShortcuts,
   onConnect,
 }: {
+  updates?: React.ReactNode;
   reading: ReadingSettings;
   onReading: (reading: ReadingSettings) => void;
   onAppearance: () => void;
@@ -17,6 +19,7 @@ export function Settings({
 }) {
   return (
     <div className="settings-content">
+      {updates}
       <fieldset>
         <legend>Reading</legend>
         <p>
