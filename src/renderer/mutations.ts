@@ -109,7 +109,7 @@ export class Mutations {
   private protectedSnapshots = new Set<string>();
   private evicted = new Set<string>();
   private snapshotSizes = new Map<string, number>();
-  private serializedSizes = new WeakMap<TreeSnapshot, number>();
+  private serializedSizes = new WeakMap<TreeSnapshot | Issue, number>();
   protectSnapshots(ids: string[]) {
     this.protectedSnapshots = new Set(ids);
     this.publish();
@@ -124,22 +124,29 @@ export class Mutations {
       this.rendered[id],
       ...(tab ? (this.sharedSnapshots?.(tab) ?? []) : []),
     ]);
-    owners.delete(undefined);
-    this.snapshotSizes.set(
-      id,
-      [...owners].reduce(
-        (bytes, snapshot) => bytes + this.serializedSize(snapshot!),
-        0,
-      ),
-    );
+    const issues = new Set<Issue>();
+    let bytes = 0;
+    for (const snapshot of owners) {
+      if (!snapshot) continue;
+      bytes += this.serializedSize(snapshot);
+      for (const issue of snapshot.issues) issues.add(issue);
+    }
+    // Displayed ordering graphs may still own issues from an older refresh.
+    // Exact issue aliases are already covered by the snapshot records above.
+    for (const issue of tab ? (this.displayedIssues?.(tab) ?? []) : []) {
+      if (issues.has(issue)) continue;
+      bytes += this.serializedSize(issue);
+      issues.add(issue);
+    }
+    this.snapshotSizes.set(id, bytes);
   }
-  private serializedSize(snapshot: TreeSnapshot) {
-    // Snapshots are immutable. Weak keys cache accounting work without retaining
-    // a second snapshot store after its consumer/gate releases it.
-    let bytes = this.serializedSizes.get(snapshot);
+  private serializedSize(value: TreeSnapshot | Issue) {
+    // Snapshots/issues are immutable. Weak keys cache accounting work without
+    // retaining a second issue store after its consumers release it.
+    let bytes = this.serializedSizes.get(value);
     if (bytes === undefined) {
-      bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
-      this.serializedSizes.set(snapshot, bytes);
+      bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      this.serializedSizes.set(value, bytes);
     }
     return bytes;
   }
@@ -207,6 +214,7 @@ export class Mutations {
     ) => void,
     private snapshotBudget = 64 * 1024 * 1024,
     private sharedSnapshots?: (tab: TabState) => (TreeSnapshot | undefined)[],
+    private displayedIssues?: (tab: TabState) => Iterable<Issue>,
   ) {}
 
   beginRefresh() {

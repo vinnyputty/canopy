@@ -708,6 +708,15 @@ export function App() {
           })),
         undefined,
         (tab) => [rootRefreshes.current.snapshot(refreshRootKey(tab))],
+        function* (tab) {
+          const root = displayedTrees.current.get(tab.id);
+          const pending = root ? [root] : [];
+          while (pending.length) {
+            const node = pending.pop()!;
+            yield node.issue;
+            pending.push(...node.children);
+          }
+        },
       ),
   );
   const editSession = useRef(0);
