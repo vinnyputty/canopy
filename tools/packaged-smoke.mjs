@@ -408,60 +408,71 @@ for (const format of platform.formats) {
       await linuxStartupEvidence(executable, artifact, format, directory);
     let launchExecutable = executable;
     let identity;
-    let installed = false;
-    if (process.platform === 'linux') {
-      const hash = async (path) =>
-        createHash('sha256')
-          .update(await readFile(path))
-          .digest('hex');
-      identity = {
-        executableSha256: await hash(executable),
-        appAsarSha256: await hash(
-          join(dirname(executable), 'resources', 'app.asar'),
-        ),
-      };
-      if (format === 'deb') {
-        if (
-          process.env.GITHUB_ACTIONS !== 'true' ||
-          process.env.RUNNER_ENVIRONMENT !== 'github-hosted'
-        )
-          throw new Error(
-            'Automatic DEB installation requires a disposable GitHub-hosted runner',
-          );
-        // Exercise the shipped postinst/AppArmor semantics, never chown an
-        // extracted test payload or relax host namespace restrictions.
-        run('sudo', ['-n', 'dpkg', '--install', artifact]);
-        installed = true;
-        launchExecutable = '/opt/Canopy/canopy';
-        checkDesktopEntry(
-          await readFile('/usr/share/applications/canopy.desktop', 'utf8'),
-          launchExecutable,
-        );
-        await linuxStartupEvidence(
-          launchExecutable,
-          artifact,
-          format,
-          directory,
-        );
-      } else {
-        checkDesktopEntry(
-          await readFile(join(dirname(executable), 'canopy.desktop'), 'utf8'),
-          'AppRun',
-        );
-        // Check the shipped launcher, then invoke the original AppImage runtime
-        // (including its mounting path). Never launch the extracted binary.
-        expect(
-          await readFile(join(dirname(executable), 'AppRun'), 'utf8'),
-        ).toBe(await readFile(join(root, 'tools', 'AppRun'), 'utf8'));
-        launchExecutable = artifact;
-        identity.appImage = artifact;
-      }
-    }
+    let installAttempted = false;
+    let primaryFailed = false;
     let launches;
     try {
+      if (process.platform === 'linux') {
+        const hash = async (path) =>
+          createHash('sha256')
+            .update(await readFile(path))
+            .digest('hex');
+        identity = {
+          executableSha256: await hash(executable),
+          appAsarSha256: await hash(
+            join(dirname(executable), 'resources', 'app.asar'),
+          ),
+        };
+        if (format === 'deb') {
+          if (
+            process.env.GITHUB_ACTIONS !== 'true' ||
+            process.env.RUNNER_ENVIRONMENT !== 'github-hosted'
+          )
+            throw new Error(
+              'Automatic DEB installation requires a disposable GitHub-hosted runner',
+            );
+          // Exercise the shipped postinst/AppArmor semantics, never chown an
+          // extracted test payload or relax host namespace restrictions.
+          installAttempted = true;
+          run('sudo', ['-n', 'dpkg', '--install', artifact]);
+          launchExecutable = '/opt/Canopy/canopy';
+          checkDesktopEntry(
+            await readFile('/usr/share/applications/canopy.desktop', 'utf8'),
+            launchExecutable,
+          );
+          await linuxStartupEvidence(
+            launchExecutable,
+            artifact,
+            format,
+            directory,
+          );
+        } else {
+          checkDesktopEntry(
+            await readFile(join(dirname(executable), 'canopy.desktop'), 'utf8'),
+            'AppRun',
+          );
+          // Check the shipped launcher, then invoke the original AppImage runtime
+          // (including its mounting path). Never launch the extracted binary.
+          expect(
+            await readFile(join(dirname(executable), 'AppRun'), 'utf8'),
+          ).toBe(await readFile(join(root, 'tools', 'AppRun'), 'utf8'));
+          launchExecutable = artifact;
+          identity.appImage = artifact;
+        }
+      }
       launches = await smoke(launchExecutable, directory, name, identity);
+    } catch (error) {
+      primaryFailed = true;
+      throw error;
     } finally {
-      if (installed) run('sudo', ['-n', 'dpkg', '--remove', 'canopy']);
+      if (installAttempted) {
+        try {
+          run('sudo', ['-n', 'dpkg', '--remove', 'canopy']);
+        } catch (cleanupError) {
+          if (!primaryFailed) throw cleanupError;
+          console.error('DEB removal also failed:', cleanupError);
+        }
+      }
     }
     results.push({
       artifact: name,
