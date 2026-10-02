@@ -162,6 +162,10 @@ async function smoke(executablePath, directory, artifact) {
       );
       await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
       await expect(page.locator('.welcome-error')).toHaveCount(0);
+      // Retained errors cover startup before firstWindow() resolves and before
+      // the live listener attaches. Check each launch while its page is open.
+      errors.push(...(await page.pageErrors()).map((error) => error.message));
+      expect(errors).toEqual([]);
       await app.close();
       app = undefined;
     }
