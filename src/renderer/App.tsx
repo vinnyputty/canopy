@@ -5384,7 +5384,7 @@ export function App() {
               try {
                 await saveWorkspace(workspaceRef.current);
                 await operation();
-                window.location.reload();
+                await window.canopy.reloadWorkspace();
               } catch (error) {
                 workspaceTransferBusy.current = false;
                 throw error;

@@ -357,6 +357,7 @@ export interface CanopyAPI {
   applyWorkspaceImport(token: string): Promise<Workspace>;
   rollbackWorkspaceImport(): Promise<Workspace>;
   canUndoWorkspaceImport(): Promise<boolean>;
+  reloadWorkspace(): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;

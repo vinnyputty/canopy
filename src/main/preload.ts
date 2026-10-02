@@ -77,6 +77,7 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:canUndoWorkspaceImport'),
   rollbackWorkspaceImport: () =>
     ipcRenderer.invoke('canopy:rollbackWorkspaceImport'),
+  reloadWorkspace: () => ipcRenderer.invoke('canopy:reloadWorkspace'),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
   saveWorkspace: (workspace) =>
     ipcRenderer.invoke('canopy:saveWorkspace', workspace),

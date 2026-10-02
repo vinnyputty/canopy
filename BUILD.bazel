@@ -125,3 +125,27 @@ js_binary(
     patch_node_fs = False,
     tags = ["manual"],
 )
+
+js_binary(
+    name = "stage_backup_smoke",
+    entry_point = "tools/stage-backup-smoke.mjs",
+    data = [":build", ":node_modules", ":sources"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "backup_cases",
+    entry_point = "tools/smoke-backup-cases.mjs",
+    data = [":node_modules", "tools/smoke-search.mjs", "tools/smoke-refresh.mjs"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "backup_smoke",
+    entry_point = "tools/smoke-backup.mjs",
+    data = [":node_modules"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
