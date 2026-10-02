@@ -45,11 +45,13 @@
     "productName": "Canopy",
     "asar": true,
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "assets/branding"
     },
     "files": [
       "dist/main.cjs",
       "dist/preload.cjs",
+      "dist/branding/**",
       "dist/renderer/**",
       "package.json"
     ],
@@ -59,12 +61,14 @@
         "zip"
       ],
       "category": "public.app-category.productivity",
-      "identity": null
+      "identity": null,
+      "icon": "assets/branding/icon.icns"
     },
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "assets/branding/icon.ico"
     },
     "linux": {
       "target": [
@@ -73,7 +77,24 @@
       ],
       "category": "Office",
       "maintainer": "Canopy contributors",
-      "syncDesktopName": true
+      "syncDesktopName": true,
+      "icon": "assets/branding/icons",
+      "executableName": "canopy",
+      "desktop": {
+        "entry": {
+          "Name": "Canopy",
+          "StartupWMClass": "canopy",
+          "Comment": "A focused desktop workspace for issue trees"
+        }
+      }
+    },
+    "dmg": {
+      "icon": "assets/branding/icon.icns"
+    },
+    "nsis": {
+      "installerIcon": "assets/branding/icon.ico",
+      "uninstallerIcon": "assets/branding/icon.ico",
+      "installerHeaderIcon": "assets/branding/icon.ico"
     }
   }
 }

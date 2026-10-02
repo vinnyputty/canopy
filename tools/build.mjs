@@ -1,7 +1,9 @@
 import { build } from 'esbuild';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, writeFile } from 'node:fs/promises';
 
 await mkdir('dist/renderer', { recursive: true });
+await cp('assets/branding', 'dist/branding', { recursive: true });
+await cp('assets/branding/icon.svg', 'dist/renderer/icon.svg');
 await Promise.all([
   build({
     entryPoints: ['src/main/index.ts'],

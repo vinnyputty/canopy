@@ -78,6 +78,10 @@ Jira roots prefetch status choices by issue type so child menus open with cached
 
 Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/jira.md).
 
+## About & Support
+
+Open **About & Support** from the sidebar, command palette, or **Help** menu on every platform; macOS also has **Canopy → About Canopy**. The view shows the running application's version and opens Releases, Documentation, and Report an issue in your browser. Issue reports open a blank form; Canopy does not attach workspace data or credentials.
+
 ## Packaging
 
 ```sh
@@ -85,6 +89,27 @@ bazel run //:package
 ```
 
 Installers are written to `release/`: DMG/ZIP on macOS, NSIS on Windows, and AppImage/DEB on Linux. Packaging runs on the target operating system. Builds are unsigned; macOS distribution needs signing and notarization for a smooth installation experience. CI builds and checks each OS and creates platform artifacts for pull requests. GUI launch and real-site integration must also be verified on the target machine.
+
+### Branding
+
+`assets/branding/icon.svg` is the source mark: a rounded green tile with a white issue hierarchy, extending the app's tree and lucide line visual system. The sidebar and About view use the same SVG. Platform assets are generated with the repository's pinned Electron/Chromium canvas renderer and PNG-backed ICO/ICNS containers, without additional tools or global configuration:
+
+```sh
+bazel --output_base=/tmp/canopy-bazel-79 run //:icons
+bazel --output_base=/tmp/canopy-bazel-79 test //:branding_check --test_output=errors
+```
+
+Run `bazel run //:branding_smoke` to check About version, support links and browser failures, menus, command palette, runtime icon decoding, and macOS About reopening using a disposable profile and intercepted browser links. Set `CANOPY_PACKAGED_EXE` to an unsigned packaged executable to run the same check against that app. Run icon generation separately from other Electron/desktop checks. Commit the generated PNG set, ICO, ICNS, and source/version/hash manifest together with the SVG. `branding_check` validates the package schema, source freshness, image dimensions, PNG decoding, and containers. Bazel includes branding resources in build and desktop runfiles; the desktop launcher stages them for electron-builder and packages runtime icons under `dist/branding`.
+
+Explicit [electron-builder v26 icon paths](https://www.electron.build/v26/docs/features/icons-and-images/) cover macOS app and DMG volume, Windows executable and NSIS installer/uninstaller, and Linux icon sizes. Linux's `desktopName`, `syncDesktopName`, executable name, and `StartupWMClass` agree with [desktop entry integration](https://www.electron.build/v26/docs/linux/). Windows uses the configured app ID for taskbar grouping; macOS source launches set the Dock icon.
+
+Native acceptance remains pending on target machines. Keep release/branding PRs pending until installers and installed apps are checked at normal and high-DPI scales:
+
+- macOS: DMG volume and app icon, Finder, Dock, window switcher, app/Help menus, version and support links; include closing all windows and reopening About from the menu.
+- Windows: NSIS installer/uninstaller, installed shortcut and executable, Start menu, taskbar grouping, window switcher, Help menu, version and support links.
+- Linux: AppImage and installed DEB, desktop entry and launcher icon, taskbar grouping and window switcher under X11/Wayland, Help menu, version and support links.
+
+About & Support has its own sidebar entry alongside Settings and is also available from the command palette and native menus.
 
 ## Development
 

@@ -48,6 +48,7 @@ bazel(
   '//:test',
   '//:typecheck',
   '//:format_check',
+  '//:branding_check',
   '//:portable_checks',
   // Unit and portability targets each launch the complete process-heavy suite.
   '--local_test_jobs=1',
@@ -55,9 +56,17 @@ bazel(
   ...testEnvironment,
 );
 if (process.platform === 'linux' && !env.DISPLAY) {
+  run('xvfb-run', [
+    '-a',
+    'bazel',
+    ...startupOptions,
+    'run',
+    '//:branding_smoke',
+  ]);
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke']);
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:demo_check']);
 } else {
+  bazel('run', '//:branding_smoke');
   bazel('run', '//:smoke');
   bazel('run', '//:demo_check');
 }
