@@ -40,6 +40,7 @@ export async function auditRelationships(app, page) {
         issue('team/a#12', 'team/a#10'),
       ],
       'team/b#5': [issue('team/b#5')],
+      'team/b#6': [issue('team/b#6')],
       'A-1': [issue('A-1')],
     };
     const controls = {
@@ -53,6 +54,7 @@ export async function auditRelationships(app, page) {
       treeCalls: [],
       includeCompletedBlocker: false,
       heldTreeConnection: null,
+      heldTreeRoot: null,
       heldSourceTree: false,
       treeRelease: null,
       backgroundMarker: null,
@@ -77,6 +79,7 @@ export async function auditRelationships(app, page) {
           tab('wrong', 'other', 'team/a#10'),
           tab('owner', 'work', 'team/a#10'),
           tab('jira', 'jira', 'A-1'),
+          tab('unrelated', 'work', 'team/b#6'),
         ],
         activeTabId: 'source',
         shortcuts: {},
@@ -95,7 +98,7 @@ export async function auditRelationships(app, page) {
             key === 'team/a#1' && controls.includeCompletedBlocker
               ? [...trees[key], issue('team/a#11', key, true)]
               : trees[key].map((value) =>
-                  key === 'team/a#10' &&
+                  key === controls.heldTreeRoot &&
                   value.key === key &&
                   controls.backgroundMarker &&
                   _connection === controls.heldTreeConnection
@@ -110,7 +113,7 @@ export async function auditRelationships(app, page) {
           warnings: [],
         });
         if (
-          (key === 'team/a#10' &&
+          (key === controls.heldTreeRoot &&
             _connection === controls.heldTreeConnection) ||
           (key === 'team/a#1' &&
             _connection === 'work' &&
@@ -367,7 +370,7 @@ export async function auditRelationships(app, page) {
     await pane
       .getByRole('button', { name: 'Show team/b#5 in tree', exact: true })
       .click();
-    await expect(page.getByRole('tab')).toHaveCount(5);
+    await expect(page.getByRole('tab')).toHaveCount(6);
     await expect(page.locator('[data-tree-key="team/b#5"]')).toBeFocused();
     await expect
       .poll(() =>
@@ -646,22 +649,25 @@ export async function auditRelationships(app, page) {
     await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
     await expect(tasks).toContainText('Blocked by team/a#11');
     // Deliver a real held tree response after returning to the source, without
-    // navigation during its pending relationship inspection. Exercise both
-    // another account and an unrelated root in the same account.
-    for (const [index, connection] of [
-      [1, 'other'],
-      [2, 'work'],
+    // navigation during its pending relationship inspection. Exercise
+    // another account, an unreferenced root, and a referenced parent change.
+    for (const [index, connection, rootKey, invalidates] of [
+      [1, 'other', 'team/a#10', false],
+      [4, 'work', 'team/b#6', false],
+      [2, 'work', 'team/a#10', true],
     ]) {
+      await expect(page.getByRole('tab').nth(index)).toContainText(rootKey);
       await page.getByRole('tab').nth(index).click();
-      const marker = `Confirmed background ${connection}`;
+      const marker = `Confirmed background ${connection} ${rootKey}`;
       await app.evaluate(
-        (_electron, { connection, marker }) => {
+        (_electron, { connection, rootKey, marker }) => {
           const state = globalThis.relationshipAudit;
           state.heldTreeConnection = connection;
+          state.heldTreeRoot = rootKey;
           state.backgroundMarker = marker;
           state.treeRelease = null;
         },
-        { connection, marker },
+        { connection, rootKey, marker },
       );
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await expect
@@ -692,9 +698,16 @@ export async function auditRelationships(app, page) {
       expect(backgroundHeld.call.requestId).toEqual(expect.any(String));
       await app.evaluate(() => globalThis.relationshipAudit.treeRelease());
       await expect(page.getByRole('tab').nth(index)).toContainText(marker);
-      await expect(
-        tasks.getByRole('button', { name: 'Loading relationships…' }),
-      ).toBeVisible();
+      if (invalidates) {
+        await expect(tasks).toContainText('Blocker state unknown');
+        await expect(
+          tasks.getByRole('button', { name: 'Inspect blockers' }),
+        ).toBeVisible();
+      } else {
+        await expect(
+          tasks.getByRole('button', { name: 'Loading relationships…' }),
+        ).toBeVisible();
+      }
       expect(
         await app.evaluate(
           (_electron, { call, cancelledBefore }) =>
@@ -707,16 +720,29 @@ export async function auditRelationships(app, page) {
               ),
           backgroundHeld,
         ),
-      ).toBe(false);
+      ).toBe(invalidates);
+      const backgroundCompleted = await app.evaluate(
+        () => globalThis.relationshipAudit.completed,
+      );
       await app.evaluate(() => globalThis.relationshipAudit.release());
-      await expect(tasks).toContainText('Background inspection retained');
+      await expect
+        .poll(() => app.evaluate(() => globalThis.relationshipAudit.completed))
+        .toBeGreaterThan(backgroundCompleted);
+      if (invalidates)
+        await expect(tasks).not.toContainText('Background inspection retained');
+      else await expect(tasks).toContainText('Background inspection retained');
       await app.evaluate(() => {
         const state = globalThis.relationshipAudit;
         state.mode = 'normal';
         state.release = null;
         state.heldTreeConnection = null;
+        state.heldTreeRoot = null;
         state.backgroundMarker = null;
       });
+      if (invalidates) {
+        await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+        await expect(tasks).toContainText('Blocked by team/a#11');
+      }
     }
     const beforeRefresh = await app.evaluate(() => ({
       reads: globalThis.relationshipAudit.treeReads,

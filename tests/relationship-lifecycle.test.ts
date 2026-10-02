@@ -418,7 +418,7 @@ function rendererRequests(realRefresh = false) {
   assert.ok(publish, 'production mutation snapshot callback');
   runInNewContext(
     js(
-      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current] };`,
+      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current], graphRef: () => relationshipGraphsRef.current };`,
     ),
     context,
   );
@@ -1081,6 +1081,195 @@ test('late target conflict preserves unaffected active blockers and outside-conn
   assert.equal(blockers.blocker, 'blocked');
   assert.equal(blockers.incomplete, true);
   assert.deepEqual(blockers.blockers, ['B-2']);
+});
+
+test('desktop background audit preserves unreferenced roots and invalidates its referenced parent', async () => {
+  const source = parsed('../tools/smoke-relationships.mjs');
+  const installer = nodes(
+    source,
+    (n) =>
+      ts.isCallExpression(n) && n.expression.getText(source) === 'app.evaluate',
+  )[0] as ts.CallExpression;
+  const background = nodes(
+    source,
+    (n) =>
+      ts.isForOfStatement(n) &&
+      n.getText(source).includes('const backgroundHeld'),
+  )[0] as ts.ForOfStatement;
+  assert.ok(
+    installer && background,
+    'actual IPC fixture and native audit selection',
+  );
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const fixture: any = {
+    ipcMain: {
+      _invokeHandlers: handlers,
+      removeHandler: (channel: string) => handlers.delete(channel),
+      handle: (channel: string, handler: (...args: any[]) => any) =>
+        handlers.set(channel, handler),
+    },
+  };
+  runInNewContext(
+    `(${installer.arguments[0].getText(source)})({ ipcMain })`,
+    fixture,
+  );
+  const controls = fixture.relationshipAudit;
+  const api = rendererRequests(true);
+  const tabs = handlers.get('canopy:loadWorkspace')!().tabs as TabState[];
+  api.tabs.splice(0, api.tabs.length, ...tabs);
+  api.context.activeTab = api.tabs[0];
+  let serial = 0;
+  api.context.crypto.randomUUID = () => `background-${serial++}`;
+  for (const name of ['tree', 'relationships', 'cancelRelationships'])
+    api.context.window.canopy[name] = async (...args: unknown[]) =>
+      handlers.get(`canopy:${name}`)!(null, ...args);
+  api.context.mutations = new Mutations(
+    api.context.window.canopy,
+    (view) => api.context.api.publish(view),
+    () => {},
+  );
+  api.context.refreshSchedule.current.sync(
+    api.tabs.map((tab: TabState) => tab.id),
+    'source',
+    api.context.Date.now(),
+  );
+  api.context.activeIdRef.current = 'source';
+  for (const tab of tabs)
+    api.context.mutations.receive(
+      tab,
+      await api.context.window.canopy.tree(tab.connectionId, tab.rootKey),
+      0,
+    );
+  await api.refresh(tabs[0], false, true);
+  await api.advance(31_000);
+  await api.inspect('work', 'team/a#1');
+
+  // Match the preceding native changed-target poll and restored target evidence.
+  controls.mode = 'background-hold';
+  const recovery = api.inspect('work', 'team/a#1');
+  const recoveryCall = controls.calls.at(-1);
+  const recoveryBoundary = controls.cancelled.length;
+  controls.pollTargetUnavailable = true;
+  await api.advance(121_000);
+  assert.ok(
+    controls.cancelled
+      .slice(recoveryBoundary)
+      .some(
+        (call: any) =>
+          call.connection === recoveryCall.connection &&
+          call.requestId === recoveryCall.requestId,
+      ),
+  );
+  controls.release();
+  await recovery;
+  controls.mode = 'normal';
+  controls.pollTargetUnavailable = false;
+  await api.advance(241_000);
+  await api.inspect('work', 'team/a#1');
+  const identity = '["work","team/a#1"]';
+  const inspected = api.graphs()[identity] as IssueRelationships;
+  assert.equal(
+    inspected.groups.find((group) => group.kind === 'parent')!.items[0].key,
+    'team/a#10',
+  );
+  assert.equal(
+    inspected.groups.find((group) => group.kind === 'blocked')!.items[0].key,
+    'team/b#5',
+  );
+  assert.equal(
+    api.context.mutations
+      .confirmedSnapshot('owner')
+      .issues.find((row: Issue) => row.key === 'team/a#11').unavailableFields,
+    undefined,
+  );
+
+  const cases = runInNewContext(background.expression.getText(source), {}) as [
+    number,
+    string,
+    string?,
+    boolean?,
+  ][];
+  for (const [index, connection, selectedRoot, invalidates = false] of cases) {
+    const tab = tabs[index];
+    assert.equal(tab.connectionId, connection);
+    if (selectedRoot) assert.equal(tab.rootKey, selectedRoot);
+    const before = api.context.mutations.confirmedSnapshot(tab.id);
+    controls.heldTreeConnection = connection;
+    // Reviewed fixture held team/a#10 implicitly; the fixed fixture scopes both identities.
+    controls.heldTreeRoot = tab.rootKey;
+    controls.backgroundMarker = `Confirmed background ${connection} ${tab.rootKey}`;
+    controls.treeRelease = null;
+    const delivery = api.refresh(tab, true, true);
+    assert.equal(typeof controls.treeRelease, 'function');
+    controls.mode = 'background-hold';
+    controls.release = null;
+    const held = api.inspect('work', 'team/a#1');
+    const call = controls.calls.at(-1);
+    assert.equal(call.connection, 'work');
+    assert.equal(call.key, 'team/a#1');
+    const boundary = controls.cancelled.length;
+    assert.ok(api.graphs()[identity]);
+    assert.equal(api.loading()[identity], true);
+    controls.treeRelease();
+    await delivery;
+    const after = api.context.mutations.confirmedSnapshot(tab.id);
+    assert.equal(
+      api.context.api.intent().length,
+      0,
+      'the delivered manual target refresh has no outstanding source intent',
+    );
+    assert.equal(
+      api.context.api.graphRef()[identity],
+      api.graphs()[identity],
+      'published graph ref and visible graph agree',
+    );
+    const changed = [...relationshipChangedKeys(before, after)];
+    assert.deepEqual(
+      changed,
+      [tab.rootKey],
+      'only the selected root summary changed; cached blocker/child facts were restored',
+    );
+    const cancelled = controls.cancelled
+      .slice(boundary)
+      .filter(
+        (cancel: any) =>
+          cancel.connection === call.connection &&
+          cancel.requestId === call.requestId,
+      );
+    console.log(
+      'Background audit proof',
+      JSON.stringify({
+        connection,
+        rootKey: tab.rootKey,
+        invalidates,
+        changed,
+        call,
+        cancelled,
+        graphPresent: !!api.graphs()[identity],
+        loading: api.loading()[identity] === true,
+      }),
+    );
+    assert.equal(cancelled.length, invalidates ? 1 : 0);
+    assert.equal(!!api.graphs()[identity], !invalidates);
+    assert.equal(api.loading()[identity] === true, !invalidates);
+    controls.release();
+    await held;
+    assert.equal(
+      !!api.graphs()[identity],
+      !invalidates,
+      'late result respects exact cancellation and graph authority',
+    );
+    controls.mode = 'normal';
+    controls.heldTreeConnection = null;
+    controls.heldTreeRoot = null;
+    controls.backgroundMarker = null;
+    if (invalidates) await api.inspect('work', 'team/a#1');
+  }
+  assert.equal(
+    cases.length,
+    3,
+    'negative account/root controls and positive parent-change control all execute',
+  );
 });
 
 for (const gate of ['editor', 'pending write']) {
