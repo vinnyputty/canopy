@@ -343,7 +343,7 @@ export async function auditRelationships(app, page) {
     await pane
       .getByRole('button', { name: 'Show team/a#11 in tree', exact: true })
       .click();
-    await expect(page.getByRole('tab')).toHaveCount(4);
+    await expect(page.getByRole('tab')).toHaveCount(5);
     await expect
       .poll(() =>
         app.evaluate(() => globalThis.relationshipAudit.saved?.activeTabId),
@@ -433,7 +433,7 @@ export async function auditRelationships(app, page) {
       .getByRole('button', { name: 'Show team/a#12 in tree', exact: true })
       .click();
     await expectOwner('team/a#12');
-    await expect(page.getByRole('tab')).toHaveCount(5);
+    await expect(page.getByRole('tab')).toHaveCount(6);
     await page.getByRole('tab').first().click();
     await page.getByRole('button', { name: 'Next tasks', exact: true }).click();
     const tasks = page.getByRole('region', { name: 'Next tasks', exact: true });

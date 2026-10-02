@@ -8,7 +8,10 @@ import { issueWorkBrief } from '../src/renderer/copy-issue';
 import {
   relationshipBlockers,
   relationshipChangedKeys,
+  relationshipDestination,
 } from '../src/renderer/relationships';
+import { activateTab, sameRoot, visit } from '../src/renderer/workspace';
+import { rootView } from '../src/renderer/table-view';
 import { DemoProvider } from '../src/main/demo-provider';
 import { RootRefreshGate, RefreshSchedule } from '../src/renderer/refresh';
 import { Mutations } from '../src/renderer/mutations';
@@ -22,6 +25,7 @@ import type {
   IssueRelationships,
   TreeSnapshot,
   TabState,
+  Workspace,
 } from '../src/shared/types';
 
 const issue = (key: string, parentKey?: string): Issue => ({
@@ -1082,6 +1086,186 @@ test('late target conflict preserves unaffected active blockers and outside-conn
   assert.equal(blockers.incomplete, true);
   assert.deepEqual(blockers.blockers, ['B-2']);
 });
+
+for (const [checkpoint, name] of [
+  [0, 'blocker owner reuse'],
+  [2, 'parent and child owner reuse'],
+] as const) {
+  test(`desktop tab count follows actual App ${name} and root admission`, () => {
+    const smoke = parsed('../tools/smoke-relationships.mjs');
+    const installer = nodes(
+      smoke,
+      (n) =>
+        ts.isCallExpression(n) &&
+        n.expression.getText(smoke) === 'app.evaluate',
+    )[0] as ts.CallExpression;
+    const counts = nodes(
+      smoke,
+      (n) =>
+        ts.isCallExpression(n) &&
+        n.expression.getText(smoke) ===
+          "expect(page.getByRole('tab')).toHaveCount",
+    ) as ts.CallExpression[];
+    assert.equal(
+      counts.length,
+      3,
+      'all native tab-count checkpoints are covered',
+    );
+    const handlers = new Map<string, (...args: any[]) => any>();
+    runInNewContext(`(${installer.arguments[0].getText(smoke)})({ ipcMain })`, {
+      ipcMain: {
+        _invokeHandlers: handlers,
+        removeHandler: (channel: string) => handlers.delete(channel),
+        handle: (channel: string, handler: (...args: any[]) => any) =>
+          handlers.set(channel, handler),
+      },
+    });
+    const initial = handlers.get('canopy:loadWorkspace')!() as Workspace;
+    assert.deepEqual(
+      Array.from(initial.tabs, (tab) => tab.id),
+      ['source', 'wrong', 'owner', 'jira', 'unrelated'],
+    );
+    const source = parsed('../src/renderer/App.tsx');
+    const declarations = nodes(
+      source,
+      (n) =>
+        ts.isVariableDeclaration(n) &&
+        ['navigate', 'jumpToRelationship'].includes(n.name.getText(source)),
+    )
+      .map((n) => `const ${n.getText(source)};`)
+      .join('\n');
+    const context: any = {
+      relationshipDestination,
+      activateTab,
+      rootView,
+      sameRoot,
+      visit,
+      useCallback: (fn: unknown) => fn,
+      workspaceRef: { current: initial },
+      historyRef: { current: { back: [], forward: [] } },
+      pendingScrollRestore: { current: null },
+      navigationReveal: { current: null },
+      setHistory: () => {},
+      setNextTaskViews: () => {},
+      setReveal: (value: unknown) => {
+        context.reveal = value;
+      },
+      setWorkspace: (update: (value: Workspace) => Workspace) => {
+        context.workspaceRef.current = update(context.workspaceRef.current);
+      },
+      snapshots: Object.fromEntries(
+        initial.tabs.map((tab) => [
+          tab.id,
+          handlers.get('canopy:tree')!(null, tab.connectionId, tab.rootKey),
+        ]),
+      ),
+      crypto: {
+        randomUUID: (() => {
+          let id = 0;
+          return () => `outside-${id++}`;
+        })(),
+      },
+    };
+    runInNewContext(
+      js(
+        `${declarations}\nglobalThis.api = { jump: jumpToRelationship, navigate };`,
+      ),
+      context,
+    );
+    const current = () => context.workspaceRef.current as Workspace;
+    const active = () =>
+      current().tabs.find((tab) => tab.id === current().activeTabId)!;
+    const jump = (connection: string, key: string) => {
+      context.api.jump(connection, key);
+      assert.equal(active().connectionId, connection);
+      assert.equal(active().selectedKey, key);
+      assert.equal(context.reveal.tabId, active().id);
+      assert.equal(context.reveal.key, key);
+    };
+    const returned = () =>
+      context.api.navigate(current().tabs.find((tab) => tab.id === 'source'));
+    jump('work', 'team/a#11');
+    assert.equal(active().id, 'owner');
+    assert.equal(
+      current().tabs.find((tab) => tab.id === 'wrong')!.selectedKey,
+      'team/a#10',
+    );
+    const blockerWorkspace = current();
+    returned();
+    jump('work', 'team/b#5');
+    const outside = active();
+    assert.equal(outside.rootKey, 'team/b#5');
+    assert.equal(outside.id, 'outside-0');
+    const outsideWorkspace = current();
+    context.snapshots[outside.id] = handlers.get('canopy:tree')!(
+      null,
+      'work',
+      'team/b#5',
+    );
+    returned();
+    jump('work', 'team/a#10');
+    assert.equal(active().id, 'owner');
+    returned();
+    jump('work', 'team/a#12');
+    assert.equal(active().id, 'owner');
+    const hierarchyWorkspace = current();
+    assert.equal(
+      current().tabs.length,
+      initial.tabs.length + 1,
+      'outside root admitted once, hierarchy reuses its owner',
+    );
+    jump('work', 'team/b#5');
+    assert.equal(active().id, outside.id);
+    context.api.navigate({ ...outside, id: 'duplicate-root-id' });
+    assert.equal(
+      active().id,
+      outside.id,
+      'actual tab admission deduplicates the same account/root',
+    );
+    assert.equal(current().tabs.length, hierarchyWorkspace.tabs.length);
+    jump('other', 'team/b#5');
+    assert.equal(
+      active().id,
+      'outside-1',
+      'same key on another account admits a distinct root',
+    );
+    assert.equal(current().tabs.length, hierarchyWorkspace.tabs.length + 1);
+    jump('work', 'team/b#5');
+    assert.equal(active().id, outside.id);
+    const checkpoints = [
+      blockerWorkspace,
+      outsideWorkspace,
+      hierarchyWorkspace,
+    ];
+    console.log(
+      'Native tab-count source proof',
+      JSON.stringify({
+        counts: checkpoints.map((value) => value.tabs.length),
+        checkpoint,
+        expected: counts[checkpoint].arguments[0].getText(smoke),
+      }),
+    );
+    const assertion = (index: number) =>
+      runInNewContext(counts[index].getText(smoke), {
+        page: {
+          getByRole: (role: string) => {
+            assert.equal(role, 'tab');
+            return checkpoints[index].tabs;
+          },
+        },
+        expect: (tabs: TabState[]) => ({
+          toHaveCount: (count: number) =>
+            assert.equal(
+              tabs.length,
+              count,
+              `actual native ${name} tab-count assertion`,
+            ),
+        }),
+      });
+    assertion(1); // The outside-root assertion must remain exact as well.
+    assertion(checkpoint);
+  });
+}
 
 test('desktop background audit preserves unreferenced roots and invalidates its referenced parent', async () => {
   const source = parsed('../tools/smoke-relationships.mjs');
