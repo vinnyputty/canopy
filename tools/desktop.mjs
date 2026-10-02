@@ -133,11 +133,14 @@ if (
       { mode: 0o755 },
     );
   }
+  const { default: sign, signingConfig } =
+    await import('./windows-signing.mjs');
   const { build } = require('electron-builder');
   const { version } = require('electron/package.json');
   await build({
     projectDir: staging,
     config: {
+      ...signingConfig(process.env, process.platform, manifest.version, sign),
       electronVersion: version,
       npmRebuild: false,
       directories: { output: join(workspace, 'release') },
