@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -188,6 +189,67 @@ export async function qualify(manifest, path) {
   }
   return evidence;
 }
+function runGh(args) {
+  const result = spawnSync('gh', args, { encoding: 'utf8', timeout: 60000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0)
+    throw new Error(`gh ${args[0]} failed (${result.status})`);
+  return result.stdout;
+}
+export async function publish(
+  directory,
+  tag,
+  version,
+  commit,
+  evidence,
+  notes,
+  gh = runGh,
+) {
+  const manifest = await verifyDownloads(directory, tag, version, commit);
+  await qualify(manifest, evidence);
+  await readFile(notes, 'utf8');
+  // Resolve the live ref after artifact/native verification, not the checkout snapshot.
+  const endpoint = `repos/{owner}/{repo}/git/ref/tags/${manifest.tag}`;
+  const ref = JSON.parse(gh(['api', endpoint]));
+  if (ref.ref !== `refs/tags/${manifest.tag}`)
+    throw new Error('Remote tag identity mismatch');
+  let object = ref.object;
+  const seen = new Set();
+  while (
+    object?.type === 'tag' &&
+    /^[a-f0-9]{40}$/.test(object.sha) &&
+    !seen.has(object.sha)
+  ) {
+    seen.add(object.sha);
+    object = JSON.parse(
+      gh(['api', `repos/{owner}/{repo}/git/tags/${object.sha}`]),
+    ).object;
+  }
+  if (object?.type !== 'commit' || object.sha !== manifest.commit)
+    throw new Error('Remote tag commit differs from verified manifest');
+  // Annotated objects are immutable, but their ref may change during peeling.
+  if (ref.object.type === 'tag') {
+    const current = JSON.parse(gh(['api', endpoint]));
+    if (
+      current.ref !== ref.ref ||
+      current.object?.type !== ref.object.type ||
+      current.object?.sha !== ref.object.sha
+    )
+      throw new Error('Remote tag changed during verification');
+  }
+  gh([
+    'release',
+    'edit',
+    manifest.tag,
+    '--tag',
+    manifest.tag,
+    '--notes-file',
+    notes,
+    '--draft=false',
+    '--verify-tag',
+  ]);
+}
+
 if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href
@@ -197,6 +259,7 @@ if (
     validateTag(args[0], (await json('package.json')).version);
   else if (mode === 'assemble') await assemble(...args);
   else if (mode === 'verify') await verifyDownloads(...args);
+  else if (mode === 'publish') await publish(...args);
   else if (mode === 'qualify') {
     const [directory, tag, version, commit, evidence] = args;
     await qualify(

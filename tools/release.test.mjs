@@ -8,6 +8,7 @@ import {
   assemble,
   assetNames,
   platforms,
+  publish,
   qualify,
   validateTag,
   verifyDownloads,
@@ -156,23 +157,7 @@ test('publication requires exact-hash native evidence and macOS distribution tru
   fixture(async ({ input, output, root }) => {
     const manifest = await build(input, output);
     const path = join(root, 'qualification.json');
-    const evidence = {
-      tag,
-      commit,
-      status: 'passed',
-      evidenceUrl: 'https://example.test/qualification',
-      assets: manifest.assets.map((asset) => ({
-        ...asset,
-        nativeChecks: 'passed',
-        tester: 'test fixture',
-        osBuild: 'mock desktop',
-        date: '2026-10-02',
-        evidenceUrl: 'https://example.test/result',
-        signingPolicy: asset.name.includes('-mac-')
-          ? 'Developer ID signed and notarized'
-          : 'unsigned; trust prompts recorded',
-      })),
-    };
+    const evidence = qualification(manifest);
     await writeFile(path, JSON.stringify(evidence));
     await qualify(manifest, path);
     for (const patch of [
@@ -187,3 +172,191 @@ test('publication requires exact-hash native evidence and macOS distribution tru
       await assert.rejects(qualify(manifest, path));
     }
   }));
+
+function qualification(manifest) {
+  return {
+    tag,
+    commit,
+    status: 'passed',
+    evidenceUrl: 'https://example.test/qualification',
+    assets: manifest.assets.map((asset) => ({
+      ...asset,
+      nativeChecks: 'passed',
+      tester: 'test fixture',
+      osBuild: 'mock desktop',
+      date: '2026-10-02',
+      evidenceUrl: 'https://example.test/result',
+      signingPolicy: asset.name.includes('-mac-')
+        ? 'Developer ID signed and notarized'
+        : 'unsigned; trust prompts recorded',
+    })),
+  };
+}
+
+async function publicationFixture(fn) {
+  await fixture(async ({ root, input, output }) => {
+    const manifest = await build(input, output);
+    await rm(join(output, 'release-notes.md'));
+    const evidence = join(root, 'qualification.json');
+    const notes = join(root, 'public-notes.md');
+    await writeFile(evidence, JSON.stringify(qualification(manifest)));
+    await writeFile(notes, 'Qualified synthetic test release');
+    await fn({ output, evidence, notes });
+  });
+}
+const refEndpoint = `repos/{owner}/{repo}/git/ref/tags/${tag}`;
+const annotatedSha = 'c'.repeat(40);
+const remoteRef = (type, sha) => ({
+  ref: `refs/tags/${tag}`,
+  object: { type, sha },
+});
+const tagEndpoint = `repos/{owner}/{repo}/git/tags/${annotatedSha}`;
+function mockGh(responses, calls) {
+  return (args) => {
+    calls.push(args);
+    if (args[0] === 'release') {
+      assert.equal(
+        responses.length,
+        0,
+        'publication must follow every remote identity check',
+      );
+      return '';
+    }
+    const response = responses.shift();
+    assert.ok(response, 'unexpected remote query');
+    assert.deepEqual(args, ['api', response.endpoint]);
+    if (response.error) throw response.error;
+    return JSON.stringify(response.body);
+  };
+}
+test('publication resolves live lightweight and annotated tags to the qualified commit before editing', async () => {
+  for (const annotated of [false, true])
+    await publicationFixture(async ({ output, evidence, notes }) => {
+      const ref = remoteRef(
+        annotated ? 'tag' : 'commit',
+        annotated ? annotatedSha : commit,
+      );
+      const responses = [{ endpoint: refEndpoint, body: ref }];
+      if (annotated)
+        responses.push(
+          {
+            endpoint: tagEndpoint,
+            body: { object: { type: 'commit', sha: commit } },
+          },
+          { endpoint: refEndpoint, body: ref },
+        );
+      const calls = [];
+      await publish(
+        output,
+        tag,
+        version,
+        commit,
+        evidence,
+        notes,
+        mockGh(responses, calls),
+      );
+      assert.deepEqual(calls.at(-1), [
+        'release',
+        'edit',
+        tag,
+        '--tag',
+        tag,
+        '--notes-file',
+        notes,
+        '--draft=false',
+        '--verify-tag',
+      ]);
+      assert.equal(calls.length, annotated ? 4 : 2);
+    });
+});
+test('deleted or moved remote tags block publication despite a matching checkout and qualified manifest', async () => {
+  const missing = {
+    endpoint: refEndpoint,
+    error: new Error('HTTP 404: tag deleted'),
+  };
+  const annotated = {
+    endpoint: refEndpoint,
+    body: remoteRef('tag', annotatedSha),
+  };
+  const peeled = {
+    endpoint: tagEndpoint,
+    body: { object: { type: 'commit', sha: commit } },
+  };
+  const moved = {
+    endpoint: refEndpoint,
+    body: remoteRef('commit', 'b'.repeat(40)),
+  };
+  for (const responses of [
+    [missing], // Lightweight or annotated ref removed after checkout.
+    [moved],
+    [
+      annotated,
+      {
+        endpoint: tagEndpoint,
+        body: { object: { type: 'commit', sha: 'b'.repeat(40) } },
+      },
+    ],
+    [annotated, peeled, missing], // Ref disappears while peeling its immutable object.
+    [annotated, peeled, moved],
+    [
+      annotated,
+      peeled,
+      { endpoint: refEndpoint, body: remoteRef('tag', 'd'.repeat(40)) },
+    ],
+  ])
+    await publicationFixture(async ({ output, evidence, notes }) => {
+      const calls = [];
+      await assert.rejects(
+        publish(
+          output,
+          tag,
+          version,
+          commit,
+          evidence,
+          notes,
+          mockGh([...responses], calls),
+        ),
+        /tag deleted|Remote tag/,
+      );
+      assert.ok(
+        calls.every((args) => args[0] === 'api'),
+        'failed identity checks must never edit a release',
+      );
+    });
+});
+test('publication fails before remote calls for corrupt artifacts or pending native evidence', async () => {
+  for (const corrupt of [true, false])
+    await publicationFixture(async ({ output, evidence, notes }) => {
+      if (corrupt)
+        await writeFile(join(output, 'Canopy-0.1.0-win-x64.exe'), 'changed');
+      else {
+        const pending = JSON.parse(await readFile(evidence, 'utf8'));
+        pending.status = 'pending';
+        await writeFile(evidence, JSON.stringify(pending));
+      }
+      const calls = [];
+      await assert.rejects(
+        publish(
+          output,
+          tag,
+          version,
+          commit,
+          evidence,
+          notes,
+          mockGh([], calls),
+        ),
+      );
+      assert.equal(calls.length, 0);
+    });
+});
+test('publishing workflow invokes the guarded publication entry point', async () => {
+  const workflow = await readFile(
+    new URL('../.github/workflows/publish.yml', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    workflow,
+    /node tools\/release\.mjs publish downloaded "\$RELEASE_TAG" "\$version" "\$source_sha" "release-qualification\/\$RELEASE_TAG\.json" "release-qualification\/\$RELEASE_TAG\.md"/,
+  );
+  assert.doesNotMatch(workflow, /gh release edit/);
+});
