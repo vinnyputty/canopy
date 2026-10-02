@@ -1,4 +1,5 @@
 import { _electron as electron, expect } from '@playwright/test';
+import { auditAccessibility } from './smoke-accessibility.mjs';
 import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
@@ -1404,6 +1405,21 @@ try {
     recursive: true,
     force: true,
   });
+  if (process.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY === '1') {
+    await launch();
+    await auditAccessibility(
+      app,
+      page,
+      join(workspace, '.cache', 'accessibility'),
+    );
+    expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
+    await close();
+    await rm(userData, { recursive: true, force: true });
+    console.log(
+      'Canopy observed accessibility barrier regressions passed. Native qualification remains separate.',
+    );
+    process.exit(0);
+  }
   if (process.env.CANOPY_SMOKE_SIDEBAR_ONLY === '1') {
     await auditSidebarSample();
     expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
