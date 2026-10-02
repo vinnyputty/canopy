@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
+let flushHandler: (() => Promise<void>) | undefined;
+let ready: () => void;
+const flushReady = new Promise<void>((resolve) => {
+  ready = resolve;
+});
 const api: CanopyAPI = {
   updateState: () => ipcRenderer.invoke('canopy:updateState'),
   updatePreferences: (value) =>
@@ -9,6 +14,32 @@ const api: CanopyAPI = {
   cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
   dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
   openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
+  onWorkspaceFlush: (handler) => {
+    flushHandler = handler;
+    ready();
+  },
+  flushWorkspace: async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        flushReady,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'Workspace flush is unavailable. Wait for the window to load, then retry closing.',
+                ),
+              ),
+            10_000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    await flushHandler!();
+  },
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),

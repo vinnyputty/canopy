@@ -32,6 +32,8 @@ Drag the sidebar divider to resize it between 180 and 400 pixels (220 by default
 
 Window size, position, and maximized state survive restarts. Saved bounds are clamped to an available monitor's work area when display arrangements change. Fullscreen state is not restored.
 
+Closing the window or quitting waits for the latest workspace state to save, including pending changes to tabs, views, filters, and unread state. A failed save keeps the window open with its save error so you can retry closing. On Windows, Canopy delays a session shutdown request while saving and then quits. Windows controls whether the shutdown proceeds or needs to be retried; a forced shutdown can interrupt persistence. See [native close verification](workspace-close-check.md) for isolated OS shutdown checks.
+
 Workspace saves replace the previous file atomically. On Windows, temporary file-lock errors retry with bounded backoff; persistent failures remain visible and leave the previous saved file intact.
 
 ## Bulk triage

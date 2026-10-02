@@ -1,6 +1,7 @@
 import { auditInbox } from './smoke-inbox.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSidebar } from './smoke-sidebar.mjs';
+import { auditWorkspaceClose } from './smoke-close.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPalette } from './smoke-palette.mjs';
@@ -3544,6 +3545,12 @@ try {
   await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
+  await auditWorkspaceClose({
+    launch,
+    close,
+    current: () => ({ app, page }),
+    userData,
+  });
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(
