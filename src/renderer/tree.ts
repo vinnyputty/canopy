@@ -71,23 +71,29 @@ export function buildIssueTree(
   const nodes = new Map(
     issues.map((issue) => [issue.key, { issue, children: [] as IssueNode[] }]),
   );
-  for (const node of nodes.values()) {
-    if (node.issue.parentKey && nodes.has(node.issue.parentKey)) {
-      let ancestor: Issue | undefined = nodes.get(node.issue.parentKey)?.issue;
-      const visited = new Set<string>();
-      let cyclic = false;
-      while (ancestor && !visited.has(ancestor.key)) {
-        if (ancestor.key === node.issue.key) {
-          cyclic = true;
-          break;
-        }
-        visited.add(ancestor.key);
-        ancestor = ancestor.parentKey
-          ? nodes.get(ancestor.parentKey)?.issue
-          : undefined;
+  // A parent graph has at most one outgoing edge per issue. Classify each
+  // path once; only members of a cycle lose their parent edge.
+  const classified = new Set<string>();
+  const cyclic = new Set<string>();
+  for (const key of nodes.keys()) {
+    const path: string[] = [];
+    const positions = new Map<string, number>();
+    let current: string | undefined = key;
+    while (current && nodes.has(current) && !classified.has(current)) {
+      const position = positions.get(current);
+      if (position !== undefined) {
+        for (const member of path.slice(position)) cyclic.add(member);
+        break;
       }
-      if (!cyclic) nodes.get(node.issue.parentKey)!.children.push(node);
+      positions.set(current, path.length);
+      path.push(current);
+      current = nodes.get(current)!.issue.parentKey;
     }
+    for (const member of path) classified.add(member);
+  }
+  for (const node of nodes.values()) {
+    if (node.issue.parentKey && !cyclic.has(node.issue.key))
+      nodes.get(node.issue.parentKey)?.children.push(node);
   }
   return nodes.get(rootKey) ?? null;
 }

@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import type {
   Connection,
+  TreeSnapshot,
   IssuePatch,
   Workspace,
   TokenConnectionInput,
@@ -407,6 +408,7 @@ async function start(
       ? githubRootUrl(value)
       : `${connection.url}/browse/${encodeURIComponent(value)}`;
   };
+  const trees = new Map<string, AbortController>();
   const searches = new Map<string, AbortController>();
   const cancelSearch = (id: string, requestId: string) => {
     const owner = JSON.stringify([text(id), text(requestId)]);
@@ -531,10 +533,11 @@ async function start(
     disconnect: async (id: string) => {
       if (demoMode) throw new Error('Close the demo to manage connections.');
       text(id);
-      for (const [owner, controller] of searches) {
+      for (const [owner, controller] of [...searches, ...trees]) {
         if (JSON.parse(owner)[0] === id) {
           controller.abort();
           searches.delete(owner);
+          trees.delete(owner);
         }
       }
       for (const [owner, controller] of relationshipRequests) {
@@ -563,8 +566,37 @@ async function start(
           ? auth.githubSyncStatus(id)
           : auth.syncStatus(id);
     },
-    tree: (id: string, root: string) =>
-      provider(id).tree(normalizedRoot(id, root)),
+    tree: async (id: string, root: string, requestId?: string) => {
+      const client = provider(id);
+      const key = normalizedRoot(id, root);
+      if (requestId === undefined) return client.tree(key);
+      const owner = JSON.stringify([text(id), text(requestId)]);
+      trees.get(owner)?.abort();
+      const controller = new AbortController();
+      trees.set(owner, controller);
+      try {
+        return await client.tree(key, {
+          signal: controller.signal,
+          progress: (snapshot: TreeSnapshot) => {
+            if (
+              trees.get(owner) === controller &&
+              window &&
+              !window.isDestroyed()
+            )
+              window.webContents.send(
+                'canopy:treeProgress',
+                requestId,
+                snapshot,
+              );
+          },
+        });
+      } finally {
+        if (trees.get(owner) === controller) trees.delete(owner);
+      }
+    },
+    cancelTree: (id: string, requestId: string) => {
+      trees.get(JSON.stringify([text(id), text(requestId)]))?.abort();
+    },
     priorityOrder: (id: string, keys: unknown) => {
       if (!Array.isArray(keys) || keys.length > 1000)
         throw new Error('Invalid priority representatives.');
@@ -873,6 +905,8 @@ async function start(
       (_wc, _permission, callback) => callback(false),
     );
     window.on('closed', () => {
+      for (const controller of trees.values()) controller.abort();
+      trees.clear();
       window = null;
     });
     await window.loadFile(html);
