@@ -7,9 +7,13 @@ export async function replaceFile(
   destination: string,
   platform = process.platform,
   move = rename,
+  beforeMove?: () => void,
 ): Promise<void> {
   const backoff = [25, 50, 100, 200, 250, 250];
   for (let attempt = 0; ; attempt += 1) {
+    // Recheck approval after any asynchronous staging or lock retry, then
+    // invoke the native rename in the same JavaScript turn.
+    beforeMove?.();
     try {
       await move(source, destination);
       return;

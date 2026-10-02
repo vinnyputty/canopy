@@ -53,7 +53,8 @@ export function WorkspaceBackupPanel({
         filters, appearance, reading, pane sizes, and keyboard shortcuts. These
         metadata may reveal private project names, issue titles, account
         identifiers in saved filters, and workflow details. Store the file
-        privately.
+        privately. Repeated closed-root history is exported once per root; open
+        roots take precedence.
       </p>
       <p>
         Credentials and tokens, issue snapshots, comments, descriptions, and

@@ -18,12 +18,13 @@ import {
 } from './fixtures/workspace-backup';
 
 // Exercise Storage's actual queue and filesystem without loading Electron or a keychain.
-async function sampleStorage(directory: string) {
+async function sampleStorage(directory: string, gateModule?: string) {
   const result = await build({
     entryPoints: ['src/main/storage.ts'],
     bundle: true,
     platform: 'node',
     format: 'cjs',
+    external: gateModule ? [gateModule] : [],
     write: false,
     plugins: [
       {
@@ -36,9 +37,19 @@ async function sampleStorage(directory: string) {
           build.onLoad(
             { filter: /.*/, namespace: 'replacement-failure' },
             () => ({
-              contents: `import {access,rename} from 'node:fs/promises'; export async function replaceFile(source,destination) { let fail = false; try { await access(destination+'.fail'); fail = true; } catch {} if (fail) throw new Error('Fixture replacement failure'); await rename(source,destination); }`,
+              contents: `${gateModule ? `import {beforeReplace} from ${JSON.stringify(gateModule)};` : 'const beforeReplace = async () => {};'} import {access,rename} from 'node:fs/promises'; export async function replaceFile(source,destination) { let fail = false; try { await access(destination+'.fail'); fail = true; } catch {} if (fail) throw new Error('Fixture replacement failure'); await beforeReplace(destination); arguments[4]?.(); await rename(source,destination); }`,
             }),
           );
+          if (gateModule) {
+            build.onResolve({ filter: /^node:fs\/promises$/ }, (args) =>
+              /[\\/]storage\.ts$/.test(args.importer)
+                ? { path: 'staged-fs', namespace: 'staging-gate' }
+                : undefined,
+            );
+            build.onLoad({ filter: /.*/, namespace: 'staging-gate' }, () => ({
+              contents: `export * from 'node:fs/promises'; import {writeFile as write} from 'node:fs/promises'; import {afterStage} from ${JSON.stringify(gateModule)}; export async function writeFile(...args) {await write(...args); await afterStage(args[0]);}`,
+            }));
+          }
           build.onResolve({ filter: /^electron$/ }, () => ({
             path: 'electron',
             namespace: 'sample',
@@ -196,3 +207,99 @@ test('bounded backup file reads and private atomic exports reject protected dest
   await assert.rejects(readBackupFile(file));
   await assert.rejects(readBackupFile(directory), /regular backup/);
 });
+
+for (const phase of ['queue', 'staging', 'replacement'] as const) {
+  test(`connection change during ${phase} rejects before workspace replacement`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), 'canopy-approval-race-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const gateFile = join(directory, 'gate.cjs');
+    await writeFile(
+      gateFile,
+      `const {basename} = require('node:path');
+exports.pause = async () => {};
+exports.arm = phase => {
+  let notify, release;
+  const entered = new Promise(resolve => notify = resolve);
+  const blocked = new Promise(resolve => release = resolve);
+  exports.started = () => entered;
+  exports.release = release;
+  exports.pause = async candidate => {
+    if (candidate === phase) { notify(); await blocked; }
+  };
+};
+exports.beforeReplace = async destination => {
+  if (basename(destination) === 'hold.json') await exports.pause('queue');
+  if (basename(destination) === 'workspace.json') await exports.pause('replacement');
+};
+exports.afterStage = async file => {
+  if (basename(file) === 'workspace.json.tmp') await exports.pause('staging');
+};`,
+    );
+    const gate = createRequire(import.meta.url)(gateFile) as {
+      arm(phase: string): void;
+      started(): Promise<void>;
+      release(): void;
+    };
+    const storage = await sampleStorage(directory, gateFile);
+    const original = structuredClone(backupWorkspace);
+    await storage.write('workspace', original);
+    await writeFile(join(directory, 'credentials.json'), 'FAKE OPAQUE FIXTURE');
+    await writeFile(join(directory, 'tree-cache.json'), 'PRIVATE SAMPLE CACHE');
+    const originalBytes = await readFile(
+      join(directory, 'workspace.json'),
+      'utf8',
+    );
+    let connections = structuredClone(backupConnections);
+    const transfer = new WorkspaceTransfer(storage, () => connections);
+    const backup = createBackup(
+      { ...original, theme: 'light' },
+      backupConnections,
+    );
+    const mapping = Object.fromEntries(
+      backupConnections.map((c) => [c.id, c.id]),
+    );
+    const preview = await transfer.preview(backup, mapping, 'replace');
+    gate.arm(phase);
+    let held: Promise<void> | undefined;
+    if (phase === 'queue') {
+      held = storage.write('hold', { sample: true });
+      await gate.started();
+    }
+    const applying = transfer.apply(preview.token);
+    const rejected = assert.rejects(
+      applying,
+      /connection.*changed|preview expired/i,
+      phase,
+    );
+    if (phase !== 'queue') await gate.started();
+    // Same ID/provider/server, different account: provider compatibility alone is insufficient.
+    connections = connections.map((c) => ({
+      ...c,
+      accountName: 'different-sample-account',
+    }));
+    gate.release();
+    if (held) await held;
+    await rejected;
+    assert.equal(
+      await readFile(join(directory, 'workspace.json'), 'utf8'),
+      originalBytes,
+      phase,
+    );
+    assert.equal(transfer.canUndo(), false);
+    await assert.rejects(readFile(join(directory, 'workspace.json.tmp')), {
+      code: 'ENOENT',
+    });
+    assert.equal(
+      await readFile(join(directory, 'credentials.json'), 'utf8'),
+      'FAKE OPAQUE FIXTURE',
+    );
+    assert.equal(
+      await readFile(join(directory, 'tree-cache.json'), 'utf8'),
+      'PRIVATE SAMPLE CACHE',
+    );
+    connections = structuredClone(backupConnections);
+    const retried = await transfer.preview(backup, mapping, 'replace');
+    await transfer.apply(retried.token);
+    assert.equal((await storage.read<Workspace>('workspace'))?.theme, 'light');
+  });
+}

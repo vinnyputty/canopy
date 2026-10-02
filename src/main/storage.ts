@@ -21,12 +21,18 @@ export class Storage {
       );
     }
   }
-  private async persist(name: string, contents: string) {
+  private async persist(name: string, contents: string, validate?: () => void) {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const file = join(this.directory, `${name}.json`);
     try {
       await writeFile(`${file}.tmp`, contents, { mode: 0o600 });
-      await replaceFile(`${file}.tmp`, file);
+      await replaceFile(
+        `${file}.tmp`,
+        file,
+        process.platform,
+        undefined,
+        validate,
+      );
     } finally {
       await rm(`${file}.tmp`, { force: true }).catch(() => {});
     }
@@ -39,17 +45,22 @@ export class Storage {
     this.pending = task;
     return task;
   }
-  replaceWorkspace(expected: Workspace, next: Workspace): Promise<void> {
+  replaceWorkspace(
+    expected: Workspace,
+    next: Workspace,
+    validate?: () => void,
+  ): Promise<void> {
     const contents = JSON.stringify(next);
     const task = this.pending
       .catch(() => {})
       .then(async () => {
+        validate?.();
         const current = await this.read<Workspace>('workspace');
         if (!isDeepStrictEqual(current, JSON.parse(JSON.stringify(expected))))
           throw new Error(
             'Workspace changed after preview; review the import again.',
           );
-        await this.persist('workspace', contents);
+        await this.persist('workspace', contents, validate);
       });
     this.pending = task;
     return task;

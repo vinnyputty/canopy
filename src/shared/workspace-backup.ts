@@ -256,8 +256,22 @@ export function createBackup(
       .map((k) => [k, workspace[k as keyof Workspace]]),
   ) as Workspace;
   portable.tabs = workspace.tabs.map(portableTab);
-  if (workspace.closedTabs)
-    portable.closedTabs = workspace.closedTabs.map(portableTab);
+  if (workspace.closedTabs) {
+    // Closed history can retain reopened roots and repeated visits. Open roots
+    // win; retain only the newest closed visit and give it a distinct tab ID.
+    const roots = new Set(portable.tabs.map(identity));
+    const ids = new Set(portable.tabs.map((tab) => tab.id));
+    portable.closedTabs = [];
+    for (const tab of workspace.closedTabs) {
+      const key = identity(tab);
+      if (roots.has(key)) continue;
+      roots.add(key);
+      let id = tab.id;
+      while (ids.has(id)) id = `closed-${id}`;
+      ids.add(id);
+      portable.closedTabs.push({ ...portableTab(tab), id });
+    }
+  }
   const backup: WorkspaceBackup = {
     format: 'canopy-workspace',
     version: 1,
@@ -293,7 +307,8 @@ export function parseBackup(contents: string): WorkspaceBackup {
   string(input.createdAt, 40);
   if (
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(input.createdAt) ||
-    !Number.isFinite(Date.parse(input.createdAt))
+    !Number.isFinite(Date.parse(input.createdAt)) ||
+    new Date(input.createdAt).toISOString() !== input.createdAt
   )
     throw new Error('Invalid backup timestamp.');
   const connections = list(input.connections, 100).map((item) => {
@@ -385,7 +400,8 @@ export function planImport(
     ...r,
     connectionId: mapping[r.connectionId],
   });
-  const incoming = structuredClone(backup.workspace);
+  const incoming = migrateViews(structuredClone(backup.workspace));
+  current = migrateViews(current);
   incoming.tabs = incoming.tabs.map(remap);
   incoming.closedTabs = incoming.closedTabs?.map(remap);
   incoming.pinnedRoots = incoming.pinnedRoots?.map(remap);
