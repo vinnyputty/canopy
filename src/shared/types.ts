@@ -210,6 +210,7 @@ export type TokenConnectionInput = {
 export type GithubConnectionInput = { token: string; repositories: string[] };
 export interface CanopyAPI {
   demoMode(): Promise<boolean>;
+  demoTimeScale(): Promise<number>;
   launchDemo(): Promise<void>;
   closeDemo(): Promise<void>;
   resetDemo(): Promise<void>;
