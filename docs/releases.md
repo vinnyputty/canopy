@@ -8,13 +8,14 @@ After source review and approval, update the app version and lockfile as needed,
 
 The draft job has only `contents: write`. It checks all platform reports against the tag version and source SHA, requires every expected format, and recalculates each hash before attaching the downloads. It creates a **draft** using an existing tag, downloads its assets again, and verifies the uploaded bytes. Missing/stale reports, extra files, altered bytes, or failed platform jobs block the draft. A verification failure after upload leaves an unpublished draft for investigation. Reruns refuse an existing release; inspect and remove a failed draft explicitly before retrying, never overwrite a published version.
 
-| Platform    | Release asset (`<version>` is the app version)                               |
-| ----------- | ---------------------------------------------------------------------------- |
-| macOS arm64 | `Canopy-<version>-mac-arm64.dmg`, `Canopy-<version>-mac-arm64.zip`           |
-| Windows x64 | `Canopy-<version>-win-x64.exe`                                               |
-| Linux x64   | `Canopy-<version>-linux-x86_64.AppImage`, `Canopy-<version>-linux-amd64.deb` |
+| Platform                     | Release asset (`<version>` is the app version)                               |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| macOS arm64 (both modes)     | `Canopy-<version>-mac-arm64.dmg`, `Canopy-<version>-mac-arm64.zip`           |
+| macOS x64 (signed mode only) | `Canopy-<version>-mac-x64.dmg`, `Canopy-<version>-mac-x64.zip`               |
+| Windows x64                  | `Canopy-<version>-win-x64.exe`                                               |
+| Linux x64                    | `Canopy-<version>-linux-x86_64.AppImage`, `Canopy-<version>-linux-amd64.deb` |
 
-Each draft also contains `SHA256SUMS` and `release-manifest.json` with version, source SHA, CI run, signing mode, and asset hashes. Signed macOS assets additionally carry the verified Developer ID identity, Team ID, certificate SHA-1, architecture, notarization submission IDs, and signature/staple/Gatekeeper results. SHA-1 identifies the certificate; artifact integrity uses SHA-256. Draft notes label these unsigned test builds awaiting native qualification. Other CPUs are unqualified. Automated payload checks do not qualify installation, upgrade, removal, OS trust, or real credentials.
+Each draft also contains `SHA256SUMS` and `release-manifest.json` with version, source SHA, CI run, signing mode, and asset hashes. Signed macOS assets additionally carry the verified Developer ID identity, Team ID, certificate SHA-1, architecture, notarization submission IDs, and signature/staple/Gatekeeper results. SHA-1 identifies the certificate; artifact integrity uses SHA-256. Unsigned-mode draft notes label the downloads unsigned test builds. Signed-mode notes label macOS downloads Developer ID signed/notarized candidates and Windows/Linux downloads test builds. Both modes await native qualification and block public release. Other CPUs are unqualified. Automated payload checks do not qualify installation, upgrade, removal, OS trust, or real credentials.
 
 ## Install and verify
 
