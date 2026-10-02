@@ -3300,6 +3300,12 @@ export function App() {
           setWorkspace((current) => ({ ...current, previewWidth }))
         }
         onClose={closePreview}
+        onAuthoringChanged={() => {
+          for (const tab of allRefreshTabs.filter(
+            (tab) => tab.connectionId === previewRoute.connectionId,
+          ))
+            void refreshTab(tab);
+        }}
         onChanged={(issue) => {
           mutations.acceptConfirmedLabels(previewRoute.connectionId, issue);
           for (const tab of allRefreshTabs.filter((tab) =>

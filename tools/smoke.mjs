@@ -1,4 +1,5 @@
 import { auditInbox } from './smoke-inbox.mjs';
+import { auditAuthoring } from './smoke-authoring.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
@@ -3544,6 +3545,7 @@ try {
   await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
+  await auditAuthoring(appPath, executablePath, env);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(
