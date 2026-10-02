@@ -102,6 +102,7 @@ export async function checkPackagedInstallCleanup() {
                   '--no-install-recommends',
                   'libnotify4',
                   'libsecret-1-0',
+                  'libfuse2t64',
                 ],
           );
           calls.push(stage);
