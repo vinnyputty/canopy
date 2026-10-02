@@ -194,3 +194,36 @@ test('search boundaries persist with merged ranked pages and reset with connecti
   assert.deepEqual(search.state.issues, []);
   search.cancel();
 });
+
+test('deliberate search stays local until explicitly loaded and cancels obsolete pages', async () => {
+  let calls = 0;
+  let resolve: (page: SearchPage) => void = () => {};
+  const search = new IssueSearch(
+    {
+      search: async () => {
+        calls++;
+        return new Promise<SearchPage>((done) => {
+          resolve = done;
+        });
+      },
+      cancelSearch: async () => {},
+    },
+    () => {},
+    0,
+  );
+  search.start('one', 'platform', undefined, false);
+  await tick();
+  assert.equal(calls, 0);
+  const pending = search.load();
+  assert.equal(calls, 1);
+  search.start('two', 'different', undefined, false);
+  resolve({
+    issues: [issue('CAN-1', 'Obsolete')],
+    boundaries: [{ repository: 'owner/repo', reason: 'incomplete' }],
+  });
+  await pending;
+  assert.equal(search.state.issues.length, 0);
+  assert.equal(search.state.boundaries.length, 0);
+  assert.equal(search.state.searched, false);
+  search.cancel();
+});

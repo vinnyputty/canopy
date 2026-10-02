@@ -3,6 +3,7 @@ import { _electron as electron, expect } from '@playwright/test';
 import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
+import { auditPalette } from './smoke-palette.mjs';
 import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
 import { auditWorkflow } from './smoke-workflow.mjs';
 import { auditPreview, installPreviewHandlers } from './smoke-preview.mjs';
@@ -3446,6 +3447,7 @@ try {
     }),
   );
   await launch();
+  await auditPalette(app, page);
   await auditSearch(app, page);
   await auditRefresh(app, page, resizeWindow);
 

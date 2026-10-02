@@ -24,7 +24,7 @@ export async function auditRefresh(app, page, resizeWindow) {
     await page.getByRole('button', { name: 'More commands' }).click();
     await page
       .getByRole('dialog', { name: 'Command palette' })
-      .getByRole('button', { name: /Refresh current tree/ })
+      .getByRole('option', { name: /Refresh current tree/ })
       .click();
   };
   const checking = page.getByText('Checking for changes');
