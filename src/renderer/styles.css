@@ -3084,3 +3084,16 @@ kbd {
   gap: 8px;
   align-items: center;
 }
+
+.relationship-groups h4 {
+  margin: 12px 0 6px;
+}
+.relationship-groups .preview-link p {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.next-task-relationships {
+  max-width: 320px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

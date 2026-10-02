@@ -1,3 +1,4 @@
+import { RelationshipGroups } from './RelationshipGroups';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type {
@@ -5,6 +6,7 @@ import type {
   DevelopmentLink,
   DevelopmentLinks,
   Issue,
+  IssueRelationships,
   IssuePreview as Preview,
   SeenIssue,
   SeenValue,
@@ -32,6 +34,10 @@ function metadataValue(value: string | null | undefined, date = false) {
 export function IssuePreview({
   connectionId,
   provider,
+  connectionName,
+  relationships,
+  relationshipsLoading,
+  onRelationships,
   issueKey,
   observedIssue,
   baseline,
@@ -41,7 +47,7 @@ export function IssuePreview({
   onClose,
   onChanged,
   onPreview,
-  onOpenTab,
+  onJump,
   onOpenExternal,
   onCopyKeySummary,
   onWorkBrief,
@@ -49,6 +55,10 @@ export function IssuePreview({
 }: {
   connectionId: string;
   provider: 'jira' | 'github' | 'demo';
+  connectionName: string;
+  relationships?: IssueRelationships;
+  relationshipsLoading: boolean;
+  onRelationships: () => void;
   issueKey: string;
   observedIssue?: Issue;
   baseline?: SeenIssue;
@@ -58,7 +68,7 @@ export function IssuePreview({
   onClose: () => void;
   onChanged: (issue: Issue) => void;
   onPreview: (key: string) => void;
-  onOpenTab: (key: string) => void;
+  onJump: (key: string) => void;
   onOpenExternal: (key: string) => void;
   onCopyKeySummary: (issue: Preview['issue']) => void;
   onWorkBrief: (preview: Preview) => void;
@@ -669,48 +679,31 @@ export function IssuePreview({
               )}
             </section>
             <section>
-              <h3>Linked issue references</h3>
-              <p className="preview-hint">
-                Relationships from {issueKey}; these references are separate
-                from hierarchy children.
-              </p>
-              {data.linksError && <p role="alert">{data.linksError}</p>}
-              {data.issue.links.length === 0 && (
-                <p>No linked issue references.</p>
+              <h3>Issue relationships</h3>
+              <button
+                className="tool-button"
+                disabled={relationshipsLoading}
+                onClick={onRelationships}
+              >
+                {relationships
+                  ? 'Refresh relationships'
+                  : 'Inspect relationships'}
+              </button>
+              {relationshipsLoading ? (
+                <p role="status">Loading relationships…</p>
+              ) : relationships ? (
+                <RelationshipGroups
+                  graph={relationships}
+                  identity={`${provider === 'github' ? 'GitHub' : provider === 'jira' ? 'Jira' : 'Demo'} · ${connectionName}`}
+                  onPreview={onPreview}
+                  onJump={onJump}
+                />
+              ) : (
+                <p>
+                  Relationships have not been inspected. Blocker state may be
+                  unknown.
+                </p>
               )}
-              {data.issue.links.map((link, index) => (
-                <article
-                  className="preview-link"
-                  key={`${link.relationship}-${link.key}-${index}`}
-                >
-                  <strong>
-                    {issueKey} {link.relationship}
-                  </strong>
-                  <button
-                    className="text-button"
-                    onClick={() => onPreview(link.key)}
-                    aria-label={`Preview ${link.key}: ${link.summary}`}
-                  >
-                    {link.key} · {link.summary}
-                  </button>
-                  <div>
-                    <button
-                      className="tool-button"
-                      onClick={() => onOpenTab(link.key)}
-                    >
-                      Open tree in new tab
-                    </button>
-                    {provider !== 'demo' && (
-                      <button
-                        className="tool-button"
-                        onClick={() => onOpenExternal(link.key)}
-                      >
-                        Open in {provider === 'github' ? 'GitHub' : 'Jira'}
-                      </button>
-                    )}
-                  </div>
-                </article>
-              ))}
             </section>
           </>
         )}

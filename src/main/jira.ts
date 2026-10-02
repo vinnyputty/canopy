@@ -1,3 +1,7 @@
+import {
+  issueRelationships,
+  relationshipFailure,
+} from '../shared/relationships';
 import { JiraConsistency } from './jira-consistency';
 import { isIP } from 'node:net';
 
@@ -15,6 +19,8 @@ import type {
   Issue,
   IssuePatch,
   IssuePreview,
+  IssueRelationships,
+  Relationship,
   TreeSnapshot,
   SearchPage,
   Status,
@@ -145,7 +151,9 @@ function parseIssue(raw: JiraIssue): Issue {
       : 'indeterminate';
   const links: Issue['links'] = [];
 
-  for (const link of fields.issuelinks ?? []) {
+  for (const link of Array.isArray(fields.issuelinks)
+    ? fields.issuelinks
+    : []) {
     const linked = link.outwardIssue ?? link.inwardIssue;
     if (!linked?.key) continue;
     links.push({
@@ -161,6 +169,7 @@ function parseIssue(raw: JiraIssue): Issue {
                   : ('indeterminate' as const),
           }
         : {}),
+      direction: link.outwardIssue ? 'outward' : 'inward',
       relationship: String(
         link.outwardIssue
           ? (link.type?.outward ?? 'links to')
@@ -192,7 +201,14 @@ function parseIssue(raw: JiraIssue): Issue {
       category,
     },
     links,
-    linksAvailable: Array.isArray(fields.issuelinks),
+    linksAvailable:
+      Array.isArray(fields.issuelinks) &&
+      fields.issuelinks.every(
+        (link: any) =>
+          (link.outwardIssue ?? link.inwardIssue)?.key &&
+          link.type?.inward &&
+          link.type?.outward,
+      ),
     ...(typeof fields.updated === 'string' ? { updated: fields.updated } : {}),
     ...(Number.isSafeInteger(fields.comment?.total) && fields.comment.total >= 0
       ? { commentCount: fields.comment.total }
@@ -211,6 +227,8 @@ function parseIssue(raw: JiraIssue): Issue {
         .filter(
           (field) =>
             !(field in fields) ||
+            (field === 'status' &&
+              !['new', 'indeterminate', 'done'].includes(statusCategory)) ||
             ((field === 'issuetype' || field === 'status') &&
               fields[field] === null),
         )
@@ -567,6 +585,111 @@ export class JiraProvider {
       totalComments: Number(comments.page?.total ?? 0),
       ...(comments.error ? { commentsError: comments.error } : {}),
     };
+  }
+  async relationships(
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<IssueRelationships> {
+    signal?.throwIfAborted();
+    const raw = await this.request(
+      `${issuePath(key)}?fields=${encodeURIComponent(ISSUE_FIELDS.join(','))}`,
+      { signal },
+    );
+    signal?.throwIfAborted();
+    const issue = parseIssue(raw);
+    const graph = issueRelationships(issue);
+    if (
+      Array.isArray(raw.fields.issuelinks) &&
+      raw.fields.issuelinks.some(
+        (link: any) =>
+          !(link.outwardIssue ?? link.inwardIssue)?.key ||
+          !link.type?.inward ||
+          !link.type?.outward,
+      )
+    ) {
+      for (const group of graph.groups.filter((group) =>
+        ['blockers', 'blocked', 'related'].includes(group.kind),
+      )) {
+        group.state = 'partial';
+        group.problem = 'invalid';
+        group.reason =
+          'Jira returned incomplete link data; some relationships are unknown.';
+      }
+    }
+    const parent = graph.groups.find((group) => group.kind === 'parent')!;
+    // An omitted parent field is ambiguous: it cannot establish a complete hierarchy.
+    parent.state = 'parent' in raw.fields ? 'visible' : 'unavailable';
+    parent.reason =
+      parent.state === 'unavailable'
+        ? 'Jira did not return parent data; the parent path is unknown.'
+        : undefined;
+    if (issue.parentKey)
+      parent.items = [
+        {
+          key: issue.parentKey,
+          summary: String(
+            raw.fields.parent?.fields?.summary ?? issue.parentKey,
+          ),
+          relationship: 'child of',
+          direction: 'inward',
+          access: 'unknown',
+        },
+      ];
+    const children = graph.groups.find((group) => group.kind === 'children')!;
+    const childItems: Relationship[] = [];
+    try {
+      let token: string | undefined;
+      const seen = new Set<string>();
+      for (let page = 0; page < 2; page++) {
+        signal?.throwIfAborted();
+        const result = await this.searchPage(
+          {
+            jql: `parent = ${quoteJql(key)}`,
+            fields: ISSUE_FIELDS,
+            maxResults: 100,
+            ...(token ? { nextPageToken: token } : {}),
+          },
+          signal,
+        );
+        signal?.throwIfAborted();
+        if (!Array.isArray(result.issues) || result.issues.length > 100)
+          throw new Error('Invalid child page');
+        for (const value of result.issues) {
+          const child = parseIssue(value);
+          childItems.push({
+            key: child.key,
+            summary: child.summary,
+            relationship: 'parent of',
+            direction: 'outward',
+            statusCategory: child.unavailableFields?.includes('status')
+              ? undefined
+              : child.status.category,
+            access: 'available',
+          });
+        }
+        token =
+          typeof result.nextPageToken === 'string' && result.nextPageToken
+            ? result.nextPageToken
+            : undefined;
+        if (result.isLast === true && !token) {
+          children.state = 'visible';
+          children.reason = undefined;
+          break;
+        }
+        if (!token || seen.has(token))
+          throw new Error('Incomplete child pagination');
+        seen.add(token);
+        children.state = 'partial';
+        children.problem = 'limit';
+        children.reason = 'Showing at most 200 children; more may exist.';
+      }
+    } catch (error) {
+      children.state = childItems.length ? 'partial' : 'unavailable';
+      Object.assign(children, relationshipFailure(error, signal));
+    }
+    children.items = childItems;
+    signal?.throwIfAborted();
+    return graph;
   }
   async development(key: string): Promise<DevelopmentLinks> {
     const raw = await this.call(

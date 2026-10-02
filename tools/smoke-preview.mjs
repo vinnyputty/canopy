@@ -83,6 +83,28 @@ export async function installPreviewHandlers(
           fetchedAt: Date.now(),
           warnings: [],
         }),
+        relationships: (_event, connection, key) => ({
+          key,
+          groups: [
+            {
+              kind: 'related',
+              state: 'visible',
+              items:
+                key === 'TEST-1'
+                  ? [
+                      {
+                        key: 'LINK-9',
+                        summary: 'Linked issue',
+                        relationship: 'relates to',
+                        direction: 'outward',
+                        access: 'unknown',
+                      },
+                    ]
+                  : [],
+            },
+          ],
+        }),
+        cancelRelationships: () => {},
         preview: async (_event, connection, key) => {
           const mode = controls.mode;
           if (mode === 'brief-fail') throw new Error('Preview unavailable');
@@ -377,7 +399,10 @@ export async function auditPreview(app, page, restart) {
   await choices.nth(0).click();
   await expect(pane.locator('.preview-content > h2')).toHaveText('first issue');
   await pane
-    .getByRole('button', { name: 'Preview LINK-9: Linked issue', exact: true })
+    .getByRole('button', { name: 'Inspect relationships', exact: true })
+    .click();
+  await pane
+    .getByRole('button', { name: 'Preview LINK-9', exact: true })
     .click();
   await expect(pane).toHaveAttribute('aria-label', 'Preview LINK-9');
   await expect(pane.locator('.preview-content > h2')).toHaveText(

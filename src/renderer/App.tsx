@@ -1,3 +1,5 @@
+import { relationshipDestination } from './relationships';
+import { relationshipKinds } from '../shared/relationships';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -46,6 +48,7 @@ import type {
   EditOptions,
   Issue,
   IssuePreview as IssuePreviewData,
+  IssueRelationships,
   IssuePatch,
   RootReference,
   RootView,
@@ -309,6 +312,60 @@ export function App() {
     setSidebarSession(next.session);
   };
   const [queries, setQueries] = useState<Record<string, string>>({});
+  const [relationshipGraphs, setRelationshipGraphs] = useState<
+    Record<string, IssueRelationships>
+  >({});
+  const [relationshipLoading, setRelationshipLoading] = useState<
+    Record<string, boolean>
+  >({});
+  const relationshipRequests = useRef(new Map<string, string>());
+  const relationshipGeneration = useRef(0);
+  const relationshipIdentity = (connectionId: string, key: string) =>
+    JSON.stringify([connectionId, key]);
+  const inspectRelationships = async (connectionId: string, key: string) => {
+    const identity = relationshipIdentity(connectionId, key);
+    if (relationshipRequests.current.has(identity)) return;
+    const requestId = crypto.randomUUID();
+    const generation = relationshipGeneration.current;
+    relationshipRequests.current.set(identity, requestId);
+    setRelationshipLoading((current) => ({ ...current, [identity]: true }));
+    try {
+      const graph = await window.canopy.relationships(
+        connectionId,
+        key,
+        requestId,
+      );
+      if (
+        generation === relationshipGeneration.current &&
+        relationshipRequests.current.get(identity) === requestId
+      )
+        setRelationshipGraphs((current) => ({ ...current, [identity]: graph }));
+    } catch {
+      if (generation === relationshipGeneration.current)
+        setRelationshipGraphs((current) => ({
+          ...current,
+          [identity]: {
+            key,
+            groups: relationshipKinds.map((kind) => ({
+              kind,
+              state: 'unavailable',
+              problem: 'error',
+              reason:
+                'Relationships could not be loaded. Retry to inspect this graph.',
+              items: [],
+            })),
+          },
+        }));
+    } finally {
+      if (relationshipRequests.current.get(identity) === requestId) {
+        relationshipRequests.current.delete(identity);
+        setRelationshipLoading((current) => ({
+          ...current,
+          [identity]: false,
+        }));
+      }
+    }
+  };
   const [nextTaskViews, setNextTaskViews] = useState<Record<string, boolean>>(
     {},
   );
@@ -2123,6 +2180,16 @@ export function App() {
             activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
             activeTab ? Boolean(nextTaskMine[activeTab.id]) : false,
             priorityOrder,
+            Object.fromEntries(
+              snapshot.issues.flatMap((issue) => {
+                const graph =
+                  activeTab &&
+                  relationshipGraphs[
+                    relationshipIdentity(activeTab.connectionId, issue.key)
+                  ];
+                return graph ? [[issue.key, graph]] : [];
+              }),
+            ),
           )
         : [],
     [
@@ -2134,6 +2201,7 @@ export function App() {
       currentUsers,
       nextTaskMine,
       priorityOrder,
+      relationshipGraphs,
     ],
   );
   const jumpToTask = (key: string) => {
@@ -2802,11 +2870,69 @@ export function App() {
     };
   }, [demoMode, ready, Boolean(snapshots['demo-can-100'])]);
 
+  useEffect(() => {
+    setRelationshipGraphs({});
+  }, [snapshots]);
+  useEffect(() => {
+    return () => {
+      relationshipGeneration.current++;
+      for (const [identity, requestId] of relationshipRequests.current) {
+        const [id] = JSON.parse(identity) as [string, string];
+        void window.canopy.cancelRelationships(id, requestId).catch(() => {});
+      }
+      relationshipRequests.current.clear();
+      setRelationshipLoading({});
+    };
+  }, [activeTab?.id, previewRoute?.connectionId, previewKey, snapshots]);
+
+  const jumpToRelationship = (connectionId: string, key: string) => {
+    const current = workspaceRef.current;
+    const existing = relationshipDestination(
+      connectionId,
+      key,
+      current.tabs,
+      snapshots,
+      current.activeTabId,
+    );
+    const selectedView = rootView(current, { connectionId, rootKey: key });
+    const tab = existing ?? {
+      id: crypto.randomUUID(),
+      connectionId,
+      rootKey: key,
+      selectedKey: key,
+      expanded: [key],
+      hideDone: selectedView.hideDone,
+      filters: selectedView.filters,
+      scrollTop: 0,
+    };
+    navigate(tab);
+    setNextTaskViews((value) => ({ ...value, [tab.id]: false }));
+    navigationReveal.current = { tabId: tab.id, key };
+    setReveal({ tabId: tab.id, key });
+  };
+
   const previewPane = previewOpen ? (
     previewRoute && previewKey ? (
       <IssuePreview
         key={JSON.stringify([previewRoute.connectionId, previewKey])}
         provider={previewRoute.provider}
+        connectionName={
+          connections.find((item) => item.id === previewRoute.connectionId)
+            ?.name ?? previewRoute.connectionId
+        }
+        relationships={
+          relationshipGraphs[
+            relationshipIdentity(previewRoute.connectionId, previewKey)
+          ]
+        }
+        relationshipsLoading={Boolean(
+          relationshipLoading[
+            relationshipIdentity(previewRoute.connectionId, previewKey)
+          ],
+        )}
+        onRelationships={() =>
+          void inspectRelationships(previewRoute.connectionId, previewKey)
+        }
         connectionId={previewRoute.connectionId}
         issueKey={previewKey}
         observedIssue={confirmedSnapshots[
@@ -2846,7 +2972,7 @@ export function App() {
             void refreshTab(tab);
         }}
         onPreview={setPreviewKey}
-        onOpenTab={(key) => openTab(previewRoute.connectionId, key)}
+        onJump={(key) => jumpToRelationship(previewRoute.connectionId, key)}
         onOpenExternal={(key) =>
           void openExternal(previewRoute.connectionId, key)
         }
@@ -3931,8 +4057,8 @@ export function App() {
                               : 'Clear issues appear first, unknown blocker state next, then confirmed blocked issues.'}{' '}
                       Blocked issues always follow clear and unknown issues.{' '}
                       {activeConnection?.provider === 'github'
-                        ? 'GitHub dependency data is unavailable in tree snapshots, so blocker state is unknown.'
-                        : 'Jira blocker state is unknown when link data or a linked blocker status is unavailable.'}
+                        ? 'Inspect relationships to load GitHub blockers for a task.'
+                        : 'Blocker state is unknown when link data or a linked blocker status is unavailable.'}
                       {nextTaskCriterion === 'priority' && priorityError && (
                         <button onClick={retryPriorityOrder}>
                           Retry priority order
@@ -3959,7 +4085,7 @@ export function App() {
                             {task.blocker !== tasks[index - 1]?.blocker && (
                               <div className="next-task-group">
                                 {task.blocker === 'clear'
-                                  ? 'No active blockers found'
+                                  ? 'No active visible blockers found'
                                   : task.blocker === 'unknown'
                                     ? 'Blocker state unknown'
                                     : 'Blocked'}
@@ -3998,8 +4124,81 @@ export function App() {
                                     ? `Blocked by ${task.blockers.join(', ')}`
                                     : task.blocker === 'unknown'
                                       ? 'Blocker state unknown'
-                                      : 'No active blockers found'}
+                                      : 'No active visible blockers found'}
                                 </div>
+                              </div>
+                              <div className="next-task-relationships">
+                                {task.blockerDetails.map((link) => (
+                                  <div key={link.key}>
+                                    <span>
+                                      {activeConnection?.provider === 'github'
+                                        ? 'GitHub'
+                                        : activeConnection?.provider === 'jira'
+                                          ? 'Jira'
+                                          : 'Demo'}{' '}
+                                      · {activeConnection?.name} ·{' '}
+                                      {task.issue.key} blocked by {link.key} ·{' '}
+                                      {link.summary}
+                                      {link.statusCategory
+                                        ? ''
+                                        : ' · Status unknown'}
+                                      {link.crossRepository
+                                        ? ' · Cross-repository'
+                                        : ''}
+                                    </span>{' '}
+                                    {link.access === 'outside-connection' ? (
+                                      <span>Outside selected repositories</span>
+                                    ) : (
+                                      <button
+                                        className="text-button"
+                                        onClick={() =>
+                                          jumpToRelationship(
+                                            activeTab.connectionId,
+                                            link.key,
+                                          )
+                                        }
+                                      >
+                                        Show blocker in tree
+                                      </button>
+                                    )}
+                                  </div>
+                                ))}
+                                {task.blockerReason && (
+                                  <span role="status">
+                                    {task.blockerReason}{' '}
+                                  </span>
+                                )}
+                                {task.incomplete && (
+                                  <span>
+                                    Blocker information is incomplete.{' '}
+                                  </span>
+                                )}
+                                <button
+                                  className="text-button"
+                                  disabled={Boolean(
+                                    relationshipLoading[
+                                      relationshipIdentity(
+                                        activeTab.connectionId,
+                                        task.issue.key,
+                                      )
+                                    ],
+                                  )}
+                                  onClick={() =>
+                                    void inspectRelationships(
+                                      activeTab.connectionId,
+                                      task.issue.key,
+                                    )
+                                  }
+                                >
+                                  {relationshipLoading[
+                                    relationshipIdentity(
+                                      activeTab.connectionId,
+                                      task.issue.key,
+                                    )
+                                  ]
+                                    ? 'Loading relationships…'
+                                    : 'Inspect blockers'}
+                                </button>
                               </div>
                               <button
                                 className="tool-button"

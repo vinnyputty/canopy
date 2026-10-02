@@ -1,3 +1,4 @@
+import { relationshipFailure } from '../shared/relationships';
 import type {
   AssigneePage,
   Choice,
@@ -8,6 +9,9 @@ import type {
   Issue,
   IssuePatch,
   IssuePreview,
+  IssueRelationships,
+  Relationship,
+  RelationshipGroup,
   SearchPage,
   TreeSnapshot,
 } from '../shared/types';
@@ -105,6 +109,7 @@ function parseIssue(raw: any, parentKey?: string): Issue {
       .filter((label: any) => typeof label !== 'string')
       .map((label: any) => ({ id: label.name, name: label.name })),
     links: [],
+    linksAvailable: false,
     ...(Number.isSafeInteger(raw.comments) && raw.comments >= 0
       ? { commentCount: raw.comments }
       : {}),
@@ -353,34 +358,10 @@ export class GithubProvider {
     const raw = await this.request(this.path(key));
     const issue = parseIssue(raw);
     const latestPage = Math.max(1, Math.ceil((issue.commentCount ?? 0) / 100));
-    const [commentsResult, blockedByResult, blockingResult] = await Promise.all(
-      [
-        this.olderComments(key, latestPage).then(
-          (value) => ({ value, error: '' }),
-          (error: unknown) => ({ value: undefined, error: String(error) }),
-        ),
-        this.all(this.path(key, '/dependencies/blocked_by')).then(
-          (value) => ({ value, error: '' }),
-          (error: unknown) => ({ value: [], error: String(error) }),
-        ),
-        this.all(this.path(key, '/dependencies/blocking')).then(
-          (value) => ({ value, error: '' }),
-          (error: unknown) => ({ value: [], error: String(error) }),
-        ),
-      ],
+    const commentsResult = await this.olderComments(key, latestPage).then(
+      (value) => ({ value, error: '' }),
+      (error: unknown) => ({ value: undefined, error: String(error) }),
     );
-    issue.links = [
-      ...blockedByResult.value.map((item: any) => ({
-        key: rawKey(item),
-        summary: item.title,
-        relationship: 'blocked by',
-      })),
-      ...blockingResult.value.map((item: any) => ({
-        key: rawKey(item),
-        summary: item.title,
-        relationship: 'blocks',
-      })),
-    ];
     return {
       issue,
       metadata: {
@@ -400,8 +381,194 @@ export class GithubProvider {
       },
       totalComments: raw.comments ?? commentsResult.value?.comments.length ?? 0,
       commentsError: commentsResult.error || undefined,
-      linksError: blockedByResult.error || blockingResult.error || undefined,
     };
+  }
+  async relationships(
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<IssueRelationships> {
+    const source = this.assertSelected(key);
+    const item = (
+      raw: any,
+      relationship: string,
+      direction: Relationship['direction'],
+    ): Relationship => {
+      const target = rawKey(raw);
+      return {
+        key: target,
+        summary: String(raw.title ?? target),
+        relationship,
+        direction,
+        statusCategory:
+          raw.state === 'closed'
+            ? 'done'
+            : raw.state === 'open'
+              ? 'new'
+              : undefined,
+        access: this.selected.has(parts(target).repo)
+          ? 'available'
+          : 'outside-connection',
+        crossRepository: parts(target).repo !== source.repo,
+      };
+    };
+    const list = async (
+      kind: RelationshipGroup['kind'],
+      suffix: string,
+      label: string,
+      direction: Relationship['direction'],
+    ): Promise<RelationshipGroup> => {
+      const items: Relationship[] = [];
+      try {
+        for (let page = 1; page <= 2; page++) {
+          signal?.throwIfAborted();
+          const raw = await this.request(
+            `${this.path(key, suffix)}?per_page=100&page=${page}`,
+            { signal },
+          );
+          signal?.throwIfAborted();
+          if (!Array.isArray(raw) || raw.length > 100)
+            throw new Error('Invalid relationship page');
+          for (const value of raw) items.push(item(value, label, direction));
+          if (raw.length < 100) return { kind, state: 'visible', items };
+        }
+        return {
+          kind,
+          state: 'partial',
+          problem: 'limit',
+          reason: 'Showing at most 200 relationships; more may exist.',
+          items,
+        };
+      } catch (error) {
+        return {
+          kind,
+          state: items.length ? 'partial' : 'unavailable',
+          ...relationshipFailure(error, signal),
+          items,
+        };
+      }
+    };
+    const parent = async (): Promise<RelationshipGroup> => {
+      try {
+        signal?.throwIfAborted();
+        // GraphQL distinguishes an accessible issue with no parent from an inaccessible node.
+        const result = await this.request('/graphql', {
+          method: 'POST',
+          signal,
+          body: JSON.stringify({
+            query:
+              'query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{url title state}}}}',
+            variables: {
+              owner: source.repo.split('/')[0],
+              repo: source.repo.split('/')[1],
+              number: Number(source.number),
+            },
+          }),
+        });
+        signal?.throwIfAborted();
+        const issue = result.data?.repository?.issue;
+        if (result.errors?.length || !issue || !('parent' in issue))
+          throw new Error('Incomplete parent data');
+        const raw = issue.parent;
+        return {
+          kind: 'parent',
+          state: 'visible',
+          items: raw
+            ? [
+                item(
+                  {
+                    html_url: raw.url,
+                    title: raw.title,
+                    state: raw.state?.toLowerCase(),
+                  },
+                  'child of',
+                  'inward',
+                ),
+              ]
+            : [],
+        };
+      } catch (error) {
+        return {
+          kind: 'parent',
+          state: 'unavailable',
+          ...relationshipFailure(error, signal),
+          items: [],
+        };
+      }
+    };
+    const related = async (): Promise<RelationshipGroup> => {
+      const items: Relationship[] = [];
+      let cursor: string | undefined;
+      try {
+        for (let page = 0; page < 2; page++) {
+          signal?.throwIfAborted();
+          const result = await this.request('/graphql', {
+            method: 'POST',
+            signal,
+            body: JSON.stringify({
+              query:
+                'query($owner:String!,$repo:String!,$number:Int!,$after:String){repository(owner:$owner,name:$repo){issue(number:$number){relatesTo(first:100,after:$after){nodes{url title state} pageInfo{hasNextPage endCursor}}}}}',
+              variables: {
+                owner: source.repo.split('/')[0],
+                repo: source.repo.split('/')[1],
+                number: Number(source.number),
+                after: cursor ?? null,
+              },
+            }),
+          });
+          signal?.throwIfAborted();
+          const links = result.data?.repository?.issue?.relatesTo;
+          if (
+            result.errors?.length ||
+            !Array.isArray(links?.nodes) ||
+            links.nodes.length > 100 ||
+            typeof links.pageInfo?.hasNextPage !== 'boolean'
+          )
+            throw new Error('Incomplete related data');
+          for (const raw of links.nodes)
+            items.push(
+              item(
+                {
+                  html_url: raw.url,
+                  title: raw.title,
+                  state: raw.state?.toLowerCase(),
+                },
+                'relates to',
+                'outward',
+              ),
+            );
+          if (!links.pageInfo.hasNextPage)
+            return { kind: 'related', state: 'visible', items };
+          const next = links.pageInfo.endCursor;
+          if (typeof next !== 'string' || !next || next === cursor)
+            throw new Error('Invalid related cursor');
+          cursor = next;
+        }
+        return {
+          kind: 'related',
+          state: 'partial',
+          problem: 'limit',
+          reason: 'Showing at most 200 related issues; more may exist.',
+          items,
+        };
+      } catch (error) {
+        return {
+          kind: 'related',
+          state: items.length ? 'partial' : 'unavailable',
+          ...relationshipFailure(error, signal),
+          items,
+        };
+      }
+    };
+    const groups = await Promise.all([
+      list('blockers', '/dependencies/blocked_by', 'blocked by', 'inward'),
+      list('blocked', '/dependencies/blocking', 'blocks', 'outward'),
+      related(),
+      parent(),
+      list('children', '/sub_issues', 'parent of', 'outward'),
+    ]);
+    signal?.throwIfAborted();
+
+    return { key, groups };
   }
   async development(key: string): Promise<DevelopmentLinks> {
     const events = await this.all(this.path(key, '/timeline'));

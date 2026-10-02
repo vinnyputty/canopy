@@ -110,6 +110,7 @@ describe('JiraProvider tree', () => {
       {
         key: 'LINK-9',
         summary: 'LINK-9 summary',
+        direction: 'outward',
         relationship: 'blocks',
         statusCategory: 'indeterminate',
       },

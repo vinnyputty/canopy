@@ -1,4 +1,10 @@
-import type { Issue, TreeSnapshot } from '../shared/types';
+import { relationshipBlockers } from './relationships';
+import type {
+  Issue,
+  IssueRelationships,
+  Relationship,
+  TreeSnapshot,
+} from '../shared/types';
 import { buildIssueTree, type IssueNode } from './tree';
 
 export type NextTaskCriterion =
@@ -9,6 +15,9 @@ export type NextTask = {
   parents: Issue[];
   blocker: BlockerState;
   blockers: string[];
+  blockerDetails: Relationship[];
+  incomplete: boolean;
+  blockerReason?: string;
   rankPath: number[];
 };
 
@@ -24,31 +33,6 @@ function comparePath(a: number[], b: number[]): number {
   return a.length - b.length;
 }
 
-function blockerState(
-  issue: Issue,
-  provider: 'jira' | 'github' | 'demo',
-  byKey: Map<string, Issue>,
-): Pick<NextTask, 'blocker' | 'blockers'> {
-  if (provider === 'github') return { blocker: 'unknown', blockers: [] };
-  if (issue.linksAvailable === false)
-    return { blocker: 'unknown', blockers: [] };
-  const incoming = issue.links.filter((link) =>
-    /^(?:is )?blocked by$/i.test(link.relationship.trim()),
-  );
-  const active = incoming.filter((link) => {
-    const status = byKey.get(link.key)?.status.category ?? link.statusCategory;
-    return status !== 'done' && status !== undefined;
-  });
-  if (active.length)
-    return { blocker: 'blocked', blockers: active.map((link) => link.key) };
-  const uncertain = incoming.some(
-    (link) =>
-      (byKey.get(link.key)?.status.category ?? link.statusCategory) ===
-      undefined,
-  );
-  return { blocker: uncertain ? 'unknown' : 'clear', blockers: [] };
-}
-
 /** Build a flat task list from the complete root, independent of tree filters or expansion. */
 export function nextTasks(
   snapshot: TreeSnapshot,
@@ -57,6 +41,7 @@ export function nextTasks(
   accountId?: string,
   assignedToMe = false,
   priorityOrder?: string[],
+  relationships?: Record<string, IssueRelationships>,
 ): NextTask[] {
   const root = buildIssueTree(snapshot.issues, snapshot.rootKey);
   if (!root) return [];
@@ -77,7 +62,11 @@ export function nextTasks(
         issue,
         parents,
         rankPath,
-        ...blockerState(issue, provider, byKey),
+        ...relationshipBlockers(
+          provider === 'github' ? { ...issue, linksAvailable: false } : issue,
+          relationships?.[issue.key],
+          byKey,
+        ),
       });
     }
     node.children.forEach((child, index) =>
