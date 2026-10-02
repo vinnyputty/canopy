@@ -86,6 +86,7 @@ test('actual main teardown cancels both an in-flight update check and tree/searc
     searchController = searches.get('search')!;
   const context = {
     updates,
+    clearRelationshipRequests: () => {},
     trees,
     searches,
     AbortController,

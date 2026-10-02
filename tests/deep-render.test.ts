@@ -25,6 +25,9 @@ import {
   visit,
   closeTabs,
 } from '../src/renderer/workspace';
+import { relationshipDestination } from '../src/renderer/relationships';
+import { issueWorkBrief } from '../src/renderer/copy-issue';
+import { relationshipKinds } from '../src/shared/relationships';
 import { nextTasks } from '../src/renderer/next-tasks';
 import { withScrollPositions } from '../src/renderer/scroll-position';
 import type { Issue, Workspace } from '../src/shared/types';
@@ -358,4 +361,69 @@ test('actual App navigation restores history offsets and preserves a just-scroll
     'a',
   ]);
   assert.equal(closed.closedTabs?.[0].scrollTop, 700);
+});
+
+test('deep inspected relationships preserve task authority and same-account saved-root navigation', () => {
+  const issues = Array.from({ length: 2001 }, (_, i) => issue(i));
+  const snapshot = { rootKey: 'D-0', issues, fetchedAt: 1, warnings: [] };
+  const graph = {
+    key: 'D-2000',
+    groups: relationshipKinds.map((kind) => ({
+      kind,
+      state: 'visible' as const,
+      items:
+        kind === 'blockers'
+          ? [
+              {
+                key: 'D-1',
+                summary: 'Unknown dependency',
+                relationship: 'blocked by',
+                direction: 'inward' as const,
+                access: 'unknown' as const,
+              },
+            ]
+          : [],
+    })),
+  };
+  const tasks = nextTasks(
+    snapshot,
+    'github',
+    'rank',
+    undefined,
+    false,
+    undefined,
+    { 'D-2000': graph },
+  );
+  const task = tasks.find((task) => task.issue.key === graph.key)!;
+  assert.equal(task.parents.length, 2000);
+  assert.equal(task.blocker, 'unknown');
+  assert.equal(task.blockerDetails.length, 1);
+  assert.equal(task.incomplete, true);
+  const tab = {
+    id: 'saved-view:deep',
+    connectionId: 'work',
+    rootKey: 'D-0',
+    expanded: [],
+    hideDone: true,
+    scrollTop: 321,
+  };
+  const other = { ...tab, id: 'other-account', connectionId: 'other' };
+  const destination = relationshipDestination(
+    'work',
+    'D-2000',
+    [other, tab],
+    { [tab.id]: snapshot, [other.id]: snapshot },
+    other.id,
+  )!;
+  assert.equal(destination.id, tab.id);
+  assert.equal(destination.selectedKey, 'D-2000');
+  assert.equal(destination.expanded.length, 2001);
+  assert.equal(destination.scrollTop, 0);
+  const brief = issueWorkBrief({
+    provider: 'github',
+    knownIssues: issues,
+    issueKey: 'D-2000',
+  });
+  assert.match(brief, /Parent path: D-0 → D-1/);
+  assert.match(brief, /D-1999/);
 });

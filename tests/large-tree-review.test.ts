@@ -96,6 +96,8 @@ function refreshContext(tabs: TabState[]) {
   );
   const context = {
     tabsRef: ref(tabs),
+    manualRelationshipRefreshes: ref(new Set<string>()),
+    invalidateRelationships: () => {},
     forcedRefreshes: ref(new Set<string>()),
     cancelledTrees: ref(new Set<string>()),
     refreshRootKey: rootKey,
@@ -157,7 +159,7 @@ test('App cancellation survives automatic cooldown/forced freshness; user Retry 
   await refresh(a, true, true); // workflow freshness is explicit but not Retry
   assert.equal(calls.length, 0);
   assert.ok(context.cancelledTrees.current.has(rootKey(a)));
-  await refresh(a, true, true, true);
+  await refresh(a, true, true, true, true);
   assert.equal(calls.length, 1);
   assert.equal(context.cancelledTrees.current.has(rootKey(a)), false);
 });
@@ -195,6 +197,7 @@ function forgetContext(tabs: TabState[], sources: TabState[] = []) {
     refreshSequences: ref({}),
     refreshSchedule: ref(new RefreshSchedule()),
     deferredRefreshes: ref(new Set()),
+    manualRelationshipRefreshes: ref(new Set()),
     forcedRefreshes: ref(new Set()),
     runningExplicitRefreshes: ref(new Map()),
     setLoading: () => {},
@@ -639,7 +642,7 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
       ts.transpileModule(`(${found.getText(mainAst)})`, {
         compilerOptions: { target: ts.ScriptTarget.ES2022 },
       }).outputText,
-      { trees, searches, updates },
+      { trees, searches, updates, clearRelationshipRequests: () => {} },
     );
   };
   const navigation = listener('did-start-navigation');
