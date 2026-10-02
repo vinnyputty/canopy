@@ -5,7 +5,16 @@ import type {
   AuthoringResult,
   ParentPlan,
 } from '../shared/authoring';
-import { loadDraft, saveDraft, type AuthoringDraft } from './authoring-drafts';
+import {
+  loadDraft,
+  saveDraft,
+  subscribeDraft,
+  activeAuthoringAttempt,
+  beginAuthoringAttempt,
+  endAuthoringAttempt,
+  settleAuthoringDraft,
+  type AuthoringDraft,
+} from './authoring-drafts';
 
 export function RichAuthoring({
   connectionId,
@@ -32,29 +41,46 @@ export function RichAuthoring({
   const [plan, setPlan] = useState<ParentPlan>();
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
   const [checkedProvider, setCheckedProvider] = useState(false);
+  const [activeAttempt, setActiveAttempt] = useState(false);
   const mounted = useRef(true);
   const saving = useRef(false);
   const currentDraft = useRef(draft);
   currentDraft.current = draft;
   useEffect(() => {
     mounted.current = true;
-    try {
-      setDraft(loadDraft(localStorage, connectionId, issueKey));
-    } catch (reason) {
-      setDraft({
-        pending: 'draft recovery',
-        result: {
-          state: 'unknown',
-          message:
-            'Saved draft recovery failed. Check the provider before another write.',
-        },
-      });
-      setDraftError(
-        `Draft recovery failed: ${String(reason)}. Browser handoff remains available.`,
-      );
-    }
+    const reloadDraft = () => {
+      setActiveAttempt(activeAuthoringAttempt(connectionId, issueKey));
+      try {
+        const latest = loadDraft(localStorage, connectionId, issueKey);
+        if (
+          latest.attemptId !== currentDraft.current.attemptId ||
+          JSON.stringify(latest.result) !==
+            JSON.stringify(currentDraft.current.result)
+        )
+          setCheckedProvider(false);
+        currentDraft.current = latest;
+        setDraft(latest);
+      } catch (reason) {
+        const recovery: AuthoringDraft = {
+          pending: 'draft recovery',
+          result: {
+            state: 'unknown',
+            message:
+              'Saved draft recovery failed. Check the provider before another write.',
+          },
+        };
+        currentDraft.current = recovery;
+        setDraft(recovery);
+        setDraftError(
+          `Draft recovery failed: ${String(reason)}. Browser handoff remains available.`,
+        );
+      }
+    };
+    const unsubscribe = subscribeDraft(connectionId, issueKey, reloadDraft);
+    reloadDraft();
     return () => {
       mounted.current = false;
+      unsubscribe();
     };
   }, [connectionId, issueKey]);
   useEffect(() => {
@@ -102,17 +128,60 @@ export function RichAuthoring({
     }
   };
   const change = (patch: Partial<AuthoringDraft>) => {
-    persist({ ...currentDraft.current, ...patch });
+    try {
+      const latest = loadDraft(localStorage, connectionId, issueKey);
+      const editVersions = { ...latest.editVersions };
+      if ('description' in patch || 'fragments' in patch || 'revision' in patch)
+        editVersions.description = crypto.randomUUID();
+      if ('comment' in patch) editVersions.comment = crypto.randomUUID();
+      if ('childSummary' in patch || 'childDescription' in patch)
+        editVersions.child = crypto.randomUUID();
+      persist({ ...latest, ...patch, editVersions });
+    } catch (reason) {
+      setDraftError(`Draft recovery failed: ${String(reason)}`);
+    }
   };
   const submit = async (action: AuthoringAction) => {
-    if (saving.current || draft.pending || draftError) return;
+    if (
+      saving.current ||
+      currentDraft.current.pending ||
+      draftError ||
+      activeAuthoringAttempt(connectionId, issueKey)
+    )
+      return;
+    let before: AuthoringDraft;
+    try {
+      before = loadDraft(localStorage, connectionId, issueKey);
+    } catch (reason) {
+      setDraftError(`Draft recovery failed: ${String(reason)}`);
+      return;
+    }
+    if (before.pending) return;
     saving.current = true;
     setBusy(true);
     setError('');
     setCheckedProvider(false);
-    const before = currentDraft.current;
+    const attemptId = crypto.randomUUID();
     // Persist before the request: a process exit or preview navigation cannot erase uncertainty.
-    if (!persist({ ...before, pending: action.kind, result: undefined })) {
+    if (
+      !persist({
+        ...before,
+        pending: action.kind,
+        attemptId,
+        attemptVersion:
+          action.kind === 'description' ||
+          action.kind === 'comment' ||
+          action.kind === 'child'
+            ? before.editVersions?.[action.kind]
+            : undefined,
+        result: undefined,
+      })
+    ) {
+      saving.current = false;
+      setBusy(false);
+      return;
+    }
+    if (!beginAuthoringAttempt(connectionId, issueKey, attemptId)) {
       saving.current = false;
       setBusy(false);
       return;
@@ -126,21 +195,24 @@ export function RichAuthoring({
         message: `${String(reason)} The outcome is unknown. Check the provider before retrying.`,
       };
     }
-    const next = { ...currentDraft.current, result };
-    if (result.state === 'saved') {
-      delete next.pending;
-      if (action.kind === 'description') {
-        delete next.description;
-        delete next.revision;
-        delete next.fragments;
-      }
-      if (action.kind === 'comment') delete next.comment;
-      if (action.kind === 'child') {
-        delete next.childSummary;
-        delete next.childDescription;
-      }
-    } else if (result.state === 'rejected') delete next.pending;
-    persist(next);
+    try {
+      settleAuthoringDraft(
+        localStorage,
+        connectionId,
+        issueKey,
+        attemptId,
+        before,
+        action,
+        result,
+      );
+    } catch (reason) {
+      if (mounted.current)
+        setDraftError(
+          `Could not settle saved draft: ${String(reason)}. Check the provider before retrying.`,
+        );
+    } finally {
+      endAuthoringAttempt(connectionId, issueKey, attemptId);
+    }
     saving.current = false;
     if (mounted.current) {
       setBusy(false);
@@ -169,7 +241,10 @@ export function RichAuthoring({
       if (mounted.current) setBusy(false);
     }
   };
-  const disabled = busy || Boolean(draft.pending) || Boolean(draftError);
+  const disabled =
+    busy || activeAttempt || Boolean(draft.pending) || Boolean(draftError);
+  const editingDisabled =
+    busy || Boolean(draftError) || (Boolean(draft.pending) && !activeAttempt);
   if (provider === 'demo') return null;
   return (
     <section className="rich-authoring" aria-label={`Author ${issueKey}`}>
@@ -226,7 +301,9 @@ export function RichAuthoring({
           {draft.pending && (
             <div className="authoring-recovery">
               <p role="alert">
-                {draft.pending} retry is blocked until you check the provider.{' '}
+                {activeAttempt
+                  ? 'An authoring request is still running for this account and issue. Wait for its result before allowing another write.'
+                  : `${draft.pending} retry is blocked until you check the provider.`}{' '}
                 {draft.result?.state === 'partial' && draft.result.key
                   ? 'Use the created issue’s parent editor to finish linking it.'
                   : 'The previous request may already have completed.'}
@@ -240,16 +317,43 @@ export function RichAuthoring({
                 I checked the provider’s current content and hierarchy
               </label>
               <button
-                disabled={busy || !checkedProvider}
+                disabled={busy || activeAttempt || !checkedProvider}
                 onClick={() => {
-                  const next = { ...currentDraft.current };
-                  delete next.pending;
-                  delete next.result;
-                  if (draft.result?.key) {
-                    delete next.childSummary;
-                    delete next.childDescription;
+                  if (
+                    saving.current ||
+                    activeAuthoringAttempt(connectionId, issueKey)
+                  )
+                    return;
+                  try {
+                    const next = loadDraft(
+                      localStorage,
+                      connectionId,
+                      issueKey,
+                    );
+                    if (
+                      next.attemptId !== draft.attemptId ||
+                      next.pending !== draft.pending ||
+                      JSON.stringify(next.result) !==
+                        JSON.stringify(draft.result)
+                    ) {
+                      setCheckedProvider(false);
+                      return;
+                    }
+                    const completedChild =
+                      next.result?.key &&
+                      next.editVersions?.child === next.attemptVersion;
+                    delete next.pending;
+                    delete next.attemptId;
+                    delete next.attemptVersion;
+                    delete next.result;
+                    if (completedChild) {
+                      delete next.childSummary;
+                      delete next.childDescription;
+                    }
+                    persist(next);
+                  } catch (reason) {
+                    setDraftError(`Draft recovery failed: ${String(reason)}`);
                   }
-                  persist(next);
                   setCheckedProvider(false);
                 }}
               >
@@ -282,7 +386,7 @@ export function RichAuthoring({
                             <textarea
                               maxLength={100_000}
                               aria-label={`Description text run ${index + 1}`}
-                              disabled={disabled}
+                              disabled={editingDisabled}
                               value={
                                 edits.find((edit) => edit.id === fragment.id)
                                   ?.value ?? fragment.value
@@ -311,7 +415,7 @@ export function RichAuthoring({
                       Draft description
                       <textarea
                         aria-label="Draft description"
-                        disabled={disabled}
+                        disabled={editingDisabled}
                         maxLength={100_000}
                         value={draft.description ?? options.description.value}
                         onChange={(event) =>
@@ -332,7 +436,7 @@ export function RichAuthoring({
                         </p>
                         <pre>{options.description.value}</pre>
                         <button
-                          disabled={disabled}
+                          disabled={editingDisabled}
                           onClick={() =>
                             change({ revision: options.description.revision })
                           }
@@ -374,7 +478,7 @@ export function RichAuthoring({
                     Comment draft
                     <textarea
                       aria-label="Comment draft"
-                      disabled={disabled}
+                      disabled={editingDisabled}
                       maxLength={100_000}
                       value={draft.comment ?? ''}
                       onChange={(event) =>
@@ -405,7 +509,7 @@ export function RichAuthoring({
                     Destination parent
                     <input
                       aria-label="Destination parent"
-                      disabled={disabled}
+                      disabled={editingDisabled}
                       placeholder={
                         provider === 'github'
                           ? 'owner/repo#number; empty removes parent'
@@ -455,7 +559,7 @@ export function RichAuthoring({
                     Sub-issue title
                     <input
                       aria-label="Sub-issue title"
-                      disabled={disabled}
+                      disabled={editingDisabled}
                       maxLength={255}
                       value={draft.childSummary ?? ''}
                       onChange={(event) =>
@@ -467,7 +571,7 @@ export function RichAuthoring({
                     Sub-issue description
                     <textarea
                       aria-label="Sub-issue description"
-                      disabled={disabled}
+                      disabled={editingDisabled}
                       maxLength={100_000}
                       value={draft.childDescription ?? ''}
                       onChange={(event) =>
@@ -504,7 +608,7 @@ export function RichAuthoring({
                     {field.kind === 'choice' || field.kind === 'choices' ? (
                       <select
                         aria-label={field.name}
-                        disabled={disabled}
+                        disabled={editingDisabled}
                         multiple={field.kind === 'choices'}
                         value={
                           field.kind === 'choices'
@@ -538,7 +642,7 @@ export function RichAuthoring({
                     ) : (
                       <input
                         aria-label={field.name}
-                        disabled={disabled}
+                        disabled={editingDisabled}
                         type={field.kind === 'date' ? 'date' : 'text'}
                         value={fieldValues[field.id] ?? ''}
                         onChange={(event) =>

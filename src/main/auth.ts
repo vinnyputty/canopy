@@ -179,10 +179,23 @@ export class Auth {
     );
     if (!account)
       throw new Error('This GitHub connection is unavailable. Connect again.');
+    // Authoring only needs these read endpoints, within this account's selection.
+    const authoringRead = path.match(
+      /^\/repos\/([a-z0-9_.-]+\/[a-z0-9_.-]+)(?:\/milestones\?state=all&per_page=100)?$/i,
+    );
+    const selectedRead = Boolean(
+      authoringRead &&
+      (init.method ?? 'GET').toUpperCase() === 'GET' &&
+      !init.body &&
+      account.connection.repositories?.some(
+        (repo) => repo.toLowerCase() === authoringRead[1].toLowerCase(),
+      ),
+    );
     if (
       !path.startsWith('/') ||
       path.includes('..') ||
       !(
+        selectedRead ||
         path === '/graphql' ||
         /^\/(repos\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(issues|labels|assignees)|search\/issues|user)([/?].*)?$/i.test(
           path,
