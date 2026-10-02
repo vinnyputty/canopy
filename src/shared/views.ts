@@ -14,8 +14,10 @@ export const DEFAULT_READING: ReadingSettings = {
 export function validReading(value: unknown): value is ReadingSettings {
   return (
     record(value) &&
-    ['small', 'medium', 'large'].includes(String(value.textSize)) &&
-    ['compact', 'comfortable'].includes(String(value.spacing))
+    typeof value.textSize === 'string' &&
+    ['small', 'medium', 'large'].includes(value.textSize) &&
+    typeof value.spacing === 'string' &&
+    ['compact', 'comfortable'].includes(value.spacing)
   );
 }
 /** Active effective view wins; fallback order is open tabs, closed tabs, then sorted defaults/roots. */

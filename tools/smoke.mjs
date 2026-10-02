@@ -361,6 +361,29 @@ async function auditReadingMigration() {
     expect(view).not.toHaveProperty('textSize');
     expect(view).not.toHaveProperty('spacing');
   }
+  // The save IPC rejects malformed enums and retains the last valid workspace.
+  for (const reading of [
+    { textSize: ['small'], spacing: 'compact' },
+    { textSize: 'large', spacing: ['compact'] },
+    { textSize: { toString: null }, spacing: 'compact' },
+    { textSize: 'small', spacing: { toString: null } },
+  ]) {
+    const error = await page.evaluate(
+      async ({ saved, reading }) => {
+        try {
+          await window.canopy.saveWorkspace({ ...saved, reading });
+          return null;
+        } catch (error) {
+          return String(error);
+        }
+      },
+      { saved: persisted, reading },
+    );
+    expect(error).toContain('Invalid reading settings.');
+    expect(
+      JSON.parse(await readFile(join(userData, 'workspace.json'), 'utf8')),
+    ).toEqual(persisted);
+  }
   await close();
   await launch();
   await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');

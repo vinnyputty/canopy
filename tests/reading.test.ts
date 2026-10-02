@@ -112,6 +112,54 @@ it('falls back deterministically through open, closed and sorted connection defa
   );
   assert.equal(validReading({ textSize: 'small', spacing: 'wide' }), false);
 });
+it('recovers malformed persisted reading without coercion or losing workspace state', () => {
+  const malformed = [
+    { textSize: ['small'], spacing: 'compact' },
+    { textSize: 'large', spacing: ['compact'] },
+    { textSize: { toString: null }, spacing: 'compact' },
+    { textSize: 'small', spacing: { toString: null } },
+    { textSize: null, spacing: 'compact' },
+    { textSize: 'medium', spacing: 0 },
+  ];
+  const current = setRootView(
+    migrateViews({
+      ...base,
+      palette: 'forest',
+      shortcuts: { quickOpen: 'Meta+o' },
+      pinnedRoots: [a],
+      savedViews: [],
+    }),
+    b,
+    {
+      columns: ['issue', 'status'],
+      sort: { column: 'status', direction: 'desc' },
+      filters: { priority: 'p9' },
+      hideDone: false,
+    },
+  );
+  for (const reading of malformed) {
+    assert.equal(validReading(reading), false);
+    const saved = JSON.parse(JSON.stringify({ ...current, reading }));
+    const recovered = recoverWorkspaceViews(saved);
+    assert.deepEqual(recovered, current);
+    assert.deepEqual(saved.reading, reading);
+    const withLegacy = {
+      ...saved,
+      rootViews: {
+        ...saved.rootViews,
+        [viewKey(b)]: {
+          ...saved.rootViews[viewKey(b)],
+          textSize: 'large',
+          spacing: 'comfortable',
+        },
+      },
+    };
+    assert.deepEqual(recoverWorkspaceViews(withLegacy), {
+      ...current,
+      reading: { textSize: 'large', spacing: 'comfortable' },
+    });
+  }
+});
 it('reading survives navigation, root reset, reopening and restart while root choices stay local', () => {
   let current = migrateViews(base);
   current = setRootView(current, a, { columns: ['issue'], hideDone: false });
