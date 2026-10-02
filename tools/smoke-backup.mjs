@@ -22,6 +22,9 @@ try {
     executablePath: resolve(runtime),
     env,
   });
+  expect(
+    await app.evaluate(() => globalThis.canopyBackupKeychainForbidden),
+  ).toBe(true);
   const page = await app.firstWindow();
   await expect(
     page.getByRole('button', { name: 'Settings', exact: true }),
@@ -143,10 +146,16 @@ try {
     'data-theme',
     reviewed.workspace.theme,
   );
+  expect(await app.evaluate(() => globalThis.canopyKeychainAccesses ?? 0)).toBe(
+    0,
+  );
   console.log(
     'Sample backup UI audit passed with stubbed choosers. Native acceptance remains separate.',
   );
 } finally {
-  if (app) await app.close();
-  await rm(directory, { recursive: true, force: true });
+  try {
+    if (app) await app.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }

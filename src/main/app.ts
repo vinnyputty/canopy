@@ -635,6 +635,7 @@ async function start(
     applyWorkspaceImport: (token: string) => transfer.apply(text(token)),
     canUndoWorkspaceImport: () => transfer.canUndo(),
     rollbackWorkspaceImport: () => transfer.rollback(),
+    reloadWorkspace: () => window?.webContents.reload(),
     loadWorkspace: async () => {
       if (demoMode) return structuredClone(demoWorkspaceState);
       const saved = await storage.read<Workspace>('workspace');
