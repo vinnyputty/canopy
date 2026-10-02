@@ -87,6 +87,11 @@ export class RootRefreshGate<T> {
       if (!active.has(key) && !root.inflight) this.roots.delete(key);
   }
 
+  releaseSnapshot(key: string): void {
+    const root = this.roots.get(key);
+    if (root) root.snapshot = undefined;
+  }
+
   forget(key: string): void {
     this.roots.delete(key);
   }

@@ -97,3 +97,5 @@ Dependency install scripts are disabled. Use the Bazel launcher to obtain Electr
 Editing descriptions and comments, attachments, issue deletion, creating issues outside Jira child rows, project moves, and reparenting are not supported in this version.
 
 The sidebar Triage inbox collects unread changes, assigned work, confirmed blockers and selected review statuses across known workspace roots and providers. Local pins, snoozes and bounded action history save with the workspace; coverage limits and partial failures remain visible. See [workspace controls](docs/workspace.md#triage-inbox).
+
+Large-tree loading, cache budgets and reproducible performance checks are documented in [the performance audit](docs/performance.md).

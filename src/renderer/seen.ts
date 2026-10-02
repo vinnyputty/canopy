@@ -80,7 +80,45 @@ export function seedOrExtend(
 
 export function boundRoots(
   roots: Record<string, SeenRoot>,
+  previous?: Record<string, SeenRoot>,
 ): Record<string, SeenRoot> {
+  if (previous) {
+    // Admission pressure stops tracking new issues; it never resets a baseline.
+    const retained = structuredClone(previous);
+    const sizeOf = (value: unknown) =>
+      new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    let bytes = sizeOf(retained);
+    for (const [key, root] of Object.entries(roots)) {
+      if (!retained[key]) {
+        if (Object.keys(retained).length >= MAX_SEEN_ROOTS) continue;
+        const empty = { touchedAt: root.touchedAt, issues: {} };
+        const size =
+          sizeOf({ [key]: empty }) - (Object.keys(retained).length ? 1 : 2);
+        if (bytes + size > MAX_SEEN_BYTES) continue;
+        retained[key] = empty;
+        bytes += size;
+      }
+      let count = Object.keys(retained[key].issues).length;
+      for (const [issueKey, issue] of Object.entries(root.issues)) {
+        const old = retained[key].issues[issueKey];
+        if (!old && count >= MAX_SEEN_ISSUES) continue;
+        const size = sizeOf([issueKey, issue]);
+        const delta = old
+          ? size - sizeOf([issueKey, old])
+          : size - 2 + (count ? 1 : 0);
+        if (bytes + delta > MAX_SEEN_BYTES) continue;
+        if (!old) count++;
+        retained[key].issues[issueKey] = issue;
+        bytes += delta;
+      }
+      const delta = sizeOf(root.touchedAt) - sizeOf(retained[key].touchedAt);
+      if (bytes + delta <= MAX_SEEN_BYTES) {
+        retained[key].touchedAt = root.touchedAt;
+        bytes += delta;
+      }
+    }
+    return retained;
+  }
   const bounded: Record<string, SeenRoot> = {};
   const retained = Object.entries(roots)
     .sort((a, b) => b[1].touchedAt - a[1].touchedAt)

@@ -24,6 +24,7 @@ type Props = {
   onChange: (view: SavedIssueView) => void;
   onDelete: () => void;
   onRefresh: () => void;
+  onCancel?: () => void;
 };
 
 export function SavedViewsPanel(props: Props) {
@@ -53,6 +54,9 @@ export function SavedViewsPanel(props: Props) {
             Issues across selected roots. Open a result in its original tree.
           </p>
         </div>
+        {props.loading.size > 0 && props.onCancel && (
+          <button onClick={props.onCancel}>Cancel loads</button>
+        )}
         <button onClick={props.onRefresh}>
           <RefreshCw size={15} /> Refresh
         </button>
