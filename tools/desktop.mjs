@@ -13,6 +13,18 @@ import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
+const supported = { darwin: 'arm64', win32: 'x64', linux: 'x64' };
+if (
+  ['package', 'packaged-smoke'].includes(process.argv[2]) &&
+  supported[process.platform] !== process.arch
+)
+  throw new Error(
+    `Unexercised package platform: ${process.platform}/${process.arch}`,
+  );
+if (process.argv[2] === 'packaged-smoke') {
+  await import('./packaged-smoke.mjs');
+  process.exit(0);
+}
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 // Stage the hermetic bundle in a writable directory for Electron and packaging.
