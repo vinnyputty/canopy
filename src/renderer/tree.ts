@@ -98,22 +98,47 @@ export function buildIssueTree(
   return nodes.get(rootKey) ?? null;
 }
 
+/** Postorder transforms keep deep provider hierarchies off the JS call stack. */
+export function mapIssueTree(
+  root: IssueNode,
+  transform: (node: IssueNode, children: IssueNode[]) => IssueNode | null,
+): IssueNode | null {
+  const pending: IssueNode[] = [root],
+    order: IssueNode[] = [];
+  while (pending.length) {
+    const node = pending.pop()!;
+    order.push(node);
+    for (const child of node.children) pending.push(child);
+  }
+  const results = new Map<IssueNode, IssueNode | null>();
+  for (let i = order.length - 1; i >= 0; i--) {
+    const node = order[i];
+    results.set(
+      node,
+      transform(
+        node,
+        node.children
+          .map((child) => results.get(child)!)
+          .filter((child): child is IssueNode => child !== null),
+      ),
+    );
+  }
+  return results.get(root)!;
+}
+
 export function visibleTree(
   node: IssueNode,
   hideDone: boolean,
   keepKey?: string,
 ): IssueNode | null {
-  const children = node.children
-    .map((child) => visibleTree(child, hideDone, keepKey))
-    .filter((child): child is IssueNode => child !== null);
-  if (
+  return mapIssueTree(node, (current, children) =>
     hideDone &&
-    node.issue.key !== keepKey &&
-    node.issue.status.category === 'done' &&
-    children.length === 0
-  )
-    return null;
-  return children === node.children ? node : { issue: node.issue, children };
+    current.issue.key !== keepKey &&
+    current.issue.status.category === 'done' &&
+    !children.length
+      ? null
+      : { issue: current.issue, children },
+  );
 }
 
 export function flattenVisible(
@@ -121,15 +146,41 @@ export function flattenVisible(
   expanded: ReadonlySet<string>,
 ): IssueNode[] {
   if (!node) return [];
-  const output: IssueNode[] = [];
+  const output: IssueNode[] = [],
+    pending = [node];
   const visited = new Set<string>();
-  const visit = (current: IssueNode) => {
-    if (visited.has(current.issue.key)) return;
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (visited.has(current.issue.key)) continue;
     visited.add(current.issue.key);
     output.push(current);
-    if (expanded.has(current.issue.key)) current.children.forEach(visit);
-  };
-  visit(node);
+    if (expanded.has(current.issue.key))
+      for (let i = current.children.length - 1; i >= 0; i--)
+        pending.push(current.children[i]);
+  }
+  return output;
+}
+
+export function visibleRows(node: IssueNode, expanded: ReadonlySet<string>) {
+  const output: {
+    node: IssueNode;
+    depth: number;
+    position: number;
+    siblings: number;
+  }[] = [];
+  const pending = [{ node, depth: 0, position: 1, siblings: 1 }];
+  while (pending.length) {
+    const row = pending.pop()!;
+    output.push(row);
+    if (expanded.has(row.node.issue.key))
+      for (let i = row.node.children.length - 1; i >= 0; i--)
+        pending.push({
+          node: row.node.children[i],
+          depth: row.depth + 1,
+          position: i + 1,
+          siblings: row.node.children.length,
+        });
+  }
   return output;
 }
 
@@ -231,10 +282,12 @@ export function findNode(
   key?: string,
 ): IssueNode | null {
   if (!node || !key) return null;
-  if (node.issue.key === key) return node;
-  for (const child of node.children) {
-    const found = findNode(child, key);
-    if (found) return found;
+  const pending = [node];
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (current.issue.key === key) return current;
+    for (let i = current.children.length - 1; i >= 0; i--)
+      pending.push(current.children[i]);
   }
   return null;
 }
@@ -243,10 +296,23 @@ export function ancestorPath(
   key?: string,
 ): IssueNode[] {
   if (!node || !key) return [];
-  if (node.issue.key === key) return [node];
-  for (const child of node.children) {
-    const path = ancestorPath(child, key);
-    if (path.length) return [node, ...path];
+  const parents = new Map<IssueNode, IssueNode>();
+  const pending = [node];
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (current.issue.key === key) {
+      const path = [current];
+      let parent = parents.get(current);
+      while (parent) {
+        path.push(parent);
+        parent = parents.get(parent);
+      }
+      return path.reverse();
+    }
+    for (let i = current.children.length - 1; i >= 0; i--) {
+      parents.set(current.children[i], current);
+      pending.push(current.children[i]);
+    }
   }
   return [];
 }
@@ -255,10 +321,19 @@ export function expansionKeys(
   depth = Infinity,
 ): string[] {
   if (!node || depth <= 0) return [];
-  return [
-    node.issue.key,
-    ...node.children.flatMap((child) => expansionKeys(child, depth - 1)),
-  ];
+  const output: string[] = [],
+    pending = [{ node, depth }];
+  while (pending.length) {
+    const current = pending.pop()!;
+    output.push(current.node.issue.key);
+    if (current.depth > 1)
+      for (let i = current.node.children.length - 1; i >= 0; i--)
+        pending.push({
+          node: current.node.children[i],
+          depth: current.depth - 1,
+        });
+  }
+  return output;
 }
 export function filterTree(
   node: IssueNode | null,
@@ -270,63 +345,64 @@ export function filterTree(
   retainedKeys?: ReadonlySet<string>,
 ): IssueNode | null {
   if (!node) return null;
-  const children = node.children
-    .map((child) =>
-      filterTree(
-        child,
-        query,
-        filters,
-        hideDone,
-        accountId,
-        revealKey,
-        retainedKeys,
-      ),
-    )
-    .filter((child): child is IssueNode => child !== null);
-  const issue = node.issue;
-  const matches =
-    (!hideDone || issue.status.category !== 'done') &&
-    (!query.trim() ||
-      `${issue.key} ${issue.summary}`
-        .toLowerCase()
-        .includes(query.trim().toLowerCase())) &&
-    (!filters.assignee ||
-      (filters.assignee === 'unassigned'
-        ? !issue.assignee
-        : Boolean(accountId) && issue.assignee?.id === accountId)) &&
-    (!filters.status || filters.status === issue.status.id) &&
-    (!filters.priority ||
-      filters.priority === (issue.priority?.id ?? '__none__'));
-  return matches ||
-    children.length ||
-    issue.key === revealKey ||
-    retainedKeys?.has(issue.key)
-    ? { issue, children }
-    : null;
+  return mapIssueTree(node, (current, children) => {
+    const issue = current.issue;
+    const matches =
+      (!hideDone || issue.status.category !== 'done') &&
+      (!query.trim() ||
+        `${issue.key} ${issue.summary}`
+          .toLowerCase()
+          .includes(query.trim().toLowerCase())) &&
+      (!filters.assignee ||
+        (filters.assignee === 'unassigned'
+          ? !issue.assignee
+          : Boolean(accountId) && issue.assignee?.id === accountId)) &&
+      (!filters.status || filters.status === issue.status.id) &&
+      (!filters.priority ||
+        filters.priority === (issue.priority?.id ?? '__none__'));
+    return matches ||
+      children.length ||
+      issue.key === revealKey ||
+      retainedKeys?.has(issue.key)
+      ? { issue, children }
+      : null;
+  });
 }
-export function childCounts(node: IssueNode): {
-  open: number;
-  total: number;
-  descendants: number;
-} {
-  return {
-    open: node.children.filter(
-      (child) => child.issue.status.category !== 'done',
-    ).length,
-    total: node.children.length,
-    descendants: node.children.reduce(
-      (count, child) => count + 1 + childCounts(child).descendants,
-      0,
-    ),
-  };
+export function treeCounts(
+  node: IssueNode | null,
+): Map<string, { open: number; total: number; descendants: number }> {
+  const result = new Map<
+    string,
+    { open: number; total: number; descendants: number }
+  >();
+  if (node)
+    mapIssueTree(node, (current) => {
+      result.set(current.issue.key, {
+        open: current.children.filter(
+          (child) => child.issue.status.category !== 'done',
+        ).length,
+        total: current.children.length,
+        descendants: current.children.reduce(
+          (sum, child) => sum + 1 + result.get(child.issue.key)!.descendants,
+          0,
+        ),
+      });
+      return current;
+    });
+  return result;
+}
+export function childCounts(node: IssueNode) {
+  return treeCounts(node).get(node.issue.key)!;
 }
 
 export function indexTree(node: IssueNode | null): Map<string, IssueNode> {
-  const result = new Map<string, IssueNode>();
-  const visit = (current: IssueNode) => {
+  const result = new Map<string, IssueNode>(),
+    pending = node ? [node] : [];
+  while (pending.length) {
+    const current = pending.pop()!;
     result.set(current.issue.key, current);
-    current.children.forEach(visit);
-  };
-  if (node) visit(node);
+    for (let i = current.children.length - 1; i >= 0; i--)
+      pending.push(current.children[i]);
+  }
   return result;
 }

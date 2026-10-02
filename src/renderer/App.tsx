@@ -6,6 +6,7 @@ import {
   relationshipDestination,
 } from './relationships';
 import { relationshipKinds } from '../shared/relationships';
+import { withScrollPositions } from './scroll-position';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -80,6 +81,8 @@ import {
   ancestorPath,
   expansionKeys,
   childCounts,
+  treeCounts,
+  visibleRows,
   indexTree,
   type IssueNode,
 } from './tree';
@@ -219,7 +222,29 @@ function refreshRootKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {
 }
 export function App() {
   const updates = useUpdates();
-  const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const [workspace, storeWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const scrollPositions = useRef(new Map<string, number>());
+  const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const setWorkspace = useCallback(
+    (update: React.SetStateAction<Workspace>) => {
+      storeWorkspace((current) =>
+        typeof update === 'function'
+          ? update(withScrollPositions(current, scrollPositions.current))
+          : update,
+      );
+    },
+    [],
+  );
+  useEffect(() => {
+    const retained = new Set(
+      [...workspace.tabs, ...(workspace.closedTabs ?? [])].map((tab) => tab.id),
+    );
+    for (const id of scrollPositions.current.keys())
+      if (!retained.has(id)) scrollPositions.current.delete(id);
+  }, [workspace.tabs, workspace.closedTabs]);
+  useEffect(() => () => clearTimeout(scrollSaveTimer.current), []);
   const [selectedViewIssue, setSelectedViewIssue] = useState<string | null>(
     null,
   );
@@ -297,7 +322,10 @@ export function App() {
   const appearanceSaving = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
-  workspaceRef.current = workspace;
+  workspaceRef.current = withScrollPositions(
+    workspace,
+    scrollPositions.current,
+  );
   connectionsRef.current = connections;
   historyRef.current = history;
   const [sidebarSession, setSidebarSession] = useState(emptySidebarSession);
@@ -1321,7 +1349,11 @@ export function App() {
   const saveWorkspace = useCallback((value: Workspace) => {
     const save = pendingWorkspaceSave.current
       .catch(() => {})
-      .then(() => window.canopy.saveWorkspace(value));
+      .then(() =>
+        window.canopy.saveWorkspace(
+          withScrollPositions(value, scrollPositions.current),
+        ),
+      );
     pendingWorkspaceSave.current = save;
     return save;
   }, []);
@@ -1779,9 +1811,11 @@ export function App() {
   const restoreScroll = useCallback((tab: TabState) => {
     const element = scrollRef.current;
     if (!element) return;
-    element.scrollTop = tab.scrollTop;
+    const savedTop = scrollPositions.current.get(tab.id) ?? tab.scrollTop;
+    element.scrollTop = savedTop;
     const scrollTop = element.scrollTop;
-    if (scrollTop === tab.scrollTop) return;
+    if (scrollTop === savedTop) return;
+    scrollPositions.current.set(tab.id, scrollTop);
     // Chromium can clamp without emitting another scroll event after a layout
     // restoration. Save the actual offset even while native events are guarded.
     setWorkspace((current) => {
@@ -1817,6 +1851,7 @@ export function App() {
   }, [activeTab, Boolean(snapshot), restoreScroll]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
+    if (patch.scrollTop !== undefined) scrollPositions.current.delete(tabId);
     setWorkspace((current) => {
       const tab = current.tabs.find((tab) => tab.id === tabId);
       const next =
@@ -1842,6 +1877,7 @@ export function App() {
     if (!restoring) setHistory(visit(historyRef.current, from, tab));
     pendingScrollRestore.current =
       current.tabs.find((item) => sameRoot(item, tab))?.id ?? tab.id;
+    if (restoring) scrollPositions.current.delete(pendingScrollRestore.current);
     setWorkspace((value) => ({
       ...activateTab(value, tab, restoring),
       activeSavedViewId: null,
@@ -2611,7 +2647,7 @@ export function App() {
   );
   const tasks = useMemo(
     () =>
-      snapshot
+      snapshot && nextTaskOpen
         ? nextTasks(
             snapshot,
             activeConnection?.provider ?? 'jira',
@@ -2633,6 +2669,7 @@ export function App() {
         : [],
     [
       snapshot,
+      nextTaskOpen,
       activeConnection?.provider,
       nextTaskCriterion,
       activeTab?.id,
@@ -2701,25 +2738,7 @@ export function App() {
     filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
   const linkedSet = new Set(activeTab?.linkedExpanded ?? []);
-  const counts = useMemo(() => {
-    const result = new Map<string, ReturnType<typeof childCounts>>();
-    const visit = (node: IssueNode): number => {
-      const descendants = node.children.reduce(
-        (sum, child) => sum + 1 + visit(child),
-        0,
-      );
-      result.set(node.issue.key, {
-        open: node.children.filter(
-          (child) => child.issue.status.category !== 'done',
-        ).length,
-        total: node.children.length,
-        descendants,
-      });
-      return descendants;
-    };
-    if (tree) visit(tree);
-    return result;
-  }, [tree]);
+  const counts = useMemo(() => treeCounts(tree), [tree]);
   const breadcrumb = ancestorPath(
     tree,
     activeTab?.selectedKey ?? activeTab?.focusKey,
@@ -4841,9 +4860,25 @@ export function App() {
                       pendingScrollRestore.current === activeTab.id
                     )
                       return;
-                    updateTab(activeTab.id, {
-                      scrollTop: event.currentTarget.scrollTop,
-                    });
+                    scrollPositions.current.set(
+                      activeTab.id,
+                      event.currentTarget.scrollTop,
+                    );
+                    workspaceRef.current = withScrollPositions(
+                      workspaceRef.current,
+                      scrollPositions.current,
+                    );
+                    clearTimeout(scrollSaveTimer.current);
+                    scrollSaveTimer.current = setTimeout(() => {
+                      void saveWorkspace(workspaceRef.current).catch(
+                        (error: unknown) => {
+                          setErrors((current) => ({
+                            ...current,
+                            workspace: `Couldn’t save workspace: ${String(error)}`,
+                          }));
+                        },
+                      );
+                    }, 180);
                   }}
                 >
                   <TableHeader view={view} update={updateView} />
@@ -5658,7 +5693,28 @@ type RowsProps = {
   focusNeighbor: (key: string, direction: -1 | 1, extend?: boolean) => void;
 };
 
-function TreeRows(props: RowsProps) {
+export function TreeRows(props: RowsProps) {
+  // Sibling DOM nodes keep adversarial depth out of React/browser recursion.
+  // Each row retains its full controls, key, indentation and logical hierarchy.
+  return (
+    <>
+      {visibleRows(props.node, props.expanded).map(
+        ({ node, depth, position, siblings }) => (
+          <TreeRow
+            key={node.issue.key}
+            {...props}
+            node={node}
+            depth={props.depth + depth}
+            position={position}
+            siblings={siblings}
+          />
+        ),
+      )}
+    </>
+  );
+}
+
+function TreeRow(props: RowsProps & { position: number; siblings: number }) {
   const {
     node,
     depth,
@@ -5972,6 +6028,12 @@ function TreeRows(props: RowsProps) {
   return (
     <div
       role="treeitem"
+      className={depth > 0 ? 'tree-branch' : undefined}
+      style={{ '--branch-depth': depth - 1 } as React.CSSProperties}
+      data-tree-parent={issue.parentKey}
+      aria-level={depth + 1}
+      aria-posinset={props.position}
+      aria-setsize={props.siblings}
       aria-expanded={hasChildren ? open : undefined}
       aria-label={`${issue.key}: ${issue.summary}`}
       aria-selected={
@@ -6119,22 +6181,6 @@ function TreeRows(props: RowsProps) {
           openExternal={props.onOpenExternal}
           provider={props.provider}
         />
-      )}
-      {hasChildren && open && (
-        <div
-          role="group"
-          className="tree-branch"
-          style={{ '--branch-depth': depth } as React.CSSProperties}
-        >
-          {node.children.map((child) => (
-            <TreeRows
-              key={child.issue.key}
-              {...props}
-              node={child}
-              depth={depth + 1}
-            />
-          ))}
-        </div>
       )}
     </div>
   );

@@ -1,3 +1,4 @@
+import { app } from 'electron';
 import { launch } from '../../src/main/app';
 import { defaultShortcuts } from '../../src/renderer/tree';
 import type { Workspace } from '../../src/shared/types';
@@ -14,6 +15,17 @@ const fixtures = shapes.map(([shape, size], index) =>
   largeProvider(kind, shape, size, index, 2),
 );
 const connectionId = `perf-${kind}`;
+const crashes: object[] = [];
+app.on('render-process-gone', (_event, contents, details) => {
+  if (crashes.length < 64)
+    crashes.push({
+      at: performance.now(),
+      timeOrigin: performance.timeOrigin,
+      webContentsId: contents.id,
+      ...details,
+    });
+});
+Object.assign(globalThis, { canopyPerfCrashes: crashes });
 launch(async (storage) => {
   const tabs = fixtures.map((fixture, i) => ({
     id: `perf-${i}`,
