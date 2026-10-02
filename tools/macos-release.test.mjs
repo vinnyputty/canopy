@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 import { test } from 'node:test';
 import { command, signedPackages, signingGate } from './macos-release.mjs';
 
@@ -108,6 +108,50 @@ test('signing gate resolves a real tagged Git source and rejects unprotected run
   }
 });
 
+function opensslOutputDirectory(args, paths = { dirname }) {
+  return paths.dirname(args[args.indexOf('-out') + 1]);
+}
+function isExtractedZipApp(path, scratch, paths = { join }) {
+  return path === paths.join(scratch, 'zip', 'Canopy.app');
+}
+test('OpenSSL mock uses the parent output directory for Windows and POSIX keychain paths', () => {
+  for (const [paths, scratch, keychain] of [
+    [
+      win32,
+      String.raw`C:\Users\Runner\Temp\canopy-signing-fixture`,
+      String.raw`C:\Users\Runner\Temp\canopy-signing-fixture\signing.keychain-db`,
+    ],
+    [
+      posix,
+      '/tmp/canopy-signing-fixture',
+      '/tmp/canopy-signing-fixture/signing.keychain-db',
+    ],
+  ]) {
+    const args = ['pkcs12', '-out', paths.join(scratch, 'identity.pem')];
+    assert.equal(opensslOutputDirectory(args, paths), scratch);
+    assert.equal(
+      paths.join(opensslOutputDirectory(args, paths), 'signing.keychain-db'),
+      keychain,
+    );
+    assert.equal(
+      isExtractedZipApp(
+        paths.join(scratch, 'zip', 'Canopy.app'),
+        scratch,
+        paths,
+      ),
+      true,
+    );
+    assert.equal(
+      isExtractedZipApp(
+        paths.join(scratch, 'dmg-app', 'Canopy.app'),
+        scratch,
+        paths,
+      ),
+      false,
+    );
+  }
+});
+
 async function exercise(fault, arch = 'arm64') {
   const root = await mkdtemp(join(tmpdir(), 'canopy-sign-mock-'));
   const output = join(root, 'release');
@@ -160,8 +204,31 @@ async function exercise(fault, arch = 'arm64') {
     )
       return '"/mock/login.keychain-db"';
     if (name === 'openssl') {
-      scratch ??= args[args.indexOf('-out') + 1].replace('/identity.pem', '');
+      scratch ??= opensslOutputDirectory(args);
       if (fault === 'decrypt') throw new Error('mock decryption failure');
+      if (args.includes('-export')) {
+        assert.deepEqual(args.slice(0, 8), [
+          'pkcs12',
+          '-export',
+          '-keypbe',
+          'PBE-SHA1-3DES',
+          '-certpbe',
+          'PBE-SHA1-3DES',
+          '-macalg',
+          'sha1',
+        ]);
+        assert.equal(args[args.indexOf('-passout') + 1], 'pass:');
+        if (fault === 'export') throw new Error('mock export failure');
+      } else {
+        assert.equal(
+          args[args.indexOf('-passin') + 1],
+          'env:CANOPY_P12_PASSWORD',
+        );
+        assert.deepEqual(options.env, {
+          PATH: process.env.PATH,
+          CANOPY_P12_PASSWORD: env.MAC_CERTIFICATE_PASSWORD,
+        });
+      }
       writeFileSync(args[args.indexOf('-out') + 1], 'mock private key');
     }
     if (fault === 'import' && name === 'security' && args[0] === 'import')
@@ -190,7 +257,7 @@ async function exercise(fault, arch = 'arm64') {
       name === 'codesign' &&
       args.includes('--verify') &&
       (fault === 'signature' ||
-        (fault === 'zip-signature' && args.at(-1).includes('/zip/')))
+        (fault === 'zip-signature' && isExtractedZipApp(args.at(-1), scratch)))
     )
       throw new Error('mock invalid signature');
     if (
@@ -286,9 +353,9 @@ async function exercise(fault, arch = 'arm64') {
         (call) =>
           call.name === 'security' && call.args[0] === 'delete-keychain',
       ),
-      fault !== 'decrypt',
+      !['decrypt', 'export'].includes(fault),
     );
-    if (fault !== 'decrypt')
+    if (!['decrypt', 'export'].includes(fault))
       assert.deepEqual(
         calls
           .filter(
@@ -356,6 +423,7 @@ test('mocked arm64 and x64 flows verify stapled container payloads and clean cre
 test('certificate, notarization, staple, signature, publisher, CPU, unsafe artifacts and cleanup failures prevent success', async () => {
   for (const fault of [
     'decrypt',
+    'export',
     'import',
     'certificate',
     'notary',

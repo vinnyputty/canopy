@@ -177,6 +177,12 @@ export async function signedPackages({
     run('openssl', [
       'pkcs12',
       '-export',
+      '-keypbe',
+      'PBE-SHA1-3DES',
+      '-certpbe',
+      'PBE-SHA1-3DES',
+      '-macalg',
+      'sha1',
       '-in',
       join(scratch, 'identity.pem'),
       '-out',
