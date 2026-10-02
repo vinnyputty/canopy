@@ -210,11 +210,12 @@ export async function auditRefresh(app, page, resizeWindow) {
   await page.getByPlaceholder('Paste your token').fill('fixture-only');
   await hold('replacement-recovery', 'tree', key);
   await page
-    .getByRole('button', { name: 'Connect with token', exact: true })
+    .getByRole('button', { name: 'Verify and save Jira', exact: true })
     .click();
   await expect(
     page.getByRole('dialog', { name: 'Connect Jira', exact: true }),
-  ).toBeHidden();
+  ).toContainText('Connection saved.');
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
   // Allow the scheduler's one-second request spacing and its next timer tick.
   await page.clock.runFor(2000);
   await started('replacement-recovery');

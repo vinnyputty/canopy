@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
 const api: CanopyAPI = {
+  diagnostics: () => ipcRenderer.invoke('canopy:diagnostics'),
+  exportDiagnostics: (reviewed) =>
+    ipcRenderer.invoke('canopy:exportDiagnostics', reviewed),
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),

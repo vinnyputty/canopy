@@ -159,14 +159,13 @@ export async function auditGithub(app, page) {
       .getByPlaceholder('Paste your token')
       .fill('fixture-secret');
     await page
-      .getByRole('button', { name: 'Connect GitHub', exact: true })
+      .getByRole('button', { name: 'Verify and save GitHub', exact: true })
       .click();
     await expect(
       page.getByRole('dialog', { name: 'Connect GitHub' }),
     ).toHaveCount(0);
     await page
-      .getByRole('button', { name: 'Open issue', exact: true })
-      .first()
+      .getByRole('button', { name: 'Open first root', exact: true })
       .click();
     const dialog = page.getByRole('dialog', { name: 'Open issue tree' });
     await dialog
