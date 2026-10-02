@@ -1,0 +1,280 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  createBackup,
+  parseBackup,
+  planImport,
+  BACKUP_LIMIT,
+} from '../src/shared/workspace-backup';
+import type { Connection, Workspace } from '../src/shared/types';
+import {
+  backupConnections,
+  backupWorkspace,
+} from './fixtures/workspace-backup';
+const fixture = () =>
+  createBackup(
+    structuredClone(backupWorkspace),
+    backupConnections,
+    '2026-10-02T00:00:00.000Z',
+  );
+const mapping = {
+  'sample-jira': 'destination-jira',
+  'sample-github': 'destination-github',
+};
+const destinations: Connection[] = backupConnections.map((c) => ({
+  ...c,
+  id: mapping[c.id as keyof typeof mapping],
+}));
+const empty = (): Workspace => ({
+  tabs: [],
+  activeTabId: null,
+  theme: 'light',
+  sidebarCollapsed: false,
+  shortcuts: {},
+});
+
+test('round trips portable settings and excludes secrets, snapshots, and navigation history', () => {
+  const local = {
+    ...structuredClone(backupWorkspace),
+    credentials: { marker: 'FAKE SECRET' },
+    issueSnapshots: { marker: 'PRIVATE CACHE' },
+  };
+  const connections = backupConnections.map((c) => ({
+    ...c,
+    token: 'FAKE TOKEN',
+    accountName: 'private-account',
+  }));
+  const backup = createBackup(local, connections);
+  const contents = JSON.stringify(backup);
+  for (const forbidden of [
+    'FAKE SECRET',
+    'FAKE TOKEN',
+    'PRIVATE CACHE',
+    'PRIVATE SNAPSHOT',
+    'private-account',
+    'seenRoots',
+    'credentials',
+    'issueSnapshots',
+  ])
+    assert.ok(!contents.includes(forbidden), forbidden);
+  assert.deepEqual(backup.workspace.tabs[0].expanded, []);
+  assert.equal(backup.workspace.tabs[0].scrollTop, 0);
+  assert.deepEqual(parseBackup(contents), backup);
+  assert.deepEqual(backup.workspace.reading, backupWorkspace.reading);
+  assert.deepEqual(backup.workspace.pinnedRoots, backupWorkspace.pinnedRoots);
+  assert.deepEqual(backup.workspace.savedViews, backupWorkspace.savedViews);
+});
+
+test('rejects malformed, truncated, oversized, and unsupported versions', () => {
+  for (const contents of [
+    '{',
+    'null',
+    '[]',
+    JSON.stringify({ ...fixture(), version: 2 }),
+    JSON.stringify({ ...fixture(), version: '1' }),
+    ' '.repeat(BACKUP_LIMIT + 1),
+  ])
+    assert.throws(() => parseBackup(contents));
+  const b = fixture();
+  b.workspace.tabs[0].hideDone = 'yes' as never;
+  assert.throws(() => parseBackup(JSON.stringify(b)));
+});
+
+test('rejects unknown fields and malicious keys throughout the allowlist', () => {
+  for (const mutate of [
+    (b: any) => {
+      b.credentials = { fake: 'TOKEN' };
+    },
+    (b: any) => {
+      b.workspace.seenRoots = {};
+    },
+    (b: any) => {
+      b.connections[0].token = 'FAKE';
+    },
+    (b: any) => {
+      b.workspace.tabs[0].snapshot = {};
+    },
+    (b: any) => {
+      b.workspace.tabs[0].filters = { status: 'Open', token: 'FAKE' };
+    },
+    (b: any) => {
+      b.workspace.savedViews[0].filters.token = 'FAKE';
+    },
+    (b: any) => {
+      b.workspace.savedViews[0].filters.assignee = ['any'];
+    },
+    (b: any) => {
+      b.workspace.savedViews[0].sort.direction = ['asc'];
+    },
+    (b: any) => {
+      b.workspace.rootViews['["sample-jira","SAMPLE-1"]'].widths.token = 'FAKE';
+    },
+    (b: any) => {
+      b.workspace.shortcuts = JSON.parse('{"__proto__":"Meta+K"}');
+    },
+    (b: any) => {
+      b.workspace.rootViews = JSON.parse('{"constructor":{}}');
+    },
+    (b: any) => {
+      b.workspace.tabs[0].rootKey = '../../../credentials';
+    },
+    (b: any) => {
+      b.connections[0].url = 'https://user:FAKE@sample.invalid';
+    },
+    (b: any) => {
+      b.connections[0].url = 'https://sample.invalid?token=FAKE';
+    },
+  ]) {
+    const b = fixture();
+    mutate(b);
+    assert.throws(() => parseBackup(JSON.stringify(b)));
+  }
+});
+
+test('version 1 migrates absent reading and missing commands, rejects duplicate identities and shortcuts', () => {
+  const b = fixture();
+  delete b.workspace.reading;
+  delete b.workspace.shortcuts.selectTab9;
+  const restored = parseBackup(JSON.stringify(b));
+  assert.deepEqual(restored.workspace.reading, {
+    textSize: 'medium',
+    spacing: 'compact',
+  });
+  assert.equal(restored.workspace.shortcuts.selectTab9, '');
+  b.workspace.shortcuts.quickOpen = b.workspace.shortcuts.commandPalette;
+  assert.throws(() => parseBackup(JSON.stringify(b)), /Conflicting/);
+  const duplicate = fixture();
+  duplicate.workspace.tabs.push({
+    ...duplicate.workspace.tabs[0],
+    id: 'unique',
+  });
+  assert.throws(() => parseBackup(JSON.stringify(duplicate)), /Duplicate root/);
+});
+
+test('mapping requires explicit compatible distinct destinations and preserves cross-provider identity', () => {
+  const b = fixture();
+  assert.throws(
+    () => planImport(b, empty(), destinations, {}, 'merge'),
+    /Reconnect/,
+  );
+  assert.throws(
+    () =>
+      planImport(
+        b,
+        empty(),
+        [{ ...destinations[0], url: 'https://other.invalid' }, destinations[1]],
+        mapping,
+        'merge',
+      ),
+    /same provider/,
+  );
+  assert.throws(
+    () =>
+      planImport(
+        b,
+        empty(),
+        destinations,
+        { ...mapping, 'sample-github': 'destination-jira' },
+        'merge',
+      ),
+    /same provider/,
+  );
+  const result = planImport(
+    b,
+    empty(),
+    destinations,
+    mapping,
+    'replace',
+  ).workspace;
+  assert.deepEqual(
+    result.tabs.map((t) => t.connectionId),
+    ['destination-jira', 'destination-github'],
+  );
+  assert.equal(
+    result.savedViews?.[0].roots[0].connectionId,
+    'destination-jira',
+  );
+  const unknown = fixture();
+  unknown.workspace.tabs[0].connectionId = 'missing';
+  assert.throws(
+    () => parseBackup(JSON.stringify(unknown)),
+    /Missing connection/,
+  );
+});
+
+test('merge keeps existing conflicts and appearance, reidentifies tab collisions, and previews effects', () => {
+  const current = {
+    ...empty(),
+    tabs: [
+      {
+        ...backupWorkspace.tabs[0],
+        connectionId: 'destination-jira',
+        rootKey: 'sample-1',
+      },
+      { ...backupWorkspace.tabs[1], connectionId: 'other-github' },
+    ],
+    activeTabId: 'tab-1',
+    savedViews: [{ ...backupWorkspace.savedViews![0], name: 'Existing view' }],
+  };
+  const plan = planImport(fixture(), current, destinations, mapping, 'merge');
+  assert.equal(plan.workspace.theme, 'light');
+  assert.equal(plan.workspace.tabs.length, 3);
+  assert.equal(plan.workspace.tabs[2].id, 'import-tab-2');
+  assert.equal(plan.workspace.savedViews?.[0].name, 'Existing view');
+  assert.ok(plan.conflicts.some((c) => c.startsWith('Open root')));
+  assert.ok(plan.conflicts.some((c) => c.startsWith('Saved view')));
+});
+
+test('replace previews removal, preserves local seen data, and leaves source inputs untouched', () => {
+  const current = {
+    ...empty(),
+    seenRoots: structuredClone(backupWorkspace.seenRoots),
+  };
+  const b = fixture();
+  const serialized = JSON.stringify(b);
+  const plan = planImport(b, current, destinations, mapping, 'replace');
+  assert.equal(plan.workspace.theme, 'dark');
+  assert.deepEqual(plan.workspace.seenRoots, current.seenRoots);
+  assert.ok(plan.conflicts.some((c) => c.startsWith('Replace removes')));
+  assert.equal(JSON.stringify(b), serialized);
+});
+
+test('distinct source accounts cannot collapse to one destination and merge limits fail explicitly', () => {
+  const b = fixture();
+  b.connections.push({ ...b.connections[0], id: 'second-source' });
+  assert.throws(
+    () =>
+      planImport(
+        b,
+        empty(),
+        destinations,
+        { ...mapping, 'second-source': 'destination-jira' },
+        'merge',
+      ),
+    /distinct/,
+  );
+  const current = {
+    ...empty(),
+    tabs: Array.from({ length: 100 }, (_, i) => ({
+      ...backupWorkspace.tabs[0],
+      id: `local-${i}`,
+      rootKey: `SAMPLE-${i + 10}`,
+      connectionId: 'destination-jira',
+    })),
+  };
+  assert.throws(
+    () => planImport(fixture(), current, destinations, mapping, 'merge'),
+    /exceed/,
+  );
+});
+
+test('retains literal shortcut keys supported by the shortcut recorder', () => {
+  const b = fixture();
+  b.workspace.shortcuts.quickOpen = 'Meta++';
+  b.workspace.shortcuts.selectTab9 = 'Meta+ ';
+  b.workspace.shortcuts.selectTab8 = 'F24';
+  assert.deepEqual(
+    parseBackup(JSON.stringify(b)).workspace.shortcuts,
+    b.workspace.shortcuts,
+  );
+});
