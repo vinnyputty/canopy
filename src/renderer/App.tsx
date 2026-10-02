@@ -5285,7 +5285,6 @@ export function App() {
       )}
       {dialog === 'shortcuts' && (
         <ShortcutsDialog
-          initialFocus={settingsFlow.current}
           shortcuts={workspace.shortcuts}
           onChange={(shortcuts) =>
             setWorkspace((value) => ({ ...value, shortcuts }))
@@ -6956,10 +6955,6 @@ function OpenIssueDialog({
     const key = directKey && !explicitSelection ? directKey : selected?.key;
     if (!connectionId) setError('Choose a connection first.');
     else if (key) onOpen(connectionId, key);
-    else if (deliberate && query.trim().length >= 2) {
-      search.start(connectionId, query.trim(), project, false);
-      void search.load();
-    }
   };
   return (
     <Dialog title="Open issue tree" onClose={onClose}>
@@ -7566,16 +7561,18 @@ function AppearanceDialog({
 }
 
 function ShortcutsDialog({
-  initialFocus,
   shortcuts,
   onChange,
   onClose,
 }: {
-  initialFocus?: boolean;
   shortcuts: Record<string, string>;
   onChange: (value: Record<string, string>) => void;
   onClose: () => void;
 }) {
+  const [returnToPrevious] = useState(() =>
+    paletteReturn(document.activeElement as HTMLElement | null, null),
+  );
+  useLayoutEffect(() => returnToPrevious, [returnToPrevious]);
   const [draft, setDraft] = useState(shortcuts);
   const [recording, setRecording] = useState<string | null>(null);
   const collisions = shortcutCollisions(draft);
@@ -7599,12 +7596,7 @@ function ShortcutsDialog({
     return () => window.removeEventListener('keydown', capture, true);
   }, [recording]);
   return (
-    <Dialog
-      title="Keyboard shortcuts"
-      onClose={onClose}
-      wide
-      initialFocus={initialFocus}
-    >
+    <Dialog title="Keyboard shortcuts" onClose={onClose} wide initialFocus>
       <div className="shortcut-intro">
         Click a shortcut, then press the new key combination. Conflicting
         shortcuts must be resolved before saving.

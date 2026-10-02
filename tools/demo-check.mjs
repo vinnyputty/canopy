@@ -47,7 +47,15 @@ async function closeDemo(session) {
 const first = await openDemo();
 // Pause synchronously when a target state renders, before its presentation timer
 // can expire. The script is reinstalled after every Reset and replay reload.
-await first.page.addInitScript(() => {
+function installDemoHold() {
+  const trace = [];
+  globalThis.canopyDemoCheckTrace = trace;
+  const record = (event, state = {}) => {
+    trace.push({ ms: performance.now(), event, ...state });
+    if (trace.length > 64) trace.shift();
+  };
+  record('script-entry', { hold: sessionStorage.getItem('canopy-check-hold') });
+  let previous = '';
   const observer = new MutationObserver(() => {
     const target = sessionStorage.getItem('canopy-check-hold');
     const ready =
@@ -62,7 +70,25 @@ await first.page.addInitScript(() => {
     const pause = [...document.querySelectorAll('button')].find(
       (button) => button.textContent === 'Pause demo',
     );
+    const state = {
+      target,
+      ready: Boolean(ready),
+      pause: Boolean(pause),
+      rootAction: document
+        .querySelector(
+          '[aria-label="Expand CAN-100"], [aria-label="Collapse CAN-100"]',
+        )
+        ?.getAttribute('aria-label'),
+      caption: document.querySelector('.demo-tour [role="status"]')
+        ?.textContent,
+    };
+    const signature = JSON.stringify(state);
+    if (signature !== previous) {
+      record('render', state);
+      previous = signature;
+    }
     if (!ready || !pause) return;
+    record('pause-click', state);
     pause.click();
     sessionStorage.removeItem('canopy-check-hold');
     observer.disconnect();
@@ -72,16 +98,81 @@ await first.page.addInitScript(() => {
     subtree: true,
     characterData: true,
   });
-});
+}
+await first.page.addInitScript(installDemoHold);
+
+async function demoFailureState() {
+  return {
+    readyState: document.readyState,
+    hold: sessionStorage.getItem('canopy-check-hold'),
+    requestedStep: sessionStorage.getItem('canopy-demo-step'),
+    requestedPaused: sessionStorage.getItem('canopy-demo-paused'),
+    beforeReset: sessionStorage.getItem('canopy-check-before-reset'),
+    navigation: performance.getEntriesByType('navigation').map((entry) => ({
+      startTime: entry.startTime,
+      duration: entry.duration,
+      type: entry.type,
+    })),
+    trace: globalThis.canopyDemoCheckTrace,
+    tour: document.querySelector('.demo-tour')?.textContent,
+    tree: [...document.querySelectorAll('[data-tree-key]')].map((row) => ({
+      key: row.getAttribute('data-tree-key'),
+      expanded: row.getAttribute('aria-expanded'),
+    })),
+    focus: document.activeElement?.getAttribute('aria-label'),
+    workspace: await window.canopy.loadWorkspace(),
+  };
+}
+
+async function reportDemoFailure(page, target, primary) {
+  let timer;
+  try {
+    const state = await Promise.race([
+      page.evaluate(demoFailureState),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Demo diagnostic timed out')),
+          2000,
+        );
+      }),
+    ]);
+    console.error(
+      'Demo hold failure:',
+      JSON.stringify({ target, error: String(primary), state }),
+    );
+  } catch (error) {
+    console.error('Demo hold diagnostic failed:', String(error));
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function resetAndHold(page, target) {
-  await page.evaluate(
-    (target) => sessionStorage.setItem('canopy-check-hold', target),
-    target,
-  );
+  await page.evaluate((target) => {
+    sessionStorage.setItem('canopy-check-hold', target);
+    sessionStorage.setItem(
+      'canopy-check-before-reset',
+      JSON.stringify({
+        target,
+        tour: document.querySelector('.demo-tour')?.textContent,
+        ms: performance.now(),
+        tree: [...document.querySelectorAll('[data-tree-key]')].map((row) => ({
+          key: row.getAttribute('data-tree-key'),
+          expanded: row.getAttribute('aria-expanded'),
+        })),
+      }),
+    );
+  }, target);
   await page.getByRole('button', { name: 'Reset and replay' }).click();
-  await expect(page.getByRole('button', { name: 'Resume demo' })).toBeVisible({
-    timeout: 30000,
-  });
+  try {
+    await expect(page.getByRole('button', { name: 'Resume demo' })).toBeVisible(
+      {
+        timeout: 30000,
+      },
+    );
+  } catch (error) {
+    await reportDemoFailure(page, target, error);
+    throw error;
+  }
   // Hold beyond either transient state's unpaused lifetime before testing Stop.
   await page.waitForTimeout(timingWindow(4000));
 }

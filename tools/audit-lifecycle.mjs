@@ -1,9 +1,21 @@
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { promisify } from 'node:util';
+import { cpus, freemem, totalmem } from 'node:os';
 
 const execFile = promisify(childProcess.execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let activeCimSnapshots = 0;
+
+function hostCpuTimes() {
+  return cpus().reduce(
+    (sum, cpu) => ({
+      total: sum.total + Object.values(cpu.times).reduce((a, b) => a + b, 0),
+      idle: sum.idle + cpu.times.idle,
+    }),
+    { total: 0, idle: 0 },
+  );
+}
 
 export async function deadline(operation, ms, label) {
   let timer;
@@ -25,12 +37,37 @@ export async function deadline(operation, ms, label) {
 async function processes(ms) {
   if (process.platform === 'win32') {
     // CreationDate distinguishes a retained tree member from a reused PID.
-    const script =
-      '$ErrorActionPreference = "Stop"; Get-CimInstance Win32_Process | ForEach-Object { @{ pid=$_.ProcessId; ppid=$_.ParentProcessId; start=if ($null -ne $_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString("o") } else { $null } } } | ConvertTo-Json -Compress';
+    // Flush phase markers independently of stdout's complete identity snapshot.
+    // A timeout before script-entry is different from a slow query or serializer.
+    const script = `
+[Console]::Error.WriteLine("canopy-cim phase=script-entry"); [Console]::Error.Flush();
+$ErrorActionPreference = "Stop";
+$clock = [System.Diagnostics.Stopwatch]::StartNew();
+function Mark($phase, $count) {
+  $self = [System.Diagnostics.Process]::GetCurrentProcess();
+  [Console]::Error.WriteLine("canopy-cim phase=$phase elapsedMs=$($clock.ElapsedMilliseconds) rows=$count cpuMs=$($self.TotalProcessorTime.TotalMilliseconds) memoryBytes=$($self.WorkingSet64) processors=$([Environment]::ProcessorCount)");
+  [Console]::Error.Flush();
+}
+Mark "module-load" 0;
+Import-Module CimCmdlets;
+Mark "query" 0;
+$processes = @(Get-CimInstance Win32_Process);
+Mark "projection" $processes.Count;
+$rows = @($processes | ForEach-Object { @{ pid=$_.ProcessId; ppid=$_.ParentProcessId; start=if ($null -ne $_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString("o") } else { $null } } });
+Mark "serialization" $rows.Count;
+$json = $rows | ConvertTo-Json -Compress;
+Mark "complete" $rows.Count;
+[Console]::Out.WriteLine($json);
+`;
     const started = Date.now();
+    const concurrentSnapshots = ++activeCimSnapshots;
+    const cpuStarted = process.cpuUsage();
+    let hostStarted = null;
+    let spawnedMs = null;
+    let snapshotPid = null;
     let stdout;
     try {
-      ({ stdout } = await execFile(
+      const pending = execFile(
         'powershell.exe',
         [
           '-NoProfile',
@@ -39,13 +76,40 @@ async function processes(ms) {
           Buffer.from(script, 'utf16le').toString('base64'),
         ],
         { timeout: ms, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
-      ));
+      );
+      pending.child?.once('spawn', () => {
+        spawnedMs = Date.now() - started;
+        snapshotPid = pending.child.pid;
+        hostStarted = hostCpuTimes();
+      });
+      ({ stdout } = await pending);
     } catch (error) {
+      const hostEnded = hostStarted ? hostCpuTimes() : null;
       // TAP otherwise prints only the generic message, losing timeout evidence.
       throw new Error(
         `CIM process snapshot failed: ${JSON.stringify({
           elapsedMs: Date.now() - started,
           timeoutMs: ms,
+          phase:
+            [
+              ...String(error.stderr ?? '').matchAll(
+                /canopy-cim phase=([\w-]+)/g,
+              ),
+            ].at(-1)?.[1] ?? 'startup-or-script-entry',
+          spawnedMs,
+          snapshotPid,
+          observerPid: process.pid,
+          concurrentSnapshots,
+          observerCpuMicros: process.cpuUsage(cpuStarted),
+          observerMemoryBytes: process.memoryUsage().rss,
+          hostCpuDeltaMs:
+            hostEnded && hostStarted
+              ? {
+                  total: hostEnded.total - hostStarted.total,
+                  idle: hostEnded.idle - hostStarted.idle,
+                }
+              : null,
+          hostMemoryBytes: { free: freemem(), total: totalmem() },
           code: error.code ?? null,
           killed: error.killed ?? null,
           signal: error.signal ?? null,
@@ -54,6 +118,8 @@ async function processes(ms) {
         })}`,
         { cause: error },
       );
+    } finally {
+      activeCimSnapshots--;
     }
     const result = JSON.parse(stdout);
     return (Array.isArray(result) ? result : [result]).map((row) => {
