@@ -3365,6 +3365,19 @@ try {
   );
   await launch();
   await auditSearch(app, page);
+  // Search ends on a missing root. Persist the refresh fixture's active tab
+  // before its reload rather than relying on an unfinished debounce.
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.evaluate(() => window.canopy.flushWorkspace());
+  await waitForSavedWorkspace((saved) =>
+    saved.tabs.some(
+      (tab) => tab.id === saved.activeTabId && tab.rootKey === 'CAN-200',
+    ),
+  );
   await auditRefresh(app, page, resizeWindow);
 
   await page.getByTitle('Disconnect Canopy demo').click();
