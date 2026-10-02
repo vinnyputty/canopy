@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { before, after, it } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -93,33 +101,89 @@ for (const scenario of [
   });
 }
 
-for (const scenario of ['missing', 'relative', 'non-temp', 'credentials']) {
-  it(`native audit rejects unsafe profile before launch/Auth: ${scenario}`, () => {
-    const profile = join(directory, 'audit-' + scenario);
-    mkdirSync(profile, { recursive: true });
-    if (scenario === 'credentials')
-      writeFileSync(
-        join(profile, 'credentials.json'),
-        'forbidden synthetic sentinel',
+for (const flag of ['0', '1']) {
+  for (const scenario of [
+    'missing',
+    'relative',
+    'non-temp',
+    'credentials',
+    'invalid-realpath',
+    'temp-root',
+    'symlink-escape',
+    'symlink-credentials',
+  ]) {
+    it(`audit guard preserves rejected profile after exit: ${scenario}, cleanup=${flag}`, () => {
+      const holder = join(directory, `audit-${scenario}-${flag}`);
+      mkdirSync(holder, { recursive: true });
+      const sentinel = join(holder, 'sentinel.txt');
+      writeFileSync(sentinel, 'Unapproved synthetic profile sentinel');
+      let profile = holder;
+      if (scenario === 'credentials')
+        writeFileSync(
+          join(holder, 'credentials.json'),
+          'SYNTHETIC CREDENTIAL SENTINEL',
+        );
+      if (scenario === 'relative') profile = holder.slice(directory.length + 1);
+      if (scenario === 'non-temp') profile = resolve('/');
+      if (scenario === 'invalid-realpath') profile = join(holder, 'missing');
+      if (scenario === 'temp-root') profile = tmpdir();
+      if (scenario.startsWith('symlink-')) {
+        profile = join(holder, 'profile-link');
+        const target =
+          scenario === 'symlink-escape'
+            ? resolve('/')
+            : join(holder, 'credential-target');
+        if (scenario === 'symlink-credentials') {
+          mkdirSync(target);
+          writeFileSync(
+            join(target, 'credentials.json'),
+            'SYNTHETIC CREDENTIAL SENTINEL',
+          );
+        }
+        symlinkSync(
+          target,
+          profile,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      }
+      const env = {
+        ...process.env,
+        CANOPY_DEMO_TEMP: flag,
+        CANOPY_USER_DATA: profile,
+        CANOPY_GUARD_TEST_ROOT: directory,
+      };
+      if (scenario === 'missing')
+        delete (env as Partial<typeof env>).CANOPY_USER_DATA;
+      const child = spawnSync(
+        process.execPath,
+        [join(directory, 'audit-guard.cjs'), join(directory, 'audit.cjs')],
+        { env, cwd: directory, encoding: 'utf8', timeout: 2000 },
       );
-    const env = {
-      ...process.env,
-      CANOPY_DEMO_TEMP: '0',
-      CANOPY_USER_DATA:
-        scenario === 'relative'
-          ? 'relative-profile'
-          : scenario === 'non-temp'
-            ? '/'
-            : profile,
-    };
-    if (scenario === 'missing')
-      delete (env as Partial<typeof env>).CANOPY_USER_DATA;
-    const child = spawnSync(
-      process.execPath,
-      [join(directory, 'audit-guard.cjs'), join(directory, 'audit.cjs')],
-      { env, encoding: 'utf8', timeout: 2000 },
-    );
-    assert.equal(child.status, 0, child.stdout + child.stderr);
-    assert.match(child.stdout, /PASS audit profile guard/);
-  });
+      // Check preservation AFTER child exit, including registered exit handlers.
+      assert.equal(child.status, 0, child.stdout + child.stderr);
+      assert.match(child.stdout, /PASS audit profile guard/);
+      assert.equal(
+        readFileSync(sentinel, 'utf8'),
+        'Unapproved synthetic profile sentinel',
+      );
+      if (scenario === 'credentials')
+        assert.equal(
+          readFileSync(join(holder, 'credentials.json'), 'utf8'),
+          'SYNTHETIC CREDENTIAL SENTINEL',
+        );
+      if (scenario.startsWith('symlink-')) {
+        assert.ok(lstatSync(profile).isSymbolicLink());
+        assert.ok(readlinkSync(profile));
+        if (scenario === 'symlink-credentials')
+          assert.equal(
+            readFileSync(
+              join(holder, 'credential-target', 'credentials.json'),
+              'utf8',
+            ),
+            'SYNTHETIC CREDENTIAL SENTINEL',
+          );
+      }
+      assert.ok(existsSync(holder));
+    });
+  }
 }

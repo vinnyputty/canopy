@@ -2,13 +2,9 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { launch } from '../../src/main/app';
-import { createDemoFixture, demoWorkspace } from '../../src/main/demo';
-import { Updates } from '../../src/main/updates';
-import { ReleaseRequestError, type ReleasePage } from '../../src/main/releases';
-import { release } from './releases';
+import type { ReleasePage } from '../../src/main/releases';
 
-// Fail before launch/Auth/fixture writes if a parent did not explicitly select
+// Fail before runtime main imports, launch/Auth or fixture writes if a parent did not explicitly select
 // a disposable temp profile. Do not read credentials, even in a mistaken launch.
 const profile = process.env.CANOPY_USER_DATA;
 if (!profile || !isAbsolute(profile))
@@ -35,6 +31,18 @@ if (
   throw new Error(
     'Update audit requires a credential-free disposable temp profile.',
   );
+
+// Keep these synchronous runtime imports AFTER validation. Static imports run
+// before the guard and can register main's inherited demo cleanup on rejection.
+const { launch } =
+  require('../../src/main/app') as typeof import('../../src/main/app');
+const { createDemoFixture, demoWorkspace } =
+  require('../../src/main/demo') as typeof import('../../src/main/demo');
+const { Updates } =
+  require('../../src/main/updates') as typeof import('../../src/main/updates');
+const { ReleaseRequestError } =
+  require('../../src/main/releases') as typeof import('../../src/main/releases');
+const { release } = require('./releases') as typeof import('./releases');
 
 const controls = {
   mode: 'available' as
