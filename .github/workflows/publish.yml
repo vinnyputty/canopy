@@ -31,9 +31,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          node tools/release.mjs tag "$RELEASE_TAG"
-          version=$(node -p 'require("./package.json").version')
-          source_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
+          source=$(node tools/release.mjs tag-source "$RELEASE_TAG")
+          read -r source_sha version <<< "$source"
           test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
           gh release download "$RELEASE_TAG" --dir downloaded
           node tools/release.mjs publish downloaded "$RELEASE_TAG" "$version" "$source_sha" "release-qualification/$RELEASE_TAG.json" "release-qualification/$RELEASE_TAG.md"

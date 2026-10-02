@@ -196,6 +196,29 @@ function runGh(args) {
     throw new Error(`gh ${args[0]} failed (${result.status})`);
   return result.stdout;
 }
+function runGit(args) {
+  const result = spawnSync('git', args, { encoding: 'utf8', timeout: 60000 });
+  if (result.error) throw result.error;
+  if (result.status !== 0)
+    throw new Error(`git ${args[0]} failed (${result.status})`);
+  return result.stdout;
+}
+export function resolveTagSource(tag, git = runGit) {
+  // Validate syntax before constructing a Git revision; the dispatch version is irrelevant.
+  validateTag(tag, typeof tag === 'string' ? tag.slice(1) : undefined);
+  const commit = git([
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    `refs/tags/${tag}^{commit}`,
+  ]).trim();
+  if (!/^[a-f0-9]{40}$/.test(commit))
+    throw new Error('Invalid tagged source commit');
+  const { version } = JSON.parse(git(['show', `${commit}:package.json`]));
+  validateTag(tag, version);
+  return { commit, version };
+}
+
 export async function publish(
   directory,
   tag,
@@ -257,7 +280,10 @@ if (
   const [mode, ...args] = process.argv.slice(2);
   if (mode === 'tag')
     validateTag(args[0], (await json('package.json')).version);
-  else if (mode === 'assemble') await assemble(...args);
+  else if (mode === 'tag-source') {
+    const { commit, version } = resolveTagSource(args[0]);
+    console.log(`${commit} ${version}`);
+  } else if (mode === 'assemble') await assemble(...args);
   else if (mode === 'verify') await verifyDownloads(...args);
   else if (mode === 'publish') await publish(...args);
   else if (mode === 'qualify') {

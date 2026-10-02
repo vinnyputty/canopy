@@ -9,6 +9,7 @@ import {
   assetNames,
   platforms,
   publish,
+  resolveTagSource,
   qualify,
   validateTag,
   verifyDownloads,
@@ -358,5 +359,110 @@ test('publishing workflow invokes the guarded publication entry point', async ()
     workflow,
     /node tools\/release\.mjs publish downloaded "\$RELEASE_TAG" "\$version" "\$source_sha" "release-qualification\/\$RELEASE_TAG\.json" "release-qualification\/\$RELEASE_TAG\.md"/,
   );
-  assert.doesNotMatch(workflow, /gh release edit/);
+  assert.match(
+    workflow,
+    /source=\$\(node tools\/release\.mjs tag-source "\$RELEASE_TAG"\)\s+read -r source_sha version <<< "\$source"/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /require\("\.\/package\.json"\)|gh release edit/,
+  );
+});
+
+test('an older qualified release uses its tagged version after the dispatch branch version advances', async () =>
+  publicationFixture(async ({ output, evidence, notes }) => {
+    const dispatch = await mkdtemp(join(tmpdir(), 'canopy-release-dispatch-'));
+    const previous = process.cwd();
+    const calls = [];
+    try {
+      await writeFile(
+        join(dispatch, 'package.json'),
+        JSON.stringify({ version: '0.2.0' }),
+      );
+      process.chdir(dispatch);
+      const source = resolveTagSource(tag, (args) => {
+        calls.push(args);
+        if (args[0] === 'rev-parse') return `${commit}\n`;
+        assert.deepEqual(args, ['show', `${commit}:package.json`]);
+        return JSON.stringify({ version });
+      });
+      assert.deepEqual(source, { commit, version });
+      assert.deepEqual(calls[0], [
+        'rev-parse',
+        '--verify',
+        '--end-of-options',
+        `refs/tags/${tag}^{commit}`,
+      ]);
+      const remoteCalls = [];
+      await publish(
+        output,
+        tag,
+        source.version,
+        source.commit,
+        evidence,
+        notes,
+        mockGh(
+          [{ endpoint: refEndpoint, body: remoteRef('commit', commit) }],
+          remoteCalls,
+        ),
+      );
+      assert.equal(remoteCalls.at(-1)[0], 'release');
+    } finally {
+      process.chdir(previous);
+      await rm(dispatch, { recursive: true, force: true });
+    }
+  }));
+test('tag resolution rejects unsafe syntax before invoking Git', () => {
+  for (const unsafe of [
+    '--help',
+    '-c core.sshCommand=bad',
+    'HEAD',
+    'refs/tags/v0.1.0',
+    'v0.1.0^{commit}',
+    'v0.1.0:package.json',
+    'v0.1.0;echo bad',
+    'v0.1.0\n',
+    'v0.1.0$(bad)',
+    'v0.1.0`bad`',
+    'v01.1.0',
+    'v0.1.0-01',
+    undefined,
+  ]) {
+    assert.throws(() =>
+      resolveTagSource(unsafe, () => assert.fail('unsafe tag reached Git')),
+    );
+  }
+});
+test('missing tag, invalid commit and mismatched tagged package version fail closed', () => {
+  assert.throws(
+    () =>
+      resolveTagSource(tag, () => {
+        throw new Error('git rev-parse failed: missing tag');
+      }),
+    /missing tag/,
+  );
+  for (const invalid of [
+    'HEAD',
+    '--help',
+    `${commit}:package.json`,
+    'b'.repeat(39),
+  ])
+    assert.throws(
+      () => resolveTagSource(tag, () => invalid),
+      /Invalid tagged source commit/,
+    );
+  for (const taggedVersion of ['0.2.0', '01.1.0', undefined]) {
+    const calls = [];
+    assert.throws(
+      () =>
+        resolveTagSource(tag, (args) => {
+          calls.push(args);
+          return args[0] === 'rev-parse'
+            ? commit
+            : JSON.stringify({ version: taggedVersion });
+        }),
+      /must match app version/,
+    );
+    assert.deepEqual(calls[1], ['show', `${commit}:package.json`]);
+  }
 });
