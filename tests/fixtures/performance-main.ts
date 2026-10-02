@@ -20,13 +20,28 @@ launch(async (storage) => {
     connectionId,
     rootKey: fixture.rootKey,
     summary: shapes[i][0],
-    expanded: [fixture.rootKey],
+    expanded: Array.from({ length: shapes[i][1] }, (_, index) =>
+      kind === 'jira'
+        ? `PERF${i}-${index + 1}`
+        : `${fixture.repository}#${index + 1}`,
+    ),
     hideDone: true,
     scrollTop: 0,
   }));
   const workspace: Workspace = {
-    tabs,
-    activeTabId: tabs[0].id,
+    tabs: [
+      tabs[
+        shapes.findIndex(
+          ([shape]) => shape === (process.env.CANOPY_PERF_SHAPE ?? 'wide'),
+        )
+      ],
+    ],
+    activeTabId:
+      tabs[
+        shapes.findIndex(
+          ([shape]) => shape === (process.env.CANOPY_PERF_SHAPE ?? 'wide'),
+        )
+      ].id,
     theme: 'system',
     sidebarCollapsed: false,
     shortcuts: defaultShortcuts(
@@ -56,9 +71,26 @@ launch(async (storage) => {
         ? key.startsWith(fixture.rootKey.split('-')[0] + '-')
         : key.startsWith(fixture.repository + '#'),
     )!;
+  const calls: { root: string; at: number; call: number }[] = [];
+  const loads: {
+    root: string;
+    event: string;
+    at: number;
+    count?: number;
+    incomplete?: boolean;
+  }[] = [];
+  for (const fixture of fixtures)
+    fixture.onCall(() => {
+      calls.push({
+        root: fixture.rootKey,
+        at: performance.now(),
+        call: fixture.calls(),
+      });
+    });
   Object.assign(globalThis, {
     canopyPerf: {
       calls: () => fixtures.map((fixture) => fixture.calls()),
+      events: () => ({ calls, loads, timeOrigin: performance.timeOrigin }),
       offline: (value: boolean) =>
         fixtures.forEach((fixture) =>
           fixture.fail(value ? fixture.calls() + 1 : Infinity),
@@ -81,7 +113,35 @@ launch(async (storage) => {
       throw new Error('Isolated sample issues have no external target.');
     },
     provider: {
-      tree: (key, options) => fixtureFor(key).provider.tree(key, options),
+      tree: async (key, options) => {
+        loads.push({ root: key, event: 'start', at: performance.now() });
+        try {
+          const snapshot = await fixtureFor(key).provider.tree(key, {
+            ...options,
+            progress: (snapshot) => {
+              loads.push({
+                root: key,
+                event: 'progress',
+                at: performance.now(),
+                count: snapshot.issues.length,
+                incomplete: Boolean(snapshot.incomplete),
+              });
+              options?.progress?.(snapshot);
+            },
+          });
+          loads.push({
+            root: key,
+            event: 'complete',
+            at: performance.now(),
+            count: snapshot.issues.length,
+            incomplete: Boolean(snapshot.incomplete),
+          });
+          return snapshot;
+        } catch (error) {
+          loads.push({ root: key, event: 'error', at: performance.now() });
+          throw error;
+        }
+      },
       preview: (key) => fixtureFor(key).provider.preview(key),
       development: async () => ({
         state: 'unavailable',

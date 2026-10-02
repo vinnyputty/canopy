@@ -109,21 +109,39 @@ export class Mutations {
   private protectedSnapshots = new Set<string>();
   private evicted = new Set<string>();
   private snapshotSizes = new Map<string, number>();
+  private serializedSizes = new WeakMap<TreeSnapshot, number>();
   protectSnapshots(ids: string[]) {
     this.protectedSnapshots = new Set(ids);
-    this.boundSnapshots();
     this.publish();
   }
   isEvicted(id: string) {
     return this.evicted.has(id);
   }
   private measureSnapshot(id: string) {
-    const snapshot = this.bases[id];
-    if (snapshot)
-      this.snapshotSizes.set(
-        id,
-        new TextEncoder().encode(JSON.stringify(snapshot)).byteLength,
-      );
+    const tab = this.tabs.get(id);
+    const owners = new Set([
+      this.bases[id],
+      this.rendered[id],
+      ...(tab ? (this.sharedSnapshots?.(tab) ?? []) : []),
+    ]);
+    owners.delete(undefined);
+    this.snapshotSizes.set(
+      id,
+      [...owners].reduce(
+        (bytes, snapshot) => bytes + this.serializedSize(snapshot!),
+        0,
+      ),
+    );
+  }
+  private serializedSize(snapshot: TreeSnapshot) {
+    // Snapshots are immutable. Weak keys cache accounting work without retaining
+    // a second snapshot store after its consumer/gate releases it.
+    let bytes = this.serializedSizes.get(snapshot);
+    if (bytes === undefined) {
+      bytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+      this.serializedSizes.set(snapshot, bytes);
+    }
+    return bytes;
   }
   private boundSnapshots() {
     let bytes = [...this.snapshotSizes.values()].reduce(
@@ -139,6 +157,7 @@ export class Mutations {
       )
         continue;
       delete this.bases[id];
+      delete this.rendered[id];
       this.snapshotSizes.delete(id);
       this.evicted.add(id);
       bytes -= size;
@@ -187,6 +206,7 @@ export class Mutations {
       fields: string[],
     ) => void,
     private snapshotBudget = 64 * 1024 * 1024,
+    private sharedSnapshots?: (tab: TabState) => (TreeSnapshot | undefined)[],
   ) {}
 
   beginRefresh() {
@@ -213,7 +233,16 @@ export class Mutations {
   receive(tab: TabState, snapshot: TreeSnapshot, revision: number) {
     this.tabs.set(tab.id, tab);
     // A partial refresh cannot confirm remote deletion or drop cached descendants.
-    const previous = this.bases[tab.id];
+    const previous =
+      this.bases[tab.id] ??
+      [...this.tabs.values()]
+        .filter(
+          (other) =>
+            other.connectionId === tab.connectionId &&
+            other.rootKey === tab.rootKey,
+        )
+        .map((other) => this.bases[other.id])
+        .find(Boolean);
     if (snapshot.incomplete && previous) {
       const loaded = new Map(
         snapshot.issues.map((issue) => [issue.key, issue]),
@@ -262,9 +291,15 @@ export class Mutations {
     this.bases[tab.id] = snapshot;
     this.evicted.delete(tab.id);
     this.snapshotSizes.delete(tab.id);
-    this.measureSnapshot(tab.id);
-    this.boundSnapshots();
     this.publish();
+  }
+  adopt(tab: TabState, fromId: string) {
+    const snapshot = this.bases[fromId];
+    if (snapshot && !this.bases[tab.id]) {
+      if (this.protectedSnapshots.has(fromId))
+        this.protectedSnapshots.add(tab.id);
+      this.receive(tab, snapshot, this.revision);
+    }
   }
   confirmedSnapshot(id: string) {
     return this.bases[id];
@@ -300,16 +335,20 @@ export class Mutations {
       }
   }
   private publish() {
-    this.boundSnapshots();
     const snapshots: Record<string, TreeSnapshot> = {};
     for (const [id, base] of Object.entries(this.bases)) {
       let snapshot = base;
       for (const entry of this.entries)
         if (entry.connectionId === this.tabs.get(id)?.connectionId)
           snapshot = applyChange(snapshot, entry.change);
-      snapshots[id] = reconcileSnapshot(this.rendered[id], snapshot);
+      snapshots[id] =
+        snapshot === this.rendered[id]
+          ? snapshot
+          : reconcileSnapshot(this.rendered[id], snapshot);
     }
     this.rendered = snapshots;
+    for (const id of Object.keys(this.bases)) this.measureSnapshot(id);
+    this.boundSnapshots();
     const last = this.history.at(-1);
     this.changed({
       snapshots,

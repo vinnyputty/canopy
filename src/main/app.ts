@@ -840,12 +840,18 @@ async function start(
     });
     const created = window;
     created.webContents.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument)
-        clearRelationshipRequests();
+      if (!details.isMainFrame || details.isSameDocument) return;
+      // Reload/navigation can destroy the renderer before its cancellation IPC
+      // arrives. Release the departing document's provider reads in main too.
+      for (const controller of trees.values()) controller.abort();
+      trees.clear();
+      clearRelationshipRequests();
     });
     created.webContents.on('render-process-gone', clearRelationshipRequests);
     created.webContents.on('destroyed', () => {
       updates.cancel();
+      for (const controller of trees.values()) controller.abort();
+      trees.clear();
       for (const controller of searches.values()) controller.abort();
       searches.clear();
       clearRelationshipRequests();
