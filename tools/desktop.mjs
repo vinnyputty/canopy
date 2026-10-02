@@ -123,6 +123,10 @@ if (
     process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
   );
   process.env.PATH = `${dirname(nodeBinary)}${delimiter}${process.env.PATH ?? ''}`;
+  if (process.platform === 'linux') {
+    await mkdir(join(staging, 'tools'));
+    await cp(join(root, 'tools', 'AppRun'), join(staging, 'tools', 'AppRun'));
+  }
   const { build } = require('electron-builder');
   const { version } = require('electron/package.json');
   await build({

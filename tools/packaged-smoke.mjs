@@ -1,3 +1,4 @@
+import { checkDesktopEntry } from './linux-package-check.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -25,7 +26,7 @@ const { version } = JSON.parse(
 const platforms = {
   darwin: { os: 'mac', arch: 'arm64', formats: ['dmg', 'zip'] },
   win32: { os: 'win', arch: 'x64', formats: ['exe'] },
-  linux: { os: 'linux', arch: 'x64', formats: ['AppImage', 'deb'] },
+  linux: { os: 'linux', arch: 'x64', formats: ['deb', 'AppImage'] },
 };
 const platform = platforms[process.platform];
 if (!platform || platform.arch !== process.arch)
@@ -134,7 +135,11 @@ async function linuxStartupEvidence(executable, artifact, format, directory) {
   const evidence = {
     format,
     launchSemantics:
-      'extracted payload; installer hooks and FUSE mounting not exercised',
+      executable === '/opt/Canopy/canopy'
+        ? 'installed DEB; shipped postinst executed'
+        : format === 'deb'
+          ? 'extracted DEB identity inspection; installer not yet run'
+          : 'extracted identity inspection; original AppImage runtime launched separately',
     artifact: await inspect(artifact),
     executable: await inspect(executable),
     appAsar: await inspect(join(payload, 'resources', 'app.asar')),
@@ -178,7 +183,7 @@ async function linuxStartupEvidence(executable, artifact, format, directory) {
     JSON.stringify(evidence, null, 2),
   );
 }
-async function smoke(executablePath, directory, artifact) {
+async function smoke(executablePath, directory, artifact, identity) {
   const userData = join(directory, 'user-data');
   await mkdir(userData);
   const env = { ...process.env, CANOPY_USER_DATA: userData };
@@ -265,6 +270,25 @@ async function smoke(executablePath, directory, artifact) {
       console.log(
         `Packaged launch security evidence: ${JSON.stringify(launches.at(-1))}`,
       );
+      if (identity) {
+        const actual = await app.evaluate(({ app }) => ({
+          pid: process.pid,
+          appAsar: app.getAppPath(),
+          appImage: process.env.APPIMAGE,
+        }));
+        actual.executable = await realpath(`/proc/${actual.pid}/exe`);
+        const hash = async (path) =>
+          createHash('sha256')
+            .update(await readFile(path))
+            .digest('hex');
+        actual.executableSha256 = await hash(`/proc/${actual.pid}/exe`);
+        actual.appAsarSha256 = await hash(actual.appAsar);
+        expect(actual.executableSha256).toBe(identity.executableSha256);
+        expect(actual.appAsarSha256).toBe(identity.appAsarSha256);
+        if (identity.appImage) expect(actual.appImage).toBe(identity.appImage);
+        else expect(actual.executable).toBe(executablePath);
+        Object.assign(launches.at(-1), actual);
+      }
       expect(launch.frameUrl).toBe(launch.expectedUrl);
       expect(launch.userData).toBe(userData);
       expect(launch.rendererSandbox).toBe(true);
@@ -382,9 +406,66 @@ for (const format of platform.formats) {
     await access(executable);
     if (process.platform === 'linux')
       await linuxStartupEvidence(executable, artifact, format, directory);
-    const launches = await smoke(executable, directory, name);
+    let launchExecutable = executable;
+    let identity;
+    let installed = false;
+    if (process.platform === 'linux') {
+      const hash = async (path) =>
+        createHash('sha256')
+          .update(await readFile(path))
+          .digest('hex');
+      identity = {
+        executableSha256: await hash(executable),
+        appAsarSha256: await hash(
+          join(dirname(executable), 'resources', 'app.asar'),
+        ),
+      };
+      if (format === 'deb') {
+        if (
+          process.env.GITHUB_ACTIONS !== 'true' ||
+          process.env.RUNNER_ENVIRONMENT !== 'github-hosted'
+        )
+          throw new Error(
+            'Automatic DEB installation requires a disposable GitHub-hosted runner',
+          );
+        // Exercise the shipped postinst/AppArmor semantics, never chown an
+        // extracted test payload or relax host namespace restrictions.
+        run('sudo', ['-n', 'dpkg', '--install', artifact]);
+        installed = true;
+        launchExecutable = '/opt/Canopy/canopy';
+        checkDesktopEntry(
+          await readFile('/usr/share/applications/canopy.desktop', 'utf8'),
+          launchExecutable,
+        );
+        await linuxStartupEvidence(
+          launchExecutable,
+          artifact,
+          format,
+          directory,
+        );
+      } else {
+        checkDesktopEntry(
+          await readFile(join(dirname(executable), 'canopy.desktop'), 'utf8'),
+          'AppRun',
+        );
+        // Check the shipped launcher, then invoke the original AppImage runtime
+        // (including its mounting path). Never launch the extracted binary.
+        expect(
+          await readFile(join(dirname(executable), 'AppRun'), 'utf8'),
+        ).toBe(await readFile(join(root, 'tools', 'AppRun'), 'utf8'));
+        launchExecutable = artifact;
+        identity.appImage = artifact;
+      }
+    }
+    let launches;
+    try {
+      launches = await smoke(launchExecutable, directory, name, identity);
+    } finally {
+      if (installed) run('sudo', ['-n', 'dpkg', '--remove', 'canopy']);
+    }
     results.push({
       artifact: name,
+      launchExecutable,
       launches,
       sha256: createHash('sha256')
         .update(await readFile(artifact))

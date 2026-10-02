@@ -99,8 +99,17 @@
       ],
       "category": "Office",
       "maintainer": "Canopy contributors",
-      "syncDesktopName": true
+      "syncDesktopName": true,
+      "extraFiles": [
+        {
+          "from": "tools/AppRun",
+          "to": "AppRun"
+        }
+      ]
     },
-    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "appImage": {
+      "executableArgs": []
+    }
   }
 }
