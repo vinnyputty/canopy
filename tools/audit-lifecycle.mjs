@@ -96,12 +96,28 @@ async function processes(ms) {
     });
 }
 
+function validBirth(start) {
+  if (typeof start !== 'string' || !Number.isFinite(Date.parse(start)))
+    return false;
+  if (process.platform !== 'win32')
+    return /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(
+      start,
+    );
+  // Exact UTC round-trip form emitted by CreationDate.ToString("o").
+  return (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/.test(start) &&
+    new Date(start).toISOString().slice(0, 19) === start.slice(0, 19)
+  );
+}
+
 class OwnedScope {
   constructor(child, options, owner) {
     this.child = child;
     this.pid = child.pid;
     this.owner = owner;
     this.members = new Map();
+    this.observed = new Set();
+    this.capturedRows = false;
     this.groupRetired = false;
     this.valid =
       Number.isSafeInteger(this.pid) &&
@@ -115,21 +131,59 @@ class OwnedScope {
       this.captureError = error;
     });
   }
-  async live() {
+  async live(ms = this.owner.operationMs) {
     if (!this.valid)
       throw new Error(
         'Launch did not establish an isolated owned process scope',
       );
-    const rows = await processes(this.owner.operationMs);
-    const root = rows.find((row) => row.pid === this.pid);
-    if (root && (typeof root.start !== 'string' || !root.start))
-      throw new Error(
-        `Unestablished process creation identity for PID ${root.pid}`,
-      );
-    if (root && this.rootStart && root.start !== this.rootStart) {
-      // A reused root PID must never become a kill target or seed a new tree.
+    const rows = await processes(ms);
+    const byPid = new Map(rows.map((row) => [row.pid, row]));
+    // A complete successful snapshot can prove absence or valid PID reuse.
+    // Unavailable/malformed birth information proves neither.
+    for (const [pid, birth] of this.members) {
+      const row = byPid.get(pid);
+      if (!row || (validBirth(row.start) && row.start !== birth)) {
+        this.members.delete(pid);
+        this.observed.delete(pid);
+      }
+    }
+    for (const pid of this.observed)
+      if (!byPid.has(pid)) this.observed.delete(pid);
+    const root = byPid.get(this.pid);
+    if (
+      root &&
+      this.rootStart &&
+      validBirth(root.start) &&
+      root.start !== this.rootStart
+    ) {
       this.groupRetired = true;
-    } else if (root) {
+      this.members.delete(this.pid);
+      this.observed.delete(this.pid);
+    }
+    // Retain every potential descendant BEFORE validation can reject a partial
+    // capture. Unknown identities seed observation only, never signaling.
+    const potential = new Set([...this.members.keys(), ...this.observed]);
+    if (root && !this.groupRetired && (this.rootStart || !this.exited()))
+      potential.add(root.pid);
+    if (process.platform !== 'win32' && !this.groupRetired)
+      for (const row of rows) if (row.pgid === this.pid) potential.add(row.pid);
+    let added;
+    do {
+      added = false;
+      for (const row of rows) {
+        if (!potential.has(row.pid) && potential.has(row.ppid)) {
+          potential.add(row.pid);
+          added = true;
+        }
+      }
+    } while (added);
+    for (const pid of potential) this.observed.add(pid);
+    this.capturedRows ||= potential.size > 0;
+    if (root && !this.groupRetired && (this.rootStart || !this.exited())) {
+      if (!validBirth(root.start))
+        throw new Error(
+          `Unestablished process creation identity for PID ${root.pid}`,
+        );
       if (process.platform !== 'win32' && root.pgid !== this.pid)
         throw new Error('Owned launch is not its process-group leader');
       this.rootStart ??= root.start;
@@ -143,13 +197,16 @@ class OwnedScope {
       // Node detached:true creates this new group before exec; the recorded
       // successful spawn owns it even if the leader exits before the first ps.
       owned.push(...rows.filter((row) => row.pgid === this.pid));
-    } else if (!this.rootStart && !this.members.size) {
+    } else if (
+      !this.rootStart &&
+      !this.members.size &&
+      !(this.capturedRows && !this.observed.size && this.exited())
+    ) {
       throw new Error(
         'Could not retain the launch-owned Windows process-tree identity',
       );
     }
     const identities = new Set(owned.map((row) => row.pid));
-    let added;
     do {
       added = false;
       for (const row of rows) {
@@ -160,17 +217,25 @@ class OwnedScope {
         }
       }
     } while (added);
+    // Save all verified siblings even when another observed row is uncertain.
     for (const row of owned) {
-      if (typeof row.start !== 'string' || !row.start)
-        throw new Error(
-          `Unestablished process creation identity for PID ${row.pid}`,
-        );
       if (row.pid === process.pid)
         throw new Error(
           'Refusing to include the audit process in its child scope',
         );
-      this.members.set(row.pid, row.start);
+      if (validBirth(row.start)) this.members.set(row.pid, row.start);
     }
+    const uncertain = rows.filter(
+      (row) =>
+        this.observed.has(row.pid) &&
+        (!validBirth(row.start) ||
+          !this.members.has(row.pid) ||
+          this.members.get(row.pid) !== row.start),
+    );
+    if (uncertain.length)
+      throw new Error(
+        `Unestablished process creation identity for PID ${uncertain.map((row) => row.pid).join(', ')}`,
+      );
     const live = [
       ...new Map(
         owned.filter((row) => !row.zombie).map((row) => [row.pid, row]),
@@ -217,7 +282,7 @@ class OwnedScope {
     // Recheck birth identities immediately before signaling; never kill by name.
     for (const member of live) {
       if (process.platform !== 'win32' && member.pgid === this.pid) continue;
-      const current = (await processes(remaining())).find(
+      const current = (await this.live(remaining())).find(
         (row) =>
           row.pid === member.pid && row.start === member.start && !row.zombie,
       );
