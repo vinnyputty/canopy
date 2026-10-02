@@ -13,6 +13,7 @@ const sessions = [];
 const children = [];
 const focusFailures = [];
 const stateOnly = process.argv.includes('--state-only');
+const hiddenWindowCheck = process.platform === 'linux' && stateOnly;
 async function verifyFocus(session, scenario) {
   if (stateOnly) {
     console.log(`Native focus acceptance pending: ${scenario} (--state-only).`);
@@ -83,16 +84,32 @@ try {
   await expect(
     page.getByRole('heading', { name: 'See the whole tree.' }),
   ).toBeVisible();
-  await normal.evaluate(({ BrowserWindow }) =>
-    BrowserWindow.getAllWindows()[0].minimize(),
-  );
-  await expect
-    .poll(() =>
-      normal.evaluate(({ BrowserWindow }) =>
-        BrowserWindow.getAllWindows()[0].isMinimized(),
-      ),
-    )
-    .toBe(true);
+  if (hiddenWindowCheck) {
+    console.log(
+      'Native minimization acceptance pending: Linux --state-only checks hidden-window restoration because a virtual display may have no window manager.',
+    );
+    await normal.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].hide(),
+    );
+    await expect
+      .poll(() =>
+        normal.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()[0].isVisible(),
+        ),
+      )
+      .toBe(false);
+  } else {
+    await normal.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].minimize(),
+    );
+    await expect
+      .poll(() =>
+        normal.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows()[0].isMinimized(),
+        ),
+      )
+      .toBe(true);
+  }
   await Promise.all(Array.from({ length: 3 }, () => duplicate([appPath])));
   await expect
     .poll(() =>
@@ -140,7 +157,60 @@ try {
       ),
     )
     .toBe(1);
-  await demo.close();
+  await demo.evaluate(({ BrowserWindow }) => {
+    globalThis.canopyDemoCloseHeld = true;
+    const closing = BrowserWindow.getAllWindows()[0];
+    globalThis.canopyDemoClosingWindowId = closing.id;
+    closing.on('close', (event) => {
+      if (globalThis.canopyDemoCloseHeld) event.preventDefault();
+    });
+    closing.close();
+  });
+  await duplicate([appPath, '--canopy-demo'], {
+    ...env,
+    CANOPY_USER_DATA: isolated,
+    CANOPY_DEMO_TEMP: '1',
+  });
+  expect(
+    await demo.evaluate(
+      ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+    ),
+  ).toBe(1);
+  await demo.evaluate(({ BrowserWindow }) => {
+    globalThis.canopyDemoCloseHeld = false;
+    BrowserWindow.getAllWindows()[0].close();
+  });
+  await expect
+    .poll(() =>
+      demo.evaluate(({ BrowserWindow }) => {
+        const windows = BrowserWindow.getAllWindows();
+        return (
+          windows.length === 1 &&
+          windows[0].id !== globalThis.canopyDemoClosingWindowId
+        );
+      }),
+    )
+    .toBe(true);
+  await expect(
+    (await demo.firstWindow()).getByRole('region', { name: 'Canopy demo' }),
+  ).toBeVisible();
+  await verifyFocus(demo, 'demo duplicate launch during pending close');
+  const demoExited = new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(new Error('Demo close without a pending launch did not exit.')),
+      10000,
+    );
+    demo.process().once('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`Demo exited with ${code}.`));
+    });
+  });
+  await demo.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].close(),
+  );
+  await demoExited;
   sessions.splice(sessions.indexOf(demo), 1);
 
   if (process.platform === 'darwin') {
@@ -289,7 +359,7 @@ try {
   await normal.close();
   sessions.splice(sessions.indexOf(normal), 1);
   console.log(
-    'Instance state checks passed: rapid duplicate launches, minimized and closed window restoration, independent demo and smoke profiles, duplicate launch during startup.',
+    'Instance state checks passed: rapid duplicate launches, window restoration, independent demo and smoke profiles, duplicate launches during startup and normal/demo close, and ordinary demo exit.',
   );
   if (focusFailures.length)
     throw new AggregateError(

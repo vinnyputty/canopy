@@ -1011,7 +1011,7 @@ export function launch(
       app.quit();
     });
   app.on('window-all-closed', () => {
-    if (demoMode || (process.platform !== 'darwin' && !focusRequested))
+    if ((demoMode || process.platform !== 'darwin') && !focusRequested)
       app.quit();
   });
 }

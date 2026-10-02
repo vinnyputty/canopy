@@ -28,6 +28,8 @@ Each profile has one Canopy process. Launching it again restores and focuses its
 
 On macOS, also close the window and click Canopy's Dock icon to verify native activation recreates and focuses it. The automated check exercises the application’s `activate` handler; a real Dock click remains a separate native acceptance check.
 
+Linux `--state-only` checks restoration of a hidden window so it can run on a virtual display without a window manager. Native minimized-window restoration remains part of the default check.
+
 Run the full CI sequence locally with:
 
 ```sh
