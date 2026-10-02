@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { signingConfig } from './windows-signing.mjs';
+import { checkWindowsBuilderSigning } from './windows-builder-check.mjs';
 import { checkDesktopEntry } from './linux-package-check.mjs';
 
 export async function checkPackagingPermissions() {
@@ -127,69 +128,7 @@ export async function checkPackagingPermissions() {
         () => {},
       ),
     );
-    const { WindowsSignToolManager } = lib(
-      'codeSign/windowsSignToolManager.js',
-    );
-    const signerCalls = [];
-    let rejectSigning = false;
-    const hook = async (task) => {
-      signerCalls.push({ path: task.path, hash: task.hash });
-      if (rejectSigning) throw new Error('fixture signing failure');
-    };
-    const signing = signingConfig(
-      {
-        CANOPY_WINDOWS_SIGN: '1',
-        GITHUB_ACTIONS: 'true',
-        RUNNER_ENVIRONMENT: 'github-hosted',
-        GITHUB_EVENT_NAME: 'push',
-        GITHUB_REF: `refs/tags/v${manifest.version}`,
-        CANOPY_WINDOWS_PFX: 'fixture',
-        CANOPY_WINDOWS_PFX_PASSWORD: 'fixture',
-        CANOPY_WINDOWS_SUBJECT: 'CN=Fixture',
-        CANOPY_WINDOWS_THUMBPRINT: 'A'.repeat(40),
-        CANOPY_SIGNTOOL: 'fixture',
-      },
-      'win32',
-      manifest.version,
-      hook,
-    );
-    const { validateConfiguration } = lib('util/config/config.js');
-    await validateConfiguration(
-      {
-        ...manifest.build,
-        ...signing,
-        win: { ...manifest.build.win, ...signing.win },
-      },
-      null,
-    );
-    const manager = new WindowsSignToolManager({
-      platformSpecificBuildOptions: signing.win,
-      appInfo: {
-        productName: 'Canopy',
-        type: 'commonjs',
-        computePackageUrl: async () => manifest.homepage,
-      },
-      info: { getWorkspaceRoot: async () => directory },
-      getCscLink: () => null,
-    });
-    for (const path of [
-      'Canopy.exe',
-      'Uninstall Canopy.exe',
-      'Canopy-setup.exe',
-    ])
-      assert.equal(
-        await manager.signFile({ path, options: signing.win }),
-        true,
-      );
-    assert.deepEqual(
-      signerCalls.map((task) => task.hash),
-      ['sha256', 'sha256', 'sha256'],
-    );
-    rejectSigning = true;
-    await assert.rejects(
-      manager.signFile({ path: 'failed.exe', options: signing.win }),
-      /fixture signing failure/,
-    );
+    await checkWindowsBuilderSigning(builderRequire, lib, directory, manifest);
     const appDir = join(directory, 'app');
     await mkdir(appDir);
     const actualMatchers = matchers(config, project, appDir);

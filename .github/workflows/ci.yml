@@ -53,6 +53,10 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ runner.os }}
           repository-cache: true
+      - name: Parse and compile Windows helper sources
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tools/windows-native-controls.ps1
       - run: bazel run //:ci
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -85,6 +89,10 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22.16.0'
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
@@ -95,6 +103,9 @@ jobs:
           $tool = Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin/*/x64/signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $tool) { throw 'Windows SDK SignTool missing' }
           "CANOPY_SIGNTOOL=$($tool.FullName)" >> $env:GITHUB_ENV
+      - name: Prepare pinned Artifact Signing SDK in owned runner storage
+        shell: pwsh
+        run: tools/windows-prepare-signing.ps1
       - run: bazel build //:build
       - name: Build signed Windows packages
         run: bazel run //:package
@@ -102,10 +113,10 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
           CANOPY_EXPECT_PLATFORM: win32/x64
           CANOPY_WINDOWS_SIGN: '1'
-          CANOPY_WINDOWS_PFX: ${{ secrets.WINDOWS_PFX_BASE64 }}
-          CANOPY_WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
-          CANOPY_WINDOWS_SUBJECT: ${{ vars.WINDOWS_SIGNING_SUBJECT }}
-          CANOPY_WINDOWS_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_THUMBPRINT }}
+          CANOPY_WINDOWS_POLICY: ${{ vars.WINDOWS_SIGNING_POLICY }}
+          AZURE_TENANT_ID: ${{ vars.WINDOWS_SIGNING_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.WINDOWS_SIGNING_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.WINDOWS_SIGNING_CLIENT_SECRET }}
       - name: Verify signed packaged behavior without signing credentials
         run: bazel run //:packaged_smoke
         env:
@@ -114,14 +125,18 @@ jobs:
       - name: Verify actual installer and embedded executable signatures
         run: node tools/windows-signing.mjs report .cache/verified-packages
         env:
-          CANOPY_WINDOWS_SUBJECT: ${{ vars.WINDOWS_SIGNING_SUBJECT }}
-          CANOPY_WINDOWS_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_THUMBPRINT }}
+          CANOPY_WINDOWS_POLICY: ${{ vars.WINDOWS_SIGNING_POLICY }}
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: Canopy-win-x64
           path: .cache/verified-packages/*
           include-hidden-files: true
           if-no-files-found: error
+      - name: Remove owned public signing SDK files
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:CANOPY_SIGN_SDK_OWNED) { Remove-Item -LiteralPath $env:CANOPY_SIGN_SDK_OWNED -Recurse -Force }
   draft:
     if: github.event_name == 'push'
     needs: [validate, check, signed-windows]
