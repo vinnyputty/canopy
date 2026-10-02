@@ -42,24 +42,35 @@ const env = { ...process.env, CANOPY_USER_DATA: directory };
 delete env.ELECTRON_RUN_AS_NODE;
 
 async function duplicate(args, profileEnv = env) {
-  const child = spawn(executablePath, args, {
-    env: profileEnv,
-    stdio: 'ignore',
+  const child = spawn(
+    executablePath,
+    // Match Playwright's test launch for the downloaded Linux runtime.
+    [...args, ...(process.platform === 'linux' ? ['--no-sandbox'] : [])],
+    { env: profileEnv, stdio: ['ignore', 'ignore', 'pipe'] },
+  );
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr = (stderr + chunk.toString()).slice(-8000);
   });
   children.push(child);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error('Duplicate launch did not exit.')),
+      () => reject(new Error(`Duplicate launch did not exit.\n${stderr}`)),
       10000,
     );
     child.once('error', (error) => {
       clearTimeout(timer);
       reject(error);
     });
-    child.once('exit', (code) => {
+    child.once('exit', (code, signal) => {
       clearTimeout(timer);
       if (code === 0) resolve();
-      else reject(new Error(`Duplicate launch exited with ${code}.`));
+      else
+        reject(
+          new Error(
+            `Duplicate launch exited with code ${code}, signal ${signal}.\n${stderr}`,
+          ),
+        );
     });
   });
 }
