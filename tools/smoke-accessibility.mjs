@@ -18,6 +18,48 @@ export async function auditAccessibility(app, page, evidence) {
       (_electron, { method, args }) => globalThis.canopySmoke[method](...args),
       { method, args },
     );
+  const afterRestoration = () =>
+    page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+  // Observe actual fixture completions without substituting responses or clocks.
+  await app.evaluate(() => {
+    const demo = globalThis.canopySmoke;
+    const observations = { trees: [], updates: [], failures: [] };
+    globalThis.canopyAccessibility = observations;
+    const tree = demo.tree.bind(demo);
+    demo.tree = async (key) => {
+      const result = await tree(key);
+      observations.trees.push(structuredClone(result));
+      return result;
+    };
+    const update = demo.update.bind(demo);
+    demo.update = async (key, patch) => {
+      try {
+        const result = await update(key, patch);
+        observations.updates.push({
+          key,
+          patch,
+          result: structuredClone(result),
+        });
+        return result;
+      } catch (error) {
+        observations.failures.push({ key, patch, error: String(error) });
+        throw error;
+      }
+    };
+  });
+  const latestTree = (key) =>
+    app.evaluate(
+      (_electron, key) =>
+        globalThis.canopyAccessibility.trees
+          .filter((tree) => tree.rootKey === key)
+          .at(-1),
+      key,
+    );
   const open = page
     .getByRole('button', { name: 'Open issue', exact: true })
     .first();
@@ -63,61 +105,298 @@ export async function auditAccessibility(app, page, evidence) {
   await page.keyboard.press('Escape');
   await expect(summary).toBeFocused();
   await summary.press('Enter');
-  const priority = page.getByLabel('Edit priority for CAN-100', {
-    exact: true,
-  });
-  await priority.focus();
-  await expect(priority).toBeFocused();
+  const searchDestination = page.getByLabel('Find in tree', { exact: true });
+  await searchDestination.click();
   await expect(
     page.getByLabel('Summary for CAN-100', { exact: true }),
   ).toHaveCount(0);
+  await afterRestoration();
+  await expect(searchDestination).toBeFocused();
+
+  // A dialog action focuses the real search field before dismissing the dialog.
+  await commands.click();
+  await page
+    .getByRole('dialog', { name: 'Command palette' })
+    .getByRole('button', { name: /Find in tree/ })
+    .click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await afterRestoration();
+  await expect(page.getByLabel('Find in tree', { exact: true })).toBeFocused();
+
+  const savedSummary = 'Sample completed accessibility edit';
   await summary.press('Enter');
   await page
     .getByLabel('Summary for CAN-100', { exact: true })
-    .fill('Sample barrier regression');
-  await fixture('hold', 'a11y-edit', 'update', 'CAN-100');
+    .fill(savedSummary);
+  await fixture('hold', 'a11y-edit-success', 'update', 'CAN-100');
   await page.keyboard.press('Enter');
-  await expect.poll(() => fixture('started', 'a11y-edit')).toBe(true);
-  await expect(summary).toBeFocused();
+  await expect.poll(() => fixture('started', 'a11y-edit-success')).toBe(true);
+  await expect(summary).toHaveText(savedSummary);
   await expect(
     page.getByRole('status').filter({ hasText: /^Saving CAN-100$/ }),
   ).toHaveCount(1);
-  await fixture('release', 'a11y-edit', 'Sample edit failure');
+  expect(await fixture('completed', 'a11y-edit-success')).toBe(false);
+  await fixture('release', 'a11y-edit-success');
+  await expect.poll(() => fixture('completed', 'a11y-edit-success')).toBe(true);
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        globalThis.canopyAccessibility.updates.some(
+          ({ key, result }) =>
+            key === 'CAN-100' &&
+            result.summary === 'Sample completed accessibility edit',
+        ),
+      ),
+    )
+    .toBe(true);
+  await expect(summary).toHaveText(savedSummary);
+  await expect(page.locator('.undo-banner')).toContainText('Change saved');
+  await expect(
+    page
+      .locator('.undo-banner')
+      .getByRole('button', { name: 'Undo edit to CAN-100', exact: true }),
+  ).toBeEnabled();
+  await expect(page.getByLabel('Saving CAN-100', { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole('status').filter({ hasText: /^Saving CAN-100$/ }),
+  ).toHaveCount(0);
+  await afterRestoration();
+  await expect(summary).toBeFocused();
+  await capture('summary-completed');
+
+  await summary.press('Enter');
+  await page
+    .getByLabel('Summary for CAN-100', { exact: true })
+    .fill('Sample rejected accessibility edit');
+  await fixture('hold', 'a11y-edit-failure', 'update', 'CAN-100');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => fixture('started', 'a11y-edit-failure')).toBe(true);
+  await expect(summary).toBeFocused();
+  await fixture('release', 'a11y-edit-failure', 'Sample edit failure');
   const alert = page
     .getByRole('alert')
     .filter({ hasText: 'Sample edit failure' });
   await expect(alert).toBeVisible();
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        globalThis.canopyAccessibility.failures.some(
+          ({ key, patch }) =>
+            key === 'CAN-100' &&
+            patch.summary === 'Sample rejected accessibility edit',
+        ),
+      ),
+    )
+    .toBe(true);
+  await expect(summary).toHaveText(savedSummary);
+  await expect(page.getByLabel('Saving CAN-100', { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole('status').filter({ hasText: /^Saving CAN-100$/ }),
+  ).toHaveCount(0);
+  await afterRestoration();
+  await expect(summary).toBeFocused();
+  await capture('summary-rolled-back');
   await alert.getByRole('button', { name: 'Dismiss error' }).click();
 
+  // Focus the same CAN-101 subtree in two distinct tabs so its row/container
+  // survives navigation. The real tab shortcut acts while its editor is focused.
+  await open.click();
+  await picker.getByRole('combobox').fill('CAN-101');
+  await picker.getByRole('button', { name: 'Open tree', exact: true }).click();
+  await expect(
+    page.getByRole('tree', { name: 'CAN-101 issue tree' }),
+  ).toBeVisible();
+  const targetTabId = await page.getByRole('tree').getAttribute('data-tab-id');
+  expect(targetTabId).not.toBeNull();
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  const sharedSummary = page
+    .locator('[data-tree-key="CAN-101"] > .issue-row')
+    .getByTitle('Double-click to edit');
+  await sharedSummary.click();
+  await page.locator('.tree-view-menu > summary').click();
+  await page
+    .getByRole('button', { name: 'Focus selected subtree', exact: true })
+    .click();
+  await page.locator('.tree-view-menu > summary').press('Escape');
+  await expect(
+    page.getByRole('tree').locator(':scope > [data-tree-key="CAN-101"]'),
+  ).toHaveCount(1);
+  const sourceTabId = await page.getByRole('tree').getAttribute('data-tab-id');
+  expect(sourceTabId).not.toBeNull();
+  expect(sourceTabId).not.toBe(targetTabId);
+  const survivingTitle = await sharedSummary.evaluateHandle(
+    (e) => e.parentElement,
+  );
+  await sharedSummary.press('Enter');
+  await expect(
+    page.getByLabel('Summary for CAN-101', { exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+3' : 'Control+3',
+  );
+  await expect(page.getByRole('tree')).toHaveAttribute(
+    'data-tab-id',
+    targetTabId,
+  );
+  await expect(
+    page.getByLabel('Summary for CAN-101', { exact: true }),
+  ).toHaveCount(0);
+  await afterRestoration();
+  expect(
+    await survivingTitle.evaluate(
+      (e) =>
+        e.isConnected &&
+        e ===
+          document.querySelector(
+            '[data-tree-key="CAN-101"] > .issue-row .issue-title',
+          ),
+    ),
+  ).toBe(true);
+  await expect(sharedSummary).not.toBeFocused();
+  await capture('summary-same-key-tab-transition');
+  await survivingTitle.dispose();
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await page.locator('.tree-view-menu > summary').click();
+  await page.getByRole('button', { name: 'Back to root', exact: true }).click();
+  await page.locator('.tree-view-menu > summary').press('Escape');
+
+  const statusSelector = '.statusbar > .sr-only:first-child';
+  const live = page.locator(statusSelector);
+  const liveNode = await live.elementHandle();
+  expect(liveNode).not.toBeNull();
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Accessibility.enable');
+  const refreshEvidence = [];
+  const checkLive = async (state, snapshot) => {
+    expect(
+      await liveNode.evaluate(
+        (node) =>
+          node.isConnected &&
+          node === document.querySelector('.statusbar > .sr-only:first-child'),
+      ),
+    ).toBe(true);
+    await expect(live).toHaveAttribute('role', 'status');
+    await expect(live).toHaveAttribute('aria-atomic', 'true');
+    const { root } = await cdp.send('DOM.getDocument');
+    const { nodeId } = await cdp.send('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: statusSelector,
+    });
+    const { nodes } = await cdp.send('Accessibility.getPartialAXTree', {
+      nodeId,
+      fetchRelatives: false,
+    });
+    const ax = nodes.find((node) => node.role?.value === 'status');
+    expect(ax).toBeDefined();
+    const properties = Object.fromEntries(
+      ax.properties.map((property) => [property.name, property.value.value]),
+    );
+    expect(properties.live).toBe('polite');
+    expect(properties.atomic).toBe(true);
+    refreshEvidence.push({
+      state,
+      snapshot,
+      text: await live.textContent(),
+      connection: await page
+        .getByRole('status', { name: 'Connection status' })
+        .textContent(),
+      nodeId,
+      ax,
+    });
+    await writeFile(
+      join(evidence, 'refresh-transitions.json'),
+      JSON.stringify(refreshEvidence, null, 2),
+    );
+  };
+  const completion = (snapshot) =>
+    page.evaluate(
+      (snapshot) =>
+        `${snapshot.rootKey}: ${snapshot.issues.length} issues, last updated at ${new Date(snapshot.fetchedAt).toLocaleTimeString()}`,
+      snapshot,
+    );
+  const timestamp = page.locator('.statusbar').getByText(/Last updated/);
+  const before = await latestTree('CAN-100');
+  expect(before).toBeDefined();
+  const previousStatus = await completion(before);
+  await expect(live).toHaveText(previousStatus);
+  const previousTitle = await timestamp.getAttribute('title');
+  expect(previousTitle).toBe(
+    await page.evaluate(
+      (time) => new Date(time).toLocaleString(),
+      before.fetchedAt,
+    ),
+  );
+  await checkLive('before', before);
   await fixture('hold', 'a11y-refresh', 'tree', 'CAN-100');
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect.poll(() => fixture('started', 'a11y-refresh')).toBe(true);
-  await expect(
-    page
-      .getByRole('status')
-      .filter({ hasText: 'Checking CAN-100 for changes' }),
-  ).toHaveCount(1);
+  await expect(live).toHaveText('Checking CAN-100 for changes');
+  await checkLive('failure-pending', before);
   await page.emulateMedia({ reducedMotion: 'reduce' });
+  const spinners = page.locator('.spin:visible');
+  expect(await spinners.count()).toBeGreaterThan(0);
   expect(
-    await page
-      .locator('.spin')
-      .evaluateAll((elements) =>
-        elements.every((e) => getComputedStyle(e).animationName === 'none'),
-      ),
+    await spinners.evaluateAll((elements) =>
+      elements.every((e) => getComputedStyle(e).animationName === 'none'),
+    ),
   ).toBe(true);
   await capture('reduced-motion-loading');
   await fixture('release', 'a11y-refresh', 'Sample refresh failure');
   await expect(
     page.getByRole('alert').filter({ hasText: 'Sample refresh failure' }),
   ).toBeVisible();
-  await capture('refresh-error');
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(
-    page
-      .getByRole('status')
-      .filter({ hasText: /CAN-100: .* issues, last updated at/ }),
-  ).toHaveCount(1);
+    page.getByText('Checking for changes', { exact: true }),
+  ).toHaveCount(0);
+  await expect(live).toHaveText(previousStatus);
+  await expect(timestamp).toHaveAttribute('title', previousTitle);
+  expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);
+  await expect(
+    page.getByRole('status', { name: 'Connection status' }),
+  ).toHaveText('Connection error');
+  await checkLive('failure-settled-retained', before);
+  await capture('refresh-error');
+
+  // Let real time cross a second boundary so visible timestamps also distinguish
+  // retained data from the actual retry delivery. Do not fake the provider clock.
+  await expect
+    .poll(() => page.evaluate(() => Date.now()))
+    .toBeGreaterThan(before.fetchedAt + 1000);
+  await fixture('hold', 'a11y-retry', 'tree', 'CAN-100');
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect.poll(() => fixture('started', 'a11y-retry')).toBe(true);
+  await expect(live).toHaveText('Checking CAN-100 for changes');
+  await expect(timestamp).toHaveAttribute('title', previousTitle);
+  expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);
+  expect(await fixture('completed', 'a11y-retry')).toBe(false);
+  await checkLive('retry-pending', before);
+  await fixture('release', 'a11y-retry');
+  await expect.poll(() => fixture('completed', 'a11y-retry')).toBe(true);
+  await expect
+    .poll(async () => (await latestTree('CAN-100')).fetchedAt)
+    .toBeGreaterThan(before.fetchedAt);
+  const delivered = await latestTree('CAN-100');
+  await expect(live).toHaveText(await completion(delivered));
+  await expect(timestamp).toHaveAttribute(
+    'title',
+    await page.evaluate(
+      (time) => new Date(time).toLocaleString(),
+      delivered.fetchedAt,
+    ),
+  );
+  await expect(timestamp).not.toHaveAttribute('title', previousTitle);
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(
+    page.getByRole('status', { name: 'Connection status' }),
+  ).toHaveText('Connected');
+  await checkLive('retry-completed-delivery', delivered);
+  await capture('refresh-retry-completed');
+  await cdp.detach();
+  await liveNode.dispose();
 
   // Only the disposable fixture provider supplies this partial-result state.
   await app.evaluate(() => {
@@ -159,62 +438,232 @@ export async function auditAccessibility(app, page, evidence) {
         await appearance
           .getByRole('radio', { name: theme, exact: true })
           .check();
-        const ratios = await page.evaluate(() => {
-          const rgb = (color) => color.match(/[\d.]+/g).map(Number);
-          const blend = (a, b) =>
-            a
-              .slice(0, 3)
-              .map((v, i) => v * (a[3] ?? 1) + b[i] * (1 - (a[3] ?? 1)));
-          const luminance = (color) =>
-            color
-              .map((v) => v / 255)
-              .map((v) =>
-                v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4,
-              )
-              .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
-          return [
-            ...document.querySelectorAll(
-              '.column-sort, .sidebar-empty, .statusbar > span:not(.sr-only), .dialog .primary',
-            ),
-          ]
-            .filter(
-              (e) => e.getBoundingClientRect().width && e.textContent.trim(),
-            )
-            .map((e) => {
-              const chain = [];
-              for (let p = e; p; p = p.parentElement) chain.unshift(p);
-              let background = [255, 255, 255];
-              for (const p of chain)
-                background = blend(
-                  rgb(getComputedStyle(p).backgroundColor),
-                  background,
-                );
-              const foreground = blend(
-                rgb(getComputedStyle(e).color),
-                background,
-              );
-              const values = [
-                luminance(foreground),
-                luminance(background),
-              ].sort((a, b) => a - b);
-              return {
-                text: e.textContent.trim(),
-                ratio: (values[1] + 0.05) / (values[0] + 0.05),
-              };
+        const effectiveMode =
+          theme === 'System' ? colorScheme : theme.toLowerCase();
+        const expectedBackgrounds = {
+          Default: { light: 'rgb(248, 249, 251)', dark: 'rgb(23, 25, 29)' },
+          Ocean: { light: 'rgb(242, 248, 249)', dark: 'rgb(16, 37, 46)' },
+          Forest: { light: 'rgb(246, 248, 242)', dark: 'rgb(27, 38, 31)' },
+        };
+        await expect(page.locator('html')).toHaveAttribute(
+          'data-palette',
+          palette.toLowerCase(),
+        );
+        await expect(page.locator('html')).toHaveAttribute(
+          'data-theme',
+          theme.toLowerCase(),
+        );
+        await expect(page.locator('html')).toHaveCSS(
+          'color-scheme',
+          effectiveMode,
+        );
+        await expect(page.locator('.app')).toHaveCSS(
+          'background-color',
+          expectedBackgrounds[palette][effectiveMode],
+        );
+        const appliedStyle = await page.evaluate(() => ({
+          palette: document.documentElement.dataset.palette,
+          theme: document.documentElement.dataset.theme,
+          systemScheme: matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light',
+          colorScheme: getComputedStyle(document.documentElement).colorScheme,
+          background: getComputedStyle(document.querySelector('.app'))
+            .backgroundColor,
+        }));
+        expect(appliedStyle.systemScheme).toBe(colorScheme);
+        const categories = [
+          {
+            category: 'selected-root-summary',
+            state: 'selected',
+            selector:
+              '.sidebar-root .side-tab.active > span > small:not(.root-context)',
+          },
+          {
+            category: 'selected-root-context',
+            state: 'selected',
+            selector: '.sidebar-root .side-tab.active .root-context',
+          },
+          {
+            category: 'unselected-root-summary',
+            state: 'unselected',
+            selector:
+              '.sidebar-root .side-tab:not(.active) > span > small:not(.root-context)',
+          },
+          {
+            category: 'unselected-root-context',
+            state: 'unselected',
+            selector: '.sidebar-root .side-tab:not(.active) .root-context',
+          },
+          {
+            category: 'connection-secondary',
+            state: 'rest',
+            selector: '.connection small',
+          },
+          {
+            category: 'inactive-tab-summary',
+            state: 'inactive',
+            selector: '.top-tab:not(.active) .tab-label small',
+          },
+          {
+            category: 'column-header',
+            state: 'rest',
+            selector: '.column-sort',
+          },
+          {
+            category: 'sidebar-empty',
+            state: 'rest',
+            selector: '.sidebar-empty',
+          },
+          {
+            category: 'footer-secondary',
+            state: 'rest',
+            selector: '.statusbar > span:not(.sr-only)',
+          },
+        ];
+        const measure = (categories) =>
+          page.evaluate((categories) => {
+            // Inactive-tab color-mix backgrounds can serialize as color(srgb ...).
+            // Let Chromium parse CSS colors into sRGB, rather than treating every
+            // numeric serialization as 0-255 rgb() channels.
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = 1;
+            const context = canvas.getContext('2d', {
+              colorSpace: 'srgb',
+              willReadFrequently: true,
             });
+            if (!context)
+              throw new Error(
+                'sRGB color measurement requires a canvas context',
+              );
+            const rgb = (color) => {
+              context.clearRect(0, 0, 1, 1);
+              context.fillStyle = color;
+              context.fillRect(0, 0, 1, 1);
+              const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+              return [r, g, b, a / 255];
+            };
+            const blend = (a, b) =>
+              a
+                .slice(0, 3)
+                .map((v, i) => v * (a[3] ?? 1) + b[i] * (1 - (a[3] ?? 1)));
+            const luminance = (color) =>
+              color
+                .map((v) => v / 255)
+                .map((v) =>
+                  v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4,
+                )
+                .reduce(
+                  (sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i],
+                  0,
+                );
+            return categories.map(({ category, state, selector }) => ({
+              category,
+              state,
+              selector,
+              normalization: 'sRGB 8-bit browser canvas',
+              measurements: [...document.querySelectorAll(selector)]
+                .filter((e) => {
+                  const b = e.getBoundingClientRect();
+                  const style = getComputedStyle(e);
+                  return (
+                    b.width > 0 &&
+                    b.height > 0 &&
+                    style.visibility === 'visible' &&
+                    style.display !== 'none' &&
+                    e.textContent.trim()
+                  );
+                })
+                .map((e) => {
+                  const chain = [];
+                  for (let p = e; p; p = p.parentElement) chain.unshift(p);
+                  let background = [255, 255, 255];
+                  for (const p of chain)
+                    background = blend(
+                      rgb(getComputedStyle(p).backgroundColor),
+                      background,
+                    );
+                  const color = getComputedStyle(e).color;
+                  const foreground = blend(rgb(color), background);
+                  const values = [
+                    luminance(foreground),
+                    luminance(background),
+                  ].sort((a, b) => a - b);
+                  return {
+                    text: e.textContent.trim(),
+                    className: e.className,
+                    color,
+                    foreground,
+                    compositedBackground: background,
+                    elementBackground: getComputedStyle(e).backgroundColor,
+                    hovered: e.matches(':hover'),
+                    disabled: e.matches(':disabled'),
+                    ratio: (values[1] + 0.05) / (values[0] + 0.05),
+                  };
+                }),
+            }));
+          }, categories);
+        const primary = appearance.getByRole('button', {
+          name: 'Save',
+          exact: true,
         });
-        contrast.push({ palette, theme, colorScheme, ratios });
-        for (const result of ratios)
+        await expect(primary).toBeEnabled();
+        await appearance
+          .getByRole('heading', { name: 'Appearance', exact: true })
+          .hover();
+        const rest = await measure([
+          ...categories,
+          {
+            category: 'primary-button',
+            state: 'rest',
+            selector: '.dialog .primary',
+          },
+        ]);
+        await primary.hover();
+        const hover = await measure([
+          {
+            category: 'primary-button',
+            state: 'hover',
+            selector: '.dialog .primary',
+          },
+        ]);
+        contrast.push({
+          palette,
+          theme,
+          colorScheme,
+          effectiveMode,
+          appliedStyle,
+          categories: [...rest, ...hover],
+        });
+        // Persist observations before assertions, including empty/missing classes.
+        await writeFile(
+          join(evidence, 'rendered-contrast.json'),
+          JSON.stringify(contrast, null, 2),
+        );
+        for (const group of [...rest, ...hover]) {
           expect(
-            result.ratio,
-            `${palette}/${theme}/${colorScheme}: ${result.text}`,
-          ).toBeGreaterThanOrEqual(4.5);
+            group.measurements.length,
+            `${palette}/${theme}/${colorScheme}: ${group.category}/${group.state} is required`,
+          ).toBeGreaterThan(0);
+          for (const result of group.measurements) {
+            expect(result.text.length).toBeGreaterThan(0);
+            if (group.category === 'primary-button') {
+              expect(result.disabled).toBe(false);
+              expect(result.hovered).toBe(group.state === 'hover');
+            }
+            expect(
+              result.ratio,
+              `${palette}/${theme}/${colorScheme}: ${group.category}/${group.state}: ${result.text}`,
+            ).toBeGreaterThanOrEqual(4.5);
+          }
+        }
         await capture(`${palette}-${theme}-${colorScheme}`);
         await page.keyboard.press('Escape');
         await expect(settings).toBeFocused();
       }
     }
   }
+  expect(contrast).toHaveLength(12);
   await writeFile(
     join(evidence, 'rendered-contrast.json'),
     JSON.stringify(contrast, null, 2),
