@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { runPackagedCheck } from './packaged-check-log.mjs';
 
 const cwd = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 const startupOptions = process.argv.slice(2);
@@ -16,8 +17,10 @@ for (const key of Object.keys(env)) {
     delete env[key];
   }
 }
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd, env, stdio: 'inherit' });
+function run(command, args, packaged = false) {
+  const result = packaged
+    ? runPackagedCheck(command, args, { cwd, env })
+    : spawnSync(command, args, { cwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     console.error(
@@ -48,13 +51,11 @@ if (process.platform === 'linux' && !env.DISPLAY) {
 bazel('run', '//:package');
 if (process.platform === 'darwin') bazel('run', '//:packaged_smoke_failure');
 if (process.platform === 'linux' && !env.DISPLAY) {
-  run('xvfb-run', [
-    '-a',
-    'bazel',
-    ...startupOptions,
-    'run',
-    '//:packaged_smoke',
-  ]);
+  run(
+    'xvfb-run',
+    ['-a', 'bazel', ...startupOptions, 'run', '//:packaged_smoke'],
+    true,
+  );
 } else {
-  bazel('run', '//:packaged_smoke');
+  run('bazel', [...startupOptions, 'run', '//:packaged_smoke'], true);
 }

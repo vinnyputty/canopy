@@ -7,8 +7,10 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
+  stat,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -88,6 +90,93 @@ async function extract(artifact, format, directory) {
       : format === 'deb'
         ? join(payload, 'opt', 'Canopy', 'canopy')
         : join(payload, 'squashfs-root', 'canopy');
+}
+async function linuxStartupEvidence(executable, artifact, format, directory) {
+  const inspect = async (path) => {
+    try {
+      const metadata = await stat(path);
+      return {
+        path,
+        realpath: await realpath(path),
+        uid: metadata.uid,
+        gid: metadata.gid,
+        mode: (metadata.mode & 0o7777).toString(8),
+        sha256: createHash('sha256')
+          .update(await readFile(path))
+          .digest('hex'),
+      };
+    } catch (error) {
+      return { path, error: String(error) };
+    }
+  };
+  const read = async (path) => {
+    try {
+      return await readFile(path, 'utf8');
+    } catch (error) {
+      return String(error);
+    }
+  };
+  const probe = (command, args) => {
+    const result = spawnSync(command, args, {
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 256 * 1024,
+    });
+    return {
+      status: result.status,
+      signal: result.signal,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      error: result.error?.message,
+    };
+  };
+  const payload = dirname(executable);
+  const evidence = {
+    format,
+    launchSemantics:
+      'extracted payload; installer hooks and FUSE mounting not exercised',
+    artifact: await inspect(artifact),
+    executable: await inspect(executable),
+    appAsar: await inspect(join(payload, 'resources', 'app.asar')),
+    sandboxHelper: await inspect(join(payload, 'chrome-sandbox')),
+    apparmorProfile: await read(join(payload, 'resources', 'apparmor-profile')),
+    apparmorEnabled: await read('/sys/module/apparmor/parameters/enabled'),
+    userNamespaceRestriction: await read(
+      '/proc/sys/kernel/apparmor_restrict_unprivileged_userns',
+    ),
+    unprivilegedUserNamespaces: await read(
+      '/proc/sys/kernel/unprivileged_userns_clone',
+    ),
+    runnerApparmorContext: await read('/proc/self/attr/current'),
+    userNamespaceProbe: probe('unshare', ['--user', 'true']),
+    mount: probe('findmnt', ['-T', executable, '-no', 'TARGET,FSTYPE,OPTIONS']),
+  };
+  if (format === 'deb') {
+    const control = join(directory, 'deb-control');
+    run('dpkg-deb', ['-e', artifact, control]);
+    evidence.debPostInstall = await read(join(control, 'postinst'));
+  } else {
+    evidence.appRun = await inspect(join(payload, 'AppRun'));
+    evidence.desktopEntries = await Promise.all(
+      (await readdir(payload))
+        .filter((name) => name.endsWith('.desktop'))
+        .map(async (name) => ({
+          name,
+          contents: await read(join(payload, name)),
+        })),
+    );
+  }
+  const diagnostics = join(
+    workspace,
+    '.cache',
+    'smoke-failure',
+    artifact.split(/[\\/]/).at(-1),
+  );
+  await mkdir(diagnostics, { recursive: true });
+  await writeFile(
+    join(diagnostics, 'linux-startup.json'),
+    JSON.stringify(evidence, null, 2),
+  );
 }
 async function smoke(executablePath, directory, artifact) {
   const userData = join(directory, 'user-data');
@@ -291,6 +380,8 @@ for (const format of platform.formats) {
     await access(artifact);
     const executable = await extract(artifact, format, directory);
     await access(executable);
+    if (process.platform === 'linux')
+      await linuxStartupEvidence(executable, artifact, format, directory);
     const launches = await smoke(executable, directory, name);
     results.push({
       artifact: name,
