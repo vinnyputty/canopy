@@ -1,4 +1,5 @@
 import { expect } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 /** Isolated source/UI fixtures; no provider, browser, keychain, or clipboard use. */
 export async function auditSetup(app, page) {
@@ -8,7 +9,7 @@ export async function auditSetup(app, page) {
   const originalWorkspace = await page.evaluate(() =>
     window.canopy.loadWorkspace(),
   );
-  await app.evaluate(({ ipcMain }) => {
+  await app.evaluate(({ ipcMain, dialog, app: desktop }) => {
     const other = {
       id: 'token:fixture-other',
       provider: 'jira',
@@ -27,7 +28,21 @@ export async function auditSetup(app, page) {
       pending: [],
       handlers: new Map(),
       attempts: 0,
+      rootReads: [],
     });
+    state.saveDialog = dialog.showSaveDialog;
+    state.exportMode = 'cancel';
+    state.exportPath = `${desktop.getPath('userData')}/diagnostics-fixture.json`;
+    dialog.showSaveDialog = async () =>
+      state.exportMode === 'cancel'
+        ? { canceled: true }
+        : {
+            canceled: false,
+            filePath:
+              state.exportMode === 'failure'
+                ? `${desktop.getPath('userData')}/missing/report.json`
+                : state.exportPath,
+          };
     const replace = (name, handler) => {
       const channel = `canopy:${name}`;
       state.handlers.set(channel, ipcMain._invokeHandlers.get(channel));
@@ -48,23 +63,26 @@ export async function auditSetup(app, page) {
       name: 'Fixture user',
     }));
     replace('search', () => ({ issues: [] }));
-    replace('tree', (_event, _id, rootKey) => ({
-      rootKey,
-      issues: [
-        {
-          id: rootKey,
-          key: rootKey,
-          summary: 'Fixture root',
-          type: 'Task',
-          priority: null,
-          assignee: null,
-          status: { id: 'todo', name: 'To do', category: 'new' },
-          links: [],
-        },
-      ],
-      warnings: [],
-      fetchedAt: Date.now(),
-    }));
+    replace('tree', (_event, id, rootKey) => {
+      state.rootReads.push({ id, rootKey });
+      return {
+        rootKey,
+        issues: [
+          {
+            id: rootKey,
+            key: rootKey,
+            summary: 'Fixture root',
+            type: 'Task',
+            priority: null,
+            assignee: null,
+            status: { id: 'todo', name: 'To do', category: 'new' },
+            links: [],
+          },
+        ],
+        warnings: [],
+        fetchedAt: Date.now(),
+      };
+    });
     replace('syncStatus', () => ({ retryAt: null }));
     replace('priorityOrder', () => []);
     replace('transitions', () => []);
@@ -124,6 +142,24 @@ export async function auditSetup(app, page) {
         ),
       )
       .toBe('OTHER-1');
+    await expect
+      .poll(() =>
+        page.evaluate(async () =>
+          Boolean((await window.canopy.loadWorkspace())?.tabs[0]?.view),
+        ),
+      )
+      .toBe(true);
+    await page
+      .getByLabel('Filter status', { exact: true })
+      .selectOption('To do');
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async () =>
+            (await window.canopy.loadWorkspace())?.tabs[0]?.filters?.status,
+        ),
+      )
+      .toBe('todo');
     const before = await page.evaluate(() => window.canopy.loadWorkspace());
     let attempts = 0;
     for (const [method, provider, failure] of [
@@ -190,10 +226,12 @@ export async function auditSetup(app, page) {
         .getByRole('button', { name: 'Close dialog', exact: true })
         .click();
     }
+    let rootNumber = 0;
     for (const url of [
       'https://TEAM.atlassian.net',
       'https://team.atlassian.net:443',
     ]) {
+      await page.getByRole('tab', { name: /OTHER-1/ }).click();
       await start();
       await fillJira(url);
       await page
@@ -212,13 +250,84 @@ export async function auditSetup(app, page) {
       await expect(
         page.getByRole('combobox', { name: 'Connection', exact: true }),
       ).toHaveValue('token:fixture-team');
+      const rootKey = `TEAM-${++rootNumber}`;
       await page
-        .getByRole('button', { name: 'Close dialog', exact: true })
+        .getByRole('combobox', {
+          name: 'Issue key, uppercase project prefix, Jira URL, or summary',
+          exact: true,
+        })
+        .fill(rootKey);
+      await page
+        .getByRole('button', { name: 'Open tree', exact: true })
         .click();
+      await expect(
+        page.getByRole('tree', { name: `${rootKey} issue tree` }),
+      ).toBeVisible();
+      const rootRead = await app.evaluate(
+        (_electron, rootKey) =>
+          globalThis.setupAudit.rootReads.find(
+            (read) => read.rootKey === rootKey,
+          ),
+        rootKey,
+      );
+      expect(rootRead).toEqual({ id: 'token:fixture-team', rootKey });
     }
+    await sidebar
+      .getByRole('button', { name: 'Setup help', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: 'Review diagnostics', exact: true })
+      .click();
+    const report = page.getByLabel('Diagnostics report');
+    await expect(report).toContainText('canopy-support-v1');
+    const reviewed = await report.textContent();
+    expect(reviewed).not.toMatch(
+      /fixture-only-token|fixture@example|other\.atlassian|team\.atlassian|OTHER-1|TEAM-[12]|Fixture root/,
+    );
+    const save = page.getByRole('button', {
+      name: 'Save reviewed diagnostics…',
+      exact: true,
+    });
+    await save.click();
+    await expect(
+      page
+        .getByRole('dialog', { name: 'Setup help', exact: true })
+        .getByRole('status'),
+    ).toContainText('Export canceled.');
+    await app.evaluate(() => {
+      globalThis.setupAudit.exportMode = 'save';
+    });
+    await save.click();
+    await expect(
+      page
+        .getByRole('dialog', { name: 'Setup help', exact: true })
+        .getByRole('status'),
+    ).toContainText('Diagnostics saved.');
+    const savedPath = await app.evaluate(
+      () => globalThis.setupAudit.exportPath,
+    );
+    const saved = await readFile(savedPath, 'utf8');
+    expect(saved).toBe(reviewed);
+    await app.evaluate(() => {
+      globalThis.setupAudit.exportMode = 'failure';
+    });
+    await save.click();
+    await expect(
+      page
+        .getByRole('dialog', { name: 'Setup help', exact: true })
+        .getByRole('status'),
+    ).toContainText('Could not save diagnostics.');
+    await expect(report).toHaveText(reviewed);
+    await page
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .click();
+    console.log(
+      'Setup regressions passed: dismissal, late results, workspace, canonical reconnect, reviewed diagnostics save/cancel/failure.',
+    );
   } finally {
-    await app.evaluate(({ ipcMain }) => {
+    await app.evaluate(({ ipcMain, dialog }) => {
       const state = globalThis.setupAudit;
+      dialog.showSaveDialog = state.saveDialog;
       for (const pending of state.pending)
         pending.reject(new Error('Fixture cleanup'));
       for (const [channel, handler] of state.handlers) {

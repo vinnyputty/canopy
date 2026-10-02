@@ -536,7 +536,10 @@ async function auditMutations() {
     page.getByRole('tab', { name: new RegExp(root) }).click();
   const dismissError = async (text) => {
     await expect(page.getByRole('alert')).toContainText(text);
-    await page.getByRole('alert').getByRole('button').click();
+    await page
+      .getByRole('alert')
+      .getByRole('button', { name: 'Dismiss error', exact: true })
+      .click();
   };
   const undo = async (name) => {
     const button = page.getByRole('button', { name, exact: true });
@@ -975,7 +978,10 @@ async function auditMutationViews() {
           .length,
     ),
   ).toBe(rankCalls);
-  await page.getByRole('alert').getByRole('button').click();
+  await page
+    .getByRole('alert')
+    .getByRole('button', { name: 'Dismiss error', exact: true })
+    .click();
   await app.evaluate(() => {
     globalThis.canopySmoke.rankingState = undefined;
   });
@@ -2301,7 +2307,9 @@ try {
   await resizeWindow(600);
   // The earlier error assertion is complete. Its banner is transient across
   // restart, so remove it before testing restoration under an unchanged layout.
-  await page.locator('.error-banner button').click();
+  await page
+    .getByRole('button', { name: 'Dismiss error', exact: true })
+    .click();
   await expect(page.locator('.error-banner')).toHaveCount(0);
   // Exercise the gutter-free geometry used by overlay scrollbars on macOS.
   await setScrollbars('none');

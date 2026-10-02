@@ -248,7 +248,7 @@ export function App() {
     void window.canopy
       .connections()
       .then((value) => {
-        if (current) setConnections(value);
+        if (current) storeConnections(value);
       })
       .catch(() => {});
     return () => {
@@ -3803,6 +3803,7 @@ export function App() {
                   </button>
                 )}
                 <button
+                  aria-label="Dismiss error"
                   onClick={() =>
                     setErrors((value) => {
                       const copy = { ...value };
