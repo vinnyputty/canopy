@@ -114,3 +114,11 @@ js_binary(
     patch_node_fs = False,
     tags = ["manual"],
 )
+
+js_binary(
+    name = "palette_check",
+    entry_point = "tools/palette-check.mjs",
+    data = [":build", ":node_modules", "package.json"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
