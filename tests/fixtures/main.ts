@@ -1,8 +1,45 @@
+import { ipcMain } from 'electron';
 import { launch } from '../../src/main/app';
 import type { Issue } from '../../src/shared/types';
 import { ControlledDemoProvider } from './controlled';
 
 launch(async (storage) => {
+  if (process.env.CANOPY_SMOKE_BRANDING === '1') {
+    const controls = {
+      holdCreation: true,
+      holdSubscription: true,
+      reading: false,
+      subscribing: false,
+      releaseCreation: null as (() => void) | null,
+      releaseSubscription: null as (() => void) | null,
+    };
+    Object.assign(globalThis, { canopyBrandingCreation: controls });
+    const read = storage.read.bind(storage);
+    storage.read = async <T>(name: string) => {
+      if (name === 'window' && controls.holdCreation) {
+        controls.reading = true;
+        await new Promise<void>((resolve) => {
+          controls.releaseCreation = resolve;
+        });
+        controls.holdCreation = false;
+        controls.reading = false;
+      }
+      return read<T>(name);
+    };
+    const handle = ipcMain.handle.bind(ipcMain);
+    ipcMain.handle = (channel, listener) =>
+      handle(channel, async (event, ...args) => {
+        if (channel === 'canopy:supportReady' && controls.holdSubscription) {
+          controls.subscribing = true;
+          await new Promise<void>((resolve) => {
+            controls.releaseSubscription = resolve;
+          });
+          controls.holdSubscription = false;
+          controls.subscribing = false;
+        }
+        return listener(event, ...args);
+      });
+  }
   if (await storage.read<boolean>('demo-removed')) return undefined;
   const demo = new ControlledDemoProvider(
     (await storage.read<Issue[]>('demo')) ?? undefined,

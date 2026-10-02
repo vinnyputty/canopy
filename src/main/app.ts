@@ -429,6 +429,20 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let creatingWindow: Promise<void> | null = null;
+  let supportPending = false;
+  let supportSubscriber: BrowserWindow | null = null;
+  const deliverSupport = () => {
+    if (
+      supportPending &&
+      window &&
+      supportSubscriber === window &&
+      !window.isDestroyed()
+    ) {
+      supportPending = false;
+      window.webContents.send('canopy:showSupport');
+    }
+  };
   const handlers: Record<string, (...args: any[]) => unknown> = {
     updateState: () => updates.snapshot(),
     updatePreferences: (value: unknown) => updates.preferences(value),
@@ -441,6 +455,10 @@ async function start(
     dismissUpdateNotice: () => updates.dismiss(),
     openRelease: (tag: unknown) =>
       updates.open(tag, (url) => shell.openExternal(url)),
+    supportReady: () => {
+      supportSubscriber = window;
+      deliverSupport();
+    },
     appVersion: () => app.getVersion(),
     openSupportLink: (link: unknown) => shell.openExternal(supportUrl(link)),
     demoMode: () => demoMode,
@@ -779,10 +797,7 @@ async function start(
       if (
         event.sender !== window?.webContents ||
         event.senderFrame !== window.webContents.mainFrame ||
-        ![
-          pathToFileURL(html).href,
-          `${pathToFileURL(html).href}?support=1`,
-        ].includes(event.senderFrame.url)
+        event.senderFrame.url !== pathToFileURL(html).href
       )
         throw new Error('Untrusted application window.');
       return handler(...args);
@@ -792,7 +807,7 @@ async function start(
     quitting = true;
     updates.cancel();
   });
-  const createWindow = async (support = false) => {
+  const createWindow = async () => {
     const saved = demoMode
       ? null
       : restoreWindow(
@@ -828,6 +843,9 @@ async function start(
         clearRelationshipRequests();
     });
     created.webContents.on('render-process-gone', clearRelationshipRequests);
+    created.webContents.on('did-start-loading', () => {
+      if (window === created) supportSubscriber = null;
+    });
     created.webContents.on('destroyed', () => {
       updates.cancel();
       for (const controller of searches.values()) controller.abort();
@@ -888,10 +906,21 @@ async function start(
     window.webContents.session.setPermissionRequestHandler(
       (_wc, _permission, callback) => callback(false),
     );
-    window.on('closed', () => {
-      window = null;
+    created.on('closed', () => {
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+      }
     });
-    await window.loadFile(html, { query: support ? { support: '1' } : {} });
+    await created.loadFile(html);
+  };
+  const ensureWindow = (): Promise<void> => {
+    if (creatingWindow) return creatingWindow;
+    if (window) return Promise.resolve();
+    creatingWindow = createWindow().finally(() => {
+      creatingWindow = null;
+    });
+    return creatingWindow;
   };
   const openDemoFromMenu = () =>
     void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
@@ -901,16 +930,18 @@ async function start(
       ),
     );
   const showSupport = () => {
-    if (window) {
-      if (window.isMinimized()) window.restore();
-      window.show();
-      window.focus();
-      window.webContents.send('canopy:showSupport');
-    } else {
-      void createWindow(true).catch((error: Error) =>
+    supportPending = true;
+    void ensureWindow()
+      .then(() => {
+        if (!window) return;
+        if (window.isMinimized()) window.restore();
+        window.show();
+        window.focus();
+        deliverSupport();
+      })
+      .catch((error: Error) =>
         dialog.showErrorBox('Could not open About & Support', error.message),
       );
-    }
   };
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
@@ -992,10 +1023,12 @@ async function start(
       },
     ]),
   );
-  await createWindow();
   app.on('activate', () => {
-    if (!window) void createWindow();
+    void ensureWindow().catch((error: Error) =>
+      dialog.showErrorBox('Could not open Canopy', error.message),
+    );
   });
+  await ensureWindow();
 }
 export function launch(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,

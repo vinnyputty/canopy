@@ -267,12 +267,7 @@ export function App() {
     | 'connect'
     | 'support'
     | null
-  >(
-    new URLSearchParams(window.location.search).has('support')
-      ? 'support'
-      : null,
-  );
-  useEffect(() => window.canopy.onShowSupport(() => setDialog('support')), []);
+  >(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
   const settingsFlow = useRef(false);
   useLayoutEffect(() => {
@@ -281,6 +276,49 @@ export function App() {
       settingsTrigger.current?.focus();
     }
   }, [dialog]);
+  const supportButton = useRef<HTMLButtonElement>(null);
+  const supportReturnFocus = useRef<{
+    trigger: HTMLElement | null;
+    fallback: HTMLElement | null;
+  } | null>(null);
+  const showSupport = useCallback((trigger?: HTMLElement) => {
+    if (!supportReturnFocus.current) {
+      supportReturnFocus.current = {
+        fallback: settingsFlow.current
+          ? settingsTrigger.current
+          : supportButton.current,
+        trigger:
+          trigger ??
+          (document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null),
+      };
+    }
+    setDialog('support');
+  }, []);
+  useLayoutEffect(() => {
+    if (dialog === null && supportReturnFocus.current) {
+      const { trigger, fallback } = supportReturnFocus.current;
+      supportReturnFocus.current = null;
+      const target =
+        trigger?.isConnected && trigger !== document.body
+          ? trigger
+          : fallback?.isConnected
+            ? fallback
+            : supportButton.current;
+      target?.focus({ preventScroll: true });
+    }
+  }, [dialog]);
+  useEffect(() => {
+    const unsubscribe = window.canopy.onShowSupport(() => showSupport());
+    // Acknowledge only after the authoritative renderer installs its listener.
+    void window.canopy
+      .supportReady()
+      .catch((error) =>
+        console.error('Could not subscribe to About requests:', error),
+      );
+    return unsubscribe;
+  }, [showSupport]);
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
     palette: NonNullable<Workspace['palette']>;
@@ -2214,7 +2252,7 @@ export function App() {
         id: 'support',
         label: 'About & Support',
         icon: Info,
-        run: () => setDialog('support'),
+        run: () => showSupport(),
       },
       {
         id: 'shortcuts',
@@ -2223,7 +2261,7 @@ export function App() {
         run: () => setDialog('shortcuts'),
       },
     ],
-    [activeTab, expandAll, refreshTab],
+    [activeTab, expandAll, refreshTab, showSupport],
   );
 
   useEffect(() => {
@@ -3533,7 +3571,8 @@ export function App() {
         </button>
         <button
           className="sidebar-settings"
-          onClick={() => setDialog('support')}
+          ref={supportButton}
+          onClick={(event) => showSupport(event.currentTarget)}
         >
           <Info size={16} />
           <span>About &amp; Support</span>
@@ -7497,7 +7536,7 @@ function SupportDialog({ onClose }: { onClose: () => void }) {
     }
   };
   return (
-    <Dialog title="About & Support" onClose={onClose} compact>
+    <Dialog title="About & Support" onClose={onClose} compact initialFocus>
       <div className="support-dialog">
         <img src="icon.svg" width="80" height="80" alt="" />
         <h3>Canopy</h3>
