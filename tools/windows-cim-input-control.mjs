@@ -7,6 +7,19 @@ import {
 
 const limit = 16 * 1024 * 1024;
 const modes = ['exec-open', 'exec-end', 'spawn-ignore'];
+const phasePattern =
+  /canopy-cim phase=(script-entry|module-load|query|projection|serialization|complete)(?=\s|$)/g;
+const codes = new Set([
+  'ENOENT',
+  'EACCES',
+  'EPERM',
+  'ENOBUFS',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+  'ABORT_ERR',
+]);
+const lastPhase = (text) => [...text.matchAll(phasePattern)].at(-1)?.[1];
 
 // Read-only diagnostics: these results never establish process ownership.
 // Called inside the native lifecycle test worker, not the pre-build launcher.
@@ -51,8 +64,7 @@ export async function runCimInputControls({
     moduleAnalysisCacheConfigured: Boolean(env.PSModuleAnalysisCachePath),
     processors: cpus().length,
   };
-  // Same raw script and context establish whether the pre-build sync result
-  // transfers to this worker. Sync children consume an empty input then EOF.
+  // Sync's empty input/EOF baseline has Node's synchronous exit-wait contract.
   for (const [variant, script] of variants) {
     for (const mode of variant === 'raw' ? ['sync', ...modes] : modes) {
       const started = Date.now();
@@ -63,36 +75,41 @@ export async function runCimInputControls({
         result = {
           ...child,
           killed: child.error?.code === 'ETIMEDOUT',
-          closed: !child.error || child.error.code !== 'ETIMEDOUT',
+          closed: child.error?.code !== 'ETIMEDOUT' || child.signal !== null,
           stderrEvents: null,
           spawnedMs: null,
+          stdoutBytes: Buffer.byteLength(child.stdout ?? ''),
+          stderrBytes: Buffer.byteLength(child.stderr ?? ''),
+          phase: lastPhase(String(child.stderr ?? '')),
         };
-        // spawnSync waits for exit/stdio closure even when its timeout kills.
-        if (child.error?.code === 'ETIMEDOUT')
-          result.closed = child.signal !== null;
-      } else {
+      } else
         result = await asyncControl(command, argsFor(script), options, mode);
-      }
       let rows;
       let parseError;
       if (result.status === 0 && !result.error) {
+        let parsed;
         try {
-          const parsed = JSON.parse(String(result.stdout));
+          parsed = JSON.parse(String(result.stdout));
+        } catch {
+          parseError = 'INVALID_SNAPSHOT_JSON';
+        }
+        if (!parseError) {
           const snapshot = Array.isArray(parsed) ? parsed : [parsed];
           if (
             !snapshot.length ||
             snapshot.some(
               (row) =>
                 !row ||
+                Object.keys(row).sort().join(',') !== 'pid,ppid,start' ||
                 !Number.isSafeInteger(row.pid) ||
+                row.pid < 0 ||
                 !Number.isSafeInteger(row.ppid) ||
-                !('start' in row),
+                row.ppid < 0 ||
+                !(row.start === null || typeof row.start === 'string'),
             )
           )
-            throw new Error('Incomplete CIM input-control snapshot');
-          rows = snapshot.length;
-        } catch (error) {
-          parseError = String(error);
+            parseError = 'INVALID_SNAPSHOT_SCHEMA';
+          else rows = snapshot.length;
         }
       }
       const record = {
@@ -107,32 +124,48 @@ export async function runCimInputControls({
         signal: result.signal,
         killed: result.killed,
         childPid: result.pid ?? null,
-        code: result.error?.code ?? null,
-        error: result.error ? String(result.error).slice(0, 4096) : parseError,
+        code: codes.has(result.error?.code)
+          ? result.error.code
+          : result.error
+            ? 'CHILD_ERROR'
+            : null,
+        error: result.error
+          ? 'CHILD_OPERATION_FAILED'
+          : (parseError ?? (result.status !== 0 ? 'NONZERO_EXIT' : undefined)),
         closed: result.closed,
+        cleanupCodes: (result.cleanupErrors ?? []).map((failure) =>
+          codes.has(failure.code) ? failure.code : 'CONTROL_CLEANUP_FAILED',
+        ),
         spawnedMs: result.spawnedMs,
         stderrEvents: result.stderrEvents,
         observerCpuMicros: process.cpuUsage(cpuStarted),
         hostFreeMemoryBytes: freemem(),
-        phase:
-          result.phase ??
-          [
-            ...String(result.stderr ?? '').matchAll(
-              /canopy-cim phase=([\w-]+)/g,
-            ),
-          ].at(-1)?.[1] ??
-          'startup-or-script-entry',
+        phase: result.phase ?? 'startup-or-script-entry',
         rows,
-        stderr: String(result.stderr ?? '').slice(0, 4096),
-        stdout:
-          result.status === 0 && !parseError
-            ? undefined
-            : String(result.stdout ?? '').slice(0, 4096),
+        stdoutBytes: result.stdoutBytes,
+        stderrBytes: result.stderrBytes,
       };
       results.push(record);
+      if (!result.closed) {
+        const failure = new Error(
+          `CIM input control closure unconfirmed: ${JSON.stringify(record)}`,
+        );
+        // Retain the exact handle and first error without serializing untrusted
+        // command/output strings through Error inspection or diagnostic records.
+        Object.defineProperties(failure, {
+          child: { value: result.child },
+          primary: { value: result.error },
+          record: { value: record },
+          cleanupErrors: { value: result.cleanupErrors },
+        });
+        try {
+          report(record);
+        } catch (secondary) {
+          Object.defineProperty(failure, 'reportError', { value: secondary });
+        }
+        throw failure;
+      }
       report(record);
-      // Never continue spawning comparisons after unestablished child closure.
-      if (!result.closed) return results;
     }
   }
   return results;
@@ -144,42 +177,91 @@ function asyncControl(command, args, options, mode) {
     let child;
     let error;
     let stdout = '';
-    let stderr = '';
-    let bytes = 0;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let phase;
     let phaseTail = '';
     let spawnedMs = null;
     const stderrEvents = [];
+    const cleanupErrors = [];
+    const listeners = [];
     let settled = false;
+    let stopping = false;
     let timer;
     let closureTimer;
+    const listen = (emitter, event, handler) => {
+      if (!emitter) return;
+      emitter.on(event, handler);
+      listeners.push([emitter, event, handler]);
+    };
     const done = (status, signal, closed) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(closureTimer);
+      for (const [emitter, event, handler] of listeners)
+        emitter.removeListener(event, handler);
+      if (!closed) {
+        // Release only this control's pipes/observer handles; failure retains
+        // child identity and prohibits further control/fixture launches.
+        for (const stream of [child?.stdin, child?.stdout, child?.stderr]) {
+          try {
+            stream?.destroy();
+          } catch (failure) {
+            cleanupErrors.push(failure);
+          }
+        }
+        try {
+          child?.unref();
+        } catch (failure) {
+          cleanupErrors.push(failure);
+        }
+      }
       resolve({
         status,
         signal,
         closed,
+        child,
         pid: child?.pid ?? null,
         killed: child?.killed ?? false,
         error,
+        cleanupErrors,
         stdout,
-        stderr,
+        stdoutBytes,
+        stderrBytes,
         spawnedMs,
         stderrEvents,
         phase,
       });
     };
+    const stop = (failure) => {
+      error ??= failure;
+      if (settled || stopping) return;
+      stopping = true;
+      clearTimeout(timer);
+      // The same finite close allowance covers timeout, stream limits and
+      // transport faults. Only the directly launched handle receives a signal.
+      closureTimer = setTimeout(() => done(null, null, false), 2000);
+      try {
+        if (!child.kill('SIGKILL'))
+          cleanupErrors.push(
+            new Error('Control termination request was not accepted'),
+          );
+      } catch (failure) {
+        cleanupErrors.push(failure);
+      }
+    };
+    // Own the finite deadline rather than leaving an uncancellable native
+    // timeout behind if direct-handle termination/close cannot be confirmed.
     try {
       child =
         mode === 'spawn-ignore'
           ? spawn(command, args, {
               ...options,
+              timeout: 0,
               stdio: ['ignore', 'pipe', 'pipe'],
             })
-          : execFile(command, args, options, (failure) => {
+          : execFile(command, args, { ...options, timeout: 0 }, (failure) => {
               error ??= failure;
             });
     } catch (failure) {
@@ -187,47 +269,57 @@ function asyncControl(command, args, options, mode) {
       done(null, null, true); // No child was launched.
       return;
     }
-    child.once('spawn', () => {
+    listen(child, 'spawn', () => {
       spawnedMs = Date.now() - started;
     });
-    child.once('error', (failure) => {
-      error ??= failure;
-    });
-    child.once('close', (status, signal) => done(status, signal, true));
-    child.stdout?.on('data', (chunk) => {
-      bytes += chunk.length;
-      if (bytes <= limit) stdout += chunk;
-      else {
-        error ??= Object.assign(
-          new Error('CIM control output exceeded maxBuffer'),
-          { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+    listen(child, 'error', (failure) => stop(failure));
+    listen(child, 'close', (status, signal) => done(status, signal, true));
+    listen(child.stdout, 'data', (chunk) => {
+      stdoutBytes += Buffer.byteLength(chunk);
+      if (stdoutBytes <= limit) stdout += chunk;
+      else
+        stop(
+          Object.assign(new Error('CIM control stdout exceeded maxBuffer'), {
+            code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+          }),
         );
-        child.kill();
-      }
     });
-    child.stderr?.on('data', (chunk) => {
+    listen(child.stderr, 'data', (chunk) => {
       const text = phaseTail + chunk;
-      phase =
-        [...text.matchAll(/canopy-cim phase=([\w-]+)/g)].at(-1)?.[1] ?? phase;
+      phase = lastPhase(text) ?? phase;
       phaseTail = text.slice(-128);
+      stderrBytes += Buffer.byteLength(chunk);
       if (stderrEvents.length < 16)
         stderrEvents.push({
           elapsedMs: Date.now() - started,
           bytes: Buffer.byteLength(chunk),
         });
-      if (stderr.length < 4096) stderr = (stderr + chunk).slice(0, 4096);
+      if (stderrBytes > limit)
+        stop(
+          Object.assign(new Error('CIM control stderr exceeded maxBuffer'), {
+            code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+          }),
+        );
     });
+    listen(child.stdout, 'error', (failure) => stop(failure));
+    listen(child.stderr, 'error', (failure) => stop(failure));
+    listen(child.stdin, 'error', (failure) => stop(failure));
+    timer = setTimeout(
+      () =>
+        stop(
+          Object.assign(new Error('CIM input control timed out'), {
+            code: 'ETIMEDOUT',
+          }),
+        ),
+      options.timeout,
+    );
     // end() sends EOF, not input. Production execFile remains unchanged.
-    child.stdin?.on('error', (failure) => {
-      error ??= failure;
-    });
-    if (mode === 'exec-end') child.stdin?.end();
-    timer = setTimeout(() => {
-      error ??= Object.assign(new Error('CIM input control timed out'), {
-        code: 'ETIMEDOUT',
-      });
-      child.kill(); // Only this diagnostic's directly launched child handle.
-      closureTimer = setTimeout(() => done(null, null, false), 2000);
-    }, options.timeout);
+    if (mode === 'exec-end') {
+      try {
+        child.stdin?.end();
+      } catch (failure) {
+        stop(failure);
+      }
+    }
   });
 }

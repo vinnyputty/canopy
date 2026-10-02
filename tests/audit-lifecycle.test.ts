@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import childProcess, { type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
@@ -17,7 +17,7 @@ import { runCimInputControls } from '../tools/windows-cim-input-control.mjs';
 // These comparisons execute in the same Bazel/Node worker as the required
 // lifecycle fixtures. Diagnostic failures never replace their assertions.
 if (process.platform === 'win32') {
-  test('native CIM input comparisons in the lifecycle worker', async () => {
+  before(async () => {
     await runCimInputControls();
   });
 }

@@ -5,11 +5,14 @@ export interface CimInputControlRecord {
   elapsedMs: number;
   timeoutMs: number;
   closed: boolean;
+  cleanupCodes: string[];
+  childPid: number | null;
   phase: string;
   rows?: number;
-  stderr: string;
-  stdout?: string;
   error?: string;
+  code: string | null;
+  stdoutBytes: number;
+  stderrBytes: number;
   stderrEvents: { elapsedMs: number; bytes: number }[] | null;
 }
 export function runCimInputControls(options?: {
