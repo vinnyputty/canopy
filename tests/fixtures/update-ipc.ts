@@ -20,14 +20,19 @@ function gate() {
   const wait = new Promise<void>((resolve) => {
     release = resolve;
   });
-  return { wait, release, held: false };
+  let enter!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  return { wait, release, entered, enter };
 }
 const load = gate(),
-  write = gate();
+  write = gate(),
+  startup = gate(),
+  transport = gate();
 let holdLoad = scenario.startsWith('load-'),
   holdWrite = false;
 let time = 2 * 7 * 24 * 60 * 60 * 1000;
-let ready = false;
 let win: any;
 const handlers = new Map<string, (...args: any[]) => any>();
 const requests: string[] = [],
@@ -65,7 +70,7 @@ class Window extends EventEmitter {
   }
   async loadFile(file: string) {
     this.webContents.mainFrame.url = pathToFileURL(file).href;
-    ready = true;
+    startup.enter();
   }
 }
 const forbidden = () => {
@@ -93,6 +98,7 @@ const electron = {
   dialog: {
     showErrorBox: (...args: unknown[]) => {
       dialogs.push(args);
+      startup.enter();
     },
   },
   screen: {
@@ -178,14 +184,29 @@ function get(url: string, options: any, callback: (response: any) => void) {
     response.emit('data', Buffer.from(body));
     response.emit('end');
   };
-  if (scenario === 'active-replacement' && requests.length === 1)
+  if (scenario === 'active-replacement' && requests.length === 1) {
     deliverHeld = deliver;
-  else queueMicrotask(deliver);
+    transport.enter();
+  } else queueMicrotask(deliver);
   return req;
 }
-async function until(predicate: () => boolean) {
-  for (let n = 0; n < 200 && !predicate(); n++) await tick();
-  assert.ok(predicate(), 'Expected boundary to be reached');
+async function boundary(entered: Promise<void>, name: string) {
+  // Entry signals follow actual main/Storage/HTTPS execution. A finite deadline
+  // detects a missing boundary without counting event-loop turns before I/O.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      entered,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Expected ${name} boundary within 5000ms`)),
+          5000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 const moduleLoader = Module as unknown as { _load: (...args: any[]) => any };
 const original = moduleLoader._load;
@@ -206,7 +227,7 @@ moduleLoader._load = function (name, ...args) {
           'Auth secrets must not be accessed',
         );
         if (String(file) === join(profile!, 'updates.json') && holdLoad) {
-          load.held = true;
+          load.enter();
           await load.wait;
         }
         return (fs.readFile as any)(file, ...rest);
@@ -217,7 +238,7 @@ moduleLoader._load = function (name, ...args) {
           'Write outside disposable profile',
         );
         if (String(file) === join(profile!, 'updates.json.tmp') && holdWrite) {
-          write.held = true;
+          write.enter();
           await write.wait;
         }
         return (fs.writeFile as any)(file, ...rest);
@@ -245,7 +266,7 @@ launch(
 );
 
 (async () => {
-  await until(() => ready || !!dialogs.length);
+  await boundary(startup.entered, 'main startup');
   assert.deepEqual(dialogs, []);
   const event = () => ({
     sender: win.webContents,
@@ -280,7 +301,7 @@ launch(
       prereleases: false,
     });
     const pending = invoke('checkUpdates', true);
-    await until(() => !!deliverHeld);
+    await boundary(transport.entered, 'held HTTPS');
     await invoke('cancelUpdateCheck');
     time += 7 * 24 * 60 * 60 * 1000 + 1;
     version = '0.4.0';
@@ -347,8 +368,8 @@ launch(
         notifications: true,
         prereleases: false,
       });
-      await until(() => write.held);
-    } else await until(() => load.held);
+      await boundary(write.entered, 'held preference write');
+    } else await boundary(load.entered, 'held initial load');
     const before = requests.length;
     const pending: Promise<UpdateState> = invoke(
       'checkUpdates',
@@ -438,7 +459,17 @@ launch(
   console.log(
     `PASS ${scenario}: actual main IPC + real Storage + production HTTPS adapter; no GUI/auth/provider/browser/clipboard`,
   );
-})().catch((error) => {
+})().catch(async (error) => {
+  // Failure must not leave held gates or a production transport deadline alive.
+  if (win)
+    handlers.get('canopy:cancelUpdateCheck')?.({
+      sender: win.webContents,
+      senderFrame: win.webContents.mainFrame,
+    });
+  load.release();
+  write.release();
+  deliverHeld?.();
+  await tick();
   console.error(error);
   process.exitCode = 1;
 });

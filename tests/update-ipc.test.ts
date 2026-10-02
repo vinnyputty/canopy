@@ -46,6 +46,13 @@ before(async () => {
     outfile: join(directory, 'audit-guard.cjs'),
   });
   await build({
+    entryPoints: ['tests/fixtures/update-ipc-io.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile: join(directory, 'io.cjs'),
+  });
+  await build({
     entryPoints: ['tests/fixtures/update-ipc.ts'],
     bundle: true,
     platform: 'node',
@@ -98,6 +105,83 @@ for (const scenario of [
     );
     assert.equal(child.status, 0, child.stdout + child.stderr);
     assert.match(child.stdout, new RegExp(`PASS ${scenario}`));
+  });
+}
+
+for (const scenario of [
+  'write-destroyed',
+  'write-preferences',
+  'write-replacement',
+  'active-replacement',
+]) {
+  it(`main IPC waits for delayed real filesystem boundaries: ${scenario}`, () => {
+    const profile = join(directory, `delayed-${scenario}`);
+    mkdirSync(profile);
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--require',
+        join(directory, 'io.cjs'),
+        join(directory, 'controls.cjs'),
+        join(directory, 'source.cjs'),
+        scenario,
+      ],
+      {
+        env: {
+          ...process.env,
+          CANOPY_USER_DATA: profile,
+          CANOPY_DEMO_TEMP: '0',
+          CANOPY_IPC_IO: 'delay',
+        },
+        encoding: 'utf8',
+        timeout: 20_000,
+      },
+    );
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.match(child.stdout, /REAL mkdir completed/);
+    assert.match(child.stdout, new RegExp(`PASS ${scenario}`));
+    assert.match(child.stdout, /EXIT timeouts=0/);
+    assert.ok(!existsSync(join(profile, 'credentials.json')));
+  });
+}
+for (const [scenario, boundary] of [
+  ['write-cancel', 'held preference write'],
+]) {
+  it(`main IPC fails finitely when ${boundary} never arrives`, () => {
+    const profile = join(directory, `missing-${scenario}`);
+    mkdirSync(profile);
+    const started = performance.now();
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--require',
+        join(directory, 'io.cjs'),
+        join(directory, 'controls.cjs'),
+        join(directory, 'source.cjs'),
+        scenario,
+      ],
+      {
+        env: {
+          ...process.env,
+          CANOPY_USER_DATA: profile,
+          CANOPY_DEMO_TEMP: '0',
+          CANOPY_IPC_IO: 'never',
+        },
+        encoding: 'utf8',
+        timeout: 20_000,
+      },
+    );
+    assert.equal(child.error, undefined, child.stderr);
+    assert.equal(child.status, 1, child.stdout + child.stderr);
+    assert.match(child.stdout, /REAL mkdir completed/);
+    assert.match(
+      child.stderr,
+      new RegExp(`Expected ${boundary} boundary within 5000ms`),
+    );
+    assert.ok(performance.now() - started >= 4900);
+    assert.doesNotMatch(child.stdout, /PASS /);
+    assert.match(child.stdout, /EXIT timeouts=0/);
+    assert.ok(!existsSync(join(profile, 'credentials.json')));
   });
 }
 
