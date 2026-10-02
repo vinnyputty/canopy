@@ -2,6 +2,7 @@ import { expect } from '@playwright/test';
 
 // Run only inside the lead-token-protected smoke launcher and disposable profile.
 export async function auditRelationships(app, page) {
+  let originalBounds;
   await app.evaluate(({ ipcMain }) => {
     const issue = (key, parentKey, done = false) => ({
       id: key,
@@ -49,6 +50,9 @@ export async function auditRelationships(app, page) {
       completed: 0,
       treeReads: 0,
       includeCompletedBlocker: false,
+      heldTreeConnection: null,
+      treeRelease: null,
+      backgroundMarker: null,
     };
     globalThis.relationshipAudit = controls;
     const handlers = {
@@ -80,15 +84,27 @@ export async function auditRelationships(app, page) {
       },
       tree: (_event, _connection, key) => {
         controls.treeReads++;
-        return {
+        const read = () => ({
           rootKey: key,
           issues:
             key === 'team/a#1' && controls.includeCompletedBlocker
               ? [...trees[key], issue('team/a#11', key, true)]
-              : trees[key],
+              : trees[key].map((value) =>
+                  key === 'team/a#10' &&
+                  value.key === key &&
+                  controls.backgroundMarker &&
+                  _connection === controls.heldTreeConnection
+                    ? { ...value, summary: controls.backgroundMarker }
+                    : value,
+                ),
           fetchedAt: Date.now() + controls.treeReads,
           warnings: [],
-        };
+        });
+        if (key === 'team/a#10' && _connection === controls.heldTreeConnection)
+          return new Promise((resolve) => {
+            controls.treeRelease = () => resolve(read());
+          });
+        return read();
       },
       issueUrl: (_event, connection, key) =>
         connection === 'jira'
@@ -106,7 +122,7 @@ export async function auditRelationships(app, page) {
       relationships: async (_event, connection, key, requestId) => {
         controls.calls.push({ connection, key, requestId });
         const mode = controls.mode;
-        if (mode === 'hold')
+        if (mode === 'hold' || mode === 'background-hold')
           await new Promise((resolve) => {
             controls.release = resolve;
           });
@@ -213,6 +229,8 @@ export async function auditRelationships(app, page) {
           groups[4] = { kind: 'children', state: 'visible', items: [] };
         }
         if (mode === 'hold') groups[0].items[0].summary = 'Late ignored result';
+        if (mode === 'background-hold')
+          groups[0].items[0].summary = 'Background inspection retained';
         controls.completed++;
         return { key, groups };
       },
@@ -232,6 +250,12 @@ export async function auditRelationships(app, page) {
     }
   });
   try {
+    originalBounds = await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      const bounds = window.getBounds();
+      window.setBounds({ ...bounds, width: 1008, height: 640 });
+      return bounds;
+    });
     await page.reload();
     const source = page.locator('[data-tree-key="team/a#1"]');
     await expect(source).toBeVisible();
@@ -397,6 +421,79 @@ export async function auditRelationships(app, page) {
     await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
     await expect(tasks).toContainText('Sample team/a#11');
     await expect(tasks).toContainText('Blocked by team/a#11');
+    // Deliver a real held tree response after returning to the source, without
+    // navigation during its pending relationship inspection. Exercise both
+    // another account and an unrelated root in the same account.
+    for (const [index, connection] of [
+      [1, 'other'],
+      [2, 'work'],
+    ]) {
+      await page.getByRole('tab').nth(index).click();
+      const marker = `Confirmed background ${connection}`;
+      await app.evaluate(
+        (_electron, { connection, marker }) => {
+          const state = globalThis.relationshipAudit;
+          state.heldTreeConnection = connection;
+          state.backgroundMarker = marker;
+          state.treeRelease = null;
+        },
+        { connection, marker },
+      );
+      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+      await expect
+        .poll(() =>
+          app.evaluate(() => typeof globalThis.relationshipAudit.treeRelease),
+        )
+        .toBe('function');
+      await page.getByRole('tab').first().click();
+      await expect(tasks).toContainText('Blocked by team/a#11');
+      await app.evaluate(() => {
+        globalThis.relationshipAudit.mode = 'background-hold';
+        globalThis.relationshipAudit.release = null;
+      });
+      await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+      await expect
+        .poll(() =>
+          app.evaluate(() => typeof globalThis.relationshipAudit.release),
+        )
+        .toBe('function');
+      const backgroundHeld = await app.evaluate(() => ({
+        call: globalThis.relationshipAudit.calls.at(-1),
+        cancelledBefore: globalThis.relationshipAudit.cancelled.length,
+      }));
+      expect(backgroundHeld.call).toMatchObject({
+        connection: 'work',
+        key: 'team/a#1',
+      });
+      expect(backgroundHeld.call.requestId).toEqual(expect.any(String));
+      await app.evaluate(() => globalThis.relationshipAudit.treeRelease());
+      await expect(page.getByRole('tab').nth(index)).toContainText(marker);
+      await expect(
+        tasks.getByRole('button', { name: 'Loading relationships…' }),
+      ).toBeVisible();
+      expect(
+        await app.evaluate(
+          (_electron, { call, cancelledBefore }) =>
+            globalThis.relationshipAudit.cancelled
+              .slice(cancelledBefore)
+              .some(
+                (cancelled) =>
+                  cancelled.connection === call.connection &&
+                  cancelled.requestId === call.requestId,
+              ),
+          backgroundHeld,
+        ),
+      ).toBe(false);
+      await app.evaluate(() => globalThis.relationshipAudit.release());
+      await expect(tasks).toContainText('Background inspection retained');
+      await app.evaluate(() => {
+        const state = globalThis.relationshipAudit;
+        state.mode = 'normal';
+        state.release = null;
+        state.heldTreeConnection = null;
+        state.backgroundMarker = null;
+      });
+    }
     const beforeRefresh = await app.evaluate(() => ({
       reads: globalThis.relationshipAudit.treeReads,
       relationships: globalThis.relationshipAudit.calls.length,
@@ -441,8 +538,29 @@ export async function auditRelationships(app, page) {
     await expect(tasks).toContainText('Blocker information is incomplete');
     await app.evaluate(() => {
       globalThis.relationshipAudit.mode = 'hold';
+      globalThis.relationshipAudit.release = null;
     });
-    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    const inspect = tasks.getByRole('button', { name: 'Inspect blockers' });
+    await inspect.scrollIntoViewIfNeeded();
+    await expect
+      .poll(() =>
+        inspect.evaluate((button) => {
+          const box = button.getBoundingClientRect();
+          const pane = button.closest('.next-tasks').getBoundingClientRect();
+          const x = box.left + box.width / 2;
+          const y = box.top + box.height / 2;
+          const hit = document.elementFromPoint(x, y);
+          return (
+            x >= pane.left &&
+            x <= pane.right &&
+            y >= pane.top &&
+            y <= pane.bottom &&
+            button.contains(hit)
+          );
+        }),
+      )
+      .toBe(true);
+    await inspect.click();
     await expect(
       tasks.getByRole('button', { name: 'Loading relationships…' }),
     ).toBeVisible();
@@ -530,7 +648,25 @@ export async function auditRelationships(app, page) {
     await app.evaluate(() => {
       globalThis.relationshipAudit.mode = 'custom';
     });
-    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await inspect.scrollIntoViewIfNeeded();
+    await expect
+      .poll(() =>
+        inspect.evaluate((button) => {
+          const box = button.getBoundingClientRect();
+          const pane = button.closest('.next-tasks').getBoundingClientRect();
+          const x = box.left + box.width / 2;
+          const y = box.top + box.height / 2;
+          return (
+            x >= pane.left &&
+            x <= pane.right &&
+            y >= pane.top &&
+            y <= pane.bottom &&
+            button.contains(document.elementFromPoint(x, y))
+          );
+        }),
+      )
+      .toBe(true);
+    await inspect.click();
     await expect(tasks).toContainText('Blocker state unknown');
     await expect(tasks).not.toContainText('No active visible blockers found');
   } finally {
@@ -540,5 +676,9 @@ export async function auditRelationships(app, page) {
         if (handler) ipcMain.handle(channel, handler);
       }
     });
+    if (originalBounds)
+      await app.evaluate(({ BrowserWindow }, bounds) => {
+        BrowserWindow.getAllWindows()[0].setBounds(bounds);
+      }, originalBounds);
   }
 }

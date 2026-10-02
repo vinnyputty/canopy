@@ -411,6 +411,10 @@ async function start(
     searches.delete(owner);
   };
   const relationshipRequests = new Map<string, AbortController>();
+  const clearRelationshipRequests = () => {
+    for (const controller of relationshipRequests.values()) controller.abort();
+    relationshipRequests.clear();
+  };
   const cancelRelationships = (id: string, requestId: string) => {
     const owner = JSON.stringify([text(id), text(requestId)]);
     relationshipRequests.get(owner)?.abort();
@@ -800,10 +804,16 @@ async function start(
       },
     });
     const created = window;
+    created.webContents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument)
+        clearRelationshipRequests();
+    });
+    created.webContents.on('render-process-gone', clearRelationshipRequests);
     created.webContents.on('destroyed', () => {
       updates.cancel();
       for (const controller of searches.values()) controller.abort();
       searches.clear();
+      clearRelationshipRequests();
     });
     if (saved?.maximized) created.maximize();
     let savingWindow: Promise<void> = Promise.resolve();

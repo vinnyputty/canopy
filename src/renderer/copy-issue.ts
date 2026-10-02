@@ -27,17 +27,22 @@ export function issueWorkBrief({
   if (!issue) throw new Error('Issue details are unavailable.');
   const graph = relationships?.key === issue.key ? relationships : undefined;
   const byKey = new Map(knownIssues.map((item) => [item.key, item]));
+  const parentGroup = graph?.groups.find((group) => group.kind === 'parent');
   const parents: string[] = [];
   const visited = new Set([issue.key]);
   // Jira preview requests the immediate parent; its unavailable/absent result
   // must take precedence over an older tree snapshot.
   const freshJiraParent = preview !== undefined && provider === 'jira';
   const parentUnavailable = issue.unavailableFields?.includes('parent');
-  let parentKey = freshJiraParent
-    ? parentUnavailable
-      ? undefined
-      : issue.parentKey
-    : (issue.parentKey ?? byKey.get(issue.key)?.parentKey);
+  let parentKey = parentGroup
+    ? parentGroup.state === 'visible'
+      ? parentGroup.items[0]?.key
+      : undefined
+    : freshJiraParent
+      ? parentUnavailable
+        ? undefined
+        : issue.parentKey
+      : (issue.parentKey ?? byKey.get(issue.key)?.parentKey);
   while (parentKey && !visited.has(parentKey)) {
     visited.add(parentKey);
     parents.unshift(parentKey);
@@ -123,12 +128,11 @@ export function issueWorkBrief({
                   'No visible issue links returned; hierarchy relationships have not been inspected.',
                 ]),
       ].join('\n');
-  const parentGroup = graph?.groups.find((group) => group.kind === 'parent');
   const parentPath = parentGroup
     ? parentGroup.state !== 'visible'
       ? 'Unknown: parent relationships are incomplete or unavailable.'
       : parentGroup.items.length
-        ? parentGroup.items.map((link) => link.key).join(' → ')
+        ? parents.join(' → ')
         : 'No visible parent returned.'
     : parents.length
       ? parents.join(' → ')

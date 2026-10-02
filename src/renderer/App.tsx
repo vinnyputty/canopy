@@ -342,7 +342,10 @@ export function App() {
       )
         setRelationshipGraphs((current) => ({ ...current, [identity]: graph }));
     } catch {
-      if (generation === relationshipGeneration.current)
+      if (
+        generation === relationshipGeneration.current &&
+        relationshipRequests.current.get(identity) === requestId
+      )
         setRelationshipGraphs((current) => ({
           ...current,
           [identity]: {
@@ -367,6 +370,37 @@ export function App() {
       }
     }
   };
+  const invalidateRelationships = useCallback(
+    (connectionId: string, keys: string[]) => {
+      const affected = new Set(
+        keys.map((key) => relationshipIdentity(connectionId, key)),
+      );
+      for (const identity of affected) {
+        const requestId = relationshipRequests.current.get(identity);
+        if (requestId) {
+          relationshipRequests.current.delete(identity);
+          void window.canopy
+            .cancelRelationships(connectionId, requestId)
+            .catch(() => {});
+        }
+      }
+      setRelationshipGraphs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([identity]) => !affected.has(identity),
+          ),
+        ),
+      );
+      setRelationshipLoading((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([identity]) => !affected.has(identity),
+          ),
+        ),
+      );
+    },
+    [],
+  );
   const [nextTaskViews, setNextTaskViews] = useState<Record<string, boolean>>(
     {},
   );
@@ -1127,6 +1161,13 @@ export function App() {
                 refreshSequences.current[tab.id] !== sequence)
             )
               continue;
+            invalidateRelationships(
+              target.connectionId,
+              [
+                ...next.issues,
+                ...(snapshotsRef.current[target.id]?.issues ?? []),
+              ].map((issue) => issue.key),
+            );
             mutations.receive(target, next, epoch);
             delivered.add(target.id);
           }
@@ -1195,7 +1236,7 @@ export function App() {
         }
       }
     },
-    [demoMode],
+    [demoMode, invalidateRelationships],
   );
 
   const finishWorkflowReturn = useCallback(() => {
@@ -2720,6 +2761,16 @@ export function App() {
         await delay(4000);
 
         show(4, 'The linked CAN-200 issue opens in a separate tab.', 6000);
+        await inspectRelationships('demo', 'CAN-108');
+        await waitFor(
+          () =>
+            Boolean(
+              document.querySelector(
+                '[aria-label="Preview CAN-108"] [aria-label="Related links"] .preview-link button.tool-button',
+              ),
+            ),
+          'Inspected related work',
+        );
         highlight(
           Array.from(document.querySelectorAll<HTMLElement>('.preview-link'))
             .find((link) => link.textContent?.includes('CAN-200'))
@@ -2872,9 +2923,6 @@ export function App() {
   }, [demoMode, ready, Boolean(snapshots['demo-can-100'])]);
 
   useEffect(() => {
-    setRelationshipGraphs({});
-  }, [snapshots]);
-  useEffect(() => {
     return () => {
       relationshipGeneration.current++;
       for (const [identity, requestId] of relationshipRequests.current) {
@@ -2884,7 +2932,7 @@ export function App() {
       relationshipRequests.current.clear();
       setRelationshipLoading({});
     };
-  }, [activeTab?.id, previewRoute?.connectionId, previewKey, snapshots]);
+  }, [activeTab?.id, previewRoute?.connectionId, previewKey]);
 
   const jumpToRelationship = (connectionId: string, key: string) => {
     const current = workspaceRef.current;
