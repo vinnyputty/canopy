@@ -4,17 +4,21 @@ on:
   workflow_dispatch:
 jobs:
   check:
+    name: ${{ matrix.check_name }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-15
+            check_name: check (macos-latest)
             platform: darwin/arm64
             artifact: mac-arm64
           - os: windows-2025
+            check_name: check (windows-latest)
             platform: win32/x64
             artifact: win-x64
           - os: ubuntu-24.04
+            check_name: check (ubuntu-latest)
             platform: linux/x64
             artifact: linux-x64
     runs-on: ${{ matrix.os }}

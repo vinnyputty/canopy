@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -96,16 +97,27 @@ async function smoke(executablePath, directory, artifact) {
   for (const key of Object.keys(env)) {
     if (
       (key.startsWith('CANOPY_') && key !== 'CANOPY_USER_DATA') ||
-      key === 'ELECTRON_RUN_AS_NODE'
+      [
+        'ELECTRON_RUN_AS_NODE',
+        'ELECTRON_DISABLE_SANDBOX',
+        'CHROME_DEVEL_SANDBOX',
+        'NODE_OPTIONS',
+      ].includes(key)
     )
       delete env[key];
   }
   let app;
   let page;
   const errors = [];
+  const launches = [];
   try {
     for (const restart of [false, true]) {
-      app = await electron.launch({ executablePath, env, timeout: 30000 });
+      app = await electron.launch({
+        executablePath,
+        env,
+        chromiumSandbox: true,
+        timeout: 30000,
+      });
       page = await app.firstWindow();
       page.on('pageerror', (error) => errors.push(error.message));
       await page.context().setOffline(true);
@@ -127,6 +139,58 @@ async function smoke(executablePath, directory, artifact) {
       await expect(
         page.getByRole('button', { name: 'Try demo', exact: true }).first(),
       ).toBeVisible();
+      const launch = await app.evaluate(({ app, BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        const { join } = process.getBuiltinModule('node:path');
+        const { pathToFileURL } = process.getBuiltinModule('node:url');
+        const preferences = window.webContents.getLastWebPreferences();
+        const state = {
+          args: process.argv,
+          userData: app.getPath('userData'),
+          expectedUrl: pathToFileURL(
+            join(app.getAppPath(), 'dist', 'renderer', 'index.html'),
+          ).href,
+          frameUrl: window.webContents.mainFrame.url,
+          rendererSandbox: preferences.sandbox,
+          sandboxControls: [
+            'ELECTRON_DISABLE_SANDBOX',
+            'CHROME_DEVEL_SANDBOX',
+          ].filter((key) => process.env[key]),
+        };
+        if (process.platform === 'linux') {
+          const { readFileSync } = process.getBuiltinModule('node:fs');
+          const status = readFileSync(
+            `/proc/${window.webContents.getOSProcessId()}/status`,
+            'utf8',
+          );
+          state.rendererNoNewPrivs = Number(
+            status.match(/^NoNewPrivs:\s+(\d+)/m)?.[1],
+          );
+          state.rendererSeccomp = Number(
+            status.match(/^Seccomp:\s+(\d+)/m)?.[1],
+          );
+        }
+        return state;
+      });
+      launches.push({ restart, ...launch });
+      console.log(
+        `Packaged launch security evidence: ${JSON.stringify(launches.at(-1))}`,
+      );
+      expect(launch.frameUrl).toBe(launch.expectedUrl);
+      expect(launch.userData).toBe(userData);
+      expect(launch.rendererSandbox).toBe(true);
+      expect(launch.sandboxControls).toEqual([]);
+      expect(
+        launch.args.filter((arg) =>
+          /^--(?:no-sandbox|disable-setuid-sandbox|disable-seccomp-filter-sandbox|disable-namespace-sandbox|disable-gpu-sandbox)(?:=|$)/.test(
+            arg,
+          ),
+        ),
+      ).toEqual([]);
+      if (process.platform === 'linux') {
+        expect(launch.rendererNoNewPrivs).toBe(1);
+        expect(launch.rendererSeccomp).toBe(2);
+      }
       expect(await page.evaluate(() => window.canopy.connections())).toEqual(
         [],
       );
@@ -194,6 +258,7 @@ async function smoke(executablePath, directory, artifact) {
         {
           error: String(error.stack ?? error),
           errors,
+          launches,
           platform: process.platform,
           arch: process.arch,
         },
@@ -205,6 +270,7 @@ async function smoke(executablePath, directory, artifact) {
   } finally {
     if (app) await app.close();
   }
+  return launches;
 }
 for (const format of platform.formats) {
   // electron-builder uses native Linux architecture names in artifact macros.
@@ -216,14 +282,19 @@ for (const format of platform.formats) {
         : platform.arch;
   const name = `Canopy-${version}-${platform.os}-${artifactArch}.${format}`;
   const artifact = join(workspace, 'release', name);
-  const directory = await mkdtemp(join(tmpdir(), 'canopy-packaged-'));
+  // Canonicalize temporary paths before launch, including Windows short-name
+  // aliases, so Electron and the file-URL trust check use the same spelling.
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), 'canopy-packaged-')),
+  );
   try {
     await access(artifact);
     const executable = await extract(artifact, format, directory);
     await access(executable);
-    await smoke(executable, directory, name);
+    const launches = await smoke(executable, directory, name);
     results.push({
       artifact: name,
+      launches,
       sha256: createHash('sha256')
         .update(await readFile(artifact))
         .digest('hex'),
