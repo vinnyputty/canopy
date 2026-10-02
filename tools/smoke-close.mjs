@@ -34,6 +34,7 @@ export async function auditWorkspaceClose({
         tabs: [tab('CAN-100'), tab('CAN-200')],
         activeTabId: 'CAN-100',
         theme: 'dark',
+        reading: { textSize: 'medium', spacing: 'compact' },
         sidebarCollapsed: false,
         shortcuts: {},
         seenRoots: {
@@ -61,14 +62,18 @@ export async function auditWorkspaceClose({
       .check();
     await page.getByLabel('Filter priority').selectOption('2');
     await page.locator('.view-settings > summary').click();
-    await page.getByLabel('Text size', { exact: true }).selectOption('small');
+    await page.getByLabel('Show Assignee column').uncheck();
     await page.locator('.view-settings > summary').click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByLabel('Text size', { exact: true }).selectOption('small');
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
     await page.getByRole('button', { name: /Mark root seen/ }).click();
     const before = JSON.parse(
       await readFile(join(userData, 'workspace.json'), 'utf8'),
     );
     expect(before.tabs).toHaveLength(2);
     expect(before.tabs[0].hideDone).toBe(false);
+    expect(before.reading).toEqual({ textSize: 'medium', spacing: 'compact' });
     const closingPage = page.waitForEvent('close');
     await app.evaluate(({ app, BrowserWindow }, route) => {
       const window = BrowserWindow.getAllWindows()[0];
@@ -92,9 +97,10 @@ export async function auditWorkspaceClose({
     expect(saved.tabs).toHaveLength(1);
     expect(saved.tabs[0].hideDone).toBe(true);
     expect(saved.tabs[0].filters.priority).toBe('2');
-    expect(saved.rootViews[JSON.stringify(['demo', 'CAN-100'])].textSize).toBe(
-      'small',
-    );
+    expect(
+      saved.rootViews[JSON.stringify(['demo', 'CAN-100'])].columns,
+    ).not.toContain('assignee');
+    expect(saved.reading).toEqual({ textSize: 'small', spacing: 'compact' });
     expect(
       saved.seenRoots['demo:CAN-100'].issues['CAN-100'].seenAt,
     ).toBeGreaterThan(1);
@@ -106,6 +112,14 @@ export async function auditWorkspaceClose({
       page.getByRole('checkbox', { name: 'Hide done', exact: true }),
     ).toBeChecked();
     await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+    await expect(
+      page.getByRole('button', { name: 'Sort by Assignee', exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(page.getByLabel('Text size', { exact: true })).toHaveValue(
+      'small',
+    );
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(
       page.getByRole('button', { name: /Mark root seen/ }),
     ).toHaveCount(0);

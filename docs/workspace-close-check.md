@@ -76,9 +76,9 @@ The fixture stores local sample issue edits in this profile. Reopen with the sam
 
 For each native logout, restart, and shutdown case:
 
-1. Start from the seeded profile. Close the `CAN-200` tab, enable **Hide done**, select a priority filter, set **Text size** to **Small** in the view settings, and choose **Mark root seen**.
+1. Start from the seeded profile. Close the `CAN-200` tab, enable **Hide done**, select a priority filter, hide the **Assignee** column in **View**, set **Text size** to **Small** under **Settings → Reading**, and choose **Mark root seen**.
 2. Trigger the native OS action promptly after the last change. Record whether the OS proceeds, delays, cancels, or asks to terminate Canopy. Do not force termination for the successful-save case.
-3. Sign back in or restart, then launch the fixture with the same profile. Verify the closed tab stays closed, **Hide done** is enabled, the priority filter and small text remain, and the root is marked seen. Compare `workspace.json` before and after if any state differs.
+3. Sign back in or restart, then launch the fixture with the same profile. Verify the closed tab stays closed, **Hide done** is enabled, the priority filter, hidden Assignee column, and app-wide small text remain, and the root is marked seen. Compare `workspace.json` before and after if any state differs.
 4. Re-seed the profile between cases while Canopy is closed.
 
 Automated smoke holds the debounce deterministically and verifies close/quit persistence. Native checks establish the OS termination behavior; manual timing alone does not prove that a debounce was pending.
