@@ -1,8 +1,9 @@
+import { finishBackupAudit } from './backup-audit-cleanup.mjs';
 // Exclusive desktop token required; stage-backup-smoke supplies forbidden keychain and fake providers.
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSearch } from './smoke-search.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 const [sampleApp, runtime] = process.argv.slice(2);
@@ -17,6 +18,8 @@ const exportedFile = join(directory, 'exported.json');
 const env = { ...process.env, CANOPY_USER_DATA: profile };
 delete env.ELECTRON_RUN_AS_NODE;
 let app, page;
+let failure;
+let failed = false;
 const errors = [];
 const mark = (label) => {
   console.log(`PASS ${label}`);
@@ -518,16 +521,20 @@ try {
     'Zero forbidden keychain accesses, unchanged fake credential/cache files, no renderer page errors',
   );
 } catch (error) {
-  if (page && !page.isClosed())
-    console.error(
-      'Sample UI diagnostics',
-      await page.locator('body').innerText(),
-    );
-  throw error;
+  failure = error;
+  failed = true;
 } finally {
-  try {
-    if (app) await app.close();
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  await finishBackupAudit({
+    app,
+    directory,
+    failure,
+    failed,
+    diagnostics: async () => {
+      if (page && !page.isClosed())
+        console.error(
+          'Sample UI diagnostics',
+          await page.locator('body').innerText(),
+        );
+    },
+  });
 }
