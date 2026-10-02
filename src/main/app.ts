@@ -4,6 +4,7 @@ import {
   relationshipKinds,
   relationshipFailure,
 } from '../shared/relationships';
+import { validateCopyTemplate } from '../shared/copy-template';
 import { Providers } from './providers';
 import {
   app,
@@ -167,6 +168,11 @@ function workspace(value: Workspace) {
     (value.viewDefaults !== undefined && !validViewMap(value.viewDefaults))
   )
     throw new Error('Invalid table view.');
+  if (
+    value.copyTemplate !== undefined &&
+    !validateCopyTemplate(value.copyTemplate)
+  )
+    throw new Error('Invalid copy template.');
   if (value.reading !== undefined && !validReading(value.reading))
     throw new Error('Invalid reading settings.');
   if (value.triage !== undefined && !validTriage(value.triage))

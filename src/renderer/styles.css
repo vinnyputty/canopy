@@ -3161,3 +3161,11 @@ kbd {
   color: var(--muted);
   margin-top: 3px;
 }
+
+.work-brief-dialog textarea {
+  display: block;
+  width: 100%;
+  min-height: 100px;
+  margin-top: 6px;
+  resize: vertical;
+}

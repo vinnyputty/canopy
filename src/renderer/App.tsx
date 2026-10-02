@@ -15,6 +15,12 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import {
+  DEFAULT_COPY_TEMPLATE,
+  COPY_PLACEHOLDERS,
+  validateCopyTemplate,
+  renderCopyTemplate,
+} from '../shared/copy-template';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -3319,8 +3325,8 @@ export function App() {
             issueKey: preview.issue.key,
             provider: previewRoute.provider,
             knownIssues:
-              snapshots[sourceTabId(previewRoute, workspace.tabs)]?.issues ??
-              [],
+              confirmedSnapshots[sourceTabId(previewRoute, workspace.tabs)]
+                ?.issues ?? [],
             preview,
             relationships:
               relationshipGraphs[
@@ -5174,7 +5180,7 @@ export function App() {
                 connectionId: activeTab.connectionId,
                 issueKey: rowMenu.issue.key,
                 provider: activeConnection?.provider ?? 'jira',
-                knownIssues: snapshot?.issues ?? [],
+                knownIssues: confirmedSnapshots[activeTab.id]?.issues ?? [],
                 relationships:
                   relationshipGraphs[
                     relationshipIdentity(
@@ -5188,7 +5194,14 @@ export function App() {
         />
       )}
       {workBrief && (
-        <WorkBriefDialog {...workBrief} onClose={() => setWorkBrief(null)} />
+        <WorkBriefDialog
+          {...workBrief}
+          copyTemplate={workspace.copyTemplate}
+          onTemplate={(copyTemplate) =>
+            setWorkspace((value) => ({ ...value, copyTemplate }))
+          }
+          onClose={() => setWorkBrief(null)}
+        />
       )}
       {childParent && (
         <CreateChildDialog
@@ -7699,6 +7712,8 @@ function WorkBriefDialog({
   preview,
   relationships,
   onClose,
+  copyTemplate,
+  onTemplate,
 }: {
   connectionId: string;
   issueKey: string;
@@ -7707,8 +7722,36 @@ function WorkBriefDialog({
   preview?: IssuePreviewData;
   relationships?: IssueRelationships;
   onClose: () => void;
+  copyTemplate?: string;
+  onTemplate: (template: string | undefined) => void;
 }) {
   const [brief, setBrief] = useState('');
+  const [custom, setCustom] = useState(false);
+  const [template, setTemplate] = useState(
+    copyTemplate ?? DEFAULT_COPY_TEMPLATE,
+  );
+  const [context, setContext] = useState<{
+    issue: Issue;
+    sourceUrl?: string;
+  } | null>(null);
+  let sharedText = brief;
+  let templateError = '';
+  if (custom) {
+    sharedText = '';
+    try {
+      if (context)
+        sharedText = renderCopyTemplate(
+          template,
+          context.issue,
+          provider,
+          context.sourceUrl,
+        );
+    } catch {
+      templateError =
+        'Use only the listed placeholders and plain text. The source URL must identify this issue without credentials or query parameters.';
+    }
+  }
+
   const [error, setError] = useState('');
   const [partial, setPartial] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -7716,6 +7759,7 @@ function WorkBriefDialog({
   useEffect(() => {
     let live = true;
     setBrief('');
+    setContext(null);
     setError('');
     setPartial(false);
     setCopied(false);
@@ -7733,6 +7777,20 @@ function WorkBriefDialog({
     ]).then(([details, sourceUrl, inspected]) => {
       if (!live) return;
       try {
+        const confirmedIssue =
+          details.status === 'fulfilled'
+            ? details.value.issue
+            : knownIssues.find((issue) => issue.key === issueKey);
+        if (confirmedIssue && confirmedIssue.key !== issueKey)
+          throw new Error(
+            'The returned issue does not match the requested issue.',
+          );
+        if (confirmedIssue)
+          setContext({
+            issue: confirmedIssue,
+            sourceUrl:
+              sourceUrl.status === 'fulfilled' ? sourceUrl.value : undefined,
+          });
         setBrief(
           issueWorkBrief({
             preview: details.status === 'fulfilled' ? details.value : undefined,
@@ -7786,7 +7844,7 @@ function WorkBriefDialog({
   ]);
   const copy = async () => {
     try {
-      await window.canopy.copyText(brief);
+      await window.canopy.copyText(sharedText);
       setCopied(true);
       setError('');
     } catch (reason) {
@@ -7804,6 +7862,62 @@ function WorkBriefDialog({
         <p className="dialog-note">
           Review the exact Markdown before copying it.
         </p>
+        <label>
+          Copy format{' '}
+          <select
+            aria-label="Copy format"
+            value={custom ? 'custom' : 'brief'}
+            onChange={(event) => {
+              setCustom(event.target.value === 'custom');
+              setCopied(false);
+            }}
+          >
+            <option value="brief">Work brief</option>
+            <option value="custom">Custom issue context</option>
+          </select>
+        </label>
+        {custom && (
+          <>
+            <label>
+              Copy template
+              <textarea
+                aria-label="Copy template"
+                value={template}
+                maxLength={4000}
+                onChange={(event) => {
+                  setTemplate(event.target.value);
+                  setCopied(false);
+                }}
+              />
+            </label>
+            <p>
+              Allowed placeholders:{' '}
+              {COPY_PLACEHOLDERS.map((name) => `{{${name}}}`).join(', ')}.
+              Values come from issue details and the source URL. Account data,
+              credentials, comments and descriptions are excluded.
+            </p>
+            <p>
+              Issue text and your template can contain sensitive information.
+              Review the exact text before copying and choose where to paste it.
+            </p>
+            <button
+              disabled={!validateCopyTemplate(template)}
+              onClick={() => onTemplate(template)}
+            >
+              Save template
+            </button>
+            <button
+              onClick={() => {
+                setTemplate(DEFAULT_COPY_TEMPLATE);
+                onTemplate(undefined);
+                setCopied(false);
+              }}
+            >
+              Reset template
+            </button>
+          </>
+        )}
+        {templateError && <p role="alert">{templateError}</p>}
         {error && (
           <p role="alert" className="dialog-error">
             {error}
@@ -7815,11 +7929,11 @@ function WorkBriefDialog({
             fetches issue relationships.
           </p>
         )}
-        {brief ? (
+        {sharedText ? (
           <pre aria-label="Work brief Markdown" tabIndex={0}>
-            {brief}
+            {sharedText}
           </pre>
-        ) : !error ? (
+        ) : !error && !templateError ? (
           <p role="status">Loading work brief…</p>
         ) : null}
         <div className="dialog-footer">
@@ -7831,10 +7945,10 @@ function WorkBriefDialog({
           {copied && <span role="status">Copied</span>}
           <button
             className="primary"
-            disabled={!brief}
+            disabled={!sharedText}
             onClick={() => void copy()}
           >
-            Copy work brief
+            {custom ? 'Copy issue context' : 'Copy work brief'}
           </button>
         </div>
       </div>

@@ -212,6 +212,7 @@ export type TabState = {
 };
 export type Workspace = {
   triage?: import('./triage').TriageState;
+  copyTemplate?: string;
   reading?: ReadingSettings;
   tabs: TabState[];
   activeTabId: string | null;
