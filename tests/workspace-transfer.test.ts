@@ -1,0 +1,198 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { build } from 'esbuild';
+import {
+  WorkspaceTransfer,
+  readBackupFile,
+  writeBackupFile,
+} from '../src/main/workspace-transfer';
+import { createBackup } from '../src/shared/workspace-backup';
+import type { Workspace } from '../src/shared/types';
+import {
+  backupConnections,
+  backupWorkspace,
+} from './fixtures/workspace-backup';
+
+// Exercise Storage's actual queue and filesystem without loading Electron or a keychain.
+async function sampleStorage(directory: string) {
+  const result = await build({
+    entryPoints: ['src/main/storage.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    write: false,
+    plugins: [
+      {
+        name: 'forbid-keychain',
+        setup(build) {
+          build.onResolve({ filter: /\.\/replace-file$/ }, () => ({
+            path: 'replace-file',
+            namespace: 'replacement-failure',
+          }));
+          build.onLoad(
+            { filter: /.*/, namespace: 'replacement-failure' },
+            () => ({
+              contents: `import {access,rename} from 'node:fs/promises'; export async function replaceFile(source,destination) { let fail = false; try { await access(destination+'.fail'); fail = true; } catch {} if (fail) throw new Error('Fixture replacement failure'); await rename(source,destination); }`,
+            }),
+          );
+          build.onResolve({ filter: /^electron$/ }, () => ({
+            path: 'electron',
+            namespace: 'sample',
+          }));
+          build.onLoad({ filter: /.*/, namespace: 'sample' }, () => ({
+            contents:
+              'export const safeStorage = new Proxy({}, {get(){throw new Error("Keychain access forbidden in backup fixtures");}});',
+          }));
+        },
+      },
+    ],
+  });
+  const modulePath = join(directory, 'storage.cjs');
+  await writeFile(modulePath, result.outputFiles[0].contents);
+  const { Storage } = createRequire(import.meta.url)(
+    modulePath,
+  ) as typeof import('../src/main/storage');
+  return new Storage(directory);
+}
+
+test('atomic import, stale preview, failed writes, and undo preserve workspace and unrelated data', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'canopy-transfer-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const storage = await sampleStorage(directory);
+  const original = structuredClone(backupWorkspace);
+  await storage.write('workspace', original);
+  await writeFile(join(directory, 'credentials.json'), 'FAKE OPAQUE FIXTURE');
+  await writeFile(join(directory, 'tree-cache.json'), 'PRIVATE SAMPLE CACHE');
+  const transfer = new WorkspaceTransfer(storage, () => backupConnections);
+  const backup = createBackup(
+    { ...original, theme: 'light' },
+    backupConnections,
+  );
+  const mapping = Object.fromEntries(
+    backupConnections.map((c) => [c.id, c.id]),
+  );
+  let preview = await transfer.preview(backup, mapping, 'replace');
+  await storage.write('workspace', { ...original, theme: 'system' });
+  await assert.rejects(transfer.apply(preview.token), /changed after preview/);
+  assert.equal((await storage.read<Workspace>('workspace'))?.theme, 'system');
+  await storage.write('workspace', original);
+  preview = await transfer.preview(backup, mapping, 'replace');
+  // A directory at the staging path causes a real filesystem write failure.
+  await mkdir(join(directory, 'workspace.json.tmp'));
+  await assert.rejects(transfer.apply(preview.token));
+  assert.deepEqual(await storage.read('workspace'), original);
+  await rm(join(directory, 'workspace.json.tmp'), { recursive: true });
+  preview = await transfer.preview(backup, mapping, 'replace');
+  await storage.write(
+    'workspace',
+    Object.fromEntries(Object.entries(original).reverse()),
+  );
+  await writeFile(
+    join(directory, 'workspace.json.fail'),
+    'sample failure trigger',
+  );
+  await assert.rejects(
+    transfer.apply(preview.token),
+    /Fixture replacement failure/,
+  );
+  assert.deepEqual(await storage.read('workspace'), original);
+  await assert.rejects(readFile(join(directory, 'workspace.json.tmp')), {
+    code: 'ENOENT',
+  });
+  await rm(join(directory, 'workspace.json.fail'));
+  preview = await transfer.preview(backup, mapping, 'replace');
+  const imported = await transfer.apply(preview.token);
+  assert.equal(imported.theme, 'light');
+  assert.equal((await storage.read<Workspace>('workspace'))?.theme, 'light');
+  await storage.write(
+    'workspace',
+    Object.fromEntries(Object.entries(imported).reverse()),
+  );
+  await transfer.rollback();
+  assert.deepEqual(await storage.read('workspace'), original);
+  preview = await transfer.preview(backup, mapping, 'replace');
+  await transfer.apply(preview.token);
+  await storage.write('workspace', { ...imported, palette: 'ocean' });
+  await assert.rejects(transfer.rollback(), /changed after preview/);
+  assert.equal((await storage.read<Workspace>('workspace'))?.palette, 'ocean');
+  assert.equal(
+    await readFile(join(directory, 'credentials.json'), 'utf8'),
+    'FAKE OPAQUE FIXTURE',
+  );
+  assert.equal(
+    await readFile(join(directory, 'tree-cache.json'), 'utf8'),
+    'PRIVATE SAMPLE CACHE',
+  );
+});
+
+test('review tokens expire and connection changes invalidate import approval', async () => {
+  let workspace = structuredClone(backupWorkspace);
+  let connections = backupConnections;
+  const transfer = new WorkspaceTransfer(
+    {
+      read: async <T>() => structuredClone(workspace) as T,
+      replaceWorkspace: async (_, next) => {
+        workspace = next;
+      },
+    },
+    () => connections,
+  );
+  const exported = await transfer.prepareExport();
+  assert.ok(
+    !transfer.exportContents(exported.token).includes('PRIVATE SNAPSHOT'),
+  );
+  await transfer.prepareExport();
+  assert.throws(() => transfer.exportContents(exported.token), /expired/);
+  const mapping = Object.fromEntries(
+    backupConnections.map((c) => [c.id, c.id]),
+  );
+  const preview = await transfer.preview(exported.backup, mapping, 'merge');
+  connections = [
+    ...connections,
+    {
+      id: 'another',
+      name: 'Other',
+      url: 'https://other.invalid',
+      provider: 'jira',
+    },
+  ];
+  await assert.rejects(transfer.apply(preview.token), /expired/);
+  assert.deepEqual(workspace, backupWorkspace);
+});
+
+test('bounded backup file reads and private atomic exports reject protected destinations', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'canopy-backup-files-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const userData = join(directory, 'user-data');
+  await mkdir(userData);
+  const contents = JSON.stringify(
+    createBackup(backupWorkspace, backupConnections),
+    null,
+    2,
+  );
+  const file = join(directory, 'backup.json');
+  await writeBackupFile(file, contents, userData);
+  assert.deepEqual(
+    await readBackupFile(file),
+    createBackup(
+      backupWorkspace,
+      backupConnections,
+      JSON.parse(contents).createdAt,
+    ),
+  );
+  await assert.rejects(
+    writeBackupFile(join(userData, 'workspace.json'), contents, userData),
+    /outside/,
+  );
+  await writeFile(file, '{"format":');
+  await assert.rejects(readBackupFile(file), /complete JSON/);
+  await writeFile(file, 'x'.repeat(4_000_001));
+  await assert.rejects(readBackupFile(file), /under 4 MB/);
+  await writeFile(file, Buffer.from([0xff, 0xfe]));
+  await assert.rejects(readBackupFile(file));
+  await assert.rejects(readBackupFile(directory), /regular backup/);
+});

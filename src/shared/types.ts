@@ -341,6 +341,22 @@ export interface CanopyAPI {
     position?: 'before' | 'after',
   ): Promise<void>;
   priorityOrder(connectionId: string, keys: string[]): Promise<string[]>;
+  prepareWorkspaceExport(): Promise<{
+    token: string;
+    backup: import('./workspace-backup').WorkspaceBackup;
+  }>;
+  exportWorkspace(token: string): Promise<boolean>;
+  chooseWorkspaceBackup(): Promise<
+    import('./workspace-backup').WorkspaceBackup | null
+  >;
+  previewWorkspaceImport(
+    backup: import('./workspace-backup').WorkspaceBackup,
+    mapping: Record<string, string>,
+    mode: import('./workspace-backup').ImportMode,
+  ): Promise<import('./workspace-backup').ImportPreview>;
+  applyWorkspaceImport(token: string): Promise<Workspace>;
+  rollbackWorkspaceImport(): Promise<Workspace>;
+  canUndoWorkspaceImport(): Promise<boolean>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;

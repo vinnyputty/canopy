@@ -192,6 +192,7 @@ it('Settings exposes global reading, scoped reset and setup destinations; root V
       onAppearance: noop,
       onShortcuts: noop,
       onConnect: noop,
+      onBackup: noop,
     }),
   );
   for (const label of [

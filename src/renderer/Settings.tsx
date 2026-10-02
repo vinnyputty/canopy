@@ -9,6 +9,7 @@ export function Settings({
   onAppearance,
   onShortcuts,
   onConnect,
+  onBackup,
 }: {
   updates?: React.ReactNode;
   reading: ReadingSettings;
@@ -16,6 +17,7 @@ export function Settings({
   onAppearance: () => void;
   onShortcuts: () => void;
   onConnect: () => void;
+  onBackup: () => void;
 }) {
   return (
     <div className="settings-content">
@@ -78,6 +80,9 @@ export function Settings({
       </button>
       <button className="secondary" onClick={onConnect}>
         Connection setup
+      </button>
+      <button className="secondary" onClick={onBackup}>
+        Workspace backup and transfer
       </button>
       <p>
         Appearance resets to System / Default before saving. Keyboard shortcuts

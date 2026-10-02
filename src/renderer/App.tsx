@@ -15,6 +15,7 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import { WorkspaceBackupPanel } from './WorkspaceBackupPanel';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -262,6 +263,7 @@ export function App() {
     | 'shortcuts'
     | 'appearance'
     | 'settings'
+    | 'backup'
     | 'connect'
     | null
   >(null);
@@ -300,6 +302,7 @@ export function App() {
   const [history, setHistory] = useState<Navigation>({ back: [], forward: [] });
   const historyRef = useRef(history);
   const workspaceRef = useRef(workspace);
+  const workspaceTransferBusy = useRef(false);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
   const demoResetting = useRef(false);
@@ -1300,6 +1303,7 @@ export function App() {
     if (!ready) return;
     const timer = window.setTimeout(() => {
       workspaceSaveTimer.current = null;
+      if (workspaceTransferBusy.current) return;
       void saveWorkspace(workspace).catch((error) => {
         setErrors((value) => ({
           ...value,
@@ -5345,6 +5349,7 @@ export function App() {
             }
             onAppearance={() => setDialog('appearance')}
             onShortcuts={() => setDialog('shortcuts')}
+            onBackup={() => setDialog('backup')}
             onConnect={() => setDialog('connect')}
           />
           <div className="dialog-footer">
@@ -5352,6 +5357,40 @@ export function App() {
               Done
             </button>
           </div>
+        </Dialog>
+      )}
+      {dialog === 'backup' && (
+        <Dialog
+          title="Workspace backup and transfer"
+          onClose={() => setDialog(null)}
+          initialFocus
+          wide
+        >
+          <WorkspaceBackupPanel
+            connections={connections}
+            flush={async () => {
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+              }
+              await saveWorkspace(workspaceRef.current);
+            }}
+            onApply={async (operation) => {
+              workspaceTransferBusy.current = true;
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+              }
+              try {
+                await saveWorkspace(workspaceRef.current);
+                await operation();
+                window.location.reload();
+              } catch (error) {
+                workspaceTransferBusy.current = false;
+                throw error;
+              }
+            }}
+          />
         </Dialog>
       )}
       {dialog === 'appearance' && (
