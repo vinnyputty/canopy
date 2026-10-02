@@ -250,18 +250,44 @@ export async function auditInbox(app, page) {
     await expect(inbox.getByText(/Blocked by org\/repo#9/)).toBeVisible();
     const work = inbox
       .locator('.inbox-item')
-      .filter({ hasText: 'roots: org/repo#1' })
-      .filter({ hasText: '· Work · work' });
+      .filter({
+        has: page.getByRole('button', {
+          name: 'org/repo#1 Sample org/repo#1',
+          exact: true,
+        }),
+      })
+      .filter({
+        has: page.getByText('github · Work · work · roots: org/repo#1', {
+          exact: true,
+        }),
+      });
     const other = inbox
       .locator('.inbox-item')
-      .filter({ hasText: '· Other · other' });
+      .filter({
+        has: page.getByRole('button', {
+          name: 'org/repo#1 Sample org/repo#1',
+          exact: true,
+        }),
+      })
+      .filter({
+        has: page.getByText('github · Other · other · roots: org/repo#1', {
+          exact: true,
+        }),
+      });
     await expect(work).toHaveCount(1);
     await expect(other).toHaveCount(1);
     await expect(other.getByText(/Assigned to you/)).toBeVisible();
     await expect(work.getByText(/Assigned to you/)).toBeVisible();
     const jira = inbox
       .locator('.inbox-item')
-      .filter({ hasText: '· Jira · jira' });
+      .filter({
+        has: page.getByRole('button', { name: 'A-1 Sample A-1', exact: true }),
+      })
+      .filter({
+        has: page.getByText('jira · Jira · jira · roots: A-1', {
+          exact: true,
+        }),
+      });
     await expect(jira.getByText(/Review: Review/)).toBeVisible();
     await expect(jira.getByText(/Assigned to you/)).toHaveCount(0);
     await expect(work.getByText(/Unread changes/)).toBeVisible();
@@ -311,7 +337,12 @@ export async function auditInbox(app, page) {
     await expect
       .poll(() => app.evaluate(() => globalThis.inboxAudit.saved?.activeTabId))
       .toBe('other-source');
-    await work.getByRole('button', { name: /org\/repo#1 Sample/ }).click();
+    await work
+      .getByRole('button', {
+        name: 'org/repo#1 Sample org/repo#1',
+        exact: true,
+      })
+      .click();
     await expectOwner('source', 'work', 'org/repo#1');
     await expect
       .poll(() =>
@@ -332,12 +363,22 @@ export async function auditInbox(app, page) {
     await page
       .getByRole('button', { name: 'Triage inbox', exact: true })
       .click();
-    await other.getByRole('button', { name: /org\/repo#1 Sample/ }).click();
+    await other
+      .getByRole('button', {
+        name: 'org/repo#1 Sample org/repo#1',
+        exact: true,
+      })
+      .click();
     await expectOwner('other-source', 'other', 'org/repo#1');
     await page
       .getByRole('button', { name: 'Triage inbox', exact: true })
       .click();
-    await work.getByRole('button', { name: /org\/repo#1 Sample/ }).click();
+    await work
+      .getByRole('button', {
+        name: 'org/repo#1 Sample org/repo#1',
+        exact: true,
+      })
+      .click();
     await expectOwner('source', 'work', 'org/repo#1');
     await page
       .getByRole('button', { name: 'Triage inbox', exact: true })
@@ -359,6 +400,12 @@ export async function auditInbox(app, page) {
     await expect(jira.getByText(/Assigned to you/)).toBeVisible();
     await expect(other.getByText(/Assigned to you/)).toBeVisible();
     await expect(work.getByText(/Assigned to you/)).toBeVisible();
+    await expect(
+      inbox.getByRole('button', {
+        name: 'org/repo#10 Sample org/repo#10',
+        exact: true,
+      }),
+    ).toBeVisible();
     await expect(inbox.getByText(/Sample partial hierarchy/)).toBeVisible();
     expect(await app.evaluate(() => globalThis.inboxAudit.searches)).toBe(0);
     expect(
@@ -420,9 +467,7 @@ export async function auditInbox(app, page) {
       .toBe(1);
     await expect(inbox.getByText(/Blocked by org\/repo#999/)).toHaveCount(0);
     await inbox.getByRole('button', { name: /Inspect next 20/ }).click();
-    await expect(
-      inbox.getByText(/Blocked by org\/repo#9/).first(),
-    ).toBeVisible();
+    await expect(work.getByText(/Blocked by org\/repo#9/)).toBeVisible();
     await expect(inbox.getByText(/Blocked by org\/repo#999/)).toHaveCount(0);
   } finally {
     await app.evaluate(({ ipcMain }) => {
