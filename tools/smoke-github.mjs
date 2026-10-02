@@ -26,6 +26,7 @@ export async function auditGithub(app, page) {
       'team/b#2': issue('team/b', 2),
     };
     globalThis.githubSmokePatches = [];
+    globalThis.githubSmokeAssigneePages = [];
     const channel = 'canopy:transitions';
     globalThis.githubSmokeTransitionHandler =
       ipcMain._invokeHandlers.get(channel);
@@ -118,8 +119,14 @@ export async function auditGithub(app, page) {
       if (path === '/repos/team/a/labels')
         return Response.json([{ name: 'ready' }]);
       if (path === '/repos/team/b/labels') return Response.json([]);
-      if (path === '/repos/team/a/assignees')
-        return Response.json([{ login: 'tester' }]);
+      if (path === '/repos/team/a/assignees') {
+        const page = Number(parsed.searchParams.get('page') ?? 1);
+        globalThis.githubSmokeAssigneePages.push(page);
+        const users = globalThis.githubSmokeAssigneeUsers ?? [
+          { login: 'tester' },
+        ];
+        return Response.json(users.slice((page - 1) * 100, page * 100));
+      }
       if (path === '/search/issues') {
         if (
           parsed.searchParams.get('q')?.includes('only-b') &&
@@ -268,6 +275,91 @@ export async function auditGithub(app, page) {
     await expect(page.getByLabel('Search assignees')).toHaveCount(0);
     expect(await patchCount()).toBe(beforeDismiss);
     await page.locator('.view-settings > summary').press('Escape');
+
+    await app.evaluate(() => {
+      globalThis.githubSmokeAssigneeUsers = Array.from(
+        { length: 601 },
+        (_, index) => ({
+          login:
+            index === 100
+              ? 'late-user'
+              : index === 600
+                ? 'last-user'
+                : `other-${index}`,
+        }),
+      );
+    });
+    await assignee.click();
+    const people = root.locator('.assignee-popover');
+    await expect(
+      people.getByRole('button', { name: 'other-0', exact: true }),
+    ).toBeVisible();
+    await app.evaluate(() => {
+      globalThis.githubSmokeAssigneePages = [];
+    });
+    await page.getByLabel('Search assignees').fill('late-user');
+    await expect(
+      people.getByRole('button', { name: 'late-user', exact: true }),
+    ).toBeVisible();
+    expect(
+      await app.evaluate(() => globalThis.githubSmokeAssigneePages),
+    ).toEqual([1, 2, 3, 4, 5]);
+    await app.evaluate(() => {
+      globalThis.githubSmokeAssigneePages = [];
+    });
+    await page.getByLabel('Search assignees').fill('last-user');
+    await expect(
+      people.getByText(
+        'Search incomplete. Load more people to continue searching.',
+      ),
+    ).toBeVisible();
+    expect(
+      await app.evaluate(() => globalThis.githubSmokeAssigneePages),
+    ).toEqual([1, 2, 3, 4, 5]);
+    await people
+      .getByRole('button', { name: 'Load more people', exact: true })
+      .click();
+    await expect(
+      people.getByRole('button', { name: 'last-user', exact: true }),
+    ).toBeVisible();
+    await expect(
+      people.getByRole('button', { name: 'Load more people', exact: true }),
+    ).toHaveCount(0);
+    expect(
+      await app.evaluate(() => globalThis.githubSmokeAssigneePages),
+    ).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    // Discovery does not authorize selection: remove eligibility before choosing.
+    await app.evaluate(() => {
+      globalThis.githubSmokeAssigneeUsers =
+        globalThis.githubSmokeAssigneeUsers.filter(
+          (user) => user.login !== 'last-user',
+        );
+    });
+    const beforeRejectedAssignee = await patchCount();
+    await people
+      .getByRole('button', { name: 'last-user', exact: true })
+      .click();
+    await expect(
+      people.getByText(/could not confirm this person is assignable/),
+    ).toBeVisible();
+    expect(await patchCount()).toBe(beforeRejectedAssignee);
+    await page.getByLabel('Search assignees').fill('missing-user');
+    await expect(
+      people.getByText(
+        'Search incomplete. Load more people to continue searching.',
+      ),
+    ).toBeVisible();
+    await people
+      .getByRole('button', { name: 'Load more people', exact: true })
+      .click();
+    await expect(
+      people.getByText('No matching assignable people found.'),
+    ).toBeVisible();
+    await page.getByLabel('Search assignees').press('Escape');
+    await app.evaluate(() => {
+      delete globalThis.githubSmokeAssigneeUsers;
+    });
+
     await root
       .getByRole('button', { name: 'team/a issue 1', exact: true })
       .dblclick();

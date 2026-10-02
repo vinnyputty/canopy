@@ -545,7 +545,14 @@ export class GithubProvider {
           { signal },
         );
       } catch (error) {
-        if (signal.aborted) return { users: matches, nextStartAt: cursor };
+        // Fetch rejects with the signal reason before headers, or AbortError
+        // during body consumption. An elapsed deadline alone is not an error type.
+        if (
+          signal.aborted &&
+          (error === signal.reason ||
+            (error instanceof DOMException && error.name === 'AbortError'))
+        )
+          return { users: matches, nextStartAt: cursor };
         throw error;
       }
       if (
