@@ -1,14 +1,16 @@
-import { _electron as electron, expect } from '@playwright/test';
+import { _electron as electron, chromium, expect } from '@playwright/test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
 
 const appPath = process.env.CANOPY_APP_PATH;
 const packagedExecutable = process.env.CANOPY_PACKAGED_EXE;
 const executablePath = packagedExecutable || process.env.CANOPY_ELECTRON_PATH;
 if ((!appPath && !packagedExecutable) || !executablePath)
   throw new Error('Demo check needs the staged app and Electron runtime.');
+
+const timeScale = 0.1;
+const timingWindow = (ms) => Math.ceil(ms * timeScale) + 100;
 
 async function openDemo() {
   const directory = await mkdtemp(join(tmpdir(), 'canopy-demo-check-'));
@@ -17,7 +19,11 @@ async function openDemo() {
     maximized: false,
   });
   await writeFile(join(directory, 'window.json'), savedWindow);
-  const env = { ...process.env, CANOPY_USER_DATA: directory };
+  const env = {
+    ...process.env,
+    CANOPY_USER_DATA: directory,
+    CANOPY_DEMO_TIME_SCALE: String(timeScale),
+  };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({
     executablePath,
@@ -39,8 +45,52 @@ async function closeDemo(session) {
 }
 
 const first = await openDemo();
+// Pause synchronously when a target state renders, before its presentation timer
+// can expire. The script is reinstalled after every Reset and replay reload.
+await first.page.addInitScript(() => {
+  const observer = new MutationObserver(() => {
+    const target = sessionStorage.getItem('canopy-check-hold');
+    const ready =
+      target === 'editor'
+        ? document.querySelector(
+            '[data-tree-key="CAN-111"] .priority-editor select',
+          )
+        : target === 'edited' &&
+          document
+            .querySelector('[aria-label="Edit priority for CAN-111"]')
+            ?.textContent?.includes('Highest');
+    const pause = [...document.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Pause demo',
+    );
+    if (!ready || !pause) return;
+    pause.click();
+    sessionStorage.removeItem('canopy-check-hold');
+    observer.disconnect();
+  });
+  observer.observe(document, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
+});
+async function resetAndHold(page, target) {
+  await page.evaluate(
+    (target) => sessionStorage.setItem('canopy-check-hold', target),
+    target,
+  );
+  await page.getByRole('button', { name: 'Reset and replay' }).click();
+  await expect(page.getByRole('button', { name: 'Resume demo' })).toBeVisible({
+    timeout: 30000,
+  });
+  // Hold beyond either transient state's unpaused lifetime before testing Stop.
+  await page.waitForTimeout(timingWindow(4000));
+}
+
 try {
   const { page } = first;
+  expect(await page.evaluate(() => window.canopy.demoTimeScale())).toBe(
+    timeScale,
+  );
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
   await expect(page.locator('[data-tree-key="CAN-100"] .summary')).toHaveText(
     'A calmer place to get things done',
@@ -52,7 +102,8 @@ try {
   ).toHaveClass(/demo-target-highlight/);
   await page.getByRole('button', { name: 'Pause demo' }).click();
   const pausedProgress = await progress.evaluate((bar) => bar.value);
-  await page.waitForTimeout(800);
+  // Observe long enough for multiple progress ticks, even at test speed.
+  await page.waitForTimeout(timingWindow(800));
   if ((await progress.evaluate((bar) => bar.value)) !== pausedProgress)
     throw new Error('Step progress advanced while paused.');
   await page.getByRole('button', { name: 'Next demo step' }).click();
@@ -66,9 +117,9 @@ try {
   await page.getByRole('button', { name: 'Resume demo' }).click();
   await expect(page.getByRole('button', { name: 'Pause demo' })).toBeVisible();
   const resumedProgress = await progress.evaluate((bar) => bar.value);
-  await page.waitForTimeout(700);
-  if ((await progress.evaluate((bar) => bar.value)) <= resumedProgress)
-    throw new Error('Step progress did not advance after Resume.');
+  await expect
+    .poll(() => progress.evaluate((bar) => bar.value), { intervals: [20] })
+    .toBeGreaterThan(resumedProgress);
   await page.getByRole('button', { name: 'Stop demo' }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-100 issue tree' }),
@@ -88,7 +139,8 @@ try {
       page.evaluate(async () => (await window.canopy.loadWorkspace()).palette),
     )
     .toBe('forest');
-  await page.waitForTimeout(3200);
+  // Stop must stay stopped beyond the next scheduled tour action.
+  await page.waitForTimeout(timingWindow(3200));
   await expect(page.locator('[data-tree-key="CAN-108"]')).toHaveCount(0);
   await page.context().setOffline(true);
   await page.getByTitle('Refresh', { exact: true }).click();
@@ -129,16 +181,17 @@ try {
     '- Source: Local sample workspace',
   );
   await brief.getByRole('button', { name: 'Close dialog' }).click();
-  await page.getByRole('button', { name: 'Reset and replay' }).click();
+  await resetAndHold(page, 'editor');
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'default');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'system');
-  await expect(page.getByText('Step 6 of 7')).toBeVisible({ timeout: 60000 });
+  await expect(page.getByText('Step 6 of 7 · Paused')).toBeVisible();
   await expect(
     page.locator('[data-tree-key="CAN-111"] .priority-editor select'),
   ).toBeVisible();
   await page.getByRole('button', { name: 'Stop demo' }).click();
-  await page.waitForTimeout(1800);
+  // An aborted edit must stay restored beyond its pending presentation delay.
+  await page.waitForTimeout(timingWindow(1800));
   const stopped = await page.evaluate(
     async () =>
       (await window.canopy.tree('demo', 'CAN-100')).issues.find(
@@ -147,12 +200,13 @@ try {
   );
   if (stopped !== 'High')
     throw new Error(`Stop during edit left priority ${stopped}`);
-  await page.getByRole('button', { name: 'Reset and replay' }).click();
+  await resetAndHold(page, 'edited');
   await expect(
     page.getByRole('button', { name: 'Edit priority for CAN-111' }),
-  ).toContainText('Highest', { timeout: 60000 });
+  ).toContainText('Highest');
   await page.getByRole('button', { name: 'Stop demo' }).click();
-  await page.waitForTimeout(1800);
+  // An aborted edit must stay restored beyond its pending presentation delay.
+  await page.waitForTimeout(timingWindow(1800));
   await expect
     .poll(() =>
       page.evaluate(
@@ -267,7 +321,7 @@ try {
   await closeDemo(first);
 }
 
-if (process.platform !== 'win32') {
+{
   const directory = await mkdtemp(join(tmpdir(), 'canopy-demo-launch-check-'));
   const env = { ...process.env, CANOPY_USER_DATA: directory };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -277,9 +331,11 @@ if (process.platform !== 'win32') {
     env,
   });
   let childPid;
+  let childBrowser;
   let page;
   try {
     page = await app.firstWindow();
+    expect(await page.evaluate(() => window.canopy.demoTimeScale())).toBe(1);
     await expect(
       page.getByRole('button', { name: 'Try demo' }).first(),
     ).toBeVisible();
@@ -295,26 +351,49 @@ if (process.platform !== 'win32') {
     const credentialFile = join(directory, 'credentials.json');
     const credentialSentinel = JSON.stringify('encrypted-test-credentials');
     await writeFile(credentialFile, credentialSentinel);
+    // Capture the real child and its assigned DevTools endpoint in the test
+    // process, so readiness and cleanup work on every desktop platform.
+    await app.evaluate(() => {
+      const childProcess = process.getBuiltinModule('child_process');
+      const originalSpawn = childProcess.spawn;
+      globalThis.canopyCheckOutput = '';
+      childProcess.spawn = (executable, args, options) => {
+        if (!args.includes('--canopy-demo'))
+          return originalSpawn(executable, args, options);
+        const child = originalSpawn(
+          executable,
+          [
+            ...args,
+            '--remote-debugging-port=0',
+            // Match Playwright's test launch for the downloaded Linux runtime,
+            // whose chrome-sandbox helper is not installed with setuid privileges.
+            ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+          ],
+          {
+            ...options,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        globalThis.canopyCheckChild = child;
+        const record = (chunk) => {
+          globalThis.canopyCheckOutput = (
+            globalThis.canopyCheckOutput + chunk.toString()
+          ).slice(-8000);
+          const match = globalThis.canopyCheckOutput.match(
+            /DevTools listening on (ws:\/\/\S+)/,
+          );
+          if (match) globalThis.canopyCheckEndpoint = match[1];
+        };
+        child.stdout.on('data', record);
+        child.stderr.on('data', record);
+        return child;
+      };
+    });
     await page.getByRole('button', { name: 'Try demo' }).first().click();
     await expect
-      .poll(
-        () => {
-          const table = execFileSync('ps', ['-axo', 'pid=,ppid=,command='], {
-            encoding: 'utf8',
-          });
-          const processId = app.process().pid;
-          const match = table.split('\n').find((line) => {
-            const parts = line.trim().split(/\s+/, 3);
-            return (
-              Number(parts[1]) === processId && line.includes('--canopy-demo')
-            );
-          });
-          childPid = match ? Number(match.trim().split(/\s+/)[0]) : undefined;
-          return childPid;
-        },
-        { timeout: 10000 },
-      )
+      .poll(() => app.evaluate(() => globalThis.canopyCheckChild?.pid))
       .toBeGreaterThan(0);
+    childPid = await app.evaluate(() => globalThis.canopyCheckChild.pid);
     const duplicateLaunch = await page.evaluate(async () => {
       try {
         await window.canopy.launchDemo();
@@ -324,7 +403,46 @@ if (process.platform !== 'win32') {
       }
     });
     expect(duplicateLaunch).toContain('The demo is already open.');
-    await page.waitForTimeout(1400);
+    await expect
+      .poll(
+        async () => {
+          const state = await app.evaluate(() => ({
+            endpoint: globalThis.canopyCheckEndpoint,
+            exitCode: globalThis.canopyCheckChild?.exitCode,
+            output: globalThis.canopyCheckOutput,
+          }));
+          if (state.exitCode !== null && state.exitCode !== undefined)
+            throw new Error(
+              `Demo child exited (${state.exitCode}) before readiness:\n${state.output}`,
+            );
+          if (!state.endpoint)
+            return state.output || 'Waiting for child DevTools endpoint';
+          try {
+            childBrowser = await chromium.connectOverCDP(state.endpoint, {
+              timeout: 1000,
+            });
+            return 'connected';
+          } catch (error) {
+            return `${error}\n${state.output}`;
+          }
+        },
+        { timeout: 10000 },
+      )
+      .toBe('connected');
+    await expect
+      .poll(() => childBrowser.contexts()[0]?.pages().length ?? 0)
+      .toBeGreaterThan(0);
+    const childPage = childBrowser.contexts()[0].pages()[0];
+    await expect(
+      childPage.getByRole('region', { name: 'Canopy demo' }),
+    ).toBeVisible();
+    await expect(
+      childPage.getByRole('tree', { name: 'CAN-100 issue tree' }),
+    ).toBeVisible();
+    await expect(
+      childPage.getByRole('progressbar', { name: 'Step progress' }),
+    ).toBeVisible();
+
     await expect(
       page.getByRole('heading', { name: 'See the whole tree.' }),
     ).toBeVisible();
@@ -341,24 +459,18 @@ if (process.platform !== 'win32') {
     );
   } finally {
     try {
+      if (childBrowser) await childBrowser.close();
       if (childPid) {
         try {
           process.kill(childPid, 'SIGKILL');
         } catch {}
         await expect
           .poll(
-            () => {
-              try {
-                const state = execFileSync(
-                  'ps',
-                  ['-p', String(childPid), '-o', 'stat='],
-                  { encoding: 'utf8' },
-                ).trim();
-                return !state || state.startsWith('Z');
-              } catch {
-                return true;
-              }
-            },
+            () =>
+              app.evaluate(() => {
+                const child = globalThis.canopyCheckChild;
+                return child.exitCode !== null || child.signalCode !== null;
+              }),
             { timeout: 10000 },
           )
           .toBe(true);

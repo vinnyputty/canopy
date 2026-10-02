@@ -46,6 +46,20 @@ const pageErrors = [];
 const recentOutput = [];
 let smokeFailure;
 let cleanupFailure;
+async function waitForSavedWorkspace(check) {
+  await expect
+    .poll(
+      async () => {
+        const saved = JSON.parse(
+          await readFile(join(userData, 'workspace.json'), 'utf8'),
+        );
+        return check(saved);
+      },
+      { intervals: [25, 50, 100] },
+    )
+    .toBe(true);
+}
+
 function recordOutput(source, message) {
   recentOutput.push({
     time: new Date().toISOString(),
@@ -2111,8 +2125,18 @@ try {
   // Restore the previously saved drag order after reopening appended the tab.
   await secondTab.dragTo(firstTab);
 
-  // Workspace writes are intentionally debounced.
-  await page.waitForTimeout(350);
+  await waitForSavedWorkspace((saved) => {
+    const tab = saved.tabs[0];
+    return (
+      saved.previewWidth === 440 &&
+      saved.sidebarWidth === 400 &&
+      tab?.rootKey === 'CAN-200' &&
+      tab.id === saved.activeTabId &&
+      tab.filters?.status === 'todo' &&
+      tab.filters.priority === '3' &&
+      tab.selectedKey === 'CAN-202'
+    );
+  });
   await close();
   // A resized preview persists its width; loaded workspace widths are honored.
   const savedWorkspace = JSON.parse(
@@ -2301,7 +2325,7 @@ try {
   await expect(
     page.getByRole('navigation', { name: 'Pinned roots' }),
   ).toBeVisible();
-  await page.waitForTimeout(350);
+  await waitForSavedWorkspace((saved) => saved.tabs.length === 0);
   await close();
   await launch();
   await setScrollbars('none');
@@ -2492,7 +2516,7 @@ try {
 
   // Run table scenarios after the workspace held-load fixture has completed.
   {
-    await page.waitForTimeout(350);
+    await waitForSavedWorkspace((saved) => saved.pinnedRoots?.length === 0);
     await close();
     await launch();
     await openIssue('CAN-100');
@@ -2617,8 +2641,17 @@ try {
       'status',
     );
 
-    // Workspace writes are intentionally debounced.
-    await page.waitForTimeout(350);
+    await waitForSavedWorkspace((saved) => {
+      const view = saved.rootViews?.[JSON.stringify(['demo', 'CAN-200'])];
+      return (
+        view?.widths.status === 138 &&
+        view.columns[1] === 'status' &&
+        saved.tabs.some((tab) => tab.rootKey === 'CAN-100') &&
+        saved.tabs.some(
+          (tab) => tab.rootKey === 'CAN-200' && tab.id === saved.activeTabId,
+        )
+      );
+    });
     await close();
     await launch();
 
@@ -2867,7 +2900,17 @@ try {
     await page.keyboard.press(`${modifier}+Shift+t`);
     await expect(page.getByLabel('Filter priority')).toHaveValue('3');
     await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
-    await page.waitForTimeout(350);
+    await waitForSavedWorkspace((saved) => {
+      const view = saved.rootViews?.[JSON.stringify(['demo', 'CAN-100'])];
+      return (
+        saved.tabs.some(
+          (tab) => tab.rootKey === 'CAN-100' && tab.id === saved.activeTabId,
+        ) &&
+        view?.filters.priority === '3' &&
+        view.textSize === 'small' &&
+        view.hideDone
+      );
+    });
     await close();
     await launch();
     await expect(page.getByLabel('Filter priority')).toHaveValue('3');
@@ -2882,7 +2925,14 @@ try {
     await page.getByRole('button', { name: 'Expand', exact: true }).click();
 
     // Capability failures keep the tree readable and remove every rank action.
-    await page.waitForTimeout(350);
+    await waitForSavedWorkspace((saved) =>
+      saved.tabs.some(
+        (tab) =>
+          tab.rootKey === 'CAN-100' &&
+          !tab.hideDone &&
+          tab.expanded.includes('CAN-110'),
+      ),
+    );
     for (const state of ['unsupported', 'unknown']) {
       await close();
       await launch(false, { CANOPY_SMOKE_RANKING: state });
@@ -2980,7 +3030,7 @@ try {
   await page.getByTitle('Disconnect Canopy demo').click();
   await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('tab')).toHaveCount(0);
-  await page.waitForTimeout(350);
+  await waitForSavedWorkspace((saved) => saved.tabs.length === 0);
   await close();
   await launch();
   await expect(page.getByText('Canopy demo', { exact: true })).toHaveCount(0);

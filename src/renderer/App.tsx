@@ -212,6 +212,7 @@ export function App() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [ready, setReady] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
+  const demoTimeScale = useRef(1);
   const [tour, setTour] = useState<{
     phase: 'playing' | 'paused' | 'stopped' | 'complete' | 'failed';
     step: number;
@@ -810,9 +811,11 @@ export function App() {
       window.canopy.connections(),
       window.canopy.loadWorkspace(),
       window.canopy.demoMode(),
+      window.canopy.demoTimeScale(),
     ])
-      .then(([nextConnections, saved, isDemo]) => {
+      .then(([nextConnections, saved, isDemo, timeScale]) => {
         if (!live) return;
+        demoTimeScale.current = timeScale;
         setDemoMode(isDemo);
         document.title = isDemo ? 'Canopy — Demo' : 'Canopy';
         setConnections(nextConnections);
@@ -2331,6 +2334,8 @@ export function App() {
     };
     const delay = async (ms: number, count = true) => {
       if (currentStep < startStep && count) return;
+      // Scale presentation delays only; element readiness keeps its real timeout.
+      if (count) ms *= demoTimeScale.current;
       const start = activeNow();
       const before = stepElapsed;
       while (activeNow() - start < ms) {
@@ -2399,7 +2404,7 @@ export function App() {
       currentStep = step;
       clearHighlight();
       stepElapsed = 0;
-      stepDuration = duration;
+      stepDuration = duration * demoTimeScale.current;
       setProgress(0);
       if (step < startStep) return;
       if (step === startStep && startPaused) {

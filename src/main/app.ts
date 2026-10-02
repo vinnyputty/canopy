@@ -393,6 +393,12 @@ async function start(
   let demoLaunch: symbol | null = null;
   const handlers: Record<string, (...args: any[]) => unknown> = {
     demoMode: () => demoMode,
+    demoTimeScale: () => {
+      const scale = Number(process.env.CANOPY_DEMO_TIME_SCALE ?? 1);
+      return demoMode && Number.isFinite(scale) && scale > 0 && scale <= 1
+        ? scale
+        : 1;
+    },
     launchDemo: async () => {
       if (demoMode) throw new Error('The demo is already open.');
       if (demoLaunch) throw new Error('The demo is already open.');
