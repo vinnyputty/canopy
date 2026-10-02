@@ -2,6 +2,11 @@ import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
 import { recoverTriage } from '../shared/triage';
 import { InboxPanel } from './InboxPanel';
 import {
+  handoffNavigation,
+  useWorkHandoff,
+  HANDOFF_REJECTION,
+} from './work-handoff';
+import {
   relationshipChangedKeys,
   relationshipDestination,
 } from './relationships';
@@ -247,6 +252,8 @@ export function App() {
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [ready, setReady] = useState(false);
+  const [handoffHydrated, setHandoffHydrated] = useState(false);
+  const [handoffEnabled, setHandoffEnabled] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   const demoTimeScale = useRef(1);
   const [tour, setTour] = useState<{
@@ -1271,6 +1278,7 @@ export function App() {
                 },
           ),
         );
+        setHandoffHydrated(true);
       })
       .catch((error) =>
         setErrors((value) => ({
@@ -3252,6 +3260,57 @@ export function App() {
     navigationReveal.current = { tabId: tab.id, key };
     setReveal({ tabId: tab.id, key });
   };
+
+  useEffect(() => {
+    if (
+      handoffHydrated &&
+      ready &&
+      (allRefreshTabs.every(
+        (tab) => confirmedSnapshots[tab.id] || errors[tab.id],
+      ) ||
+        !navigator.onLine)
+    )
+      setHandoffEnabled(true);
+  }, [handoffHydrated, ready, allRefreshTabs, confirmedSnapshots, errors]);
+  useWorkHandoff(
+    handoffEnabled,
+    (intent) => {
+      const data = allRefreshTabs.flatMap((tab) =>
+        confirmedSnapshots[tab.id]
+          ? [
+              {
+                connectionId: tab.connectionId,
+                snapshot: confirmedSnapshots[tab.id],
+              },
+            ]
+          : [],
+      );
+      const target = handoffNavigation(
+        intent,
+        connectionsRef.current,
+        workspaceRef.current,
+        data,
+        () => crypto.randomUUID(),
+      );
+      if (target.kind === 'view') {
+        setSelectedViewIssue(null);
+        setPreviewOpen(false);
+        setWorkspace((current) => ({
+          ...current,
+          activeSavedViewId: target.viewId,
+        }));
+      } else {
+        navigate(target.tab);
+        setNextTaskViews((current) => ({ ...current, [target.tab.id]: false }));
+        navigationReveal.current = {
+          tabId: target.tab.id,
+          key: target.tab.selectedKey!,
+        };
+        setReveal({ tabId: target.tab.id, key: target.tab.selectedKey! });
+      }
+    },
+    () => setErrors((current) => ({ ...current, app: HANDOFF_REJECTION })),
+  );
 
   const previewPane = previewOpen ? (
     previewRoute && previewKey ? (

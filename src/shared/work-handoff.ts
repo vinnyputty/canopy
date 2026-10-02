@@ -12,6 +12,8 @@ export type WorkHandoff =
   | { kind: 'view'; view: string };
 
 const identifier = /^[a-zA-Z0-9_-]{1,128}$/;
+// Auth metadata uses github:hash, token:hash and OAuth grant:site IDs.
+const connectionIdentifier = /^[a-zA-Z0-9_-]+(?::[a-zA-Z0-9_-]+)?$/;
 const jiraKey = /^[A-Z][A-Z0-9_]*-[1-9]\d{0,15}$/;
 const repo = /^[-\w.]{1,100}\/[-\w.]{1,100}$/;
 const githubIssue = /^[-\w.]{1,100}\/[-\w.]{1,100}#[1-9]\d{0,15}$/;
@@ -65,7 +67,8 @@ export function parseWorkHandoff(value: unknown): WorkHandoff {
   const key = get('key');
   const host = get('host');
   if (
-    !identifier.test(get('connection')) ||
+    get('connection').length > 128 ||
+    !connectionIdentifier.test(get('connection')) ||
     !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host) ||
     host.length > 253 ||
     !(provider === 'github'

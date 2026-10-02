@@ -134,3 +134,12 @@ js_binary(
     patch_node_fs = False,
     tags = ["manual"],
 )
+
+js_binary(
+    name = "handoff_check",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", "package.json", "tools/handoff-check.mjs"],
+    args = ["handoff-check"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)

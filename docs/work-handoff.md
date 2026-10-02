@@ -4,41 +4,60 @@ In **Copy work brief**, choose **Custom issue context** to edit a plain text tem
 
 Allowed placeholders are `{{provider}}`, `{{key}}`, `{{summary}}`, `{{sourceUrl}}`, `{{status}}`, and `{{priority}}`. They read confirmed issue metadata and the provider source URL. Unknown placeholders, HTML in the template, control characters, and templates over 4,000 characters are rejected. Values escape HTML and remove control and direction override characters. The rendered payload is bounded to 100,000 characters. Missing source URLs are marked unavailable. Credential-bearing URLs, query strings, fragments, and URLs for another issue are rejected.
 
-Templates do not receive connection accounts, credentials, internal storage paths, errors, comments, or descriptions. Issue metadata and user-entered template text can still contain sensitive information; inspect the rendered text before copying. The standard work brief continues to include the description and dependency links, with its existing review step. These features need no cloud service and do not launch browsers, editors, or coding agents.
+Templates do not receive connection accounts, credentials, internal storage paths, errors, comments, or descriptions. Issue metadata and user-entered template text can still contain sensitive information; inspect the rendered text before copying. The standard work brief includes the description and dependency links, with its review step. A preview returned for another issue is refused before either copy format opens. These features need no cloud service and do not launch browsers, editors, or coding agents.
 
-## Proposed command contract — runtime pending
+## Open an existing issue or saved view from a terminal
 
-`parseWorkHandoffArguments` accepts exactly two arguments after the executable/app path: `--canopy-open` and a bounded `canopy://handoff/…` payload. This is a source contract for the future CLI transport, not an installed command or registered OS protocol.
+Run the Canopy executable with `--canopy-open` followed by one quoted payload. The app opens normally if it is not running; an existing instance receives the command and uses its existing window. This optional CLI does not install or register an OS protocol.
 
-Example issue payload:
-
-```text
-canopy://handoff/issue?connection=account-a&provider=github&host=github.com&root=team%2Frepo&key=team%2Frepo%2342
+```sh
+Canopy --canopy-open 'canopy://handoff/issue?connection=account-a&provider=github&host=github.com&root=team%2Frepo%2342&key=team%2Frepo%2343'
 ```
 
-The connection ID identifies the exact locally known account without carrying its display name or credentials. Jira uses its exact known HTTPS host and issue keys, for example `root=CAN-1&key=CAN-42`. GitHub supports `github.com` only, and the issue repository must match the root repository. Root and issue membership must already be confirmed for that connection. The resolver never fetches an unknown issue, creates a connection, or selects another account.
+The connection ID must identify the exact locally known account. IDs such as `github:HASH`, `token:HASH` and `GRANT:SITE` are opaque local identifiers, not API tokens. Obtain the exact ID from your local workspace's connection references; do not put account names, tokens, or credentials in the payload. Jira uses its exact known HTTPS host and issue keys, for example `root=CAN-100&key=CAN-111`. GitHub supports `github.com` only, and the issue repository must match the root repository. Entire `.` and `..` repository segments are rejected, including encoded forms. Dotted names remain supported.
 
-Example saved view payload:
+The root must already be known in the workspace, with a confirmed tree containing the issue. The app selects that exact root and issue, expands its ancestors, and reveals it through current filters without changing saved filters or Hide Done. An existing root tab keeps its settings and ID. Unknown roots/issues and unconfirmed data fail with a generic visible error; the command does not fetch an arbitrary issue, create a connection or substitute another account. The handoff does not force the preview pane open.
 
-```text
-canopy://handoff/view?view=triage
+Open a saved view by its exact existing local ID:
+
+```sh
+Canopy --canopy-open 'canopy://handoff/view?view=triage'
 ```
 
-The view must exist uniquely in the hydrated workspace and its referenced connections must still exist. Rooted views also require confirmed snapshots for every referenced root. Deleted views and disconnected references fail without substitution. Saved view identity names the locally saved definition; it does not embed search expressions or external URLs.
+The view must exist uniquely, its referenced connections must still exist, and every configured source must have confirmed data in the current renderer. Deleted views, disconnected references, and unavailable sources fail without selecting another view or loading a new root.
 
-Main at `5cdf719` has no single-instance command transport. Complete issue 92 on a branch stacked on reviewed issue 94, preserving its trusted-frame and focus lifecycle. The transport must validate arguments before queuing, deliver only to the current renderer after workspace hydration, bound and deduplicate pending deliveries, and cancel them across close/restart. Neither startup routing nor native focus behavior is implemented or accepted by this change.
+Development launch forwards the same arguments:
 
-## Disposable acceptance audit — pending fresh review and exclusive token
+```sh
+bazel run //:dev -- --canopy-open 'canopy://handoff/view?view=triage'
+```
 
-Use only the synthetic connections, workspace, and confirmed tree in `tests/fixtures/work-handoff.ts`. The parser tests exercise these objects without Electron, credentials, provider requests, clipboard access, or external launches. Do not turn the samples into authenticated connections.
+For a deliberately isolated demo profile, the direct development executable convention is `electron APP_PATH --canopy-demo --canopy-open PAYLOAD`; a packaged executable omits `APP_PATH`. The optional Linux runtime suffix `--no-sandbox` is consumed only as the final argument. The issue parser supports Jira/GitHub identities; the ordinary demo connection has no external provider host, so its issues are unavailable through this command. Unknown switches, extra arguments, arbitrary URLs and multiple commands in one invocation are refused. The running owner and duplicate must use the same main/demo mode and OS user profile.
 
-After stacking and reviewing the transport, prepare separate temporary sample profiles for macOS, Windows, and Linux. Seed the sample workspace and use a stub provider for both account IDs. Record the exact head, OS, profile, request log, callback log, and focus observations. Keep those profiles and evidence separate from real user data.
+## Delivery and ownership
 
-- [ ] Launch with the valid issue payload before renderer readiness; confirm one delivery after hydration, correct account, and expected selection.
-- [ ] Send the same command while running, minimized, and hidden; confirm one process, one window, correct focus, and no duplicate navigation.
-- [ ] Test malformed/encoded commands and multiple arguments against both startup and running-app callbacks; confirm no delivery or provider request.
-- [ ] Test both accounts with the same issue key, disconnected accounts, unknown hosts/roots/issues, deleted saved views, and stale view roots; confirm explicit failure without fallback.
-- [ ] Close or restart while a command is queued; confirm no stale renderer delivery.
-- [ ] Edit, save, reload, reset, and copy a custom template in the sample app; confirm the clipboard exactly matches the reviewed text and excludes connection secrets and internal paths.
+The single-instance lock carries the original bounded application arguments in [`additionalData`](https://www.electronjs.org/docs/latest/api/app#event-second-instance), avoiding Electron's reordered second-instance argv. The duplicate exits before reading, writing or cleaning the owner's profile. The owner revalidates the payload before admission to one FIFO shared by startup and running-app commands. Focus and window recreation use the existing single-instance lifecycle.
 
-Native command/focus and interactive clipboard acceptance remain pending. Browser/editor/agent destination handoff is deferred.
+The FIFO holds at most 16 pending/current commands, deduplicates only equivalent pending/current intents, and preserves distinct admission order. Completed commands can be sent again. Commands expire 60 seconds after admission; a delivered command has at most 10 seconds to be acknowledged. Overflow, expiry and invalid/unavailable targets produce a bounded generic rejection notice without echoing command text. A failed command releases the head of the queue.
+
+The renderer subscribes, then announces readiness after workspace hydration and initial normal tree reads settle (or the app is offline). It resolves each command against current connections, workspace and confirmed snapshots. Navigation commits before acknowledgment permits the next delivery. Each readiness request has a fresh client ID; replacement clients get a new session so late cleanup cannot cancel replacement work. Each delivery carries a renderer session, unique request ID and expiry. IPC readiness, acknowledgment and cancellation require the current trusted main frame at the bundled file URL. There is no polling or command-triggered provider search.
+
+Close, non-same-document navigation, renderer crash/destruction and quit cancel outgoing commands and acknowledgments. A command received after a close begins can wait for the existing window recreation path and a new hydrated renderer session. It is not delivered to the closing renderer. Same-document navigation keeps the current session. These source behaviors do not establish native OS focus acceptance.
+
+## Disposable native audit — pending fresh review and exclusive token
+
+`//:handoff_check` is a manual desktop target. Build it without executing it while native acceptance is held. After fresh combined source review and an exclusive lead token, run it with the reviewed exact head:
+
+```sh
+bazel run //:handoff_check -- REVIEWED_40_CHARACTER_HEAD
+```
+
+The audit creates a marked temporary sample profile, uses `handoff-audit-main.cjs` with synthetic Jira metadata and no credential loading, and retains profile/results as evidence. The fixture verifies the disposable profile and bounded regular marker file only after acquiring the instance lock. It checks startup navigation, a second CLI launch while minimized, one-window focus restoration, and an explicit sample context copy whose clipboard contents match the reviewed text. It installs no protocol and performs no external handoff. This target has not been executed as part of source implementation.
+
+- [ ] Run the audited CLI/clipboard target on macOS, Windows and Linux at the freshly reviewed head under the exclusive native token.
+- [ ] Verify distinct command order and duplicates during held startup/close/recreation on each OS.
+- [ ] Verify unavailable/disconnected accounts, unknown hosts/roots/issues, deleted views, stale sources and malformed command invocations leave the selection unchanged and show a safe error.
+- [ ] Verify hidden/minimized focus and native macOS Dock activation under issue 94's retained acceptance gates.
+- [ ] Edit, save, reload and reset the custom template in the disposable app; verify privacy boundaries and exact reviewed clipboard text.
+
+Native duplicate-launch/URL/focus and interactive clipboard/persistence acceptance remain pending. Browser/editor/agent destination handoff is deferred.
