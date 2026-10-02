@@ -1,3 +1,6 @@
+import { inboxStamp, type InboxGraph } from './inbox';
+import { recoverTriage } from '../shared/triage';
+import { InboxPanel } from './InboxPanel';
 import {
   relationshipChangedKeys,
   relationshipDestination,
@@ -319,6 +322,22 @@ export function App() {
   const [relationshipGraphs, setRelationshipGraphs] = useState<
     Record<string, IssueRelationships>
   >({});
+  const [inboxGraphs, setInboxGraphs] = useState<Record<string, InboxGraph>>(
+    {},
+  );
+  const receiveInboxGraphs = useCallback(
+    (entries: Record<string, InboxGraph>) => {
+      setInboxGraphs(entries);
+      setRelationshipGraphs(
+        Object.fromEntries(
+          Object.entries(entries).flatMap(([id, entry]) =>
+            entry.graph ? [[id, entry.graph]] : [],
+          ),
+        ),
+      );
+    },
+    [],
+  );
   const [relationshipLoading, setRelationshipLoading] = useState<
     Record<string, boolean>
   >({});
@@ -344,6 +363,14 @@ export function App() {
     if (relationshipRequests.current.has(identity)) return;
     const requestId = crypto.randomUUID();
     const generation = relationshipGeneration.current;
+    const confirmed = workspaceRef.current.tabs
+      .filter((tab) => tab.connectionId === connectionId)
+      .flatMap((tab) => {
+        const snapshot = confirmedSnapshots[tab.id];
+        const issue = snapshot?.issues.find((issue) => issue.key === key);
+        return snapshot && issue ? [{ snapshot, issue }] : [];
+      })
+      .sort((a, b) => b.snapshot.fetchedAt - a.snapshot.fetchedAt)[0];
     relationshipRequests.current.set(identity, requestId);
     relationshipRequestChanges.current.set(identity, new Set());
     setRelationshipLoading((current) => ({ ...current, [identity]: true }));
@@ -356,7 +383,7 @@ export function App() {
       if (
         generation === relationshipGeneration.current &&
         relationshipRequests.current.get(identity) === requestId
-      )
+      ) {
         updateRelationshipGraphs((current) => ({
           ...current,
           [identity]: {
@@ -391,6 +418,15 @@ export function App() {
             ),
           },
         }));
+        if (confirmed && graph.key === key)
+          setInboxGraphs((current) => ({
+            ...current,
+            [identity]: {
+              stamp: inboxStamp(confirmed.snapshot, confirmed.issue),
+              graph: relationshipGraphsRef.current[identity],
+            },
+          }));
+      }
     } catch {
       if (
         generation === relationshipGeneration.current &&
@@ -457,6 +493,13 @@ export function App() {
         }
       }
       updateRelationshipGraphs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([identity]) => !affected.has(identity),
+          ),
+        ),
+      );
+      setInboxGraphs((current) =>
         Object.fromEntries(
           Object.entries(current).filter(
             ([identity]) => !affected.has(identity),
@@ -567,6 +610,15 @@ export function App() {
     {},
   );
   const [syncNow, setSyncNow] = useState(Date.now());
+  useEffect(() => {
+    setWorkspace((current) => {
+      if (!current.triage) return current;
+      const triage = recoverTriage(current.triage, syncNow);
+      return JSON.stringify(triage) === JSON.stringify(current.triage)
+        ? current
+        : { ...current, triage };
+    });
+  }, [syncNow]);
   const deferredRefreshes = useRef(new Set<string>());
   const forcedRefreshes = useRef(new Set<string>());
   const manualRelationshipRefreshes = useRef(new Set<string>());
@@ -645,16 +697,47 @@ export function App() {
     mutations.pending(connectionId);
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
-  const activeSavedView = workspace.savedViews?.find(
-    (item) => item.id === workspace.activeSavedViewId,
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [inboxRootLimit, setInboxRootLimit] = useState(10);
+  const inboxView = useMemo<SavedIssueView>(
+    () => ({
+      id: 'triage-inbox',
+      name: 'Triage inbox',
+      roots: [],
+      connectionIds: connections.map((connection) => connection.id),
+      filters: { assignee: 'me', statuses: [], priority: '', hideDone: false },
+      sort: { column: 'key', direction: 'asc' },
+    }),
+    [connections],
   );
+  const activeSavedView = inboxOpen
+    ? inboxView
+    : workspace.savedViews?.find(
+        (item) => item.id === workspace.activeSavedViewId,
+      );
   const availableRoots = useMemo(
     () => configuredRoots(workspace, connections),
-    [workspace.tabs, workspace.pinnedRoots, workspace.recentRoots, connections],
+    [
+      workspace.tabs,
+      workspace.closedTabs,
+      workspace.pinnedRoots,
+      workspace.recentRoots,
+      workspace.rootViews,
+      workspace.savedViews,
+      connections,
+    ],
   );
   const savedSources = useMemo(
-    () => (activeSavedView ? viewSources(activeSavedView, availableRoots) : []),
-    [activeSavedView, availableRoots],
+    () =>
+      activeSavedView
+        ? viewSources(
+            inboxOpen
+              ? { ...activeSavedView, roots: availableRoots, connectionIds: [] }
+              : activeSavedView,
+            availableRoots,
+          ).slice(0, inboxOpen ? inboxRootLimit : undefined)
+        : [],
+    [activeSavedView, availableRoots, inboxOpen, inboxRootLimit],
   );
   const sourceTabs = useMemo<TabState[]>(
     () =>
@@ -666,7 +749,7 @@ export function App() {
       })),
     [savedSources],
   );
-  activeIdRef.current = workspace.activeSavedViewId
+  activeIdRef.current = activeSavedView
     ? (sourceTabs[0]?.id ?? null)
     : workspace.activeTabId;
   const allRefreshTabs = useMemo(
@@ -699,6 +782,17 @@ export function App() {
         ]),
       ),
     [savedSources, snapshots, sourceTabKeys],
+  );
+  const inboxSnapshots = useMemo(
+    () =>
+      Object.fromEntries(
+        savedSources.flatMap((source) => {
+          const confirmed =
+            confirmedSnapshots[sourceTabId(source, workspace.tabs)];
+          return confirmed ? [[source.id, confirmed]] : [];
+        }),
+      ),
+    [savedSources, confirmedSnapshots, sourceTabKeys],
   );
   const savedResults = useMemo(
     () =>
@@ -968,9 +1062,9 @@ export function App() {
     activeTab,
     connections,
     Boolean(activeSavedView),
-    savedResults,
-    selectedViewIssue,
-    previewOverride,
+    inboxOpen ? [] : savedResults,
+    inboxOpen ? null : selectedViewIssue,
+    inboxOpen ? null : previewOverride,
   );
   const previewKey = previewRoute?.key ?? null;
   const previewWidth = Number.isFinite(workspace.previewWidth)
@@ -1319,7 +1413,12 @@ export function App() {
         const status = await window.canopy
           .syncStatus(tab.connectionId)
           .catch(() => null);
-        if (refreshSequences.current[tab.id] !== sequence) return;
+        if (
+          refreshSequences.current[tab.id] !== sequence ||
+          !rootRefreshes.current.isCurrent(rootKey, load.generation) ||
+          !tabsRef.current.some((item) => item.id === tab.id)
+        )
+          return;
         if (status?.retryAt) {
           cooldowns.current[tab.connectionId] = status.retryAt;
           setCooldownTimes({ ...cooldowns.current });
@@ -1429,7 +1528,16 @@ export function App() {
           recovered.add(id);
         }
       }
-      if (Object.keys(cooldowns.current).length || recovered.size)
+      if (
+        Object.keys(cooldowns.current).length ||
+        recovered.size ||
+        workspaceRef.current.triage?.items.some(
+          (item) => item.snoozedUntil !== undefined && item.snoozedUntil <= now,
+        ) ||
+        workspaceRef.current.triage?.history.some(
+          (item) => item.at < now - 90 * 24 * 60 * 60 * 1000,
+        )
+      )
         setSyncNow(now);
       if (recovered.size) setCooldownTimes({ ...cooldowns.current });
       if (!navigator.onLine && !demoMode) return;
@@ -1558,6 +1666,7 @@ export function App() {
   }, []);
 
   const navigate = useCallback((tab: TabState, restoring = false) => {
+    setInboxOpen(false);
     const current = workspaceRef.current;
     const from = current.tabs.find((item) => item.id === current.activeTabId);
     if (!restoring) setHistory(visit(historyRef.current, from, tab));
@@ -3229,6 +3338,19 @@ export function App() {
           <Menu size={17} />
         </button>
         <div className="sidebar-body">
+          <button
+            className="saved-view-choice"
+            aria-current={inboxOpen ? 'page' : undefined}
+            onClick={() => {
+              setInboxOpen(true);
+              setWorkspace((current) => ({
+                ...current,
+                activeSavedViewId: null,
+              }));
+            }}
+          >
+            Triage inbox
+          </button>
           <SidebarWork
             workspace={workspace}
             connections={connections}
@@ -3237,6 +3359,7 @@ export function App() {
             onOpen={(root) => void openTab(root.connectionId, root.rootKey)}
             onSelectTab={selectTab}
             onSelectView={(id) => {
+              setInboxOpen(false);
               setSelectedViewIssue(null);
               setWorkspace((current) => ({
                 ...current,
@@ -3245,6 +3368,7 @@ export function App() {
             }}
             onOpenPicker={() => setDialog('open')}
             onCreateView={() => {
+              setInboxOpen(false);
               const id = crypto.randomUUID();
               const view: SavedIssueView = {
                 id,
@@ -3520,64 +3644,129 @@ export function App() {
         {activeSavedView && (
           <div className="tree-with-preview">
             <div className="tree-content">
-              <SavedViewsPanel
-                view={activeSavedView}
-                connections={connections}
-                availableRoots={availableRoots}
-                sources={savedSources}
-                results={savedResults}
-                selected={selectedViewIssue}
-                errors={Object.fromEntries(
-                  savedSources
-                    .map((source) => [
-                      source.id,
-                      errors[sourceTabId(source, workspace.tabs)],
-                    ])
-                    .filter(([, error]) => error),
-                )}
-                workspaceError={errors.workspace}
-                appError={errors.app}
-                identityErrors={identityErrors}
-                loading={
-                  new Set(
-                    savedSources
-                      .filter((source) =>
-                        loading.has(sourceTabId(source, workspace.tabs)),
-                      )
-                      .map((source) => source.id),
-                  )
-                }
-                onSelect={setSelectedViewIssue}
-                onOpen={openSavedResult}
-                onChange={(view) =>
-                  setWorkspace((current) => ({
-                    ...current,
-                    savedViews: current.savedViews?.map((item) =>
-                      item.id === view.id ? view : item,
+              {inboxOpen ? (
+                <InboxPanel
+                  workspace={workspace}
+                  seedGraphs={inboxGraphs}
+                  onGraphs={receiveInboxGraphs}
+                  connections={connections}
+                  sources={savedSources}
+                  totalRoots={availableRoots.length}
+                  snapshots={inboxSnapshots}
+                  users={currentUsers}
+                  identityErrors={identityErrors}
+                  now={syncNow}
+                  errors={{
+                    ...Object.fromEntries(
+                      savedSources.flatMap((source) => {
+                        const error =
+                          errors[sourceTabId(source, workspace.tabs)];
+                        return error ? [[source.id, error]] : [];
+                      }),
                     ),
-                  }))
-                }
-                onDelete={() =>
-                  setWorkspace((current) => ({
-                    ...current,
-                    savedViews: current.savedViews?.filter(
-                      (item) => item.id !== activeSavedView.id,
-                    ),
-                    activeSavedViewId: null,
-                  }))
-                }
-                onRefresh={() => {
-                  setIdentityRetry((value) => value + 1);
-                  for (const source of savedSources) {
-                    const tab = allRefreshTabs.find((item) =>
-                      sameRoot(item, source),
-                    );
-                    if (tab) void refreshTab(tab, true, true, true);
+                    ...(errors.workspace
+                      ? { workspace: errors.workspace }
+                      : {}),
+                  }}
+                  loading={
+                    new Set(
+                      savedSources
+                        .filter(
+                          (source) =>
+                            loading.has(sourceTabId(source, workspace.tabs)) ||
+                            refreshing.has(sourceTabId(source, workspace.tabs)),
+                        )
+                        .map((source) => source.id),
+                    )
                   }
-                }}
-              />
+                  onChange={setWorkspace}
+                  onSeen={markSeen}
+                  onOpen={(result) => {
+                    const snapshot = inboxSnapshots[result.source.id];
+                    if (
+                      snapshot &&
+                      !ancestorPath(
+                        buildIssueTree(snapshot.issues, snapshot.rootKey),
+                        result.issue.key,
+                      ).length
+                    )
+                      jumpToRelationship(
+                        result.source.connectionId,
+                        result.issue.key,
+                      );
+                    else openSavedResult(result);
+                  }}
+                  onMoreRoots={() => setInboxRootLimit((limit) => limit + 10)}
+                  onRefresh={() => {
+                    setIdentityRetry((value) => value + 1);
+                    for (const source of savedSources) {
+                      const tab = allRefreshTabs.find((tab) =>
+                        sameRoot(tab, source),
+                      );
+                      if (tab) void refreshTab(tab, true, true);
+                    }
+                  }}
+                />
+              ) : (
+                <SavedViewsPanel
+                  view={activeSavedView}
+                  connections={connections}
+                  availableRoots={availableRoots}
+                  sources={savedSources}
+                  results={savedResults}
+                  selected={selectedViewIssue}
+                  errors={Object.fromEntries(
+                    savedSources
+                      .map((source) => [
+                        source.id,
+                        errors[sourceTabId(source, workspace.tabs)],
+                      ])
+                      .filter(([, error]) => error),
+                  )}
+                  workspaceError={errors.workspace}
+                  appError={errors.app}
+                  identityErrors={identityErrors}
+                  loading={
+                    new Set(
+                      savedSources
+                        .filter((source) =>
+                          loading.has(sourceTabId(source, workspace.tabs)),
+                        )
+                        .map((source) => source.id),
+                    )
+                  }
+                  onSelect={setSelectedViewIssue}
+                  onOpen={openSavedResult}
+                  onChange={(view) =>
+                    setWorkspace((current) => ({
+                      ...current,
+                      savedViews: current.savedViews?.map((item) =>
+                        item.id === view.id ? view : item,
+                      ),
+                    }))
+                  }
+                  onDelete={() =>
+                    setWorkspace((current) => ({
+                      ...current,
+                      savedViews: current.savedViews?.filter(
+                        (item) => item.id !== activeSavedView.id,
+                      ),
+                      activeSavedViewId: null,
+                    }))
+                  }
+                  onRefresh={() => {
+                    setIdentityRetry((value) => value + 1);
+                    for (const source of savedSources) {
+                      const tab = allRefreshTabs.find((item) =>
+                        sameRoot(item, source),
+                      );
+                      if (tab) void refreshTab(tab, true, true);
+                    }
+                  }}
+                />
+              )}
             </div>
-            {previewPane}
+            {!inboxOpen && previewPane}
           </div>
         )}
         {activeTab && !activeSavedView && (

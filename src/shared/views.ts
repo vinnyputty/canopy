@@ -1,3 +1,4 @@
+import { recoverTriage } from './triage';
 import type {
   RootView,
   ReadingSettings,
@@ -206,6 +207,7 @@ export function recoverWorkspaceViews(workspace: Workspace): Workspace {
       : tabs;
   return {
     ...workspace,
+    triage: recoverTriage(workspace.triage),
     tabs: recoverTabs(workspace.tabs),
     ...(workspace.closedTabs
       ? { closedTabs: recoverTabs(workspace.closedTabs) }

@@ -1,3 +1,4 @@
+import { auditInbox } from './smoke-inbox.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
@@ -3513,6 +3514,7 @@ try {
   await auditGithub(app, page);
 
   await auditRelationships(app, page);
+  await auditInbox(app, page);
 
   await auditWorkflow(app, page);
 

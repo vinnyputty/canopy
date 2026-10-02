@@ -1,3 +1,4 @@
+import { inboxStamp } from '../src/renderer/inbox';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -335,6 +336,13 @@ function rendererRequests(realRefresh = false) {
       }
     },
     snapshots,
+    confirmedSnapshots: snapshots,
+    inboxStamp,
+    inboxGraphs: {},
+    setInboxGraphs: (next: any) => {
+      context.inboxGraphs =
+        typeof next === 'function' ? next(context.inboxGraphs) : next;
+    },
     snapshotsRef: { current: snapshots },
     activeTab: tabs[0],
     previewRoute: undefined,
@@ -527,6 +535,7 @@ function rendererRequests(realRefresh = false) {
     ) => {
       context.window.canopy.tree = read;
     },
+    inboxGraphs: () => context.inboxGraphs,
     graphs: () => states[0] as Record<string, IssueRelationships>,
     loading: () => states[1],
     refresh: async (tab: TabState, userRequested = true, explicit = true) => {
