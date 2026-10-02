@@ -2766,7 +2766,7 @@ try {
   // A favorite opens a closed root; reopen restores into that existing tab.
   await page
     .getByRole('navigation', { name: 'Pinned roots' })
-    .getByRole('button', { name: /CAN-100 A calmer/ })
+    .getByRole('button', { name: /^Open CAN-100.*A calmer/ })
     .click();
   await expect(page.getByRole('tab')).toHaveCount(1);
   await page.keyboard.press(`${modifier}+Shift+t`);
