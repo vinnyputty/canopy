@@ -52,21 +52,10 @@ launch(
       copySink = installSampleCopySink(clipboard);
       Object.assign(globalThis, { handoffAuditCopy: copySink });
     }
-    let fixture;
-    try {
-      fixture = await createDemoFixture();
-    } catch (error) {
-      try {
-        restoreCopy();
-      } catch (cleanup) {
-        throw new AggregateError(
-          [error, cleanup],
-          'Sample fixture failed during cleanup.',
-          { cause: error },
-        );
-      }
-      throw error;
-    }
+    // resetDemo reuses this callback while its window and copy IPC remain live.
+    // Keep isolation installed on every failure; initial startup quits through
+    // launch's catch, and only actual quit/exit restores native descriptors.
+    const fixture = await createDemoFixture();
     return {
       ...fixture,
       connection: {

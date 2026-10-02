@@ -29,6 +29,38 @@ before(async () => {
     outfile: join(directory, 'audit.cjs'),
   });
   workflow = require(join(directory, 'audit.cjs'));
+  await build({
+    entryPoints: ['tests/fixtures/handoff-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile: join(directory, 'fixture.cjs'),
+    plugins: [
+      {
+        name: 'inert-fixture-launch',
+        setup(b) {
+          b.onResolve(
+            { filter: /^(electron|\.\.\/\.\.\/src\/main\/app)$/ },
+            (x) => ({ path: x.path, namespace: 'inert' }),
+          );
+          b.onLoad({ filter: /.*/, namespace: 'inert' }, (x) => ({
+            contents:
+              x.path === 'electron'
+                ? 'export const app=globalThis.handoffRecreationBoundary.app; export const clipboard=globalThis.handoffRecreationBoundary.clipboard;'
+                : 'export const launch=globalThis.handoffRecreationBoundary.launch;',
+            loader: 'js',
+          }));
+        },
+      },
+    ],
+  });
+  await build({
+    entryPoints: ['tests/fixtures/handoff-audit-recreation.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    outfile: join(directory, 'recreation.cjs'),
+  });
 });
 after(() => rm(directory, { recursive: true, force: true }));
 
@@ -460,3 +492,46 @@ test('native entry and desktop launcher stop before staging, launch, profile or 
     assert.deepEqual(await readdir(cwd), []);
   }
 });
+
+for (const scenario of [
+  'error',
+  'undefined',
+  'null',
+  'false',
+  'zero',
+  'empty',
+  'foreign',
+]) {
+  test(`actual live fixture recreation preserves sink: ${scenario}`, async (t) => {
+    const profile = await mkdtemp(
+      join(tmpdir(), 'canopy-handoff-audit-recreation-'),
+    );
+    t.after(() => rm(profile, { recursive: true, force: true }));
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(
+      join(profile, 'handoff-audit.json'),
+      JSON.stringify({
+        kind: 'canopy-handoff-audit',
+        reviewedHead: 'e0fd9e018f25594577ae0dd43df406eddf060af7',
+      }),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(directory, 'recreation.cjs'),
+        join(directory, 'fixture.cjs'),
+        profile,
+        scenario,
+      ],
+      {
+        encoding: 'utf8',
+        timeout: 5000,
+      },
+    );
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /"resetFailureIsolated":true/);
+    if (!['error', 'foreign'].includes(scenario))
+      assert.match(result.stdout, /PASS natural Node exit restoration/);
+  });
+}
