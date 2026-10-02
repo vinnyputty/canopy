@@ -1,3 +1,8 @@
+import {
+  issueRelationships,
+  relationshipKinds,
+  relationshipFailure,
+} from '../shared/relationships';
 import { Providers } from './providers';
 import {
   app,
@@ -315,7 +320,8 @@ type Fixture = {
     | 'update'
     | 'rank'
     | 'priorityOrder'
-  >;
+  > &
+    Partial<Pick<JiraProvider, 'relationships'>>;
 };
 
 async function start(
@@ -403,6 +409,16 @@ async function start(
     const owner = JSON.stringify([text(id), text(requestId)]);
     searches.get(owner)?.abort();
     searches.delete(owner);
+  };
+  const relationshipRequests = new Map<string, AbortController>();
+  const clearRelationshipRequests = () => {
+    for (const controller of relationshipRequests.values()) controller.abort();
+    relationshipRequests.clear();
+  };
+  const cancelRelationships = (id: string, requestId: string) => {
+    const owner = JSON.stringify([text(id), text(requestId)]);
+    relationshipRequests.get(owner)?.abort();
+    relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
   const handlers: Record<string, (...args: any[]) => unknown> = {
@@ -518,6 +534,12 @@ async function start(
           searches.delete(owner);
         }
       }
+      for (const [owner, controller] of relationshipRequests) {
+        if (JSON.parse(owner)[0] === id) {
+          controller.abort();
+          relationshipRequests.delete(owner);
+        }
+      }
       if (id === fixture?.connection.id) {
         await fixture.disconnect();
         fixture = undefined;
@@ -549,6 +571,37 @@ async function start(
     },
     preview: (id: string, issue: string) =>
       provider(id).preview(normalized(id, issue)),
+    relationships: async (id: string, issue: string, requestId: string) => {
+      const key = normalized(id, issue);
+      const client = provider(id);
+      const owner = JSON.stringify([id, text(requestId)]);
+      cancelRelationships(id, requestId);
+      if (relationshipRequests.size >= 16)
+        throw new Error('Too many relationship requests. Retry shortly.');
+      const controller = new AbortController();
+      relationshipRequests.set(owner, controller);
+      try {
+        const graph = client.relationships
+          ? await client.relationships(key, controller.signal)
+          : issueRelationships((await client.preview(key)).issue);
+        controller.signal.throwIfAborted();
+        return graph;
+      } catch (error) {
+        return {
+          key,
+          groups: relationshipKinds.map((kind) => ({
+            kind,
+            state: 'unavailable',
+            items: [],
+            ...relationshipFailure(error, controller.signal),
+          })),
+        };
+      } finally {
+        if (relationshipRequests.get(owner) === controller)
+          relationshipRequests.delete(owner);
+      }
+    },
+    cancelRelationships,
     olderComments: (id: string, issue: string, page: number) => {
       const client = provider(id);
       if (!(client instanceof GithubProvider))
@@ -751,10 +804,16 @@ async function start(
       },
     });
     const created = window;
+    created.webContents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument)
+        clearRelationshipRequests();
+    });
+    created.webContents.on('render-process-gone', clearRelationshipRequests);
     created.webContents.on('destroyed', () => {
       updates.cancel();
       for (const controller of searches.values()) controller.abort();
       searches.clear();
+      clearRelationshipRequests();
     });
     if (saved?.maximized) created.maximize();
     let savingWindow: Promise<void> = Promise.resolve();

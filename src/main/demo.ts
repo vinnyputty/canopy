@@ -40,6 +40,8 @@ export async function createDemoFixture() {
     provider: {
       tree: (key: string) => provider.tree(key),
       preview: (key: string) => provider.preview(key),
+      relationships: (key: string, signal?: AbortSignal) =>
+        provider.relationships(key, signal),
       development: (key: string) => provider.development(key),
       search: (query: string, token?: string, signal?: AbortSignal) =>
         provider.search(query, token, signal),

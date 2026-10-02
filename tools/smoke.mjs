@@ -6,6 +6,7 @@ import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
 import { auditWorkflow } from './smoke-workflow.mjs';
 import { auditPreview, installPreviewHandlers } from './smoke-preview.mjs';
 import { auditGithub } from './smoke-github.mjs';
+import { auditRelationships } from './smoke-relationships.mjs';
 import { auditBulk } from './smoke-bulk.mjs';
 import { auditChildCreation } from './smoke-child.mjs';
 import { createRequire } from 'node:module';
@@ -1604,20 +1605,20 @@ try {
       'The tree now retains the parent path while hiding completed sibling work.',
     ),
   ).toBeVisible();
+  await preview
+    .getByRole('button', { name: 'Inspect relationships', exact: true })
+    .click();
   await expect(
-    preview.getByText('CAN-108 blocks', { exact: true }),
+    preview.getByText('CAN-108 blocks CAN-101', { exact: true }),
   ).toBeVisible();
   await expect(
-    preview.getByText('CAN-108 is blocked by', { exact: true }),
+    preview.getByText('CAN-108 is blocked by CAN-102', { exact: true }),
   ).toBeVisible();
   await expect(
-    preview.getByRole('heading', {
-      name: 'Linked issue references',
-      exact: true,
-    }),
+    preview.getByRole('heading', { name: 'Issue relationships', exact: true }),
   ).toBeVisible();
   await expect(
-    preview.getByText(/separate from hierarchy children/),
+    preview.getByText(/inaccessible issues may be omitted/),
   ).toBeVisible();
   await expect(tree.getByRole('treeitem')).toHaveCount(15);
   await expect(issue('CAN-200')).toHaveCount(0);
@@ -1630,7 +1631,9 @@ try {
   expect(
     await page.locator('.tree-scroll').evaluate((element) => element.scrollTop),
   ).toBe(scrollBeforePreview);
-  await preview.getByRole('button', { name: /Preview CAN-200:/ }).click();
+  await preview
+    .getByRole('button', { name: 'Preview CAN-200', exact: true })
+    .click();
   await expect(
     page.getByRole('complementary', { name: 'Preview CAN-200', exact: true }),
   ).toBeVisible();
@@ -1939,7 +1942,7 @@ try {
   await expect(page.locator('.issue-preview')).toContainText('No description.');
   await expect(page.locator('.issue-preview')).toContainText('No comments.');
   await expect(page.locator('.issue-preview')).toContainText(
-    'No linked issue references.',
+    'Relationships have not been inspected.',
   );
   await expect(
     page.locator(
@@ -3508,6 +3511,8 @@ try {
   await expect(page.getByRole('tab')).toHaveCount(0);
 
   await auditGithub(app, page);
+
+  await auditRelationships(app, page);
 
   await auditWorkflow(app, page);
 

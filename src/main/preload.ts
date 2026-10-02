@@ -22,6 +22,10 @@ const api: CanopyAPI = {
   syncStatus: (id) => ipcRenderer.invoke('canopy:syncStatus', id),
   tree: (id, key) => ipcRenderer.invoke('canopy:tree', id, key),
   preview: (id, key) => ipcRenderer.invoke('canopy:preview', id, key),
+  relationships: (id, key, requestId) =>
+    ipcRenderer.invoke('canopy:relationships', id, key, requestId),
+  cancelRelationships: (id, requestId) =>
+    ipcRenderer.invoke('canopy:cancelRelationships', id, requestId),
   olderComments: (id, key, page) =>
     ipcRenderer.invoke('canopy:olderComments', id, key, page),
   issueUrl: (id, key) => ipcRenderer.invoke('canopy:issueUrl', id, key),

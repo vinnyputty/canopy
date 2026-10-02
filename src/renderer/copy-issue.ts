@@ -1,4 +1,5 @@
-import type { Issue, IssuePreview } from '../shared/types';
+import { relationshipTitles } from '../shared/relationships';
+import type { Issue, IssuePreview, IssueRelationships } from '../shared/types';
 
 export function issueKeyAndSummary(
   issue: Pick<Issue, 'key' | 'summary'>,
@@ -12,20 +13,36 @@ export function issueWorkBrief({
   sourceUrl,
   knownIssues,
   issueKey,
+  relationships,
 }: {
   preview?: IssuePreview;
   provider: 'jira' | 'github' | 'demo';
   sourceUrl?: string;
   knownIssues: Issue[];
   issueKey?: string;
+  relationships?: IssueRelationships;
 }): string {
   const issue =
     preview?.issue ?? knownIssues.find((item) => item.key === issueKey);
   if (!issue) throw new Error('Issue details are unavailable.');
+  const graph = relationships?.key === issue.key ? relationships : undefined;
   const byKey = new Map(knownIssues.map((item) => [item.key, item]));
+  const parentGroup = graph?.groups.find((group) => group.kind === 'parent');
   const parents: string[] = [];
   const visited = new Set([issue.key]);
-  let parentKey = issue.parentKey ?? byKey.get(issue.key)?.parentKey;
+  // Jira preview requests the immediate parent; its unavailable/absent result
+  // must take precedence over an older tree snapshot.
+  const freshJiraParent = preview !== undefined && provider === 'jira';
+  const parentUnavailable = issue.unavailableFields?.includes('parent');
+  let parentKey = parentGroup
+    ? parentGroup.state === 'visible'
+      ? parentGroup.items[0]?.key
+      : undefined
+    : freshJiraParent
+      ? parentUnavailable
+        ? undefined
+        : issue.parentKey
+      : (issue.parentKey ?? byKey.get(issue.key)?.parentKey);
   while (parentKey && !visited.has(parentKey)) {
     visited.add(parentKey);
     parents.unshift(parentKey);
@@ -57,16 +74,71 @@ export function issueWorkBrief({
     const url = issueLink(link.key);
     return `- ${link.relationship}: ${url ? `[${link.key}](${url})` : link.key} — ${link.summary}`;
   });
-  const links = [
-    ...(availableLinks.length
-      ? availableLinks
-      : preview?.linksError || !preview
-        ? []
-        : ['None']),
-    ...(preview?.linksError || !preview
-      ? ['Unavailable: some dependency links could not be loaded.']
-      : []),
-  ].join('\n');
+  const links = graph
+    ? [
+        'Only relationships visible to this connection are included; inaccessible issues may be omitted.',
+        ...graph.groups.flatMap((group) => [
+          '',
+          `### ${relationshipTitles[group.kind]} (${group.state === 'visible' ? 'visible results' : group.state})`,
+          '',
+          ...group.items.map((link) => {
+            const url = issueLink(link.key);
+            const details = [
+              link.direction === 'inward' ? 'Incoming' : 'Outgoing',
+              link.statusCategory === 'done'
+                ? 'Completed'
+                : link.statusCategory
+                  ? 'Active'
+                  : 'Status unknown',
+              ...(link.crossRepository ? ['Cross-repository'] : []),
+              ...(link.access === 'outside-connection'
+                ? ['Outside selected repositories']
+                : link.access === 'unknown'
+                  ? ['Target access unverified']
+                  : []),
+            ];
+            return `- ${link.relationship}: ${url ? `[${link.key}](${url})` : link.key} — ${link.summary} (${details.join('; ')})`;
+          }),
+          ...(group.state === 'visible'
+            ? group.items.length
+              ? []
+              : [
+                  `No visible ${relationshipTitles[group.kind].toLowerCase()} returned.`,
+                ]
+            : [
+                group.state === 'partial'
+                  ? 'Partial: additional or uninterpreted relationships may exist.'
+                  : 'Unavailable: this relationship group could not be loaded.',
+              ]),
+        ]),
+      ].join('\n')
+    : [
+        ...availableLinks,
+        ...(preview?.linksError || !preview
+          ? ['Unavailable: some dependency links could not be loaded.']
+          : preview.issue.linksAvailable !== true
+            ? [
+                'Uninspected: complete dependency relationships have not been loaded.',
+              ]
+            : availableLinks.length
+              ? [
+                  'Only visible issue links are included; hierarchy relationships have not been inspected.',
+                ]
+              : [
+                  'No visible issue links returned; hierarchy relationships have not been inspected.',
+                ]),
+      ].join('\n');
+  const parentPath = parentGroup
+    ? parentGroup.state !== 'visible'
+      ? 'Unknown: parent relationships are incomplete or unavailable.'
+      : parentGroup.items.length
+        ? parents.join(' → ')
+        : 'No visible parent returned.'
+    : parents.length
+      ? parents.join(' → ')
+      : issue.unavailableFields?.includes('parent') || provider === 'github'
+        ? 'Unknown: parent relationships have not been inspected.'
+        : 'None';
   const body = preview?.descriptionMarkdown ?? preview?.description;
   const description =
     body === undefined
@@ -85,7 +157,7 @@ export function issueWorkBrief({
     `- Source: ${sourceUrl || 'Unavailable: source URL could not be loaded.'}`,
     `- Status: ${issue.status?.name ?? 'Unavailable'}`,
     `- Priority: ${provider === 'github' ? 'Not available in GitHub issues' : (issue.priority?.name ?? 'None')}`,
-    `- Parent path: ${parents.length ? parents.join(' → ') : 'None'}`,
+    `- Parent path: ${parentPath}`,
     '',
     '## Description',
     '',
@@ -93,6 +165,12 @@ export function issueWorkBrief({
     '',
     '## Dependency links',
     '',
+    ...(graph
+      ? [
+          'Results reflect the last inspection; tree polling does not recheck provider relationships. Inspect again to refresh.',
+          '',
+        ]
+      : []),
     links,
   ].join('\n');
 }

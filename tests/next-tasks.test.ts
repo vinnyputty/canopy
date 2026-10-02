@@ -18,6 +18,7 @@ function issue(
     assignee: null,
     status: { id: 'new', name: 'To Do', category: 'new' },
     links: [],
+    linksAvailable: true,
     ...patch,
   };
 }

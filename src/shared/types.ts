@@ -24,6 +24,7 @@ export type Issue = {
     summary: string;
     relationship: string;
     statusCategory?: Status['category'];
+    direction?: 'inward' | 'outward';
   }[];
   linksAvailable?: boolean;
   labels?: Choice[];
@@ -54,6 +55,25 @@ export type IssuePreview = {
   commentsError?: string;
   linksError?: string;
 };
+export type RelationshipKind =
+  'blockers' | 'blocked' | 'related' | 'parent' | 'children';
+export type Relationship = {
+  key: string;
+  summary: string;
+  relationship: string;
+  direction: 'inward' | 'outward';
+  statusCategory?: Status['category'];
+  access: 'available' | 'outside-connection' | 'unknown';
+  crossRepository?: boolean;
+};
+export type RelationshipGroup = {
+  kind: RelationshipKind;
+  state: 'visible' | 'partial' | 'unavailable';
+  reason?: string;
+  problem?: 'inaccessible' | 'error' | 'limit' | 'invalid' | 'cancelled';
+  items: Relationship[];
+};
+export type IssueRelationships = { key: string; groups: RelationshipGroup[] };
 export type DevelopmentLink = { title: string; url: string; state?: string };
 export type DevelopmentLinks = {
   state: 'available' | 'unavailable';
@@ -245,6 +265,12 @@ export interface CanopyAPI {
   syncStatus(connectionId: string): Promise<{ retryAt: number | null }>;
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
   preview(connectionId: string, key: string): Promise<IssuePreview>;
+  relationships(
+    connectionId: string,
+    key: string,
+    requestId: string,
+  ): Promise<IssueRelationships>;
+  cancelRelationships(connectionId: string, requestId: string): Promise<void>;
   olderComments(
     connectionId: string,
     key: string,

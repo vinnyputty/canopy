@@ -1,3 +1,8 @@
+import {
+  relationshipChangedKeys,
+  relationshipDestination,
+} from './relationships';
+import { relationshipKinds } from '../shared/relationships';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -46,6 +51,7 @@ import type {
   EditOptions,
   Issue,
   IssuePreview as IssuePreviewData,
+  IssueRelationships,
   IssuePatch,
   RootReference,
   RootView,
@@ -268,6 +274,7 @@ export function App() {
     provider: Connection['provider'];
     knownIssues: Issue[];
     preview?: IssuePreviewData;
+    relationships?: IssueRelationships;
   } | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
   const [options, setOptions] = useState<Record<string, PickerOptions>>({});
@@ -309,6 +316,163 @@ export function App() {
     setSidebarSession(next.session);
   };
   const [queries, setQueries] = useState<Record<string, string>>({});
+  const [relationshipGraphs, setRelationshipGraphs] = useState<
+    Record<string, IssueRelationships>
+  >({});
+  const [relationshipLoading, setRelationshipLoading] = useState<
+    Record<string, boolean>
+  >({});
+  const relationshipRequests = useRef(new Map<string, string>());
+  const relationshipRequestChanges = useRef(new Map<string, Set<string>>());
+  const relationshipGraphsRef = useRef(relationshipGraphs);
+  const relationshipConfirmedSnapshots = useRef<Record<string, TreeSnapshot>>(
+    {},
+  );
+  const updateRelationshipGraphs = (
+    update: (
+      current: Record<string, IssueRelationships>,
+    ) => Record<string, IssueRelationships>,
+  ) => {
+    relationshipGraphsRef.current = update(relationshipGraphsRef.current);
+    setRelationshipGraphs(relationshipGraphsRef.current);
+  };
+  const relationshipGeneration = useRef(0);
+  const relationshipIdentity = (connectionId: string, key: string) =>
+    JSON.stringify([connectionId, key]);
+  const inspectRelationships = async (connectionId: string, key: string) => {
+    const identity = relationshipIdentity(connectionId, key);
+    if (relationshipRequests.current.has(identity)) return;
+    const requestId = crypto.randomUUID();
+    const generation = relationshipGeneration.current;
+    relationshipRequests.current.set(identity, requestId);
+    relationshipRequestChanges.current.set(identity, new Set());
+    setRelationshipLoading((current) => ({ ...current, [identity]: true }));
+    try {
+      const graph = await window.canopy.relationships(
+        connectionId,
+        key,
+        requestId,
+      );
+      if (
+        generation === relationshipGeneration.current &&
+        relationshipRequests.current.get(identity) === requestId
+      )
+        updateRelationshipGraphs((current) => ({
+          ...current,
+          [identity]: {
+            ...graph,
+            groups: graph.groups.map((group) =>
+              group.items.some((link) =>
+                relationshipRequestChanges.current.get(identity)?.has(link.key),
+              )
+                ? {
+                    ...group,
+                    state:
+                      group.state === 'unavailable' ? 'unavailable' : 'partial',
+                    problem: 'invalid',
+                    reason:
+                      'Target data changed while relationships were loading. Inspect again for current results.',
+                    items: group.items.map((link) =>
+                      relationshipRequestChanges.current
+                        .get(identity)
+                        ?.has(link.key)
+                        ? {
+                            ...link,
+                            statusCategory: undefined,
+                            access:
+                              link.access === 'outside-connection'
+                                ? 'outside-connection'
+                                : 'unknown',
+                          }
+                        : link,
+                    ),
+                  }
+                : group,
+            ),
+          },
+        }));
+    } catch {
+      if (
+        generation === relationshipGeneration.current &&
+        relationshipRequests.current.get(identity) === requestId
+      )
+        updateRelationshipGraphs((current) => ({
+          ...current,
+          [identity]: {
+            key,
+            groups: relationshipKinds.map((kind) => ({
+              kind,
+              state: 'unavailable',
+              problem: 'error',
+              reason:
+                'Relationships could not be loaded. Retry to inspect this graph.',
+              items: [],
+            })),
+          },
+        }));
+    } finally {
+      if (relationshipRequests.current.get(identity) === requestId) {
+        relationshipRequests.current.delete(identity);
+        relationshipRequestChanges.current.delete(identity);
+        setRelationshipLoading((current) => ({
+          ...current,
+          [identity]: false,
+        }));
+      }
+    }
+  };
+  const invalidateRelationships = useCallback(
+    (
+      connectionId: string,
+      keys: string[],
+      changed: Set<string> = new Set(keys),
+    ) => {
+      if (!keys.length && !changed.size) return;
+      const affected = new Set(
+        keys.map((key) => relationshipIdentity(connectionId, key)),
+      );
+      for (const [identity, graph] of Object.entries(
+        relationshipGraphsRef.current,
+      )) {
+        if (
+          JSON.parse(identity)[0] === connectionId &&
+          graph.groups.some((group) =>
+            group.items.some((link) => changed.has(link.key)),
+          )
+        )
+          affected.add(identity);
+      }
+      for (const [identity, changes] of relationshipRequestChanges.current) {
+        if (JSON.parse(identity)[0] === connectionId)
+          for (const key of changed) changes.add(key);
+      }
+      for (const identity of affected) {
+        const requestId = relationshipRequests.current.get(identity);
+        if (requestId) {
+          relationshipRequests.current.delete(identity);
+          relationshipRequestChanges.current.delete(identity);
+          void window.canopy
+            .cancelRelationships(connectionId, requestId)
+            .catch(() => {});
+        }
+      }
+      updateRelationshipGraphs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([identity]) => !affected.has(identity),
+          ),
+        ),
+      );
+      setRelationshipLoading((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([identity]) => !affected.has(identity),
+          ),
+        ),
+      );
+    },
+    [],
+  );
   const [nextTaskViews, setNextTaskViews] = useState<Record<string, boolean>>(
     {},
   );
@@ -405,6 +569,7 @@ export function App() {
   const [syncNow, setSyncNow] = useState(Date.now());
   const deferredRefreshes = useRef(new Set<string>());
   const forcedRefreshes = useRef(new Set<string>());
+  const manualRelationshipRefreshes = useRef(new Set<string>());
   const runningExplicitRefreshes = useRef(new Map<string, number>());
   const refreshBlocked = useRef<(connectionId: string) => boolean>(() => false);
   const [online, setOnline] = useState(navigator.onLine);
@@ -423,6 +588,15 @@ export function App() {
       new Mutations(
         window.canopy,
         (view) => {
+          for (const tab of tabsRef.current) {
+            const previous = relationshipConfirmedSnapshots.current[tab.id];
+            const next = view.confirmedSnapshots[tab.id];
+            if (previous && next && next !== previous) {
+              const changed = relationshipChangedKeys(previous, next);
+              invalidateRelationships(tab.connectionId, [...changed]);
+            }
+          }
+          relationshipConfirmedSnapshots.current = view.confirmedSnapshots;
           setSnapshots(view.snapshots);
           setConfirmedSnapshots(view.confirmedSnapshots);
           setSaving(view.saving);
@@ -1001,8 +1175,14 @@ export function App() {
   }, [workspace, ready, saveWorkspace]);
 
   const refreshTab = useCallback(
-    async (tab: TabState, quiet = false, explicit = false) => {
+    async (
+      tab: TabState,
+      quiet = false,
+      explicit = false,
+      userRequested = false,
+    ) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
+      if (userRequested) manualRelationshipRefreshes.current.add(tab.id);
       explicit ||= forcedRefreshes.current.has(tab.id);
       if (
         (!navigator.onLine && !demoMode) ||
@@ -1031,6 +1211,9 @@ export function App() {
         refreshSchedule.current.defer(tab.id, load.due);
         return;
       }
+      const manualRelationships = manualRelationshipRefreshes.current.delete(
+        tab.id,
+      );
       deferredRefreshes.current.delete(tab.id);
       forcedRefreshes.current.delete(tab.id);
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
@@ -1069,7 +1252,21 @@ export function App() {
                 refreshSequences.current[tab.id] !== sequence)
             )
               continue;
+            const previous = mutations.confirmedSnapshot(target.id);
             mutations.receive(target, next, epoch);
+            const confirmed = mutations.confirmedSnapshot(target.id) ?? next;
+            if (manualRelationships)
+              invalidateRelationships(
+                target.connectionId,
+                [
+                  ...new Set(
+                    [...confirmed.issues, ...(previous?.issues ?? [])].map(
+                      (issue) => issue.key,
+                    ),
+                  ),
+                ],
+                new Set(),
+              );
             delivered.add(target.id);
           }
           if (delivered.size) {
@@ -1091,6 +1288,15 @@ export function App() {
             });
           }
         } else if (refreshSequences.current[tab.id] === sequence) {
+          if (
+            manualRelationships &&
+            rootRefreshes.current.isCurrent(rootKey, load.generation) &&
+            refreshBlocked.current(tab.connectionId) &&
+            tabsRef.current.some(
+              (item) => item.id === tab.id && refreshRootKey(item) === rootKey,
+            )
+          )
+            manualRelationshipRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
         }
         if (!delivered.size) return;
@@ -1137,7 +1343,7 @@ export function App() {
         }
       }
     },
-    [demoMode],
+    [demoMode, invalidateRelationships],
   );
 
   const finishWorkflowReturn = useCallback(() => {
@@ -1461,6 +1667,7 @@ export function App() {
         refreshSchedule.current.forget(id);
         deferredRefreshes.current.delete(id);
         forcedRefreshes.current.delete(id);
+        manualRelationshipRefreshes.current.delete(id);
         runningExplicitRefreshes.current.delete(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
@@ -1825,7 +2032,7 @@ export function App() {
         id: 'refresh',
         label: 'Refresh current tree',
         icon: RefreshCw,
-        run: () => activeTab && void refreshTab(activeTab, true, true),
+        run: () => activeTab && void refreshTab(activeTab, true, true, true),
       },
       {
         id: 'expandAll',
@@ -2123,6 +2330,16 @@ export function App() {
             activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
             activeTab ? Boolean(nextTaskMine[activeTab.id]) : false,
             priorityOrder,
+            Object.fromEntries(
+              snapshot.issues.flatMap((issue) => {
+                const graph =
+                  activeTab &&
+                  relationshipGraphs[
+                    relationshipIdentity(activeTab.connectionId, issue.key)
+                  ];
+                return graph ? [[issue.key, graph]] : [];
+              }),
+            ),
           )
         : [],
     [
@@ -2134,6 +2351,7 @@ export function App() {
       currentUsers,
       nextTaskMine,
       priorityOrder,
+      relationshipGraphs,
     ],
   );
   const jumpToTask = (key: string) => {
@@ -2651,6 +2869,16 @@ export function App() {
         await delay(4000);
 
         show(4, 'The linked CAN-200 issue opens in a separate tab.', 6000);
+        await inspectRelationships('demo', 'CAN-108');
+        await waitFor(
+          () =>
+            Boolean(
+              document.querySelector(
+                '[aria-label="Preview CAN-108"] [aria-label="Related links"] .preview-link button.tool-button',
+              ),
+            ),
+          'Inspected related work',
+        );
         highlight(
           Array.from(document.querySelectorAll<HTMLElement>('.preview-link'))
             .find((link) => link.textContent?.includes('CAN-200'))
@@ -2802,11 +3030,67 @@ export function App() {
     };
   }, [demoMode, ready, Boolean(snapshots['demo-can-100'])]);
 
+  useEffect(() => {
+    return () => {
+      relationshipGeneration.current++;
+      for (const [identity, requestId] of relationshipRequests.current) {
+        const [id] = JSON.parse(identity) as [string, string];
+        void window.canopy.cancelRelationships(id, requestId).catch(() => {});
+      }
+      relationshipRequests.current.clear();
+      relationshipRequestChanges.current.clear();
+      setRelationshipLoading({});
+    };
+  }, [activeTab?.id, previewRoute?.connectionId, previewKey]);
+
+  const jumpToRelationship = (connectionId: string, key: string) => {
+    const current = workspaceRef.current;
+    const existing = relationshipDestination(
+      connectionId,
+      key,
+      current.tabs,
+      snapshots,
+      current.activeTabId,
+    );
+    const selectedView = rootView(current, { connectionId, rootKey: key });
+    const tab = existing ?? {
+      id: crypto.randomUUID(),
+      connectionId,
+      rootKey: key,
+      selectedKey: key,
+      expanded: [key],
+      hideDone: selectedView.hideDone,
+      filters: selectedView.filters,
+      scrollTop: 0,
+    };
+    navigate(tab);
+    setNextTaskViews((value) => ({ ...value, [tab.id]: false }));
+    navigationReveal.current = { tabId: tab.id, key };
+    setReveal({ tabId: tab.id, key });
+  };
+
   const previewPane = previewOpen ? (
     previewRoute && previewKey ? (
       <IssuePreview
         key={JSON.stringify([previewRoute.connectionId, previewKey])}
         provider={previewRoute.provider}
+        connectionName={
+          connections.find((item) => item.id === previewRoute.connectionId)
+            ?.name ?? previewRoute.connectionId
+        }
+        relationships={
+          relationshipGraphs[
+            relationshipIdentity(previewRoute.connectionId, previewKey)
+          ]
+        }
+        relationshipsLoading={Boolean(
+          relationshipLoading[
+            relationshipIdentity(previewRoute.connectionId, previewKey)
+          ],
+        )}
+        onRelationships={() =>
+          void inspectRelationships(previewRoute.connectionId, previewKey)
+        }
         connectionId={previewRoute.connectionId}
         issueKey={previewKey}
         observedIssue={confirmedSnapshots[
@@ -2846,7 +3130,7 @@ export function App() {
             void refreshTab(tab);
         }}
         onPreview={setPreviewKey}
-        onOpenTab={(key) => openTab(previewRoute.connectionId, key)}
+        onJump={(key) => jumpToRelationship(previewRoute.connectionId, key)}
         onOpenExternal={(key) =>
           void openExternal(previewRoute.connectionId, key)
         }
@@ -2860,6 +3144,13 @@ export function App() {
               snapshots[sourceTabId(previewRoute, workspace.tabs)]?.issues ??
               [],
             preview,
+            relationships:
+              relationshipGraphs[
+                relationshipIdentity(
+                  previewRoute.connectionId,
+                  preview.issue.key,
+                )
+              ],
           })
         }
         onOpenComment={(commentId) => {
@@ -3281,7 +3572,7 @@ export function App() {
                     const tab = allRefreshTabs.find((item) =>
                       sameRoot(item, source),
                     );
-                    if (tab) void refreshTab(tab, true, true);
+                    if (tab) void refreshTab(tab, true, true, true);
                   }
                 }}
               />
@@ -3398,7 +3689,7 @@ export function App() {
                     refreshing.has(activeTab.id) ||
                     (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                   }
-                  onClick={() => void refreshTab(activeTab, true, true)}
+                  onClick={() => void refreshTab(activeTab, true, true, true)}
                   title="Refresh"
                 >
                   <RefreshCw
@@ -3712,7 +4003,7 @@ export function App() {
                 </span>
                 {errors[activeTab.id] && (
                   <button
-                    onClick={() => void refreshTab(activeTab, true, true)}
+                    onClick={() => void refreshTab(activeTab, true, true, true)}
                     disabled={
                       (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
@@ -3931,8 +4222,11 @@ export function App() {
                               : 'Clear issues appear first, unknown blocker state next, then confirmed blocked issues.'}{' '}
                       Blocked issues always follow clear and unknown issues.{' '}
                       {activeConnection?.provider === 'github'
-                        ? 'GitHub dependency data is unavailable in tree snapshots, so blocker state is unknown.'
-                        : 'Jira blocker state is unknown when link data or a linked blocker status is unavailable.'}
+                        ? 'Inspect relationships to load GitHub blockers for a task.'
+                        : 'Blocker state is unknown when link data or a linked blocker status is unavailable.'}{' '}
+                      Inspected blockers reflect the last inspection. Inspect
+                      again to refresh; tree polling does not recheck provider
+                      relationships.
                       {nextTaskCriterion === 'priority' && priorityError && (
                         <button onClick={retryPriorityOrder}>
                           Retry priority order
@@ -3959,7 +4253,7 @@ export function App() {
                             {task.blocker !== tasks[index - 1]?.blocker && (
                               <div className="next-task-group">
                                 {task.blocker === 'clear'
-                                  ? 'No active blockers found'
+                                  ? 'No active visible blockers found'
                                   : task.blocker === 'unknown'
                                     ? 'Blocker state unknown'
                                     : 'Blocked'}
@@ -3998,8 +4292,102 @@ export function App() {
                                     ? `Blocked by ${task.blockers.join(', ')}`
                                     : task.blocker === 'unknown'
                                       ? 'Blocker state unknown'
-                                      : 'No active blockers found'}
+                                      : 'No active visible blockers found'}
                                 </div>
+                              </div>
+                              <div className="next-task-relationships">
+                                {task.blockerDetails.map(
+                                  (link, index, links) => (
+                                    <div
+                                      key={JSON.stringify([
+                                        link.key,
+                                        link.relationship,
+                                        link.direction,
+                                        links
+                                          .slice(0, index)
+                                          .filter(
+                                            (other) =>
+                                              other.key === link.key &&
+                                              other.relationship ===
+                                                link.relationship &&
+                                              other.direction ===
+                                                link.direction,
+                                          ).length,
+                                      ])}
+                                    >
+                                      <span>
+                                        {activeConnection?.provider === 'github'
+                                          ? 'GitHub'
+                                          : activeConnection?.provider ===
+                                              'jira'
+                                            ? 'Jira'
+                                            : 'Demo'}{' '}
+                                        · {activeConnection?.name} ·{' '}
+                                        {task.issue.key} blocked by {link.key} ·{' '}
+                                        {link.summary}
+                                        {link.statusCategory
+                                          ? ''
+                                          : ' · Status unknown'}
+                                        {link.crossRepository
+                                          ? ' · Cross-repository'
+                                          : ''}
+                                      </span>{' '}
+                                      {link.access === 'outside-connection' ? (
+                                        <span>
+                                          Outside selected repositories
+                                        </span>
+                                      ) : (
+                                        <button
+                                          className="text-button"
+                                          onClick={() =>
+                                            jumpToRelationship(
+                                              activeTab.connectionId,
+                                              link.key,
+                                            )
+                                          }
+                                        >
+                                          Show blocker in tree
+                                        </button>
+                                      )}
+                                    </div>
+                                  ),
+                                )}
+                                {task.blockerReason && (
+                                  <span role="status">
+                                    {task.blockerReason}{' '}
+                                  </span>
+                                )}
+                                {task.incomplete && (
+                                  <span>
+                                    Blocker information is incomplete.{' '}
+                                  </span>
+                                )}
+                                <button
+                                  className="text-button"
+                                  disabled={Boolean(
+                                    relationshipLoading[
+                                      relationshipIdentity(
+                                        activeTab.connectionId,
+                                        task.issue.key,
+                                      )
+                                    ],
+                                  )}
+                                  onClick={() =>
+                                    void inspectRelationships(
+                                      activeTab.connectionId,
+                                      task.issue.key,
+                                    )
+                                  }
+                                >
+                                  {relationshipLoading[
+                                    relationshipIdentity(
+                                      activeTab.connectionId,
+                                      task.issue.key,
+                                    )
+                                  ]
+                                    ? 'Loading relationships…'
+                                    : 'Inspect blockers'}
+                                </button>
                               </div>
                               <button
                                 className="tool-button"
@@ -4041,7 +4429,9 @@ export function App() {
                       title="This tree couldn’t be loaded"
                       detail={errors[activeTab.id]}
                       action="Try again"
-                      onAction={() => void refreshTab(activeTab, false, true)}
+                      onAction={() =>
+                        void refreshTab(activeTab, false, true, true)
+                      }
                     />
                   ) : shownTree ? (
                     <div
@@ -4525,6 +4915,13 @@ export function App() {
                 issueKey: rowMenu.issue.key,
                 provider: activeConnection?.provider ?? 'jira',
                 knownIssues: snapshot?.issues ?? [],
+                relationships:
+                  relationshipGraphs[
+                    relationshipIdentity(
+                      activeTab.connectionId,
+                      rowMenu.issue.key,
+                    )
+                  ],
               });
             else void copyIssueText(rowMenu.issue, action);
           }}
@@ -6840,6 +7237,7 @@ function WorkBriefDialog({
   provider,
   knownIssues,
   preview,
+  relationships,
   onClose,
 }: {
   connectionId: string;
@@ -6847,6 +7245,7 @@ function WorkBriefDialog({
   provider: Connection['provider'];
   knownIssues: Issue[];
   preview?: IssuePreviewData;
+  relationships?: IssueRelationships;
   onClose: () => void;
 }) {
   const [brief, setBrief] = useState('');
@@ -6860,6 +7259,7 @@ function WorkBriefDialog({
     setError('');
     setPartial(false);
     setCopied(false);
+    const requestId = attempt > 0 ? crypto.randomUUID() : undefined;
     Promise.allSettled([
       preview && attempt === 0
         ? Promise.resolve(preview)
@@ -6867,7 +7267,10 @@ function WorkBriefDialog({
       provider === 'demo'
         ? Promise.resolve('Local sample workspace')
         : window.canopy.issueUrl(connectionId, issueKey),
-    ]).then(([details, sourceUrl]) => {
+      requestId
+        ? window.canopy.relationships(connectionId, issueKey, requestId)
+        : Promise.resolve(relationships),
+    ]).then(([details, sourceUrl, inspected]) => {
       if (!live) return;
       try {
         setBrief(
@@ -6878,12 +7281,28 @@ function WorkBriefDialog({
               sourceUrl.status === 'fulfilled' ? sourceUrl.value : undefined,
             knownIssues,
             issueKey,
+            relationships:
+              inspected.status === 'fulfilled'
+                ? inspected.value
+                : {
+                    key: issueKey,
+                    groups: relationshipKinds.map((kind) => ({
+                      kind,
+                      state: 'unavailable',
+                      items: [],
+                    })),
+                  },
           }),
         );
         setPartial(
           details.status === 'rejected' ||
             sourceUrl.status === 'rejected' ||
-            Boolean(details.status === 'fulfilled' && details.value.linksError),
+            Boolean(
+              details.status === 'fulfilled' && details.value.linksError,
+            ) ||
+            inspected.status === 'rejected' ||
+            !inspected.value ||
+            inspected.value.groups.some((group) => group.state !== 'visible'),
         );
       } catch (reason) {
         setError(`Couldn’t load work brief: ${String(reason)}`);
@@ -6891,8 +7310,20 @@ function WorkBriefDialog({
     });
     return () => {
       live = false;
+      if (requestId)
+        void window.canopy
+          .cancelRelationships(connectionId, requestId)
+          .catch(() => {});
     };
-  }, [connectionId, issueKey, provider, knownIssues, preview, attempt]);
+  }, [
+    connectionId,
+    issueKey,
+    provider,
+    knownIssues,
+    preview,
+    relationships,
+    attempt,
+  ]);
   const copy = async () => {
     try {
       await window.canopy.copyText(brief);
@@ -6920,7 +7351,8 @@ function WorkBriefDialog({
         )}
         {partial && (
           <p role="status" className="dialog-note">
-            Some work brief details are unavailable. Retry to load them.
+            Some work brief details are unavailable or uninspected. Retry
+            fetches issue relationships.
           </p>
         )}
         {brief ? (

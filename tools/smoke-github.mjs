@@ -42,6 +42,26 @@ export async function auditGithub(app, page) {
         refresh,
       );
     });
+    // Observe the real scoped IPC handler; relationship data still comes through
+    // GithubProvider and the isolated raw transport below.
+    const relationshipChannel = 'canopy:relationships';
+    globalThis.githubSmokeRelationshipHandler =
+      ipcMain._invokeHandlers.get(relationshipChannel);
+    globalThis.githubSmokeRelationshipCalls = [];
+    ipcMain.removeHandler(relationshipChannel);
+    ipcMain.handle(relationshipChannel, (event, connection, key, requestId) => {
+      globalThis.githubSmokeRelationshipCalls.push({
+        connection,
+        key,
+        requestId,
+      });
+      return globalThis.githubSmokeRelationshipHandler(
+        event,
+        connection,
+        key,
+        requestId,
+      );
+    });
     globalThis.githubSmokeReads = 0;
     globalThis.githubSmokeLimitNext = false;
     globalThis.fetch = async (url, init = {}) => {
@@ -51,14 +71,43 @@ export async function auditGithub(app, page) {
       const path = parsed.pathname;
       if (path === '/user') return Response.json({ login: 'tester' });
       if (path === '/graphql') {
-        const ids = JSON.parse(String(init.body)).variables.ids;
+        const { query, variables } = JSON.parse(String(init.body));
+        if (Array.isArray(variables.ids))
+          return Response.json({
+            data: {
+              nodes: variables.ids.map(() => ({
+                parent: null,
+                subIssuesSummary: { total: 0 },
+              })),
+            },
+          });
+        const key = `${variables.owner}/${variables.repo}#${variables.number}`;
+        const raw = globalThis.githubSmokeIssues[key];
+        const node = (value) => ({
+          url: value.html_url,
+          title: value.title,
+          state: value.state.toUpperCase(),
+        });
+        const relationshipIssue = !raw
+          ? null
+          : query.includes('relatesTo')
+            ? {
+                relatesTo: {
+                  nodes:
+                    key === 'team/a#1'
+                      ? [node(globalThis.githubSmokeIssues['team/b#2'])]
+                      : [],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              }
+            : {
+                parent:
+                  key === 'team/b#2'
+                    ? node(globalThis.githubSmokeIssues['team/a#1'])
+                    : null,
+              };
         return Response.json({
-          data: {
-            nodes: ids.map(() => ({
-              parent: null,
-              subIssuesSummary: { total: 0 },
-            })),
-          },
+          data: { repository: { issue: relationshipIssue } },
         });
       }
       if (/^\/repos\/team\/[ab]\/issues$/.test(path))
@@ -211,6 +260,12 @@ export async function auditGithub(app, page) {
     await expect(
       page.getByRole('dialog', { name: 'Connect GitHub' }),
     ).toHaveCount(0);
+    const githubConnection = await page.evaluate(async () =>
+      (await window.canopy.connections()).find(
+        (connection) => connection.name === 'GitHub · tester',
+      ),
+    );
+    expect(githubConnection?.provider).toBe('github');
     await page
       .getByRole('button', { name: 'Open issue', exact: true })
       .first()
@@ -473,7 +528,56 @@ export async function auditGithub(app, page) {
       .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()))
       .toBe('team/a#1 Updated GitHub title');
     await expect(preview.getByText('No labels.')).toBeVisible();
-    await expect(preview.getByText('team/b#2')).toBeVisible();
+    const inspectGithubRelationships = async () => {
+      const inspect = preview.getByRole('button', {
+        name: 'Inspect relationships',
+        exact: true,
+      });
+      if (await inspect.count()) {
+        await expect(
+          preview.getByText(
+            'Relationships have not been inspected. Blocker state may be unknown.',
+            { exact: true },
+          ),
+        ).toBeVisible();
+        const before = await app.evaluate(
+          () => globalThis.githubSmokeRelationshipCalls.length,
+        );
+        await inspect.click();
+        await expect
+          .poll(() =>
+            app.evaluate(() => globalThis.githubSmokeRelationshipCalls.length),
+          )
+          .toBe(before + 1);
+        const call = await app.evaluate(() =>
+          globalThis.githubSmokeRelationshipCalls.at(-1),
+        );
+        expect(call).toMatchObject({
+          connection: githubConnection.id,
+          key: 'team/a#1',
+          requestId: expect.any(String),
+        });
+      }
+      const related = preview.getByRole('region', {
+        name: 'Related links',
+        exact: true,
+      });
+      await expect(related).toContainText('Visible results');
+      await expect(related).toContainText('team/a#1 relates to team/b#2');
+      await expect(related).toContainText('team/b issue 2');
+      await expect(related).toContainText(
+        `GitHub · ${githubConnection.name} · Outgoing related link · Cross-repository · Active`,
+      );
+      await expect(
+        related.getByRole('button', { name: 'Preview team/b#2', exact: true }),
+      ).toBeVisible();
+      await expect(
+        preview.locator('.relationship-groups > .preview-hint'),
+      ).toContainText(
+        `GitHub · ${githubConnection.name} · Relationships from team/a#1`,
+      );
+    };
+    await inspectGithubRelationships();
     await expect(
       preview.getByText('Loaded comments 201–205 of 205.'),
     ).toBeVisible();
@@ -585,7 +689,10 @@ export async function auditGithub(app, page) {
     await expect(
       preview.getByRole('checkbox', { name: 'ready' }),
     ).toBeChecked();
-    await expect(preview.getByText('team/b#2')).toBeVisible();
+    await expect(
+      preview.getByRole('checkbox', { name: 'ready' }),
+    ).toBeEnabled();
+    await inspectGithubRelationships();
     await app.evaluate(() => {
       const hold = { started: false, completed: false, release: null };
       hold.promise = new Promise((resolve) => {
@@ -889,6 +996,13 @@ export async function auditGithub(app, page) {
       );
       delete globalThis.githubSmokeTransitionHandler;
       delete globalThis.githubSmokeTransitionCalls;
+      ipcMain.removeHandler('canopy:relationships');
+      ipcMain.handle(
+        'canopy:relationships',
+        globalThis.githubSmokeRelationshipHandler,
+      );
+      delete globalThis.githubSmokeRelationshipHandler;
+      delete globalThis.githubSmokeRelationshipCalls;
       globalThis.fetch = globalThis.githubSmokeFetch;
     });
   }

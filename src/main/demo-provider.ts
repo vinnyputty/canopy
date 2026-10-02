@@ -1,3 +1,4 @@
+import { issueRelationships } from '../shared/relationships';
 import type {
   Choice,
   DevelopmentLinks,
@@ -64,6 +65,7 @@ function issue(
     priority: priorities[priority],
     assignee: assignees[assignee],
     links: [],
+    linksAvailable: true,
   };
 }
 export const demoSeeds: Issue[] = [
@@ -164,6 +166,29 @@ export class DemoProvider {
       ],
       totalComments: 1,
     };
+  }
+  async relationships(key: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const issue = this.get(key);
+    const graph = issueRelationships(issue);
+    for (const group of graph.groups) {
+      if (group.kind !== 'parent' && group.kind !== 'children') continue;
+      group.state = 'visible';
+      group.reason = undefined;
+      const targets =
+        group.kind === 'parent'
+          ? this.issues.filter((item) => item.key === issue.parentKey)
+          : this.issues.filter((item) => item.parentKey === key);
+      group.items = targets.map((item) => ({
+        key: item.key,
+        summary: item.summary,
+        statusCategory: item.status.category,
+        access: 'available',
+        relationship: group.kind === 'parent' ? 'child of' : 'parent of',
+        direction: group.kind === 'parent' ? 'inward' : 'outward',
+      }));
+    }
+    return graph;
   }
   async development(_key: string): Promise<DevelopmentLinks> {
     return {
