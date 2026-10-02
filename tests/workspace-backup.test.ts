@@ -1,3 +1,6 @@
+import { DEFAULT_VIEW, migrateViews } from '../src/renderer/table-view';
+import { activateTab, closeTabs } from '../src/renderer/workspace';
+import { validateWorkspace } from '../src/shared/workspace-validation';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
@@ -277,4 +280,136 @@ test('retains literal shortcut keys supported by the shortcut recorder', () => {
     parseBackup(JSON.stringify(b)).workspace.shortcuts,
     b.workspace.shortcuts,
   );
+});
+
+test('export normalizes repeated close/reopen and restored history without relaxing external validation', () => {
+  let history = migrateViews(structuredClone(backupWorkspace));
+  const original = history.tabs[0];
+  history = closeTabs(history, [original.id]);
+  history = activateTab(history, { ...original, id: 'opened-again' });
+  history = closeTabs(history, ['opened-again']);
+  validateWorkspace(history);
+  const before = JSON.stringify(history);
+  const backup = createBackup(history, backupConnections);
+  assert.equal(
+    backup.workspace.closedTabs?.filter((t) => t.rootKey === original.rootKey)
+      .length,
+    1,
+  );
+  assert.equal(backup.workspace.closedTabs?.[0].id, 'opened-again');
+  assert.equal(JSON.stringify(history), before);
+  const ambiguous = structuredClone(backup);
+  ambiguous.workspace.closedTabs!.push({
+    ...ambiguous.workspace.closedTabs![0],
+    id: 'duplicate-root',
+  });
+  assert.throws(
+    () => parseBackup(JSON.stringify(ambiguous)),
+    /Duplicate root identities/,
+  );
+
+  let restored = closeTabs(migrateViews(structuredClone(backupWorkspace)), [
+    original.id,
+  ]);
+  restored = activateTab(restored, original, true);
+  validateWorkspace(restored);
+  const reopened = createBackup(restored, backupConnections);
+  assert.equal(reopened.workspace.tabs[0].id, restored.tabs[0].id);
+  assert.ok(
+    !reopened.workspace.closedTabs?.some((t) => t.rootKey === original.rootKey),
+  );
+  reopened.workspace.closedTabs!.push({
+    ...reopened.workspace.tabs[0],
+    rootKey: 'SAMPLE-99',
+  });
+  assert.throws(
+    () => parseBackup(JSON.stringify(reopened)),
+    /Duplicate tab identifiers/,
+  );
+});
+
+test('both import modes retain tab-only table settings before creating root maps', () => {
+  const source = structuredClone(backupWorkspace);
+  delete source.rootViews;
+  delete source.viewDefaults;
+  source.tabs[0].view = {
+    ...structuredClone(DEFAULT_VIEW),
+    widths: { ...DEFAULT_VIEW.widths, issue: 777 },
+    hideDone: false,
+    filters: { status: 'custom-status' },
+  };
+  source.tabs[0].hideDone = false;
+  source.tabs[0].filters = { status: 'custom-status' };
+  const backup = createBackup(source, backupConnections);
+  for (const mode of ['merge', 'replace'] as const) {
+    const plan = planImport(backup, empty(), destinations, mapping, mode);
+    assert.equal(plan.workspace.tabs[0].view?.widths.issue, 777, mode);
+    assert.equal(plan.workspace.tabs[0].hideDone, false, mode);
+    assert.deepEqual(
+      plan.workspace.tabs[0].filters,
+      { status: 'custom-status' },
+      mode,
+    );
+    assert.deepEqual(
+      plan.workspace.rootViews?.['["destination-jira","SAMPLE-1"]'],
+      source.tabs[0].view,
+      mode,
+    );
+    const filtersOnly = structuredClone(backup);
+    delete filtersOnly.workspace.tabs[0].view;
+    const legacy = planImport(
+      filtersOnly,
+      empty(),
+      destinations,
+      mapping,
+      mode,
+    );
+    assert.equal(legacy.workspace.tabs[0].hideDone, false);
+    assert.deepEqual(legacy.workspace.tabs[0].filters, {
+      status: 'custom-status',
+    });
+  }
+  const localView = {
+    ...structuredClone(DEFAULT_VIEW),
+    widths: { ...DEFAULT_VIEW.widths, issue: 888 },
+    filters: { status: 'local-status' },
+  };
+  const local = {
+    ...empty(),
+    tabs: [
+      {
+        ...source.tabs[0],
+        connectionId: 'destination-jira',
+        view: localView,
+        hideDone: true,
+        filters: localView.filters,
+      },
+    ],
+    activeTabId: 'tab-1',
+  };
+  const merged = planImport(backup, local, destinations, mapping, 'merge');
+  assert.deepEqual(merged.workspace.tabs[0].view, localView);
+  assert.ok(merged.conflicts.some((c) => c.startsWith('Root view:')));
+  const replaced = planImport(backup, local, destinations, mapping, 'replace');
+  assert.equal(replaced.workspace.tabs[0].view?.widths.issue, 777);
+});
+
+test('timestamps require an exact valid calendar round trip', () => {
+  for (const createdAt of [
+    '2026-02-30T00:00:00.000Z',
+    '2026-02-29T00:00:00.000Z',
+    '2026-04-31T00:00:00.000Z',
+    '2026-10-02T24:00:00.000Z',
+  ]) {
+    const backup = fixture();
+    backup.createdAt = createdAt;
+    assert.throws(
+      () => parseBackup(JSON.stringify(backup)),
+      /timestamp/,
+      createdAt,
+    );
+  }
+  const leap = fixture();
+  leap.createdAt = '2028-02-29T00:00:00.000Z';
+  assert.equal(parseBackup(JSON.stringify(leap)).createdAt, leap.createdAt);
 });

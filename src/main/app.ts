@@ -285,7 +285,8 @@ async function start(
     demoMode
       ? {
           read: async <T>() => structuredClone(demoWorkspaceState) as T,
-          replaceWorkspace: async (expected, next) => {
+          replaceWorkspace: async (expected, next, validate) => {
+            validate?.();
             if (
               !isDeepStrictEqual(
                 JSON.parse(JSON.stringify(demoWorkspaceState)),

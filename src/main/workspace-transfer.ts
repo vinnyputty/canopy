@@ -16,7 +16,11 @@ import { replaceFile } from './replace-file';
 
 export interface WorkspaceStore {
   read<T>(name: string): Promise<T | null>;
-  replaceWorkspace(expected: Workspace, next: Workspace): Promise<void>;
+  replaceWorkspace(
+    expected: Workspace,
+    next: Workspace,
+    validate?: () => void,
+  ): Promise<void>;
 }
 /** Only workspace.json participates; auth and provider caches are never read. */
 export class WorkspaceTransfer {
@@ -86,7 +90,12 @@ export class WorkspaceTransfer {
       pending.connections !== JSON.stringify(this.connections())
     )
       throw new Error('Import preview expired; review again.');
-    await this.storage.replaceWorkspace(pending.before, pending.after);
+    await this.storage.replaceWorkspace(pending.before, pending.after, () => {
+      if (pending.connections !== JSON.stringify(this.connections()))
+        throw new Error(
+          'Connections changed after preview; review the import again.',
+        );
+    });
     this.undo = { before: pending.before, after: pending.after };
     return pending.after;
   }
