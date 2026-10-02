@@ -28,6 +28,7 @@ export type InboxItem = InboxCandidate & {
 export const inboxStamp = (snapshot: TreeSnapshot, issue: Issue) =>
   JSON.stringify([snapshot.fetchedAt, issue]);
 export type InboxGraph = {
+  revision?: number;
   stamp: string;
   graph?: IssueRelationships;
   error?: string;
@@ -202,6 +203,44 @@ export function inboxItems(
 /** One bounded read at a time; cancellation guards even transports that ignore abort. */
 export class InboxInspection {
   private generation = 0;
+  // Session-only authority; a manual source refresh is not a target change.
+  revision = 0;
+  private changedAt = new Map<string, number>();
+  private sourceChangedAt = new Map<string, number>();
+  current(connectionId: string, key: string, entry: InboxGraph) {
+    const revision = entry.revision ?? 0;
+    return (
+      (this.sourceChangedAt.get(triageIdentity(connectionId, key)) ?? 0) <=
+        revision &&
+      (entry.graph?.groups.flatMap((group) => group.items) ?? []).every(
+        (item) =>
+          (this.changedAt.get(triageIdentity(connectionId, item.key)) ?? 0) <=
+          revision,
+      )
+    );
+  }
+  invalidate(connectionId: string, keys: string[], changed: Set<string>) {
+    if (!keys.length && !changed.size) return;
+    const sources = new Set(keys);
+    const revision = ++this.revision;
+    for (const key of keys)
+      this.sourceChangedAt.set(triageIdentity(connectionId, key), revision);
+    for (const key of changed)
+      this.changedAt.set(triageIdentity(connectionId, key), revision);
+    const cancelSource =
+      this.pending?.connectionId === connectionId &&
+      sources.has(this.pending.issueKey);
+    if (this.pending?.connectionId === connectionId)
+      for (const key of changed) this.pending.changed.add(key);
+    this.entries = Object.fromEntries(
+      Object.entries(this.entries).filter(([identity, entry]) => {
+        const [owner, key] = JSON.parse(identity);
+        return owner !== connectionId || this.current(owner, key, entry);
+      }),
+    );
+    if (cancelSource) this.cancel();
+    this.publish({ ...this.entries }, this.busy);
+  }
   private pending?: {
     connectionId: string;
     issueKey: string;
@@ -230,6 +269,7 @@ export class InboxInspection {
         .catch(() => {});
     this.pending = undefined;
     this.busy = false;
+    this.publish({ ...this.entries }, false);
   }
   reset(candidates: InboxCandidate[], seed: Record<string, InboxGraph> = {}) {
     const next = new Map(
@@ -275,6 +315,11 @@ export class InboxInspection {
           ),
         );
         return entry &&
+          this.current(
+            candidate.source.connectionId,
+            candidate.issue.key,
+            entry,
+          ) &&
           !targetChanged &&
           (!entry.graph || entry.graph.key === candidate.issue.key)
           ? [[id, entry]]
@@ -336,6 +381,7 @@ export class InboxInspection {
         if (throttled.has(connectionId)) {
           this.entries[id] = {
             ...previous(),
+            revision: this.revision,
             stamp: candidate.stamp,
             error: throttled.get(connectionId),
           };
@@ -347,6 +393,7 @@ export class InboxInspection {
         if (status.retryAt && status.retryAt > Date.now()) {
           this.entries[id] = {
             ...previous(),
+            revision: this.revision,
             stamp: candidate.stamp,
             error: `Rate limited until ${new Date(status.retryAt).toLocaleString()}. Retry after this time.`,
           };
@@ -364,6 +411,7 @@ export class InboxInspection {
         if (graph.key !== candidate.issue.key) throw new Error('Wrong issue');
         const changed = this.pending?.changed ?? new Set<string>();
         this.entries[id] = {
+          revision: this.revision,
           stamp: candidate.stamp,
           graph: {
             ...graph,
@@ -397,6 +445,7 @@ export class InboxInspection {
         if (generation !== this.generation) return;
         this.entries[id] = {
           ...previous(),
+          revision: this.revision,
           stamp: candidate.stamp,
           error: 'Blockers could not be inspected. Retry.',
         };

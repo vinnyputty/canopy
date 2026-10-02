@@ -1,4 +1,4 @@
-import { inboxStamp, type InboxGraph } from './inbox';
+import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
 import { recoverTriage } from '../shared/triage';
 import { InboxPanel } from './InboxPanel';
 import {
@@ -325,6 +325,10 @@ export function App() {
   const [inboxGraphs, setInboxGraphs] = useState<Record<string, InboxGraph>>(
     {},
   );
+  const [inboxInspectionGraphs, setInboxInspectionGraphs] = useState<
+    Record<string, InboxGraph>
+  >({});
+  const [inboxInspectionBusy, setInboxInspectionBusy] = useState(false);
   const receiveInboxGraphs = useCallback(
     (entries: Record<string, InboxGraph>) => {
       const accepted = Object.fromEntries(
@@ -340,6 +344,7 @@ export function App() {
             .sort((a, b) => b.snapshot.fetchedAt - a.snapshot.fetchedAt)[0];
           return (
             confirmed &&
+            inboxInspection.current(connectionId, key, entry) &&
             entry.stamp === inboxStamp(confirmed.snapshot, confirmed.issue) &&
             (!entry.graph || entry.graph.key === key)
           );
@@ -356,6 +361,14 @@ export function App() {
       }));
     },
     [],
+  );
+  const [inboxInspection] = useState(
+    () =>
+      new InboxInspection(window.canopy, (entries, busy) => {
+        setInboxInspectionGraphs(entries);
+        setInboxInspectionBusy(busy);
+        receiveInboxGraphs(entries);
+      }),
   );
   const [relationshipLoading, setRelationshipLoading] = useState<
     Record<string, boolean>
@@ -441,6 +454,7 @@ export function App() {
           setInboxGraphs((current) => ({
             ...current,
             [identity]: {
+              revision: inboxInspection.revision,
               stamp: inboxStamp(confirmed.snapshot, confirmed.issue),
               graph: relationshipGraphsRef.current[identity],
             },
@@ -483,6 +497,7 @@ export function App() {
       changed: Set<string> = new Set(keys),
     ) => {
       if (!keys.length && !changed.size) return;
+      inboxInspection.invalidate(connectionId, keys, changed);
       const affected = new Set(
         keys.map((key) => relationshipIdentity(connectionId, key)),
       );
@@ -3667,7 +3682,9 @@ export function App() {
                 <InboxPanel
                   workspace={workspace}
                   seedGraphs={inboxGraphs}
-                  onGraphs={receiveInboxGraphs}
+                  inspection={inboxInspection}
+                  graphs={inboxInspectionGraphs}
+                  busy={inboxInspectionBusy}
                   connections={connections}
                   sources={savedSources}
                   totalRoots={availableRoots.length}

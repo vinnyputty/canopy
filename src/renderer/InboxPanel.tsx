@@ -22,7 +22,9 @@ import {
 type Props = {
   workspace: Workspace;
   seedGraphs?: Record<string, InboxGraph>;
-  onGraphs?: (entries: Record<string, InboxGraph>) => void;
+  inspection: InboxInspection;
+  graphs: Record<string, InboxGraph>;
+  busy: boolean;
   connections: Connection[];
   sources: ViewSource[];
   totalRoots: number;
@@ -57,17 +59,8 @@ export function InboxPanel(props: Props) {
       ),
     [candidates],
   );
-  const [graphs, setGraphs] = useState<Record<string, InboxGraph>>({});
-  const [busy, setBusy] = useState(false);
+  const { inspection, graphs, busy } = props;
   const [showSnoozed, setShowSnoozed] = useState(false);
-  const [inspection] = useState(
-    () =>
-      new InboxInspection(window.canopy, (graphs, busy) => {
-        setGraphs(graphs);
-        setBusy(busy);
-        props.onGraphs?.(graphs);
-      }),
-  );
   const initialInspection = useRef(false);
   useEffect(() => {
     inspection.reset(candidates, props.seedGraphs);
@@ -199,7 +192,6 @@ export function InboxPanel(props: Props) {
         <button
           onClick={() => {
             inspection.cancel();
-            setBusy(false);
           }}
         >
           Cancel blocker inspection

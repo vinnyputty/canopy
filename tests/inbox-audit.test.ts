@@ -16,6 +16,7 @@ import { InboxPanel } from '../src/renderer/InboxPanel';
 import {
   inboxCandidates,
   inboxItems,
+  InboxInspection,
   type InboxGraph,
 } from '../src/renderer/inbox';
 import { configuredRoots, viewSources } from '../src/renderer/saved-views';
@@ -290,6 +291,9 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
     html = renderToStaticMarkup(
       React.createElement(InboxPanel, {
         workspace,
+        inspection: new InboxInspection({} as CanopyAPI, () => {}),
+        graphs: {},
+        busy: false,
         connections,
         sources,
         totalRoots: sources.length,
