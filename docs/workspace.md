@@ -81,3 +81,5 @@ Navigation history retains its existing limits. Undo history retains up to 100 o
 See [the performance audit](performance.md) for reproducible provider and tree benchmarks and the pending desktop measurements.
 
 Large trees and saved results render the viewport and retain complete logical results. Keyboard navigation materializes offscreen destinations; active focus, editors, menus and rank drags keep their rows mounted. Open editor ancestry remains expanded through collapse until the editor closes. Reading settings and resize update measured row geometry. This presentation does not change provider completeness, filter results, unread baselines or snapshot ownership.
+
+Keyboard navigation materializes and aligns its destination again after newly mounted rows are measured. Rows taller than the viewport show their start; passive scrolling and scope changes release the temporary navigation request while focused editors retain their own row.

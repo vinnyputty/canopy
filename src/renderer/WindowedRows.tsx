@@ -10,6 +10,7 @@ export type RowWindow = {
 export type RowModelElement = HTMLDivElement & {
   logicalRows?: () => readonly string[];
   rowKeys?: () => readonly string[];
+  revealRow?: (key: string) => HTMLElement | null;
 };
 
 export function WindowedRows({
@@ -37,6 +38,14 @@ export function WindowedRows({
   const [viewport, setViewport] = useState({ top: 0, height: 600 });
   const [focused, setFocused] = useState<string | null>(null);
   const [requested, setRequested] = useState<string | null>(null);
+  const alignment = useRef<{
+    id: string;
+    align: 'nearest' | 'center';
+    owner: readonly string[];
+    stable: number;
+    passes: number;
+    scrollTop: number;
+  } | null>(null);
   const windowed = ids.length > 200;
   const index = useMemo(() => new Map(ids.map((id, i) => [id, i])), [ids]);
   const offsets = useMemo(() => {
@@ -96,6 +105,15 @@ export function WindowedRows({
       row?.scrollIntoView({ block: align });
       return row;
     }
+    alignment.current = {
+      id,
+      align,
+      owner: ids,
+      stable: 0,
+      passes: 0,
+      scrollTop: container.scrollTop,
+    };
+    pendingAnchor.current = null;
     const start = origin(container) + offsets[i],
       end = origin(container) + offsets[i + 1];
     let top = container.scrollTop;
@@ -105,6 +123,7 @@ export function WindowedRows({
     else if (end > top + container.clientHeight)
       top = end - container.clientHeight;
     container.scrollTop = Math.max(0, top);
+    alignment.current!.scrollTop = container.scrollTop;
     // Keyboard/edit destinations must exist before their caller focuses them.
     flushSync(() => {
       setRequested(id);
@@ -112,13 +131,67 @@ export function WindowedRows({
     });
     return elements.current.get(id) ?? null;
   };
-  if (api) api.current = { ensure };
+  const navigation = useRef(ensure);
+  navigation.current = ensure;
+  const alignRequested = () => {
+    const request = alignment.current,
+      container = scroller();
+    if (!request || !container || request.owner !== ids) return false;
+    const row = elements.current.get(request.id);
+    if (!row) return false;
+    const rect = row.getBoundingClientRect(),
+      bounds = container.getBoundingClientRect();
+    const top = bounds.top + container.clientTop,
+      bottom = top + container.clientHeight;
+    // A taller-than-viewport row cannot fit: expose its start and preserve the
+    // focused owner rather than promising complete visibility.
+    const delta =
+      rect.height > container.clientHeight
+        ? rect.top - top
+        : request.align === 'center'
+          ? (rect.top + rect.bottom - top - bottom) / 2
+          : rect.top < top
+            ? rect.top - top
+            : rect.bottom > bottom
+              ? rect.bottom - bottom
+              : 0;
+    if (Math.abs(delta) > 1) {
+      container.scrollTop = Math.max(0, container.scrollTop + delta);
+      request.scrollTop = container.scrollTop;
+      request.stable = 0;
+      readViewport();
+      return false;
+    }
+    return rect.bottom > top && rect.top < bottom;
+  };
+  useLayoutEffect(() => {
+    if (alignment.current?.owner !== ids) {
+      alignment.current = null;
+      setRequested(null);
+    }
+  }, [ids]);
+  useLayoutEffect(() => {
+    const owner: RowWindow = {
+      ensure: (id, align) => navigation.current(id, align),
+    };
+    if (api) api.current = owner;
+    return () => {
+      alignment.current = null;
+      pendingAnchor.current = null;
+      if (api?.current === owner) api.current = null;
+    };
+  }, [api]);
   const currentLayout = useRef({ offsets, estimate });
   currentLayout.current = { offsets, estimate };
 
   useLayoutEffect(() => {
     const anchor = pendingAnchor.current,
       container = scroller();
+    if (alignment.current) {
+      pendingAnchor.current = null;
+      alignRequested();
+      return;
+    }
     if (!anchor || !container) return;
     pendingAnchor.current = null;
     const i = index.get(anchor.id);
@@ -133,11 +206,16 @@ export function WindowedRows({
     if (!element) return;
     element.logicalRows = () => ids;
     element.rowKeys = () => rowKeys;
+    element.revealRow = (key) => {
+      const i = rowKeys.indexOf(key);
+      return i < 0 ? null : navigation.current(ids[i], 'center');
+    };
     for (const id of heights.current.keys())
       if (!index.has(id)) heights.current.delete(id);
     return () => {
       delete element.logicalRows;
       delete element.rowKeys;
+      delete element.revealRow;
     };
   }, [ids, index, rowKeys]);
 
@@ -184,7 +262,11 @@ export function WindowedRows({
       if (sample)
         setEstimate((previous) => (previous === sample ? previous : sample));
       if (changed) {
-        if (ids[anchor] && container.scrollTop >= origin(container))
+        if (
+          !alignment.current &&
+          ids[anchor] &&
+          container.scrollTop >= origin(container)
+        )
           pendingAnchor.current = {
             id: ids[anchor],
             inside: relativeTop - old.offsets[anchor],
@@ -192,6 +274,17 @@ export function WindowedRows({
         setRevision((value) => value + 1);
       }
       readViewport();
+      const request = alignment.current;
+      if (request) {
+        const visible = alignRequested();
+        request.stable = !changed && visible ? request.stable + 1 : 0;
+        // One transient owner and finite settlement work. Focus/editor pins are
+        // separate durable interaction ownership; passive scrolling is separate.
+        if (request.stable >= 2 || ++request.passes >= 8) {
+          alignment.current = null;
+          setRequested(null);
+        } else schedule();
+      }
     };
     const schedule = () => {
       if (!frame)
@@ -213,17 +306,35 @@ export function WindowedRows({
         attributes: true,
         attributeFilter: ['style', 'class'],
       });
-    container.addEventListener('scroll', schedule, { passive: true });
+    const cancelAlignment = () => {
+      alignment.current = null;
+      setRequested(null);
+    };
+    const scroll = () => {
+      if (
+        alignment.current &&
+        Math.abs(container.scrollTop - alignment.current.scrollTop) > 1
+      )
+        cancelAlignment();
+      schedule();
+    };
+    container.addEventListener('scroll', scroll, { passive: true });
+    container.addEventListener('wheel', cancelAlignment, { passive: true });
+    container.addEventListener('touchstart', cancelAlignment, {
+      passive: true,
+    });
     document.fonts?.addEventListener('loadingdone', schedule);
     measure();
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
       styles.disconnect();
-      container.removeEventListener('scroll', schedule);
+      container.removeEventListener('scroll', scroll);
+      container.removeEventListener('wheel', cancelAlignment);
+      container.removeEventListener('touchstart', cancelAlignment);
       document.fonts?.removeEventListener('loadingdone', schedule);
     };
-  }, [ids, mounted.join(','), windowed]);
+  }, [ids, mounted.join(','), windowed, requested]);
 
   const children: React.ReactNode[] = [];
   let cursor = 0;

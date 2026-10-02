@@ -108,6 +108,40 @@ for (const [label, source] of [
         )
       )
         throw new Error('Required full-count scenario conditions changed.');
+      const spec = specs[0];
+      for (const [field, count, members] of [
+        ['treeAria', spec.expandedRows, spec.treeMembersSha256],
+        ['filterAria', spec.filterRows, spec.filterMembersSha256],
+        ['collapsedAria', 1, undefined],
+        ['savedAria', spec.savedRows, spec.savedMembersSha256],
+      ]) {
+        const projection = spec[field];
+        if (
+          !Array.isArray(projection) ||
+          projection.length !== count ||
+          projection.some(
+            (r) =>
+              !Array.isArray(r) ||
+              r.length !== 5 ||
+              typeof r[0] !== 'string' ||
+              !(r[1] === null || typeof r[1] === 'string') ||
+              !(field === 'savedAria'
+                ? r[2] === null
+                : Number.isSafeInteger(r[2]) && r[2] > 0) ||
+              !Number.isSafeInteger(r[3]) ||
+              !Number.isSafeInteger(r[4]) ||
+              r[3] < 1 ||
+              r[4] < r[3],
+          ) ||
+          new Set(projection.map((r) => r[0])).size !== count ||
+          (members &&
+            createHash('sha256')
+              .update(JSON.stringify(projection.map((r) => r[0])))
+              .digest('hex') !== members) ||
+          (field === 'collapsedAria' && projection[0][0] !== spec.root)
+        )
+          throw new Error('Required exact accessibility projection changed.');
+      }
     }
 }
 for (const [file, hash] of Object.entries(manifest.harness)) {
@@ -268,13 +302,13 @@ for (const provider of ['jira', 'github'])
         });
         await memory();
       };
-      const logical = async (kind, count, digest) => {
+      const logical = async (kind, count, digest, projection) => {
         let observed;
         await expect
           .poll(
             async () => {
               observed = await renderer(
-                async ({ kind, count, digest }) => {
+                async ({ kind, count, digest, projection, implicit }) => {
                   const members = window.canopyPerfUI.members(kind);
                   const ui = window.canopyPerfUI.counts();
                   const container = document.querySelector(
@@ -303,20 +337,63 @@ for (const provider of ['jira', 'github'])
                   const windowed = Boolean(
                     container?.querySelector('[data-row-window="viewport"]'),
                   );
-                  const positionsValid =
-                    !windowed ||
-                    mounted.every((row) => {
-                      const position = Number(
-                          row.getAttribute('aria-posinset'),
-                        ),
-                        size = Number(row.getAttribute('aria-setsize'));
-                      return (
-                        position > 0 &&
-                        size >= position &&
-                        (kind !== 'tree' ||
-                          Number(row.getAttribute('aria-level')) > 0)
-                      );
-                    });
+                  const expected = new Map(projection.map((r) => [r[0], r]));
+                  const positionsValid = mounted.every((row) => {
+                    const key =
+                      kind === 'tree'
+                        ? row.getAttribute('data-tree-key')
+                        : row.querySelector('strong')?.textContent;
+                    const metadata = expected.get(key);
+                    if (
+                      !metadata ||
+                      row.getAttribute('role') !==
+                        (kind === 'tree' ? 'treeitem' : 'listitem') ||
+                      row.closest('[role="tree"],[role="list"]') !== container
+                    )
+                      return false;
+                    // The unchanged baseline expresses hierarchy through nested
+                    // treeitem/group DOM, and list order through complete DOM.
+                    // Explicit candidate attributes must match exactly.
+                    const group = row.parentElement;
+                    const siblings = [...group.children].filter(
+                      (e) =>
+                        e.getAttribute('role') === row.getAttribute('role'),
+                    );
+                    const ancestors = [];
+                    let parent = row.parentElement;
+                    while (parent && parent !== container) {
+                      if (
+                        parent.getAttribute('role') ===
+                        (kind === 'tree' ? 'treeitem' : 'listitem')
+                      )
+                        ancestors.push(parent);
+                      parent = parent.parentElement;
+                    }
+                    if (!implicit && ancestors.length) return false;
+                    const actualParent = row.hasAttribute('data-tree-parent')
+                      ? row.getAttribute('data-tree-parent')
+                      : implicit
+                        ? (ancestors[0]?.getAttribute('data-tree-key') ?? null)
+                        : null;
+                    const value = (attribute, fallback) =>
+                      row.hasAttribute(attribute)
+                        ? Number(row.getAttribute(attribute))
+                        : implicit
+                          ? fallback
+                          : NaN;
+                    return (
+                      (kind !== 'tree' ||
+                        (actualParent === metadata[1] &&
+                          value('aria-level', ancestors.length + 1) ===
+                            metadata[2] &&
+                          (!implicit ||
+                            metadata[2] === 1 ||
+                            group.getAttribute('role') === 'group'))) &&
+                      value('aria-posinset', siblings.indexOf(row) + 1) ===
+                        metadata[3] &&
+                      value('aria-setsize', siblings.length) === metadata[4]
+                    );
+                  });
                   const spacersValid = [
                     ...(container?.querySelectorAll('[data-window-spacer]') ??
                       []),
@@ -348,7 +425,13 @@ for (const provider of ['jira', 'github'])
                       (!windowed || mounted.length < count),
                   };
                 },
-                { kind, count, digest },
+                {
+                  kind,
+                  count,
+                  digest,
+                  projection,
+                  implicit: sample.label === 'base',
+                },
               );
               return observed.valid;
             },
@@ -360,20 +443,44 @@ for (const provider of ['jira', 'github'])
       };
       const viewport = async (kind) => {
         const moves = [];
-        for (const [name, fraction] of [
-          ['middle', 0.5],
-          ['end', 1],
-          ['top', 0],
-        ]) {
+        for (const name of ['middle', 'end', 'top']) {
+          const target =
+            name === 'middle'
+              ? kind === 'tree'
+                ? spec.treeMiddleKey
+                : spec.savedMiddleKey
+              : name === 'end'
+                ? kind === 'tree'
+                  ? spec.treeLastKey
+                  : spec.savedLastKey
+                : undefined;
           await renderer(
-            ({ kind, fraction }) => {
-              const element = document.querySelector(
+            ({ kind, name, target }) => {
+              const container = document.querySelector(
                 kind === 'tree' ? '.tree-scroll' : '.saved-view-page',
               );
-              element.scrollTop =
-                (element.scrollHeight - element.clientHeight) * fraction;
+              const model = window.canopyPerfUI.members(kind);
+              const key = target ?? model[0];
+              const rowWindow = container.querySelector('[data-row-window]');
+              if (rowWindow?.revealRow) rowWindow.revealRow(key);
+              else {
+                const row = [
+                  ...container.querySelectorAll(
+                    kind === 'tree' ? '[data-tree-key]' : '.saved-view-result',
+                  ),
+                ].find(
+                  (row) =>
+                    (kind === 'tree'
+                      ? row.getAttribute('data-tree-key')
+                      : row.querySelector('strong')?.textContent) === key,
+                );
+                (kind === 'tree'
+                  ? row?.querySelector(':scope > .issue-row')
+                  : row
+                )?.scrollIntoView({ block: 'center' });
+              }
             },
-            { kind, fraction },
+            { kind, name, target },
           );
           await paint();
           let observation;
@@ -381,63 +488,89 @@ for (const provider of ['jira', 'github'])
             .poll(
               async () => {
                 observation = await renderer(
-                  ({ kind, name }) => {
+                  ({ kind, name, target }) => {
                     const container = document.querySelector(
                       kind === 'tree' ? '.tree-scroll' : '.saved-view-page',
                     );
-                    const model = window.canopyPerfUI.members(kind);
-                    const selector =
-                      kind === 'tree'
-                        ? '[data-tree-key]'
-                        : '.saved-view-result';
-                    const rows = [...container.querySelectorAll(selector)];
-                    const visible = rows
-                      .filter((row) => {
-                        const rect = (
-                            kind === 'tree'
-                              ? row.querySelector(':scope > .issue-row')
-                              : row
-                          ).getBoundingClientRect(),
-                          bounds = container.getBoundingClientRect();
-                        return (
-                          rect.bottom > bounds.top && rect.top < bounds.bottom
-                        );
-                      })
-                      .map((row) =>
+                    const model = window.canopyPerfUI.members(kind),
+                      key = target ?? model[0];
+                    const bounds = container.getBoundingClientRect();
+                    const top = bounds.top + container.clientTop,
+                      bottom = top + container.clientHeight;
+                    const positions = new Map(model.map((key, i) => [key, i]));
+                    const rows = [
+                      ...container.querySelectorAll(
+                        kind === 'tree'
+                          ? '[data-tree-key]'
+                          : '.saved-view-result',
+                      ),
+                    ];
+                    const observations = rows.map((row) => {
+                      const rect = (
+                        kind === 'tree'
+                          ? row.querySelector(':scope > .issue-row')
+                          : row
+                      ).getBoundingClientRect();
+                      const key =
                         kind === 'tree'
                           ? row.getAttribute('data-tree-key')
-                          : row.querySelector('strong').textContent,
+                          : row.querySelector('strong')?.textContent;
+                      return {
+                        key,
+                        index: positions.get(key),
+                        top: rect.top,
+                        bottom: rect.bottom,
+                        visible: rect.bottom > top && rect.top < bottom,
+                      };
+                    });
+                    const visible = observations.filter((r) => r.visible);
+                    const ordered = observations.every(
+                      (r, i) =>
+                        Number.isSafeInteger(r.index) &&
+                        (!i ||
+                          (r.index > observations[i - 1].index &&
+                            r.top >= observations[i - 1].bottom - 1)),
+                    );
+                    const covered = visible.every(
+                      (r, i) => !i || r.index === visible[i - 1].index + 1,
+                    );
+                    const rowWindow =
+                      container.querySelector('[data-row-window]');
+                    const gaps = [
+                      ...(rowWindow?.querySelectorAll('[data-window-spacer]') ??
+                        []),
+                    ];
+                    const layout = gaps.every((gap) => {
+                      const rect = gap.getBoundingClientRect();
+                      return (
+                        gap.getAttribute('aria-hidden') === 'true' &&
+                        rect.height > 0 &&
+                        (rect.bottom <= top + 1 || rect.top >= bottom - 1)
                       );
-                    const members = new Set(model);
+                    });
                     return {
                       name,
+                      target: key,
                       logicalCount: model.length,
                       mountedCount: rows.length,
-                      visibleKeys: visible,
+                      visibleKeys: visible.map((r) => r.key),
                       scrollTop: container.scrollTop,
                       scrollHeight: container.scrollHeight,
+                      ordered,
+                      covered,
+                      layout,
                       valid:
-                        visible.length > 0 &&
-                        visible.every((key) => members.has(key)) &&
-                        (name !== 'end' ||
-                          rows.some(
-                            (row) =>
-                              (kind === 'tree'
-                                ? row.getAttribute('data-tree-key')
-                                : row.querySelector('strong').textContent) ===
-                              model.at(-1),
-                          )) &&
-                        (name !== 'top' ||
-                          rows.some(
-                            (row) =>
-                              (kind === 'tree'
-                                ? row.getAttribute('data-tree-key')
-                                : row.querySelector('strong').textContent) ===
-                              model[0],
-                          )),
+                        visible.some((r) => r.key === key) &&
+                        ordered &&
+                        covered &&
+                        layout &&
+                        (name !== 'middle' ||
+                          key === model[Math.floor(model.length / 2)]) &&
+                        (name !== 'end' || key === model.at(-1)) &&
+                        (name !== 'top' || key === model[0]),
                     };
                   },
-                  { kind, name },
+                  { kind, name, target },
                 );
                 return observation.valid;
               },
@@ -510,7 +643,12 @@ for (const provider of ['jira', 'github'])
         await expect(page.getByRole('tree')).toBeVisible();
         sample.firstVisibleTreeWallMs = performance.now() - started;
         await complete([spec]);
-        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
+        await logical(
+          'tree',
+          spec.expandedRows,
+          spec.treeMembersSha256,
+          spec.treeAria,
+        );
         await end('initial-load', started);
         const initial = await renderer(() => ({
           ipc: window.canopyPerfAudit.events(),
@@ -602,11 +740,21 @@ for (const provider of ['jira', 'github'])
         await page
           .getByRole('textbox', { name: 'Find in tree' })
           .fill('region 3');
-        await logical('tree', spec.filterRows, spec.filterMembersSha256);
+        await logical(
+          'tree',
+          spec.filterRows,
+          spec.filterMembersSha256,
+          spec.filterAria,
+        );
         await end('tree-filter', start);
         start = await begin('tree-filter-clear');
         await page.getByRole('textbox', { name: 'Find in tree' }).fill('');
-        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
+        await logical(
+          'tree',
+          spec.expandedRows,
+          spec.treeMembersSha256,
+          spec.treeAria,
+        );
         await end('tree-filter-clear', start);
         start = await begin('tree-scroll');
         sample.scroll = await renderer(async () => {
@@ -643,11 +791,17 @@ for (const provider of ['jira', 'github'])
           createHash('sha256')
             .update(JSON.stringify([spec.root]))
             .digest('hex'),
+          spec.collapsedAria,
         );
         await end('tree-collapse', start);
         start = await begin('tree-expand');
         await page.getByRole('button', { name: 'Expand', exact: true }).click();
-        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
+        await logical(
+          'tree',
+          spec.expandedRows,
+          spec.treeMembersSha256,
+          spec.treeAria,
+        );
         await end('tree-expand', start);
         const row = page.locator('[data-tree-key]').first();
         await row.focus();
@@ -718,7 +872,12 @@ for (const provider of ['jira', 'github'])
             'Viewport keyboard target was already mounted; offscreen control did not execute',
           );
         sample.viewportKeyboard = neighbor;
-        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
+        await logical(
+          'tree',
+          spec.expandedRows,
+          spec.treeMembersSha256,
+          spec.treeAria,
+        );
         sample.keyboardFocusedKey = await renderer(() =>
           document.activeElement
             ?.closest('[data-tree-key]')
@@ -729,9 +888,19 @@ for (const provider of ['jira', 'github'])
           .getByRole('button', { name: 'Saved view: Large roots', exact: true })
           .click();
         await complete(roots);
-        await logical('saved', spec.savedRows, spec.savedMembersSha256);
+        await logical(
+          'saved',
+          spec.savedRows,
+          spec.savedMembersSha256,
+          spec.savedAria,
+        );
         sample.savedViewports = await viewport('saved');
-        await logical('saved', spec.savedRows, spec.savedMembersSha256);
+        await logical(
+          'saved',
+          spec.savedRows,
+          spec.savedMembersSha256,
+          spec.savedAria,
+        );
         await end('saved-view-load', start);
         const cursor = await renderer(
           () => window.canopyPerfAudit.events().events.length,
@@ -772,7 +941,12 @@ for (const provider of ['jira', 'github'])
           .toBe(true);
         sample.manualGeneration = manualGeneration;
         await complete(roots, cursor, manualGeneration);
-        await logical('saved', spec.savedRows, spec.savedMembersSha256);
+        await logical(
+          'saved',
+          spec.savedRows,
+          spec.savedMembersSha256,
+          spec.savedAria,
+        );
         await end('saved-view-refresh', start);
         sample.afterManualCompletion = await renderer(() => ({
           activeIPC: window.canopyPerfAudit.events().active,
