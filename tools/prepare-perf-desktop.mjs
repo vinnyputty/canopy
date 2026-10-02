@@ -146,16 +146,28 @@ for (const [label, source] of [
           const snapshot = await fixture.provider.tree(fixture.rootKey);
           if (snapshot.incomplete || snapshot.issues.length !== size) throw new Error('Incomplete expected fixture');
           const tree = buildIssueTree(snapshot.issues, fixture.rootKey), expanded = new Set(snapshot.issues.map(i => i.key));
-          const keys = (query, expand) => { const filtered = filterTree(tree, query, {}, true); return filtered ? flattenVisible(filtered, expand).map(n => n.issue.key) : []; };
+          const projection = (query, expand) => {
+            const filtered = filterTree(tree, query, {}, true), rows = [];
+            const pending = filtered ? [{node:filtered,level:1,position:1,size:1}] : [];
+            while(pending.length) {
+              const {node,level,position,size} = pending.pop();
+              rows.push([node.issue.key,node.issue.parentKey ?? null,level,position,size]);
+              if(expand.has(node.issue.key)) for(let i=node.children.length-1;i>=0;i--) pending.push({node:node.children[i],level:level+1,position:i+1,size:node.children.length});
+            }
+            const flat = filtered ? flattenVisible(filtered, expand).map(n => n.issue.key) : [];
+            if(JSON.stringify(flat)!==JSON.stringify(rows.map(r=>r[0]))) throw new Error('Projection traversal differs from production flattening');
+            return rows;
+          };
+          const keys = (query, expand) => projection(query, expand).map(r=>r[0]);
           const count = (query, expand) => keys(query, expand).length;
           const digest = (values) => createHash('sha256').update(JSON.stringify(values)).digest('hex');
           const full = keys('', expanded), filtered = keys('region 3', expanded);
           sources.push({ id: shape, connectionId: 'fixture', rootKey: fixture.rootKey }); snapshots[shape] = snapshot;
-          results.push({ provider, shape, root: fixture.rootKey, issues: size, expandedRows: count('', expanded), collapsedRows: count('', new Set([fixture.rootKey])), filterRows: count('region 3', expanded), keyboardNextKey: full[1], treeMembersSha256: digest(full), filterMembersSha256: digest(filtered), treeMiddleKey: full[Math.floor(full.length/2)], treeLastKey: full.at(-1) });
+          results.push({ provider, shape, root: fixture.rootKey, issues: size, expandedRows: count('', expanded), collapsedRows: count('', new Set([fixture.rootKey])), filterRows: count('region 3', expanded), keyboardNextKey: full[1], treeMembersSha256: digest(full), filterMembersSha256: digest(filtered), treeMiddleKey: full[Math.floor(full.length/2)], treeLastKey: full.at(-1), treeAria: projection('', expanded), filterAria: projection('region 3', expanded), collapsedAria: projection('', new Set()) });
         }
         const saved = viewResults({filters:{assignee:'any',statuses:[],priority:'',hideDone:true},sort:{column:'key',direction:'asc'}}, sources, snapshots, {}).map(r => r.issue.key);
         const savedMembersSha256 = createHash('sha256').update(JSON.stringify(saved)).digest('hex');
-        results.filter(r => r.provider === provider).forEach(r => Object.assign(r, {savedRows:saved.length, savedMembersSha256, savedMiddleKey:saved[Math.floor(saved.length/2)], savedLastKey:saved.at(-1)}));
+        results.filter(r => r.provider === provider).forEach(r => Object.assign(r, {savedRows:saved.length, savedMembersSha256, savedMiddleKey:saved[Math.floor(saved.length/2)], savedLastKey:saved.at(-1), savedAria:saved.map((key,i)=>[key,null,null,i+1,saved.length])}));
       }
       return results;
     }`,

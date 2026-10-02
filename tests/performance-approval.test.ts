@@ -95,9 +95,37 @@ function fixture() {
       treeLastKey: 'last',
       savedMiddleKey: 'middle',
       savedLastKey: 'last',
-      treeMembersSha256: 'a'.repeat(64),
-      filterMembersSha256: 'b'.repeat(64),
-      savedMembersSha256: 'c'.repeat(64),
+      treeMembersSha256: hash(
+        JSON.stringify(Array.from({ length: 90 }, (_, i) => String(i))),
+      ),
+      filterMembersSha256: hash(
+        JSON.stringify(Array.from({ length: 20 }, (_, i) => String(i))),
+      ),
+      savedMembersSha256: hash(
+        JSON.stringify(Array.from({ length: 270 }, (_, i) => String(i))),
+      ),
+      treeAria: Array.from({ length: 90 }, (_, i) => [
+        String(i),
+        null,
+        1,
+        i + 1,
+        90,
+      ]),
+      filterAria: Array.from({ length: 20 }, (_, i) => [
+        String(i),
+        null,
+        1,
+        i + 1,
+        20,
+      ]),
+      collapsedAria: [[`${provider}/${shape}`, null, 1, 1, 1]],
+      savedAria: Array.from({ length: 270 }, (_, i) => [
+        String(i),
+        null,
+        null,
+        i + 1,
+        270,
+      ]),
       issues: 100,
       expandedRows: 90,
       collapsedRows: 1,
@@ -258,6 +286,36 @@ test('actual launcher verifies approved harness and prepared bundle bytes before
       await assert.rejects(
         state.execute(),
         /Approved harness changed|Prepared bundle changed/,
+      );
+      assert.equal(state.runtimeImports(), 0);
+    } finally {
+      state.cleanup();
+    }
+  }
+});
+
+test('actual launcher binds exact accessibility projections to the approved manifest and refuses malformed or mismatched metadata before runtime', async () => {
+  for (const fault of [
+    'approved-bytes',
+    'missing',
+    'wrong-members',
+    'invalid-position',
+  ]) {
+    const state = fixture();
+    try {
+      if (fault === 'approved-bytes') {
+        state.manifest.scenarios[0].counts[0].treeAria[0][2] = 999;
+        writeFileSync(state.path, JSON.stringify(state.manifest));
+      } else {
+        const spec = state.manifest.scenarios[0].counts[0];
+        if (fault === 'missing') spec.treeAria = [];
+        if (fault === 'wrong-members') spec.treeAria[0][0] = 'foreign';
+        if (fault === 'invalid-position') spec.savedAria[0][3] = 999;
+        state.save();
+      }
+      await assert.rejects(
+        state.execute(),
+        /manifest changed|accessibility projection changed/,
       );
       assert.equal(state.runtimeImports(), 0);
     } finally {

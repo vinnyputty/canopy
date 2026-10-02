@@ -18,6 +18,7 @@ import {
   treeCounts,
   filterTree,
   visibleRows,
+  flattenVisible,
 } from '../src/renderer/tree';
 import { readingStyle } from '../src/renderer/table-view';
 import { viewResults } from '../src/renderer/saved-views';
@@ -652,4 +653,176 @@ test('actual App editor prop and effective expansion preserve the owning alias a
     ancestorPath,
   });
   assert.ok(expandedSet.has('R-0'));
+});
+
+test('explicit offscreen alignment settles actual tall neighborhoods, supersedes requests and releases transient owners', async () => {
+  for (const heights of [
+    [491, 500, 120],
+    [500, 500, 120],
+    [500, 500, 600],
+  ]) {
+    const state = await dom();
+    const api = { current: null as RowWindow | null };
+    try {
+      const ids = Array.from({ length: 1000 }, (_, i) => `v${i}`);
+      for (let i = heights[0]; i <= heights[1]; i++)
+        state.custom.set(`v${i}`, heights[2]);
+      const render = (members: readonly string[], key = 'scope') =>
+        React.createElement(WindowedRows, {
+          key,
+          ids: members,
+          api,
+          scrollSelector: '.tree-scroll',
+          renderRow: (i) => React.createElement('button', null, members[i]),
+        });
+      await state.render(
+        React.createElement(React.StrictMode, null, render(ids)),
+      );
+      await act(async () =>
+        api
+          .current!.ensure('v500')!
+          .querySelector('button')!
+          .focus({ preventScroll: true }),
+      );
+      await state.flush();
+      const row = state.host.querySelector<HTMLElement>(
+        '[data-window-row="v500"]',
+      )!;
+      const rect = row.getBoundingClientRect();
+      assert.equal(state.window.document.activeElement?.textContent, 'v500');
+      assert.ok(
+        rect.top >= -1 && rect.top < state.host.clientHeight,
+        'actual target starts in viewport',
+      );
+      if (rect.height <= state.host.clientHeight)
+        assert.ok(
+          rect.bottom <= state.host.clientHeight + 1,
+          'entire fitting target visible',
+        );
+      else
+        assert.ok(
+          Math.abs(rect.top) <= 1 && rect.bottom > state.host.clientHeight,
+          'oversized target exposes its start honestly',
+        );
+      await act(async () => api.current!.ensure('v500'));
+      await state.flush();
+      await act(async () => {
+        api.current!.ensure('v700');
+        api.current!.ensure('v900');
+        state.window.document.activeElement?.blur();
+      });
+      await state.flush();
+      assert.ok(
+        state.host
+          .querySelector('[data-window-row="v900"]')!
+          .getBoundingClientRect().top < state.host.clientHeight,
+      );
+      await act(async () => api.current!.ensure('v900'));
+      await state.flush();
+      await state.scroll(0);
+      assert.ok(
+        !state.host.querySelector('[data-window-row="v900"]'),
+        'satisfied un-focused destination releases its transient owner',
+      );
+      await act(async () => api.current!.ensure('v800'));
+      await state.render(
+        React.createElement(React.StrictMode, null, render(ids.slice(0, 400))),
+      );
+      assert.ok(
+        !state.host.querySelector('[data-window-row="v800"]'),
+        'filter removes obsolete request',
+      );
+      assert.equal(api.current!.ensure('v800'), null);
+      await state.render(
+        React.createElement(React.StrictMode, null, render(ids, 'other-scope')),
+      );
+      await state.scroll(0);
+      assert.ok(
+        !state.host.querySelector('[data-window-row="v800"]'),
+        'new owner has no old requested pin',
+      );
+    } finally {
+      await state.cleanup();
+      assert.equal(api.current, null, 'teardown releases navigation owner');
+    }
+  }
+});
+
+test('exact preparer hierarchy projections match real filtered, ranked, subtree and show-Done row markup', async () => {
+  const state = await dom();
+  try {
+    const text = readFileSync(
+      new URL('../tools/prepare-perf-desktop.mjs', import.meta.url),
+      'utf8',
+    );
+    const start =
+      text.indexOf('const projection = ') + 'const projection = '.length;
+    const end = text.indexOf(';\n          const keys', start);
+    assert.ok(start > 0 && end > start);
+    const issues = [
+      issue(0),
+      issue(1),
+      issue(2),
+      issue(3, 'R-1'),
+      {
+        ...issue(4, 'R-1'),
+        status: { id: 'done', name: 'Done', category: 'done' as const },
+      },
+      issue(5, 'R-2'),
+    ];
+    const full = buildIssueTree(issues, 'R-0')!;
+    // Ranking is reflected in actual child order, independent of issue keys.
+    full.children.reverse();
+    full.children.find((n) => n.issue.key === 'R-1')!.children.reverse();
+    const expanded = new Set(issues.map((i) => i.key));
+    for (const [tree, query, hideDone] of [
+      [full, '', true],
+      [full, 'Region 3', true],
+      [full, '', false],
+      [full.children.find((n) => n.issue.key === 'R-1')!, '', false],
+    ] as const) {
+      const project = new Function(
+        'filterTree',
+        'flattenVisible',
+        'tree',
+        `return (${text.slice(start, end)});`,
+      )(
+        // Exercise the identical production projection with real show-Done
+        // settings; the shipped native fixture itself deliberately hides Done.
+        (node: typeof full, q: string, filters: unknown) =>
+          filterTree(node, q, filters as {}, hideDone),
+        flattenVisible,
+        tree,
+      ) as (query: string, expanded: Set<string>) => unknown[][];
+      const expected = project(query, expanded);
+      const node = filterTree(tree, query, {}, hideDone)!;
+      const props = { ...treeProps(issues), node, expanded };
+      await state.render(React.createElement(TreeRows, props));
+      assert.deepEqual(
+        model(state.host),
+        expected.map((r) => r[0]),
+      );
+      const rows = [
+        ...state.host.querySelectorAll<HTMLElement>('[data-tree-key]'),
+      ];
+      assert.equal(rows.length, expected.length);
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i],
+          data = expected[i];
+        assert.equal(row.getAttribute('role'), 'treeitem');
+        assert.deepEqual(
+          [
+            row.dataset.treeKey,
+            row.dataset.treeParent ?? null,
+            Number(row.getAttribute('aria-level')),
+            Number(row.getAttribute('aria-posinset')),
+            Number(row.getAttribute('aria-setsize')),
+          ],
+          data,
+        );
+      }
+    }
+  } finally {
+    await state.cleanup();
+  }
 });
