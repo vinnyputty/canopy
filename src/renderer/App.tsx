@@ -1768,7 +1768,7 @@ export function App() {
           deferredRefreshes.current.has(tab.id) ||
           activeRecovery
         )
-          void refreshTab(tab, true);
+          void refreshTab(tab, true, activeRecovery);
       }
     };
     const timer = window.setInterval(tick, 1000);
