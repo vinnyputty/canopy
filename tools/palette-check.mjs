@@ -1,3 +1,4 @@
+import { AuditOwner, deadline, finishAudit } from './audit-lifecycle.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { createRequire } from 'node:module';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
@@ -23,6 +24,10 @@ const directory = await mkdtemp(join(tmpdir(), 'canopy-palette-85-'));
 const evidence =
   process.env.CANOPY_PALETTE_EVIDENCE ??
   join(tmpdir(), 'canopy-issue-85-palette-evidence');
+const owner = new AuditOwner({
+  profile: directory,
+  executable: executablePath,
+});
 const log = [];
 const record = (message) => {
   log.push(message);
@@ -33,14 +38,18 @@ let page;
 let failure;
 const errors = [];
 const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
-try {
+async function audit() {
   const env = { ...process.env, CANOPY_USER_DATA: directory };
   delete env.ELECTRON_RUN_AS_NODE;
-  app = await electron.launch({
-    executablePath,
-    args: [join(root, 'dist/smoke-main.cjs')],
-    env,
-  });
+  app = await owner.launch(() =>
+    electron.launch({
+      executablePath,
+      args: [join(root, 'dist/smoke-main.cjs')],
+      env,
+      timeout: 30000,
+    }),
+  );
+  owner.confirm(app.process());
   page = await app.firstWindow();
   page.on('pageerror', (error) => errors.push(error.message));
   await expect(page.getByText('Opening Canopy…')).toBeHidden();
@@ -92,7 +101,10 @@ try {
       ipcMain.handle(channel, (_event, ...args) => handler(...args));
     };
     replace('connections', () => connections);
-    replace('currentUser', () => ({ id: 'fixture-user', name: 'Sample user' }));
+    replace('currentUser', () => ({
+      id: 'fixture-user',
+      name: 'Sample user',
+    }));
     replace('syncStatus', () => ({ retryAt: null }));
     replace('tree', (connectionId, rootKey) => {
       state.treeCalls.push([connectionId, rootKey]);
@@ -542,48 +554,58 @@ try {
   );
   await mkdir(evidence, { recursive: true });
   await open('DUP-1');
-  await page.screenshot({ path: join(evidence, 'duplicate-connections.png') });
+  await page.screenshot({
+    path: join(evidence, 'duplicate-connections.png'),
+  });
   await page.keyboard.press('Escape');
+}
+try {
+  await deadline(audit, 180000, 'Palette audit');
 } catch (error) {
   failure = error;
   record(`FAIL ${error.stack ?? error}`);
-  await mkdir(evidence, { recursive: true });
-  if (page && !page.isClosed()) {
-    await page
-      .screenshot({ path: join(evidence, 'failure.png') })
-      .catch(() => {});
-    await writeFile(
-      join(evidence, 'failure-dom.txt'),
-      await page
-        .locator('body')
-        .innerText()
-        .catch(() => 'unavailable'),
-    );
-  }
 } finally {
-  if (app) {
-    const child = app.process();
-    let timer;
-    try {
-      await Promise.race([
-        app.close(),
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error('Electron close timeout')),
-            10000,
-          );
-        }),
-      ]);
-    } catch (error) {
-      if (child.exitCode === null) child.kill('SIGKILL');
-      record(`Cleanup fallback: ${error.message}`);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  await rm(directory, { recursive: true, force: true });
-  record(`CLEANUP owned sample profile removed: ${directory}`);
-  await mkdir(evidence, { recursive: true });
-  await writeFile(join(evidence, 'checks.log'), log.join('\n') + '\n');
+  await finishAudit({
+    owner,
+    close: app ? () => app.close() : undefined,
+    primary: failure,
+    diagnostics:
+      failure && page && !page.isClosed()
+        ? [
+            {
+              label: 'Failure screenshot',
+              run: async () => {
+                await mkdir(evidence, { recursive: true });
+                await page.screenshot({
+                  path: join(evidence, 'failure.png'),
+                  timeout: 3000,
+                });
+              },
+            },
+            {
+              label: 'Failure DOM',
+              run: async () => {
+                await mkdir(evidence, { recursive: true });
+                const content = await deadline(
+                  () => page.locator('body').innerText({ timeout: 3000 }),
+                  3000,
+                  'Failure DOM read',
+                );
+                await writeFile(join(evidence, 'failure-dom.txt'), content);
+              },
+            },
+          ]
+        : [],
+    removeProfile: async () => {
+      await rm(directory, { recursive: true, force: true });
+      record(
+        `CLEANUP verified owned scope terminated; sample profile removed: ${directory}`,
+      );
+    },
+    writeEvidence: async () => {
+      await mkdir(evidence, { recursive: true });
+      await writeFile(join(evidence, 'checks.log'), log.join('\n') + '\n');
+    },
+    secondary: (error) => record(`SECONDARY ${error.stack ?? error}`),
+  });
 }
-if (failure) throw failure;
