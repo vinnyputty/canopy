@@ -7025,7 +7025,12 @@ function Dialog({
     <div
       className="dialog-backdrop"
       role="presentation"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
     >
       <div
         ref={panelRef}
