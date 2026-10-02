@@ -227,6 +227,12 @@ function parseIssue(raw: JiraIssue): Issue {
         .filter(
           (field) =>
             !(field in fields) ||
+            (field === 'parent' &&
+              fields.parent !== null &&
+              !(
+                typeof fields.parent?.key === 'string' &&
+                ISSUE_KEY.test(fields.parent.key)
+              )) ||
             (field === 'status' &&
               !['new', 'indeterminate', 'done'].includes(statusCategory)) ||
             ((field === 'issuetype' || field === 'status') &&
@@ -617,13 +623,18 @@ export class JiraProvider {
       }
     }
     const parent = graph.groups.find((group) => group.kind === 'parent')!;
-    // An omitted parent field is ambiguous: it cannot establish a complete hierarchy.
-    parent.state = 'parent' in raw.fields ? 'visible' : 'unavailable';
+    // Only explicit null or a usable parent identity establishes a complete result.
+    parent.state =
+      raw.fields.parent === null ||
+      (typeof raw.fields.parent?.key === 'string' &&
+        ISSUE_KEY.test(raw.fields.parent.key))
+        ? 'visible'
+        : 'unavailable';
     parent.reason =
       parent.state === 'unavailable'
-        ? 'Jira did not return parent data; the parent path is unknown.'
+        ? 'Jira did not return a complete parent identity; the parent path is unknown.'
         : undefined;
-    if (issue.parentKey)
+    if (parent.state === 'visible' && issue.parentKey)
       parent.items = [
         {
           key: issue.parentKey,

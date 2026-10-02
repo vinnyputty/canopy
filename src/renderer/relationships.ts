@@ -17,6 +17,8 @@ export function relationshipBlockers(
   );
   const incoming = group?.items ?? [];
   const status = (key: string, fallback?: Issue['status']['category']) => {
+    // A fresh graph is authoritative even when its target status is missing.
+    if (graph) return fallback;
     const target = known.get(key);
     return (
       fallback ??

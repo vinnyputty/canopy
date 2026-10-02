@@ -1,0 +1,350 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { JiraProvider } from '../src/main/jira';
+import { GithubProvider } from '../src/main/github';
+import { relationshipBlockers } from '../src/renderer/relationships';
+import { issueWorkBrief } from '../src/renderer/copy-issue';
+import type { Issue, IssueRelationships } from '../src/shared/types';
+
+const issue = (
+  key: string,
+  category: Issue['status']['category'] = 'new',
+): Issue => ({
+  id: key,
+  key,
+  summary: key,
+  type: 'Task',
+  priority: null,
+  assignee: null,
+  status: { id: category, name: category, category },
+  links: [],
+});
+const jira = (fields: Record<string, unknown>) =>
+  new JiraProvider(async (path) =>
+    path.includes('/issue/')
+      ? { key: 'A-1', fields }
+      : { isLast: true, issues: [] },
+  );
+const depends = {
+  name: 'Depends',
+  outward: 'depends on',
+  inward: 'is depended on by',
+};
+
+test('documented Jira Depends end directions populate blockers and blocked issues', async () => {
+  const graph = await jira({
+    parent: null,
+    issuelinks: [
+      {
+        type: depends,
+        outwardIssue: {
+          key: 'B-2',
+          fields: {
+            summary: 'Required work',
+            status: { statusCategory: { key: 'new' } },
+          },
+        },
+      },
+      {
+        type: depends,
+        inwardIssue: {
+          key: 'B-3',
+          fields: {
+            summary: 'Waiting work',
+            status: { statusCategory: { key: 'done' } },
+          },
+        },
+      },
+    ],
+  }).relationships('A-1');
+  assert.deepEqual(
+    graph.groups[0].items.map((link) => [
+      link.key,
+      link.relationship,
+      link.direction,
+    ]),
+    [['B-2', 'depends on', 'outward']],
+  );
+  assert.deepEqual(
+    graph.groups[1].items.map((link) => [
+      link.key,
+      link.relationship,
+      link.direction,
+    ]),
+    [['B-3', 'is depended on by', 'inward']],
+  );
+  assert.equal(relationshipBlockers(issue('A-1'), graph).blocker, 'blocked');
+  assert.equal(graph.groups[2].items.length, 0);
+});
+
+test('uninterpreted Jira custom relationships keep dependency state unknown and preserve wording', async () => {
+  const graph = await jira({
+    parent: null,
+    issuelinks: [
+      {
+        type: {
+          name: 'Custom dependency',
+          outward: 'requires approval from',
+          inward: 'is required for',
+        },
+        outwardIssue: {
+          key: 'B-2',
+          fields: {
+            summary: 'Possible dependency',
+            status: { statusCategory: { key: 'done' } },
+          },
+        },
+      },
+    ],
+  }).relationships('A-1');
+  const state = relationshipBlockers(issue('A-1'), graph);
+  assert.equal(state.blocker, 'unknown');
+  assert.equal(state.incomplete, true);
+  assert.equal(graph.groups[0].state, 'partial');
+  assert.equal(graph.groups[2].items[0].relationship, 'requires approval from');
+  assert.equal(graph.groups[2].items[0].direction, 'outward');
+});
+
+test('fresh missing GitHub blocker status cannot inherit stale completed tree status', async () => {
+  const provider = new GithubProvider(
+    {
+      id: 'gh',
+      provider: 'github',
+      name: 'Mock',
+      url: 'https://github.com',
+      repositories: ['team/a'],
+    },
+    async (path, init) => {
+      if (path.includes('blocked_by'))
+        return [
+          {
+            html_url: 'https://github.com/team/a/issues/2',
+            title: 'Required work',
+          },
+        ];
+      if (path === '/graphql')
+        return {
+          data: {
+            repository: {
+              issue: JSON.parse(String(init?.body)).query.includes('relatesTo')
+                ? {
+                    relatesTo: {
+                      nodes: [],
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                    },
+                  }
+                : { parent: null },
+            },
+          },
+        };
+      return [];
+    },
+  );
+  const graph = await provider.relationships('team/a#1');
+  const state = relationshipBlockers(
+    issue('team/a#1'),
+    graph,
+    new Map([['team/a#2', issue('team/a#2', 'done')]]),
+  );
+  assert.equal(state.blocker, 'unknown');
+  assert.equal(state.incomplete, true);
+  assert.equal(state.blockerDetails[0].key, 'team/a#2');
+  assert.equal(state.blockerDetails[0].statusCategory, undefined);
+  // Snapshot-only Jira links may still use another row in the same tree.
+  assert.equal(
+    relationshipBlockers(
+      {
+        ...issue('A-1'),
+        linksAvailable: true,
+        links: [
+          { key: 'A-2', summary: 'Blocker', relationship: 'is blocked by' },
+        ],
+      },
+      undefined,
+      new Map([['A-2', issue('A-2')]]),
+    ).blocker,
+    'blocked',
+  );
+});
+
+test('incomplete Jira parent object is unavailable while explicit null is visibly empty', async () => {
+  for (const parent of [{ id: '10001' }, {}, { key: '' }, undefined]) {
+    const graph = await jira({ parent, issuelinks: [] }).relationships('A-1');
+    const group = graph.groups.find((value) => value.kind === 'parent')!;
+    assert.equal(group.state, 'unavailable');
+    assert.match(group.reason!, /unknown/i);
+    assert.equal(group.items.length, 0);
+  }
+  const absent = (
+    await jira({ parent: null, issuelinks: [] }).relationships('A-1')
+  ).groups.find((value) => value.kind === 'parent')!;
+  assert.equal(absent.state, 'visible');
+  assert.equal(absent.items.length, 0);
+  const known = (
+    await jira({
+      parent: { id: '10001', key: 'P-1' },
+      issuelinks: [],
+    }).relationships('A-1')
+  ).groups.find((value) => value.kind === 'parent')!;
+  assert.equal(known.state, 'visible');
+  assert.equal(known.items[0].key, 'P-1');
+});
+
+test('lazy GitHub preview exports uninspected dependencies honestly', async () => {
+  const preview = await new GithubProvider(
+    {
+      id: 'gh',
+      provider: 'github',
+      name: 'Mock',
+      url: 'https://github.com',
+      repositories: ['team/a'],
+    },
+    async (path) =>
+      path.includes('/comments')
+        ? []
+        : {
+            html_url: 'https://github.com/team/a/issues/1',
+            title: 'Task',
+            state: 'open',
+            comments: 0,
+            labels: [],
+          },
+  ).preview('team/a#1');
+  const brief = issueWorkBrief({
+    preview,
+    provider: 'github',
+    sourceUrl: 'https://github.com/team/a/issues/1',
+    knownIssues: [],
+  });
+  assert.doesNotMatch(brief, /## Dependency links\n\nNone/);
+  assert.match(brief, /Uninspected/);
+});
+
+// The fourth finding also requires typed results to reach the export consumer.
+test('work brief retains inspected typed direction and partial/access states without private error details', () => {
+  const relationships: IssueRelationships = {
+    key: 'team/a#1',
+    groups: [
+      {
+        kind: 'blockers',
+        state: 'partial',
+        reason: 'secret private transport',
+        items: [
+          {
+            key: 'team/b#2',
+            summary: 'Required work',
+            relationship: 'blocked by',
+            direction: 'inward',
+            access: 'outside-connection',
+            crossRepository: true,
+          },
+        ],
+      },
+      { kind: 'related', state: 'visible', items: [] },
+      {
+        kind: 'parent',
+        state: 'unavailable',
+        reason: 'secret private parent',
+        items: [],
+      },
+    ],
+  };
+  const brief = issueWorkBrief({
+    preview: {
+      issue: issue('team/a#1'),
+      description: '',
+      comments: [],
+      totalComments: 0,
+    },
+    provider: 'github',
+    knownIssues: [],
+    relationships,
+  });
+  assert.match(brief, /Required work/);
+  assert.match(brief, /Incoming/);
+  assert.match(brief, /Status unknown/);
+  assert.match(brief, /Cross-repository/);
+  assert.match(brief, /Outside selected repositories/);
+  assert.match(brief, /Partial/);
+  assert.match(brief, /- Parent path: Unknown/);
+  assert.match(brief, /No visible related links returned/);
+  assert.doesNotMatch(brief, /secret|private transport|private parent/);
+});
+
+test('snapshot-only Depends and custom links have the same blocker semantics', async () => {
+  const payloads = [
+    {
+      type: depends,
+      outwardIssue: {
+        key: 'B-2',
+        fields: {
+          summary: 'Required',
+          status: { statusCategory: { key: 'new' } },
+        },
+      },
+    },
+    {
+      type: { outward: 'needs a decision from', inward: 'decides for' },
+      inwardIssue: { key: 'B-3' },
+    },
+  ];
+  const preview = await jira({
+    issuelinks: payloads,
+    parent: { id: '10001' },
+  }).preview('A-1');
+  const state = relationshipBlockers(preview.issue);
+  assert.equal(state.blocker, 'blocked');
+  assert.equal(state.incomplete, true);
+  assert.deepEqual(state.blockers, ['B-2']);
+  assert.ok(preview.issue.unavailableFields?.includes('parent'));
+  assert.match(
+    issueWorkBrief({ preview, provider: 'jira', knownIssues: [] }),
+    /- Parent path: Unknown/,
+  );
+  const uncertain = await jira({
+    issuelinks: [payloads[1]],
+    parent: null,
+  }).preview('A-1');
+  assert.equal(relationshipBlockers(uncertain.issue).blocker, 'unknown');
+});
+
+test('a visible typed empty graph exports visible results rather than unknown or global absence', () => {
+  const relationships: IssueRelationships = {
+    key: 'team/a#1',
+    groups: ['blockers', 'blocked', 'related', 'parent', 'children'].map(
+      (kind) => ({
+        kind: kind as IssueRelationships['groups'][number]['kind'],
+        state: 'visible',
+        items: [],
+      }),
+    ),
+  };
+  const brief = issueWorkBrief({
+    preview: {
+      issue: issue('team/a#1'),
+      description: '',
+      comments: [],
+      totalComments: 0,
+    },
+    provider: 'github',
+    knownIssues: [],
+    relationships,
+  });
+  assert.match(brief, /No visible blockers returned/);
+  assert.match(brief, /No visible parent returned/);
+  assert.match(brief, /inaccessible issues may be omitted/);
+  assert.doesNotMatch(brief, /Uninspected|Dependency links\n\nNone/);
+  const otherIssue = issueWorkBrief({
+    preview: {
+      issue: issue('team/a#99'),
+      description: '',
+      comments: [],
+      totalComments: 0,
+    },
+    provider: 'github',
+    knownIssues: [],
+    relationships,
+  });
+  assert.match(otherIssue, /Uninspected/);
+  assert.doesNotMatch(otherIssue, /No visible blockers returned/);
+});

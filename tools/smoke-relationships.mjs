@@ -38,6 +38,7 @@ export async function auditRelationships(app, page) {
         issue('team/a#12', 'team/a#10'),
       ],
       'team/b#5': [issue('team/b#5')],
+      'A-1': [issue('A-1')],
     };
     const controls = {
       calls: [],
@@ -45,24 +46,28 @@ export async function auditRelationships(app, page) {
       saved: null,
       cancelled: [],
       release: null,
+      completed: 0,
+      treeReads: 0,
     };
     globalThis.relationshipAudit = controls;
     const handlers = {
       connections: () =>
-        ['work', 'other'].map((id) => ({
+        ['work', 'other', 'jira'].map((id) => ({
           id,
           name: `${id} account`,
-          provider: 'github',
-          url: 'https://github.com',
+          provider: id === 'jira' ? 'jira' : 'github',
+          url: id === 'jira' ? 'https://sample.invalid' : 'https://github.com',
           repositories: ['team/a', 'team/b'],
         })),
       currentUser: () => null,
+      syncStatus: () => ({ retryAt: null }),
       priorityOrder: () => [],
       loadWorkspace: () => ({
         tabs: [
           tab('source', 'work', 'team/a#1'),
           tab('wrong', 'other', 'team/a#10'),
           tab('owner', 'work', 'team/a#10'),
+          tab('jira', 'jira', 'A-1'),
         ],
         activeTabId: 'source',
         shortcuts: {},
@@ -72,12 +77,19 @@ export async function auditRelationships(app, page) {
       saveWorkspace: (_event, value) => {
         controls.saved = value;
       },
-      tree: (_event, _connection, key) => ({
-        rootKey: key,
-        issues: trees[key],
-        fetchedAt: Date.now(),
-        warnings: [],
-      }),
+      tree: (_event, _connection, key) => {
+        controls.treeReads++;
+        return {
+          rootKey: key,
+          issues: trees[key],
+          fetchedAt: Date.now() + controls.treeReads,
+          warnings: [],
+        };
+      },
+      issueUrl: (_event, connection, key) =>
+        connection === 'jira'
+          ? `https://sample.invalid/browse/${key}`
+          : `https://github.com/${key.replace('#', '/issues/')}`,
       preview: (_event, _connection, key) => ({
         issue:
           Object.values(trees)
@@ -89,7 +101,8 @@ export async function auditRelationships(app, page) {
       }),
       relationships: async (_event, connection, key, requestId) => {
         controls.calls.push({ connection, key, requestId });
-        if (controls.mode === 'hold')
+        const mode = controls.mode;
+        if (mode === 'hold')
           await new Promise((resolve) => {
             controls.release = resolve;
           });
@@ -105,7 +118,7 @@ export async function auditRelationships(app, page) {
           direction,
           access,
           statusCategory: target === 'team/a#11' ? 'new' : undefined,
-          crossRepository: !target.startsWith('team/a'),
+          crossRepository: target.includes('#') && !target.startsWith('team/a'),
         });
         const groups = [
           {
@@ -130,16 +143,20 @@ export async function auditRelationships(app, page) {
               ),
             ],
           },
-          { kind: 'parent', state: 'visible', items: [] },
+          {
+            kind: 'parent',
+            state: 'visible',
+            items: [entry('team/a#10', 'child of', 'inward')],
+          },
           {
             kind: 'children',
             state: 'partial',
             problem: 'limit',
             reason: 'Showing at most 200 children; more may exist.',
-            items: [],
+            items: [entry('team/a#12', 'parent of', 'outward')],
           },
         ];
-        if (controls.mode === 'error')
+        if (mode === 'error')
           groups[0] = {
             kind: 'blockers',
             state: 'unavailable',
@@ -148,7 +165,51 @@ export async function auditRelationships(app, page) {
               'Relationships are inaccessible, missing, or unavailable to this connection. Blocker state is unknown.',
             items: [],
           };
-        if (controls.mode === 'partial') groups[0].state = 'partial';
+        if (mode === 'partial') groups[0].state = 'partial';
+        if (mode === 'missing-status')
+          groups[0].items[0].statusCategory = undefined;
+        if (connection === 'jira') {
+          groups[0] = {
+            kind: 'blockers',
+            state: mode === 'custom' ? 'partial' : 'visible',
+            reason:
+              mode === 'custom'
+                ? 'Some custom link types have unknown dependency semantics; blocker state may be unknown.'
+                : undefined,
+            items:
+              mode === 'custom'
+                ? []
+                : [
+                    {
+                      ...entry('B-2', 'depends on', 'outward'),
+                      statusCategory: 'new',
+                    },
+                  ],
+          };
+          groups[1] = {
+            kind: 'blocked',
+            state: 'visible',
+            items: [entry('B-3', 'is depended on by', 'inward')],
+          };
+          groups[2] = {
+            kind: 'related',
+            state: 'visible',
+            items:
+              mode === 'custom'
+                ? [entry('B-4', 'requires approval from', 'outward')]
+                : [],
+          };
+          groups[3] = {
+            kind: 'parent',
+            state: 'unavailable',
+            reason:
+              'Jira did not return a complete parent identity; the parent path is unknown.',
+            items: [],
+          };
+          groups[4] = { kind: 'children', state: 'visible', items: [] };
+        }
+        if (mode === 'hold') groups[0].items[0].summary = 'Late ignored result';
+        controls.completed++;
         return { key, groups };
       },
       cancelRelationships: (_event, connection, requestId) => {
@@ -180,6 +241,32 @@ export async function auditRelationships(app, page) {
       await app.evaluate(() => globalThis.relationshipAudit.calls.length),
     ).toBe(0);
     await pane
+      .getByRole('button', { name: 'Copy work brief', exact: true })
+      .click();
+    const brief = page.getByRole('dialog', { name: 'Work brief for team/a#1' });
+    await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+      'Uninspected',
+    );
+    await expect(brief.getByLabel('Work brief Markdown')).not.toContainText(
+      '## Dependency links\n\nNone',
+    );
+    expect(
+      await app.evaluate(() => globalThis.relationshipAudit.calls.length),
+    ).toBe(0);
+    await brief.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+      'Sample team/a#11',
+    );
+    await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+      'Incoming',
+    );
+    await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+      'Partial',
+    );
+    await brief
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .click();
+    await pane
       .getByRole('button', { name: 'Inspect relationships', exact: true })
       .click();
     await expect(
@@ -188,13 +275,28 @@ export async function auditRelationships(app, page) {
     await expect(pane).toContainText('GitHub · work account');
     await expect(pane).toContainText('children; more may exist');
     await expect(pane).toContainText('Outside this connection');
+    await pane
+      .getByRole('button', { name: 'Copy work brief', exact: true })
+      .click();
+    await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+      'Sample team/a#11',
+    );
+    await expect(brief.getByLabel('Work brief Markdown')).toContainText(
+      'Cross-repository',
+    );
+    await expect(brief.getByLabel('Work brief Markdown')).not.toContainText(
+      'Uninspected',
+    );
+    await brief
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .click();
     await expect(
       pane.getByRole('button', { name: 'Show private/repo#9 in tree' }),
     ).toHaveCount(0);
     await pane
       .getByRole('button', { name: 'Show team/a#11 in tree', exact: true })
       .click();
-    await expect(page.getByRole('tab')).toHaveCount(3);
+    await expect(page.getByRole('tab')).toHaveCount(4);
     await expect
       .poll(() =>
         app.evaluate(() => globalThis.relationshipAudit.saved?.activeTabId),
@@ -221,7 +323,7 @@ export async function auditRelationships(app, page) {
     await pane
       .getByRole('button', { name: 'Show team/b#5 in tree', exact: true })
       .click();
-    await expect(page.getByRole('tab')).toHaveCount(4);
+    await expect(page.getByRole('tab')).toHaveCount(5);
     await expect(page.locator('[data-tree-key="team/b#5"]')).toBeFocused();
     await expect
       .poll(() =>
@@ -234,11 +336,55 @@ export async function auditRelationships(app, page) {
       )
       .toBe('team/b#5');
     await page.getByRole('tab').first().click();
+    const ensureSourcePreview = async () => {
+      await source.focus();
+      if (!(await pane.isVisible())) await page.keyboard.press('Space');
+      await expect(pane).toHaveAttribute('aria-label', 'Preview team/a#1');
+      const inspect = pane.getByRole('button', {
+        name: 'Inspect relationships',
+        exact: true,
+      });
+      if (await inspect.count()) await inspect.click();
+    };
+    await ensureSourcePreview();
+    await pane
+      .getByRole('region', { name: 'Parent path', exact: true })
+      .getByRole('button', { name: 'Show team/a#10 in tree', exact: true })
+      .click();
+    await expect(page.locator('[data-tree-key="team/a#10"]')).toBeFocused();
+    await page.getByRole('tab').first().click();
+    await ensureSourcePreview();
+    await pane
+      .getByRole('region', { name: 'Child paths', exact: true })
+      .getByRole('button', { name: 'Show team/a#12 in tree', exact: true })
+      .click();
+    await expect(page.locator('[data-tree-key="team/a#12"]')).toBeFocused();
+    await expect(page.getByRole('tab')).toHaveCount(5);
+    await page.getByRole('tab').first().click();
     await page.getByRole('button', { name: 'Next tasks', exact: true }).click();
     const tasks = page.getByRole('region', { name: 'Next tasks', exact: true });
     await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
     await expect(tasks).toContainText('Sample team/a#11');
     await expect(tasks).toContainText('Blocked by team/a#11');
+    const beforeRefresh = await app.evaluate(() => ({
+      reads: globalThis.relationshipAudit.treeReads,
+      relationships: globalThis.relationshipAudit.calls.length,
+    }));
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await expect
+      .poll(() => app.evaluate(() => globalThis.relationshipAudit.treeReads))
+      .toBeGreaterThan(beforeRefresh.reads);
+    await expect(tasks).toContainText('Blocker state unknown');
+    expect(
+      await app.evaluate(() => globalThis.relationshipAudit.calls.length),
+    ).toBe(beforeRefresh.relationships);
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.mode = 'missing-status';
+    });
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await expect(tasks).toContainText('Status unknown');
+    await expect(tasks).toContainText('Blocker state unknown');
+    await expect(tasks).not.toContainText('No active visible blockers found');
     await app.evaluate(() => {
       globalThis.relationshipAudit.mode = 'error';
     });
@@ -264,13 +410,66 @@ export async function auditRelationships(app, page) {
         app.evaluate(() => globalThis.relationshipAudit.cancelled.length),
       )
       .toBeGreaterThan(0);
+    const completedBeforeRelease = await app.evaluate(
+      () => globalThis.relationshipAudit.completed,
+    );
     await app.evaluate(() => {
       globalThis.relationshipAudit.release();
     });
+    await expect
+      .poll(() => app.evaluate(() => globalThis.relationshipAudit.completed))
+      .toBeGreaterThan(completedBeforeRelease);
     await expect(page.getByRole('tab').nth(1)).toHaveAttribute(
       'aria-selected',
       'true',
     );
+    await page.getByRole('tab').first().click();
+    // Returning to the originating route must not expose a response that ignored cancellation.
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    await expect(tasks).not.toContainText('Late ignored result');
+    await expect(
+      tasks.getByRole('button', { name: 'Inspect blockers' }),
+    ).toBeEnabled();
+
+    // Jira reviewed cases: documented Depends, uninterpreted custom link, incomplete parent.
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.mode = 'normal';
+    });
+    await page.getByRole('tab').nth(3).click();
+    const jiraRow = page.locator('[data-tree-key="A-1"]');
+    await expect(jiraRow).toBeVisible();
+    await jiraRow.focus();
+    if (!(await pane.isVisible())) await page.keyboard.press('Space');
+    await expect(pane).toHaveAttribute('aria-label', 'Preview A-1');
+    await pane
+      .getByRole('button', { name: 'Inspect relationships', exact: true })
+      .click();
+    await expect(
+      pane.getByRole('region', { name: 'Blockers', exact: true }),
+    ).toContainText('A-1 depends on B-2');
+    await expect(
+      pane.getByRole('region', { name: 'Blocked issues', exact: true }),
+    ).toContainText('A-1 is depended on by B-3');
+    const parent = pane.getByRole('region', {
+      name: 'Parent path',
+      exact: true,
+    });
+    await expect(parent).toContainText('unavailable');
+    await expect(parent).toContainText('unknown');
+    await expect(parent).not.toContainText('No visible parent path returned');
+    await page.getByRole('button', { name: 'Next tasks', exact: true }).click();
+    await expect(tasks).toContainText('Blocked by B-2');
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.mode = 'custom';
+    });
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await expect(tasks).toContainText('Blocker state unknown');
+    await expect(tasks).not.toContainText('No active visible blockers found');
   } finally {
     await app.evaluate(({ ipcMain }) => {
       for (const [channel, handler] of globalThis.relationshipAuditHandlers) {

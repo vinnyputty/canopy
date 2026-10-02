@@ -271,6 +271,7 @@ export function App() {
     provider: Connection['provider'];
     knownIssues: Issue[];
     preview?: IssuePreviewData;
+    relationships?: IssueRelationships;
   } | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
   const [options, setOptions] = useState<Record<string, PickerOptions>>({});
@@ -2986,6 +2987,13 @@ export function App() {
               snapshots[sourceTabId(previewRoute, workspace.tabs)]?.issues ??
               [],
             preview,
+            relationships:
+              relationshipGraphs[
+                relationshipIdentity(
+                  previewRoute.connectionId,
+                  preview.issue.key,
+                )
+              ],
           })
         }
         onOpenComment={(commentId) => {
@@ -4724,6 +4732,13 @@ export function App() {
                 issueKey: rowMenu.issue.key,
                 provider: activeConnection?.provider ?? 'jira',
                 knownIssues: snapshot?.issues ?? [],
+                relationships:
+                  relationshipGraphs[
+                    relationshipIdentity(
+                      activeTab.connectionId,
+                      rowMenu.issue.key,
+                    )
+                  ],
               });
             else void copyIssueText(rowMenu.issue, action);
           }}
@@ -7039,6 +7054,7 @@ function WorkBriefDialog({
   provider,
   knownIssues,
   preview,
+  relationships,
   onClose,
 }: {
   connectionId: string;
@@ -7046,6 +7062,7 @@ function WorkBriefDialog({
   provider: Connection['provider'];
   knownIssues: Issue[];
   preview?: IssuePreviewData;
+  relationships?: IssueRelationships;
   onClose: () => void;
 }) {
   const [brief, setBrief] = useState('');
@@ -7059,6 +7076,7 @@ function WorkBriefDialog({
     setError('');
     setPartial(false);
     setCopied(false);
+    const requestId = attempt > 0 ? crypto.randomUUID() : undefined;
     Promise.allSettled([
       preview && attempt === 0
         ? Promise.resolve(preview)
@@ -7066,7 +7084,10 @@ function WorkBriefDialog({
       provider === 'demo'
         ? Promise.resolve('Local sample workspace')
         : window.canopy.issueUrl(connectionId, issueKey),
-    ]).then(([details, sourceUrl]) => {
+      requestId
+        ? window.canopy.relationships(connectionId, issueKey, requestId)
+        : Promise.resolve(relationships),
+    ]).then(([details, sourceUrl, inspected]) => {
       if (!live) return;
       try {
         setBrief(
@@ -7077,12 +7098,28 @@ function WorkBriefDialog({
               sourceUrl.status === 'fulfilled' ? sourceUrl.value : undefined,
             knownIssues,
             issueKey,
+            relationships:
+              inspected.status === 'fulfilled'
+                ? inspected.value
+                : {
+                    key: issueKey,
+                    groups: relationshipKinds.map((kind) => ({
+                      kind,
+                      state: 'unavailable',
+                      items: [],
+                    })),
+                  },
           }),
         );
         setPartial(
           details.status === 'rejected' ||
             sourceUrl.status === 'rejected' ||
-            Boolean(details.status === 'fulfilled' && details.value.linksError),
+            Boolean(
+              details.status === 'fulfilled' && details.value.linksError,
+            ) ||
+            inspected.status === 'rejected' ||
+            !inspected.value ||
+            inspected.value.groups.some((group) => group.state !== 'visible'),
         );
       } catch (reason) {
         setError(`Couldn’t load work brief: ${String(reason)}`);
@@ -7090,8 +7127,20 @@ function WorkBriefDialog({
     });
     return () => {
       live = false;
+      if (requestId)
+        void window.canopy
+          .cancelRelationships(connectionId, requestId)
+          .catch(() => {});
     };
-  }, [connectionId, issueKey, provider, knownIssues, preview, attempt]);
+  }, [
+    connectionId,
+    issueKey,
+    provider,
+    knownIssues,
+    preview,
+    relationships,
+    attempt,
+  ]);
   const copy = async () => {
     try {
       await window.canopy.copyText(brief);
@@ -7119,7 +7168,8 @@ function WorkBriefDialog({
         )}
         {partial && (
           <p role="status" className="dialog-note">
-            Some work brief details are unavailable. Retry to load them.
+            Some work brief details are unavailable or uninspected. Retry
+            fetches issue relationships.
           </p>
         )}
         {brief ? (

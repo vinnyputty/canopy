@@ -516,7 +516,7 @@ export async function auditPreview(app, page, restart) {
   await page.keyboard.press('Tab');
   await expect(brief.getByLabel('Work brief Markdown')).toBeFocused();
   await brief.getByRole('button', { name: 'Copy work brief' }).click();
-  await expect(brief.getByRole('status')).toHaveText('Copied');
+  await expect(brief.getByText('Copied', { exact: true })).toBeVisible();
   expect(
     await app.evaluate(() => globalThis.previewRecovery.clipboard),
   ).toContain('<img src=x onerror="window.previewExecuted=true">');

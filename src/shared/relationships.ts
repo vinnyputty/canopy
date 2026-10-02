@@ -20,11 +20,21 @@ export const relationshipTitles: Record<RelationshipKind, string> = {
   children: 'Child paths',
 };
 export function linkKind(link: Issue['links'][number]): RelationshipKind {
-  if (/^(?:is )?blocked by$/i.test(link.relationship.trim())) return 'blockers';
-  if (/^blocks$/i.test(link.relationship.trim())) return 'blocked';
+  if (/^(?:(?:is )?blocked by|depends on)$/i.test(link.relationship.trim()))
+    return 'blockers';
+  if (/^(?:blocks|is depend(?:ed|end) on by)$/i.test(link.relationship.trim()))
+    return 'blocked';
   return 'related';
 }
 export function issueRelationships(issue: Issue): IssueRelationships {
+  // Configured Jira link descriptions carry semantics. Unknown types may be dependencies.
+  const uninterpreted = issue.links.some(
+    (link) =>
+      linkKind(link) === 'related' &&
+      !/^(?:relates to|is related to|duplicates|is duplicated by|clones|is cloned by)$/i.test(
+        link.relationship.trim(),
+      ),
+  );
   return {
     key: issue.key,
     groups: relationshipKinds.map((kind): RelationshipGroup => ({
@@ -34,13 +44,17 @@ export function issueRelationships(issue: Issue): IssueRelationships {
         kind === 'children' ||
         issue.linksAvailable !== true
           ? 'unavailable'
-          : 'visible',
+          : uninterpreted && (kind === 'blockers' || kind === 'blocked')
+            ? 'partial'
+            : 'visible',
       reason:
         kind === 'parent' || kind === 'children'
           ? 'Hierarchy has not been loaded.'
           : issue.linksAvailable !== true
             ? 'Link data is unavailable; blocker state is unknown.'
-            : undefined,
+            : uninterpreted && (kind === 'blockers' || kind === 'blocked')
+              ? 'Some custom link types have unknown dependency semantics; blocker state may be unknown.'
+              : undefined,
       items:
         kind === 'parent' || kind === 'children'
           ? []
