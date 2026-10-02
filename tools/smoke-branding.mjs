@@ -178,6 +178,7 @@ try {
     .click();
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(supportButton).toBeFocused();
   const priorFocus = page.getByRole('button', {
     name: 'Settings',
     exact: true,
