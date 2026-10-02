@@ -672,3 +672,94 @@ test('GitHub actual scan timeouts preserve matches and the interrupted cursor fo
     assert.equal(requests, 2);
   }
 });
+
+test('GitHub search reports caps and incomplete results while continuing selected repositories', async () => {
+  const paths: string[] = [];
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    const url = new URL(path, 'https://api.github.com');
+    const repo = url.searchParams.get('q')!.includes('repo:team/a')
+      ? 'team/a'
+      : 'team/b';
+    const page = Number(url.searchParams.get('page'));
+    return {
+      total_count: repo === 'team/a' ? 1001 : 1000,
+      incomplete_results: repo === 'team/b',
+      items: [raw(repo, page)],
+    };
+  });
+  let result = await provider.search('fix');
+  assert.deepEqual(result.boundaries, [
+    { repository: 'team/a', reason: 'limit' },
+  ]);
+  for (let page = 2; page <= 10; page++) {
+    assert.ok(result.nextPageToken);
+    result = await provider.search('fix', result.nextPageToken);
+  }
+  assert.deepEqual(
+    result.issues.map((issue) => issue.key),
+    ['team/a#10', 'team/b#1'],
+  );
+  assert.deepEqual(result.boundaries, [
+    { repository: 'team/a', reason: 'limit' },
+    { repository: 'team/b', reason: 'incomplete' },
+  ]);
+  while (result.nextPageToken)
+    result = await provider.search('fix', result.nextPageToken);
+  assert.ok(
+    paths.every(
+      (path) =>
+        Number(
+          new URL(path, 'https://api.github.com').searchParams.get('page'),
+        ) <= 10,
+    ),
+  );
+  assert.deepEqual(result.boundaries, [
+    { repository: 'team/b', reason: 'incomplete' },
+  ]);
+});
+
+test('GitHub preview loads the newest comment range and older pages within selected repositories', async () => {
+  const paths: string[] = [];
+  let fail = false;
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    if (path === '/repos/team/a/issues/1')
+      return raw('team/a', 1, { comments: 205 });
+    if (path.includes('/dependencies/')) return [];
+    if (fail) throw new Error('Comments temporarily unavailable');
+    const page = Number(
+      new URL(path, 'https://api.github.com').searchParams.get('page'),
+    );
+    return Array.from({ length: page === 3 ? 5 : 100 }, (_, index) => ({
+      id: (page - 1) * 100 + index + 1,
+      user: { login: 'tester' },
+      created_at: '2026-01-01T00:00:00Z',
+      body: `Comment ${(page - 1) * 100 + index + 1}`,
+    }));
+  });
+  const preview = await provider.preview('team/a#1');
+  assert.deepEqual(preview.commentPage, { start: 201, end: 205, olderPage: 2 });
+  assert.equal(preview.comments[0].id, '201');
+  assert.equal(preview.totalComments, 205);
+  const older = await provider.olderComments('team/a#1', 2);
+  assert.equal(older.start, 101);
+  assert.equal(older.end, 200);
+  assert.equal(older.olderPage, 1);
+  assert.equal(
+    (await provider.olderComments('team/a#1', 1)).olderPage,
+    undefined,
+  );
+  const count = paths.length;
+  await assert.rejects(provider.olderComments('other/repo#1', 1), /outside/);
+  for (const page of [0, -1, 1.5, NaN])
+    await assert.rejects(provider.olderComments('team/a#1', page), /Invalid/);
+  assert.equal(paths.length, count);
+  fail = true;
+  const partial = await provider.preview('team/a#1');
+  assert.equal(partial.totalComments, 205);
+  assert.equal(partial.commentPage, undefined);
+  assert.match(partial.commentsError!, /temporarily unavailable/);
+  fail = false;
+  assert.equal((await provider.preview('team/a#1')).commentsError, undefined);
+});

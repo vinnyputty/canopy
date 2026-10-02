@@ -6225,6 +6225,7 @@ function OpenIssueDialog({
   const [query, setQuery] = useState('');
   const [groupRepositories, setGroupRepositories] = useState(false);
   const [searchState, setSearchState] = useState<SearchState>({
+    boundaries: [],
     issues: [],
     loading: false,
     searched: false,
@@ -6531,6 +6532,22 @@ function OpenIssueDialog({
                 ? `${searchState.issues.length} matches loaded. More repositories can be searched.`
                 : `Ranked among ${searchState.issues.length} loaded matches; more matches are available. Later pages may contain better matches.`
               : `${searchState.issues.length} matches loaded.`}
+          </p>
+        )}
+        {searchState.boundaries.length > 0 && (
+          <p className="dialog-note" role="status">
+            GitHub search results are truncated.{' '}
+            {searchState.boundaries
+              .map((boundary) =>
+                boundary.reason === 'limit'
+                  ? `${boundary.repository}: only the first 1,000 matches are accessible. `
+                  : `${boundary.repository}: GitHub returned incomplete results. `,
+              )
+              .join('')}
+            Add more specific title or body words to narrow the query. To open a
+            known issue directly, enter owner/repo#number or its GitHub issue
+            URL in this field and press Enter. The repository must be selected
+            in this connection.
           </p>
         )}
         {searchState.nextPageToken && !searchState.error && (

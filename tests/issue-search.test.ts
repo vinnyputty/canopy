@@ -155,3 +155,42 @@ test('closing during debounce avoids a request; initial errors are retryable', a
   assert.equal(search.state.searched, true);
   search.cancel();
 });
+
+test('search boundaries persist with merged ranked pages and reset with connection or query', async () => {
+  let calls = 0;
+  const boundary = { repository: 'team/a', reason: 'limit' as const };
+  const search = new IssueSearch(
+    {
+      search: async () =>
+        ++calls === 1
+          ? {
+              issues: [issue('team/a#1', 'A query')],
+              boundaries: [boundary],
+              nextPageToken: 'next',
+            }
+          : {
+              issues: [
+                issue('team/a#2', 'query'),
+                issue('team/a#1', 'A query'),
+              ],
+              boundaries: [boundary],
+            },
+      cancelSearch: async () => {},
+    },
+    () => {},
+    0,
+  );
+  search.start('github', 'query');
+  await tick();
+  await search.load();
+  assert.deepEqual(search.state.boundaries, [boundary]);
+  assert.deepEqual(
+    search.state.issues.map((issue) => issue.key),
+    ['team/a#2', 'team/a#1'],
+  );
+  assert.equal(search.state.nextPageToken, undefined);
+  search.start('jira', 'new', undefined, false);
+  assert.deepEqual(search.state.boundaries, []);
+  assert.deepEqual(search.state.issues, []);
+  search.cancel();
+});
