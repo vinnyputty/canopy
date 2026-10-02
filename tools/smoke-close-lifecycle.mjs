@@ -16,14 +16,7 @@ function closed(app) {
     : app.waitForEvent('close');
 }
 
-export async function auditCloseLifecycle({
-  launch,
-  close,
-  current,
-  userData,
-}) {
-  let { app, page } = current();
-  await page.evaluate(() => window.canopy.flushWorkspace());
+async function holdWorkspaceReplacement(app) {
   await app.evaluate(async () => {
     const fs = process.getBuiltinModule('node:fs/promises');
     const original = fs.rename;
@@ -40,6 +33,17 @@ export async function auditCloseLifecycle({
       });
     };
   });
+}
+
+export async function auditCloseLifecycle({
+  launch,
+  close,
+  current,
+  userData,
+}) {
+  let { app, page } = current();
+  await page.evaluate(() => window.canopy.flushWorkspace());
+  await holdWorkspaceReplacement(app);
   await page.evaluate(async () => {
     const workspace = await window.canopy.loadWorkspace();
     void window.canopy.saveWorkspace({ ...workspace, sidebarCollapsed: true });
@@ -138,7 +142,68 @@ export async function auditCloseLifecycle({
   }
   await close();
   await launch();
+  ({ app, page } = current());
+  await page.evaluate(() => window.canopy.flushWorkspace());
+  const beforeStall = JSON.parse(
+    await readFile(join(userData, 'workspace.json'), 'utf8'),
+  );
+  await holdWorkspaceReplacement(app);
+  await page.evaluate(async () => {
+    const workspace = await window.canopy.loadWorkspace();
+    void window.canopy.saveWorkspace({
+      ...workspace,
+      sidebarCollapsed: !workspace.sidebarCollapsed,
+    });
+  });
+  await expect
+    .poll(() => app.evaluate(() => !!globalThis.closePendingWrite.release))
+    .toBe(true);
+  await app.evaluate(({ dialog }) => {
+    globalThis.closeTimeoutDialogs = [];
+    dialog.showMessageBox = async (_window, options) => {
+      globalThis.closeTimeoutDialogs.push(options);
+      return {
+        response: globalThis.closeTimeoutDialogs.length === 1 ? 0 : 1,
+        checkboxChecked: false,
+      };
+    };
+  });
+  // Crash during an active flush with both workspace and bounds writes stalled.
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].close(),
+  );
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer(),
+  );
+  await expect
+    .poll(() => app.evaluate(() => globalThis.closeTimeoutDialogs.length), {
+      timeout: 25_000,
+    })
+    .toBe(1);
+  expect(
+    await app.evaluate(
+      ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+    ),
+  ).toBe(1);
+  expect(
+    await app.evaluate(() => globalThis.closeTimeoutDialogs[0].detail),
+  ).toContain('abandons unfinished writes');
+  const stalledClosed = closed(app);
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].close(),
+  );
+  await stalledClosed;
+  if (process.platform === 'darwin') {
+    expect(
+      await app.evaluate(() => globalThis.closeTimeoutDialogs.length),
+    ).toBe(2);
+  }
+  await close();
+  expect(
+    JSON.parse(await readFile(join(userData, 'workspace.json'), 'utf8')),
+  ).toEqual(beforeStall);
+  await launch();
   console.log(
-    'Close lifecycle passed: crashed renderer drains pending write, failed load closes, hung renderer deadline keeps open or closes by choice.',
+    'Close lifecycle passed: crash drains available writes, failed load closes, renderer and main-write stalls share a deadline with keep-open or explicit abandonment.',
   );
 }

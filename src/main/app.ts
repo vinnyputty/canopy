@@ -740,7 +740,6 @@ async function start(
     let closing = false;
     let rendererLoaded: Promise<void>;
     let rendererUnavailable = false;
-    let forceClose = false;
     created.webContents.on('render-process-gone', () => {
       rendererUnavailable = true;
     });
@@ -754,48 +753,55 @@ async function start(
       rendererUnavailable =
         created.webContents.getURL() !== pathToFileURL(html).href;
     });
+    const flushRenderer = async () => {
+      if (!rendererUnavailable && !created.webContents.isCrashed()) {
+        try {
+          await rendererLoaded;
+          await created.webContents.executeJavaScript(
+            'window.canopy.flushWorkspace()',
+          );
+          return false;
+        } catch (error) {
+          if (!rendererUnavailable && !created.webContents.isCrashed())
+            throw error;
+        }
+      }
+      // Preserve writes already received when an unavailable renderer cannot
+      // supply newer state. The overall close deadline also bounds this drain.
+      await savingWorkspace.catch((error) =>
+        console.error('Could not finish workspace save:', error),
+      );
+      return true;
+    };
     const flushBeforeClose = async () => {
       const timedOut = new Error(
         'Workspace save did not finish before the close deadline.',
       );
       let deadline: ReturnType<typeof setTimeout> | undefined;
       try {
-        if (!rendererUnavailable && !created.webContents.isCrashed()) {
-          await Promise.race([
-            rendererLoaded.then(() =>
-              created.webContents.executeJavaScript(
-                'window.canopy.flushWorkspace()',
-              ),
-            ),
-            new Promise<never>((_, reject) => {
-              deadline = setTimeout(() => reject(timedOut), 15_000);
-            }),
-          ]);
-          return;
-        }
+        const [, forceClose] = await Promise.race([
+          Promise.all([savingWindow.catch(() => {}), flushRenderer()]),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(timedOut), 15_000);
+          }),
+        ]);
+        return forceClose;
       } catch (error) {
-        if (!rendererUnavailable && !created.webContents.isCrashed()) {
-          if (error !== timedOut) throw error;
-          const { response } = await dialog.showMessageBox(created, {
-            type: 'warning',
-            message: 'The workspace save has not finished.',
-            detail:
-              'Keep Canopy open to allow saving or recovery. Closing anyway may lose the latest workspace changes.',
-            buttons: ['Keep open', 'Close anyway'],
-            defaultId: 0,
-            cancelId: 0,
-          });
-          if (response !== 1) throw error;
-        }
+        if (error !== timedOut) throw error;
+        const { response } = await dialog.showMessageBox(created, {
+          type: 'warning',
+          message: 'The workspace save has not finished.',
+          detail:
+            'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.',
+          buttons: ['Keep open', 'Close anyway'],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        if (response !== 1) throw error;
+        return true;
       } finally {
         clearTimeout(deadline);
       }
-      // The renderer cannot supply newer state. Finish writes already received
-      // by the main process before destroying the unavailable window.
-      await savingWorkspace.catch((error) =>
-        console.error('Could not finish workspace save:', error),
-      );
-      forceClose = true;
     };
     const saveBounds = () => {
       if (
@@ -823,8 +829,8 @@ async function start(
       if (closing) return;
       closing = true;
       saveBounds();
-      void Promise.all([savingWindow.catch(() => {}), flushBeforeClose()])
-        .then(() => {
+      void flushBeforeClose()
+        .then((forceClose) => {
           closeApproved = true;
           if (forceClose) created.destroy();
           if (quitting) app.quit();
