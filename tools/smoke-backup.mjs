@@ -1,6 +1,7 @@
+import { finishBackupAudit } from './backup-audit-cleanup.mjs';
 // Desktop-token gate applies. Use a staged smoke-main sample app and runtime.
 import { _electron as electron, expect } from '@playwright/test';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -16,6 +17,8 @@ const importPath = join(directory, 'import.json');
 const env = { ...process.env, CANOPY_USER_DATA: userData };
 delete env.ELECTRON_RUN_AS_NODE;
 let app;
+let failure;
+let failed = false;
 try {
   app = await electron.launch({
     args: [resolve(sampleApp)],
@@ -152,10 +155,14 @@ try {
   console.log(
     'Sample backup UI audit passed with stubbed choosers. Native acceptance remains separate.',
   );
+} catch (error) {
+  failure = error;
+  failed = true;
 } finally {
-  try {
-    if (app) await app.close();
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  await finishBackupAudit({
+    app,
+    directory,
+    failure,
+    failed,
+  });
 }
