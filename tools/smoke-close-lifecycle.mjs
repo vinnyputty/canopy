@@ -3,17 +3,24 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 function closed(app) {
-  return process.platform === 'darwin'
-    ? expect
-        .poll(
-          () =>
-            app.evaluate(
-              ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
-            ),
-          { timeout: 25_000 },
-        )
-        .toBe(0)
-    : app.waitForEvent('close');
+  return expect
+    .poll(
+      () =>
+        app.evaluate(
+          ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+        ),
+      { timeout: 25_000 },
+    )
+    .toBe(0);
+}
+
+async function keepProcessAlive(app) {
+  // Window assertions precede Playwright's inspector disconnect in app.close().
+  // A listener prevents Electron's default quit when the last window closes.
+  await app.evaluate(({ app }) => {
+    app.removeAllListeners('window-all-closed');
+    app.on('window-all-closed', () => {});
+  });
 }
 
 async function holdWorkspaceReplacement(app) {
@@ -42,6 +49,12 @@ export async function auditCloseLifecycle({
   userData,
 }) {
   let { app, page } = current();
+  await keepProcessAlive(app);
+  const launchLifecycle = async () => {
+    await launch();
+    ({ app, page } = current());
+    await keepProcessAlive(app);
+  };
   await page.evaluate(() => window.canopy.flushWorkspace());
   await holdWorkspaceReplacement(app);
   await page.evaluate(async () => {
@@ -73,8 +86,7 @@ export async function auditCloseLifecycle({
       .sidebarCollapsed,
   ).toBe(true);
 
-  await launch();
-  ({ app } = current());
+  await launchLifecycle();
   const failedLoadClosed = closed(app);
   await app.evaluate(async ({ BrowserWindow, app }) => {
     const window = BrowserWindow.getAllWindows()[0];
@@ -89,8 +101,7 @@ export async function auditCloseLifecycle({
   await failedLoadClosed;
   await close();
 
-  await launch();
-  ({ app, page } = current());
+  await launchLifecycle();
   await page.evaluate(() => window.canopy.flushWorkspace());
   await app.evaluate(({ dialog }) => {
     globalThis.closeTimeoutDialogs = [];
@@ -132,17 +143,14 @@ export async function auditCloseLifecycle({
     BrowserWindow.getAllWindows()[0].close(),
   );
   await hungClosed;
-  if (process.platform === 'darwin') {
-    expect(
-      await app.evaluate(() => globalThis.closeTimeoutDialogs.length),
-    ).toBe(2);
-    await app.evaluate(({ dialog }) => {
-      dialog.showMessageBox = globalThis.closeOriginalDialog;
-    });
-  }
+  expect(await app.evaluate(() => globalThis.closeTimeoutDialogs.length)).toBe(
+    2,
+  );
+  await app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = globalThis.closeOriginalDialog;
+  });
   await close();
-  await launch();
-  ({ app, page } = current());
+  await launchLifecycle();
   await page.evaluate(() => window.canopy.flushWorkspace());
   const beforeStall = JSON.parse(
     await readFile(join(userData, 'workspace.json'), 'utf8'),
@@ -193,15 +201,14 @@ export async function auditCloseLifecycle({
     BrowserWindow.getAllWindows()[0].close(),
   );
   await stalledClosed;
-  if (process.platform === 'darwin') {
-    expect(
-      await app.evaluate(() => globalThis.closeTimeoutDialogs.length),
-    ).toBe(2);
-  }
+  expect(await app.evaluate(() => globalThis.closeTimeoutDialogs.length)).toBe(
+    2,
+  );
   await close();
   expect(
     JSON.parse(await readFile(join(userData, 'workspace.json'), 'utf8')),
   ).toEqual(beforeStall);
+  // Leave the caller with a fresh launch and production quit behavior.
   await launch();
   console.log(
     'Close lifecycle passed: crash drains available writes, failed load closes, renderer and main-write stalls share a deadline with keep-open or explicit abandonment.',
