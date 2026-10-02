@@ -12,6 +12,16 @@ import {
   finishAudit,
 } from '../tools/audit-lifecycle.mjs';
 
+import { runCimInputControls } from '../tools/windows-cim-input-control.mjs';
+
+// These comparisons execute in the same Bazel/Node worker as the required
+// lifecycle fixtures. Diagnostic failures never replace their assertions.
+if (process.platform === 'win32') {
+  test('native CIM input comparisons in the lifecycle worker', async () => {
+    await runCimInputControls();
+  });
+}
+
 // PowerShell/CIM startup is a subprocess operation, not a close-hang probe.
 const processBudgets =
   process.platform === 'win32'
