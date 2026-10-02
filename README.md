@@ -18,6 +18,8 @@ Choose **Try demo** on the welcome screen or from the sidebar or app menu to ope
 
 Run `bazel run //:smoke` for an automated Electron demo test covering editing, tree controls, linked tabs, shortcuts, global reading settings and migration, scoped resets, and persistence across restarts. Failures print visible app errors and recent process output, and save a screenshot plus `failure.json` under `.cache/smoke-failure/`; CI uploads these as `smoke-failure-<OS>` artifacts. Set `CANOPY_SMOKE_TEST_DIAGNOSTICS=1` to verify capture with an intentional failure. It opens isolated app windows and writes a screenshot to `.cache/tree.png`; it does not use your saved connections.
 
+Run `CANOPY_SMOKE_ACCESSIBILITY_ONLY=1 bazel run //:smoke` for the observed accessibility barrier regressions, after source review and desktop-test authorization. It captures Chromium accessibility snapshots, screenshots, and rendered contrast measurements in `.cache/accessibility/`. Native screen-reader qualification on macOS, Windows, and Linux remains a separate pending gate; see [the accessibility audit](docs/accessibility-audit.md).
+
 Run `bazel run //:smoke_github` for a focused Electron test with mocked GitHub API responses covering connection, cross-repository sub-issues, edits, labels, and grouped search. It uses isolated app data and does not use your saved credentials.
 
 Run the full CI sequence locally with:
