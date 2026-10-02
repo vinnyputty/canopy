@@ -16,6 +16,46 @@ const results = [];
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const readSaved = async () => JSON.parse(await readFile(savedFile, 'utf8'));
 
+async function closeFailedWindow() {
+  const child = running.process();
+  let timeout;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => running.close()),
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('Failure cleanup close timed out')),
+          5000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+    // Only the owned fixture child may be terminated, and only after a failure.
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise((resolve, reject) => {
+        const finish = (error) => {
+          clearTimeout(timer);
+          child.off('exit', onExit);
+          if (error) reject(error);
+          else resolve();
+        };
+        const onExit = () => finish();
+        const timer = setTimeout(
+          () => finish(new Error('Failure cleanup child exit timed out')),
+          5000,
+        );
+        child.once('exit', onExit);
+        try {
+          child.kill('SIGKILL');
+        } catch (error) {
+          finish(error);
+        }
+      });
+    }
+  }
+}
+
 async function launch() {
   running = await electron.launch({
     executablePath: process.env.CANOPY_ELECTRON_PATH,
@@ -150,6 +190,7 @@ async function burst(action) {
   });
 }
 
+let failed = false;
 try {
   await launch();
   await burst('close');
@@ -361,9 +402,24 @@ try {
     ),
   );
 } catch (error) {
+  failed = true;
   console.error(JSON.stringify({ completed: results }, null, 2));
   throw error;
 } finally {
-  if (running) await running.close();
-  await rm(profile, { recursive: true, force: true });
+  try {
+    if (running) {
+      if (failed) await closeFailedWindow();
+      else await running.close();
+    }
+  } catch (error) {
+    if (!failed) throw error;
+    console.error('Window fixture cleanup also failed:', error);
+  } finally {
+    try {
+      await rm(profile, { recursive: true, force: true });
+    } catch (error) {
+      if (!failed) throw error;
+      console.error('Window fixture profile removal also failed:', error);
+    }
+  }
 }
