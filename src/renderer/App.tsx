@@ -75,6 +75,7 @@ import {
   type IssueNode,
 } from './tree';
 import { IssuePreview } from './IssuePreview';
+import { previewTarget, type PreviewOverride } from './preview-navigation';
 import { nextTasks, type NextTaskCriterion } from './next-tasks';
 import {
   boundRoots,
@@ -292,7 +293,9 @@ export function App() {
     storeConnections(value);
   };
   const searchRef = useRef<HTMLInputElement>(null);
-  const [previewKey, setPreviewKey] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewOverride, setPreviewOverride] =
+    useState<PreviewOverride | null>(null);
   const [rowMenu, setRowMenu] = useState<{
     issue: Issue;
     x: number;
@@ -509,9 +512,9 @@ export function App() {
       const changes = unseenChanges(activeSeenRoot?.issues[issue.key], issue);
       return changes.fields.length > 0 || changes.comments > 0;
     }).length ?? 0;
-  const markSeen = (issue: Issue) => {
-    if (!activeTab) return;
-    const rootKey = seenRootKey(activeTab.connectionId, activeTab.rootKey);
+  const markSeen = (issue: Issue, source: RootReference | null = activeTab) => {
+    if (!source) return;
+    const rootKey = seenRootKey(source.connectionId, source.rootKey);
     setWorkspace((current) => {
       const root = current.seenRoots?.[rootKey];
       if (!root) return current;
@@ -739,31 +742,71 @@ export function App() {
   useEffect(() => {
     setEditor(null);
     setDragKey(null);
-    setPreviewKey(null);
     setRowMenu(null);
     pendingScrollRestore.current = activeTab?.id ?? null;
   }, [activeTab?.id]);
 
-  useEffect(() => {
-    if (activeTab?.selectedKey)
-      setPreviewKey((current) =>
-        current &&
-        !(
-          activeConnection?.provider === 'github' &&
-          activeTab.selectedKey === activeTab.rootKey &&
-          !activeTab.rootKey.includes('#')
-        )
-          ? activeTab.selectedKey!
-          : null,
-      );
-  }, [activeTab?.selectedKey, activeTab?.rootKey, activeConnection?.provider]);
+  const previewRoute = previewTarget(
+    activeTab,
+    connections,
+    Boolean(activeSavedView),
+    savedResults,
+    selectedViewIssue,
+    previewOverride,
+  );
+  const previewKey = previewRoute?.key ?? null;
+  const previewWidth = Number.isFinite(workspace.previewWidth)
+    ? Math.max(300, Math.min(720, workspace.previewWidth!))
+    : 420;
+  const setPreviewKey = (key: string | null) => {
+    setPreviewOpen(Boolean(key));
+    setPreviewOverride(
+      key
+        ? activeSavedView
+          ? {
+              tabId: 'saved-view',
+              selectedKey: selectedViewIssue ?? undefined,
+              key,
+            }
+          : activeTab
+            ? { tabId: activeTab.id, selectedKey: activeTab.selectedKey, key }
+            : null
+        : null,
+    );
+  };
   const closePreview = useCallback(() => {
-    setPreviewKey(null);
-    restoreTreeFocus(activeTab?.selectedKey ?? activeTab?.rootKey);
-  }, [activeTab?.selectedKey, activeTab?.rootKey, restoreTreeFocus]);
+    setPreviewOpen(false);
+    setPreviewOverride(null);
+    if (activeSavedView) {
+      const target =
+        document.querySelector<HTMLElement>(
+          '.saved-view-choice[aria-current="true"]',
+        ) ??
+        document.querySelector<HTMLElement>(
+          '[aria-label="Saved views"] .side-tab.active',
+        );
+      target?.focus({ preventScroll: true });
+    } else restoreTreeFocus(activeTab?.selectedKey ?? activeTab?.rootKey);
+  }, [
+    activeSavedView?.id,
+    activeTab?.selectedKey,
+    activeTab?.rootKey,
+    restoreTreeFocus,
+  ]);
+  useLayoutEffect(() => {
+    setPreviewOverride(null);
+  }, [
+    activeTab?.id,
+    activeSavedView?.id,
+    activeTab?.selectedKey,
+    selectedViewIssue,
+  ]);
+  useEffect(() => {
+    if (!activeTab && !activeSavedView) setPreviewOpen(false);
+  }, [activeTab?.id, activeSavedView?.id]);
   useEffect(() => {
     if (
-      !previewKey ||
+      !previewOpen ||
       dialog ||
       workBrief ||
       childParent ||
@@ -781,7 +824,7 @@ export function App() {
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [
-    previewKey,
+    previewOpen,
     dialog,
     workBrief,
     childParent,
@@ -2715,6 +2758,99 @@ export function App() {
     };
   }, [demoMode, ready, Boolean(snapshots['demo-can-100'])]);
 
+  const previewPane = previewOpen ? (
+    previewRoute && previewKey ? (
+      <IssuePreview
+        key={JSON.stringify([previewRoute.connectionId, previewKey])}
+        provider={previewRoute.provider}
+        connectionId={previewRoute.connectionId}
+        issueKey={previewKey}
+        observedIssue={confirmedSnapshots[
+          sourceTabId(previewRoute, workspace.tabs)
+        ]?.issues.find((issue) => issue.key === previewKey)}
+        baseline={
+          workspace.seenRoots?.[
+            seenRootKey(previewRoute.connectionId, previewRoute.rootKey)
+          ]?.issues[previewKey]
+        }
+        onMarkSeen={(previewIssue) => {
+          const issue = confirmedSnapshots[
+            sourceTabId(previewRoute, workspace.tabs)
+          ]?.issues.find((value) => value.key === previewKey);
+          if (issue)
+            markSeen(
+              {
+                ...issue,
+                commentCount: Math.max(
+                  issue.commentCount ?? 0,
+                  previewIssue.commentCount ?? 0,
+                ),
+              },
+              previewRoute,
+            );
+        }}
+        width={previewWidth}
+        onWidth={(previewWidth) =>
+          setWorkspace((current) => ({ ...current, previewWidth }))
+        }
+        onClose={closePreview}
+        onChanged={(issue) => {
+          mutations.acceptConfirmedLabels(previewRoute.connectionId, issue);
+          for (const tab of allRefreshTabs.filter((tab) =>
+            sameRoot(tab, previewRoute),
+          ))
+            void refreshTab(tab);
+        }}
+        onPreview={setPreviewKey}
+        onOpenTab={(key) => openTab(previewRoute.connectionId, key)}
+        onOpenExternal={(key) =>
+          void openExternal(previewRoute.connectionId, key)
+        }
+        onCopyKeySummary={(issue) => void copyIssueText(issue, 'key-summary')}
+        onWorkBrief={(preview) =>
+          setWorkBrief({
+            connectionId: previewRoute.connectionId,
+            issueKey: preview.issue.key,
+            provider: previewRoute.provider,
+            knownIssues:
+              snapshots[sourceTabId(previewRoute, workspace.tabs)]?.issues ??
+              [],
+            preview,
+          })
+        }
+        onOpenComment={(commentId) => {
+          void window.canopy
+            .openComment(previewRoute.connectionId, previewKey, commentId)
+            .catch((error: unknown) =>
+              setErrors((current) => ({
+                ...current,
+                app: `Couldn’t open comment: ${error instanceof Error ? error.message : String(error)}`,
+              })),
+            );
+        }}
+      />
+    ) : (
+      <aside
+        className="issue-preview"
+        aria-label="Issue preview"
+        style={{ width: previewWidth }}
+      >
+        <header>
+          <strong>Issue preview</strong>
+          <button
+            className="icon-button"
+            aria-label="Close issue preview"
+            onClick={closePreview}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className="preview-content">
+          <p role="status">Select an issue to preview.</p>
+        </div>
+      </aside>
+    )
+  ) : null;
   if (!ready)
     return (
       <div className="boot">
@@ -3133,62 +3269,67 @@ export function App() {
         </div>
 
         {activeSavedView && (
-          <SavedViewsPanel
-            view={activeSavedView}
-            connections={connections}
-            availableRoots={availableRoots}
-            sources={savedSources}
-            results={savedResults}
-            selected={selectedViewIssue}
-            errors={Object.fromEntries(
-              savedSources
-                .map((source) => [
-                  source.id,
-                  errors[sourceTabId(source, workspace.tabs)],
-                ])
-                .filter(([, error]) => error),
-            )}
-            workspaceError={errors.workspace}
-            appError={errors.app}
-            identityErrors={identityErrors}
-            loading={
-              new Set(
-                savedSources
-                  .filter((source) =>
-                    loading.has(sourceTabId(source, workspace.tabs)),
+          <div className="tree-with-preview">
+            <div className="tree-content">
+              <SavedViewsPanel
+                view={activeSavedView}
+                connections={connections}
+                availableRoots={availableRoots}
+                sources={savedSources}
+                results={savedResults}
+                selected={selectedViewIssue}
+                errors={Object.fromEntries(
+                  savedSources
+                    .map((source) => [
+                      source.id,
+                      errors[sourceTabId(source, workspace.tabs)],
+                    ])
+                    .filter(([, error]) => error),
+                )}
+                workspaceError={errors.workspace}
+                appError={errors.app}
+                identityErrors={identityErrors}
+                loading={
+                  new Set(
+                    savedSources
+                      .filter((source) =>
+                        loading.has(sourceTabId(source, workspace.tabs)),
+                      )
+                      .map((source) => source.id),
                   )
-                  .map((source) => source.id),
-              )
-            }
-            onSelect={setSelectedViewIssue}
-            onOpen={openSavedResult}
-            onChange={(view) =>
-              setWorkspace((current) => ({
-                ...current,
-                savedViews: current.savedViews?.map((item) =>
-                  item.id === view.id ? view : item,
-                ),
-              }))
-            }
-            onDelete={() =>
-              setWorkspace((current) => ({
-                ...current,
-                savedViews: current.savedViews?.filter(
-                  (item) => item.id !== activeSavedView.id,
-                ),
-                activeSavedViewId: null,
-              }))
-            }
-            onRefresh={() => {
-              setIdentityRetry((value) => value + 1);
-              for (const source of savedSources) {
-                const tab = allRefreshTabs.find((item) =>
-                  sameRoot(item, source),
-                );
-                if (tab) void refreshTab(tab, true, true);
-              }
-            }}
-          />
+                }
+                onSelect={setSelectedViewIssue}
+                onOpen={openSavedResult}
+                onChange={(view) =>
+                  setWorkspace((current) => ({
+                    ...current,
+                    savedViews: current.savedViews?.map((item) =>
+                      item.id === view.id ? view : item,
+                    ),
+                  }))
+                }
+                onDelete={() =>
+                  setWorkspace((current) => ({
+                    ...current,
+                    savedViews: current.savedViews?.filter(
+                      (item) => item.id !== activeSavedView.id,
+                    ),
+                    activeSavedViewId: null,
+                  }))
+                }
+                onRefresh={() => {
+                  setIdentityRetry((value) => value + 1);
+                  for (const source of savedSources) {
+                    const tab = allRefreshTabs.find((item) =>
+                      sameRoot(item, source),
+                    );
+                    if (tab) void refreshTab(tab, true, true);
+                  }
+                }}
+              />
+            </div>
+            {previewPane}
+          </div>
         )}
         {activeTab && !activeSavedView && (
           <>
@@ -4017,8 +4158,8 @@ export function App() {
                           void copyIssueLink(activeTab.connectionId, key)
                         }
                         onPreview={(key) =>
-                          setPreviewKey((current) =>
-                            current === key ? null : key,
+                          setPreviewKey(
+                            previewOpen && previewKey === key ? null : key,
                           )
                         }
                         menuKey={rowMenu?.issue.key}
@@ -4170,77 +4311,7 @@ export function App() {
                   </span>
                 </footer>
               </div>
-              {previewKey && (
-                <IssuePreview
-                  provider={activeConnection?.provider ?? 'jira'}
-                  connectionId={activeTab.connectionId}
-                  issueKey={previewKey}
-                  observedIssue={confirmedSnapshot?.issues.find(
-                    (issue) => issue.key === previewKey,
-                  )}
-                  baseline={activeSeenRoot?.issues[previewKey]}
-                  onMarkSeen={(previewIssue) => {
-                    const issue = confirmedSnapshot?.issues.find(
-                      (value) => value.key === previewKey,
-                    );
-                    if (issue)
-                      markSeen({
-                        ...issue,
-                        commentCount: Math.max(
-                          issue.commentCount ?? 0,
-                          previewIssue.commentCount ?? 0,
-                        ),
-                      });
-                  }}
-                  width={
-                    Number.isFinite(workspace.previewWidth)
-                      ? Math.max(300, Math.min(720, workspace.previewWidth!))
-                      : 420
-                  }
-                  onWidth={(previewWidth) =>
-                    setWorkspace((current) => ({ ...current, previewWidth }))
-                  }
-                  onClose={closePreview}
-                  onChanged={(issue) => {
-                    mutations.acceptConfirmedLabels(
-                      activeTab.connectionId,
-                      issue,
-                    );
-                    void refreshTab(activeTab);
-                  }}
-                  onPreview={setPreviewKey}
-                  onOpenTab={(key) => openTab(activeTab.connectionId, key)}
-                  onOpenExternal={(key) =>
-                    void openExternal(activeTab.connectionId, key)
-                  }
-                  onCopyKeySummary={(issue) =>
-                    void copyIssueText(issue, 'key-summary')
-                  }
-                  onWorkBrief={(preview) =>
-                    setWorkBrief({
-                      connectionId: activeTab.connectionId,
-                      issueKey: preview.issue.key,
-                      provider: activeConnection?.provider ?? 'jira',
-                      knownIssues: snapshot?.issues ?? [],
-                      preview,
-                    })
-                  }
-                  onOpenComment={(commentId) => {
-                    void window.canopy
-                      .openComment(
-                        activeTab.connectionId,
-                        previewKey,
-                        commentId,
-                      )
-                      .catch((error: unknown) =>
-                        setErrors((current) => ({
-                          ...current,
-                          app: `Couldn’t open comment: ${error instanceof Error ? error.message : String(error)}`,
-                        })),
-                      );
-                  }}
-                />
-              )}
+              {previewPane}
             </div>
           </>
         )}

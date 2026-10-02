@@ -1243,6 +1243,16 @@ try {
   await expect(
     page.getByRole('complementary', { name: 'Preview CAN-200', exact: true }),
   ).toBeVisible();
+  // Selecting another row must discard the linked preview even when returning
+  // to the row that originally opened it: A -> linked B -> C -> A.
+  await issue('CAN-109').evaluate((row) => row.focus({ preventScroll: true }));
+  await expect(page.locator('.issue-preview')).toHaveAttribute(
+    'aria-label',
+    'Preview CAN-109',
+  );
+  await issue('CAN-108').evaluate((row) => row.focus({ preventScroll: true }));
+  await expect(preview).toBeVisible();
+  await expect(issue('CAN-108')).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Escape');
   await expect(issue('CAN-108')).toBeFocused();
   expect(
@@ -1921,7 +1931,10 @@ try {
     .evaluate((element) => element.scrollTop);
   expect(linkedSourceScroll).toBeGreaterThan(0);
   await links.getByRole('button', { name: 'Open tree' }).click();
-  await expect(page.locator('.issue-preview')).toHaveCount(0);
+  await expect(page.locator('.issue-preview')).toHaveAttribute(
+    'aria-label',
+    'Preview CAN-200',
+  );
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
   ).toBeVisible();
@@ -1930,6 +1943,10 @@ try {
 
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(issue('CAN-108')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.issue-preview')).toHaveAttribute(
+    'aria-label',
+    'Preview CAN-108',
+  );
   await expect(links.getByText('CAN-200')).toBeVisible();
   await expect
     .poll(() =>
@@ -1942,8 +1959,15 @@ try {
     'true',
   );
 
+  await expect(page.locator('.issue-preview')).toHaveAttribute(
+    'aria-label',
+    'Preview CAN-200',
+  );
+  await page.keyboard.press('Escape');
+  await expect(issue('CAN-200')).toBeFocused();
   await page.keyboard.press(`${modifier}+1`);
   await expect(tree).toBeVisible();
+  await expect(page.locator('.issue-preview')).toHaveCount(0);
   await page.keyboard.press(`${modifier}+9`);
   await expect(tree).toBeVisible();
   await page.keyboard.press(`${modifier}+2`);
