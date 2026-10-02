@@ -2,9 +2,31 @@ name: Canopy
 on:
   pull_request:
   workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: canopy-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22.16.0'
+      - name: Validate version tag
+        if: github.event_name == 'push'
+        run: node tools/release.mjs tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
   check:
     name: ${{ matrix.check_name }}
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +46,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
@@ -31,6 +55,7 @@ jobs:
           repository-cache: true
       - run: bazel run //:ci
         env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
           CANOPY_EXPECT_PLATFORM: ${{ matrix.platform }}
           CANOPY_MANAGED_APPIMAGE: ${{ matrix.platform == 'linux/x64' && '1' || '0' }}
       - uses: actions/upload-artifact@v7.0.1
@@ -48,3 +73,41 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+  draft:
+    if: github.event_name == 'push'
+    needs: [validate, check]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22.16.0'
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: Canopy-*
+          path: incoming
+      - name: Verify packaged reports and assemble release
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          node tools/release.mjs assemble incoming assembled "$RELEASE_TAG" "$version" "$SOURCE_SHA" "$RUN_URL"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      - name: Create draft and verify uploaded bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          prerelease=()
+          if [[ "$version" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$RELEASE_TAG" "${prerelease[@]}" assembled/Canopy-* assembled/SHA256SUMS assembled/release-manifest.json --draft --verify-tag --title "Canopy $version" --notes-file assembled/release-notes.md
+          gh release download "$RELEASE_TAG" --dir downloaded
+          node tools/release.mjs verify downloaded "$RELEASE_TAG" "$version" "$SOURCE_SHA"

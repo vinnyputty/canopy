@@ -59,6 +59,7 @@ bazel(
   '//:typecheck',
   '//:format_check',
   '//:portable_checks',
+  '//:release_checks',
   // Unit and portability targets each launch the complete process-heavy suite.
   '--local_test_jobs=1',
   process.platform === 'win32' ? '--test_output=all' : '--test_output=errors',
