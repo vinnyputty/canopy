@@ -16,6 +16,13 @@ const jiraKey = /^[A-Z][A-Z0-9_]*-[1-9]\d{0,15}$/;
 const repo = /^[-\w.]{1,100}\/[-\w.]{1,100}$/;
 const githubIssue = /^[-\w.]{1,100}\/[-\w.]{1,100}#[1-9]\d{0,15}$/;
 
+function hasRepositoryDotSegment(value: string): boolean {
+  return value
+    .split('#')[0]
+    .split('/')
+    .some((segment) => segment === '.' || segment === '..');
+}
+
 /** A proposed CLI payload. Transport is supplied by the single-instance runtime. */
 export function parseWorkHandoff(value: unknown): WorkHandoff {
   if (
@@ -65,6 +72,8 @@ export function parseWorkHandoff(value: unknown): WorkHandoff {
       ? host === 'github.com' &&
         (repo.test(root) || githubIssue.test(root)) &&
         githubIssue.test(key) &&
+        !hasRepositoryDotSegment(root) &&
+        !hasRepositoryDotSegment(key) &&
         key.split('#')[0] === root.split('#')[0]
       : provider === 'jira' && jiraKey.test(root) && jiraKey.test(key))
   )

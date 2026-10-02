@@ -184,3 +184,71 @@ it('resolves a saved view only by existing unique identity with live connections
     ),
   );
 });
+
+it('rejects entire dot segments in decoded GitHub roots and issue identities', () => {
+  const payload = (root: string, key: string) =>
+    `canopy://handoff/issue?connection=account-a&provider=github&host=github.com&root=${root}&key=${key}`;
+  for (const owner of ['.', '..', '%2E', '%2e%2E', '%252E', '%252e%252E']) {
+    for (const separator of ['/', '%2F']) {
+      const repository = `${owner}${separator}repo`;
+      assert.throws(() =>
+        parseWorkHandoff(payload(repository, `${repository}%2342`)),
+      );
+      assert.throws(() =>
+        parseWorkHandoff(payload('team/repo', `${repository}%2342`)),
+      );
+      assert.throws(() =>
+        parseWorkHandoff(payload(repository, 'team/repo%2342')),
+      );
+    }
+  }
+  for (const name of ['.', '..', '%2E', '%2e%2E', '%252E', '%252e%252E']) {
+    const repository = `team%2F${name}`;
+    for (const root of [repository, `${repository}%237`]) {
+      assert.throws(() =>
+        parseWorkHandoff(payload(root, `${repository}%2342`)),
+      );
+    }
+    assert.throws(() =>
+      parseWorkHandoff(payload('team/repo', `${repository}%2342`)),
+    );
+  }
+});
+
+it('retains partial dotted names with matching repository and exact confirmed membership', () => {
+  for (const repository of [
+    'team.name/repo.name',
+    '.team/repo.',
+    'team/..repo',
+    'team/repo..',
+  ]) {
+    for (const root of [repository, `${repository}#7`]) {
+      const target = parseWorkHandoff(
+        `canopy://handoff/issue?${new URLSearchParams({ connection: connection.id, provider: 'github', host: 'github.com', root, key: `${repository}#42` })}`,
+      );
+      const state = {
+        ...workspace,
+        pinnedRoots: [{ connectionId: connection.id, rootKey: root }],
+      };
+      const data = [
+        {
+          connectionId: connection.id,
+          snapshot: {
+            ...snapshot,
+            rootKey: root,
+            issues: [{ ...snapshot.issues[0], key: `${repository}#42` }],
+          },
+        },
+      ];
+      assert.deepEqual(
+        resolveWorkHandoff(target, [connection], state, data),
+        target,
+      );
+      assert.throws(() =>
+        resolveWorkHandoff(target, [connection], workspace, [
+          { connectionId: connection.id, snapshot },
+        ]),
+      );
+    }
+  }
+});

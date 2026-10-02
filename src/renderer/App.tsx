@@ -3319,10 +3319,17 @@ export function App() {
           void openExternal(previewRoute.connectionId, key)
         }
         onCopyKeySummary={(issue) => void copyIssueText(issue, 'key-summary')}
-        onWorkBrief={(preview) =>
+        onWorkBrief={(preview) => {
+          if (preview.issue.key !== previewRoute.key) {
+            setErrors((current) => ({
+              ...current,
+              app: 'The returned issue does not match the requested issue.',
+            }));
+            return;
+          }
           setWorkBrief({
             connectionId: previewRoute.connectionId,
-            issueKey: preview.issue.key,
+            issueKey: previewRoute.key,
             provider: previewRoute.provider,
             knownIssues:
               confirmedSnapshots[sourceTabId(previewRoute, workspace.tabs)]
@@ -3335,8 +3342,8 @@ export function App() {
                   preview.issue.key,
                 )
               ],
-          })
-        }
+          });
+        }}
         onOpenComment={(commentId) => {
           void window.canopy
             .openComment(previewRoute.connectionId, previewKey, commentId)
