@@ -113,8 +113,9 @@ async function smoke(executablePath, directory, artifact) {
         await app.evaluate(({ app }) => ({
           packaged: app.isPackaged,
           arch: process.arch,
+          version: app.getVersion(),
         })),
-      ).toEqual({ packaged: true, arch: platform.arch });
+      ).toEqual({ packaged: true, arch: platform.arch, version });
       await expect(
         page.getByRole('heading', { name: 'See the whole tree.' }),
       ).toBeVisible();
