@@ -81,7 +81,9 @@ For each native logout, restart, and shutdown case:
 3. Sign back in or restart, then launch the fixture with the same profile. Verify the closed tab stays closed, **Hide done** is enabled, the priority filter, hidden Assignee column, and app-wide small text remain, and the root is marked seen. Compare `workspace.json` before and after if any state differs.
 4. Re-seed the profile between cases while Canopy is closed.
 
-Automated smoke holds the debounce deterministically and verifies close/quit persistence. Native checks establish the OS termination behavior; manual timing alone does not prove that a debounce was pending.
+Automated smoke holds the debounce deterministically and verifies close/quit persistence. It also checks that repeated normal Windows session requests share one close deadline and that a critical request does not start a blocking close. Simulated events do not establish native termination behavior; manual timing alone does not prove that a debounce was pending.
+
+On Windows, Canopy vetoes a normal session request while saving, which can cancel the current OS attempt. After Canopy exits, record whether Windows continues or requires another logout, restart, or shutdown attempt. Repeat the request while saving is pending and after a failed save or **Keep open**; verify requests during the active attempt share one deadline, while a later retry can start a new attempt. A critical forced-session request is allowed without waiting for persistence. In the disposable session, record the OS blocking screen and forced-termination behavior and inspect the saved file after relaunch; pending changes may be lost.
 
 ## Controlled write failure
 
@@ -97,7 +99,7 @@ Move-Item -LiteralPath (Join-Path $profileDir 'workspace.json') -Destination (Jo
 New-Item -ItemType Directory -Path (Join-Path $profileDir 'workspace.json')
 ```
 
-Toggle **Hide done** and trigger the native logout or shutdown action. Record whether Canopy can retain its window, whether **Couldn’t save workspace** remains visible, and what the OS does with the delayed/failed termination request. Verify `workspace.close-check-backup.json` retains the previous saved state. If the OS forces termination, record that limitation explicitly; a forced process exit cannot await persistence.
+Toggle **Hide done** and trigger the native logout or shutdown action. Record whether Canopy can retain its window, whether **Couldn’t save workspace** remains visible, and whether the OS cancels the current termination attempt or requires a retry. Verify `workspace.close-check-backup.json` retains the previous saved state. If the OS forces termination, record that limitation explicitly; a forced process exit cannot await persistence.
 
 Before restarting Canopy, remove only the empty blocker directory and restore the backup. If the desktop remains available, do this while Canopy is still open, then retry the native action:
 

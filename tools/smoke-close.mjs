@@ -80,13 +80,43 @@ export async function auditWorkspaceClose({
       if (route === 'close') window.close();
       else if (route === 'quit') app.quit();
       else {
-        let prevented = false;
-        window.emit('query-session-end', {
-          preventDefault() {
-            prevented = true;
-          },
-        });
-        if (!prevented) throw new Error('Session shutdown was not delayed.');
+        let prevented = 0;
+        let deadlines = 0;
+        let quitRequests = 0;
+        const timer = globalThis.setTimeout;
+        const beforeQuit = () => quitRequests++;
+        app.on('before-quit', beforeQuit);
+        globalThis.setTimeout = (callback, delay, ...args) => {
+          if (delay === 15_000) deadlines++;
+          return timer(callback, delay, ...args);
+        };
+        try {
+          window.emit('query-session-end', {
+            reasons: ['logoff', 'critical'],
+            preventDefault() {
+              prevented++;
+            },
+          });
+          if (prevented || deadlines || quitRequests || window.isDestroyed())
+            throw new Error(
+              'Critical session request started a blocking close.',
+            );
+          for (let request = 0; request < 3; request++) {
+            window.emit('query-session-end', {
+              reasons: ['shutdown'],
+              preventDefault() {
+                prevented++;
+              },
+            });
+          }
+          if (prevented !== 3 || deadlines !== 1)
+            throw new Error(
+              'Repeated session requests did not share one deadline.',
+            );
+        } finally {
+          globalThis.setTimeout = timer;
+          app.removeListener('before-quit', beforeQuit);
+        }
       }
     }, route);
     await closingPage;
@@ -200,7 +230,68 @@ export async function auditWorkspaceClose({
     ).toBe(false);
   }
   await launch();
+  let { app, page } = current();
+  await holdDebounce(page);
+  await page.evaluate(() => window.canopy.flushWorkspace());
+  const beforeAppearance = JSON.parse(
+    await readFile(join(userData, 'workspace.json'), 'utf8'),
+  );
+  const palette = beforeAppearance.palette === 'forest' ? 'Ocean' : 'Forest';
+  await app.evaluate(({ ipcMain }, target) => {
+    const channel = 'canopy:saveWorkspace';
+    const original = ipcMain._invokeHandlers.get(channel);
+    const audit = { release: null, calls: [] };
+    globalThis.closeAppearanceSave = audit;
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, (event, workspace) => {
+      audit.calls.push(workspace);
+      if (workspace.palette !== target || audit.release)
+        return original(event, workspace);
+      return new Promise((resolve, reject) => {
+        audit.release = () =>
+          Promise.resolve(original(event, workspace)).then(resolve, reject);
+      });
+    });
+  }, palette.toLowerCase());
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Appearance', exact: true }).click();
+  const appearance = page.getByRole('dialog', { name: 'Appearance' });
+  await appearance.getByRole('radio', { name: palette }).check();
+  await appearance.getByRole('button', { name: 'Save' }).click();
+  await expect
+    .poll(() => app.evaluate(() => !!globalThis.closeAppearanceSave.release))
+    .toBe(true);
+  // Exercise a concurrent workspace update while the appearance write waits.
+  const hideDone = page.getByRole('checkbox', {
+    name: 'Hide done',
+    exact: true,
+  });
+  await hideDone.evaluate((element) => element.click());
+  await expect(hideDone).toBeChecked();
+  const appearanceClosed = page.waitForEvent('close');
+  await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].close(),
+  );
+  expect(page.isClosed()).toBe(false);
+  await app.evaluate(() => globalThis.closeAppearanceSave.release());
+  await appearanceClosed;
+  await close();
+  const savedAppearance = JSON.parse(
+    await readFile(join(userData, 'workspace.json'), 'utf8'),
+  );
+  expect(savedAppearance.palette).toBe(palette.toLowerCase());
+  expect(savedAppearance.tabs[0].hideDone).toBe(true);
+  expect(savedAppearance.reading).toEqual(beforeAppearance.reading);
+  await launch();
+  ({ app, page } = current());
+  await expect(page.locator('html')).toHaveAttribute(
+    'data-palette',
+    palette.toLowerCase(),
+  );
+  await expect(
+    page.getByRole('checkbox', { name: 'Hide done', exact: true }),
+  ).toBeChecked();
   console.log(
-    'Workspace close, quit, session request, failure and retry persistence passed.',
+    'Workspace close, quit, session request, failure and retry persistence passed, including held appearance save with concurrent workspace changes.',
   );
 }

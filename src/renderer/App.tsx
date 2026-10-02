@@ -4771,6 +4771,13 @@ export function App() {
                 theme,
                 palette,
               });
+              // Closing can flush before React commits this update. Preserve
+              // other workspace changes made while the appearance write waited.
+              workspaceRef.current = {
+                ...workspaceRef.current,
+                theme,
+                palette,
+              };
               setWorkspace((current) => ({ ...current, theme, palette }));
               setAppearancePreview(null);
               setDialog((current) =>

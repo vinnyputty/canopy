@@ -755,15 +755,42 @@ async function start(
     });
     const flushRenderer = async () => {
       if (!rendererUnavailable && !created.webContents.isCrashed()) {
+        let unavailable: () => void;
+        const failedLoad = (
+          _event: unknown,
+          code: number,
+          _description: string,
+          _url: string,
+          mainFrame: boolean,
+        ) => {
+          if (mainFrame && code !== -3) unavailable();
+        };
+        const lostRenderer = new Promise<true>((resolve) => {
+          unavailable = () => resolve(true);
+          created.webContents.once('render-process-gone', unavailable);
+          created.webContents.on('did-fail-load', failedLoad);
+        });
         try {
-          await rendererLoaded;
-          await created.webContents.executeJavaScript(
-            'window.canopy.flushWorkspace()',
-          );
-          return false;
+          const lost = await Promise.race([
+            lostRenderer,
+            (async () => {
+              await rendererLoaded;
+              await created.webContents.executeJavaScript(
+                'window.canopy.flushWorkspace()',
+              );
+              return false;
+            })(),
+          ]);
+          if (!lost) return false;
         } catch (error) {
           if (!rendererUnavailable && !created.webContents.isCrashed())
             throw error;
+        } finally {
+          created.webContents.removeListener(
+            'render-process-gone',
+            unavailable!,
+          );
+          created.webContents.removeListener('did-fail-load', failedLoad);
         }
       }
       // Preserve writes already received when an unavailable renderer cannot
@@ -843,7 +870,9 @@ async function start(
         });
     });
     created.on('query-session-end', (event) => {
-      if (closeApproved) return;
+      // Windows marks forced termination as critical; that request cannot
+      // promise time to persist and must not start another blocking close.
+      if (closeApproved || event.reasons.includes('critical')) return;
       event.preventDefault();
       app.quit();
     });
