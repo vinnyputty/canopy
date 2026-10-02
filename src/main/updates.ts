@@ -35,6 +35,7 @@ export class Updates {
   private controller?: AbortController;
   private flight?: Promise<UpdateState>;
   private generation = 0;
+  private cancellationEpoch = 0;
   private cache?: { rows: unknown[]; at: number; limited: boolean };
   private cooldown = 0;
   private writes: Promise<void> = Promise.resolve();
@@ -93,9 +94,21 @@ export class Updates {
   }
   async snapshot(): Promise<UpdateState> {
     await this.loaded;
+    if (
+      this.state.stale &&
+      this.state.checkedAt !== undefined &&
+      this.now() - this.state.checkedAt >= WEEK
+    ) {
+      this.state.release = undefined;
+      this.state.checkedAt = undefined;
+      this.state.stale = false;
+      this.state.notice = false;
+      this.state.message += ' Previous release result expired.';
+    }
     return structuredClone(this.state);
   }
   cancel() {
+    this.cancellationEpoch++;
     this.generation++;
     this.controller?.abort();
     this.controller = undefined;
@@ -104,6 +117,7 @@ export class Updates {
   preferences(value: unknown): Promise<UpdateState> {
     if (!validUpdatePreferences(value))
       return Promise.reject(new Error('Invalid update preferences.'));
+    this.cancel();
     const input = { ...value };
     const task = (this.preferenceChange ?? Promise.resolve())
       .catch(() => {})
@@ -120,7 +134,6 @@ export class Updates {
     await this.loaded;
     if (!validUpdatePreferences(value))
       throw new Error('Invalid update preferences.');
-    this.cancel();
     const previous = this.saved.preferences;
     this.saved.preferences = { ...value };
     try {
@@ -143,8 +156,8 @@ export class Updates {
     return this.snapshot();
   }
   async dismiss() {
-    await this.loaded;
     this.cancel();
+    await this.loaded;
     this.state.notice = false;
     if (this.state.release) this.saved.dismissedTag = this.state.release.tag;
     try {
@@ -155,14 +168,19 @@ export class Updates {
     return this.snapshot();
   }
   async open(tag: unknown, open: (url: string) => Promise<unknown>) {
-    await this.loaded;
-    if (!this.state.release || tag !== this.state.release.tag)
+    const state = await this.snapshot();
+    if (!state.release || tag !== state.release.tag)
       throw new Error('Check for an available release first.');
     await open(releaseUrl(tag));
   }
   async check(background = false): Promise<UpdateState> {
+    // Cancellation covers queued requests as well as active transports. Starting
+    // another check does not invalidate this boundary, so callers can deduplicate.
+    const requestedEpoch = this.cancellationEpoch;
     await this.loaded;
+    if (requestedEpoch !== this.cancellationEpoch) return this.snapshot();
     await this.preferenceChange?.catch(() => {});
+    if (requestedEpoch !== this.cancellationEpoch) return this.snapshot();
     if (
       background &&
       (this.storageError ||
@@ -309,12 +327,6 @@ export class Updates {
             ? error.message
             : 'Could not check releases. The network may be offline or the check timed out. Try again later.',
       };
-      // Retain at most one bounded successful result, clearly marked stale.
-      if (this.state.checkedAt && this.now() - this.state.checkedAt > WEEK) {
-        this.state.release = undefined;
-        this.state.checkedAt = undefined;
-        this.state.stale = false;
-      }
     } finally {
       clearTimeout(timer);
     }

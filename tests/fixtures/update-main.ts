@@ -1,9 +1,40 @@
 // Dedicated audit entry point. Production main never reads these controls.
+import { existsSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { launch } from '../../src/main/app';
 import { createDemoFixture, demoWorkspace } from '../../src/main/demo';
 import { Updates } from '../../src/main/updates';
 import { ReleaseRequestError, type ReleasePage } from '../../src/main/releases';
 import { release } from './releases';
+
+// Fail before launch/Auth/fixture writes if a parent did not explicitly select
+// a disposable temp profile. Do not read credentials, even in a mistaken launch.
+const profile = process.env.CANOPY_USER_DATA;
+if (!profile || !isAbsolute(profile))
+  throw new Error(
+    'Supply an explicit disposable CANOPY_USER_DATA for update audit.',
+  );
+const resolvedProfile = realpathSync(profile);
+const tempRoots = [
+  realpathSync(tmpdir()),
+  ...(existsSync('/tmp') ? [realpathSync('/tmp')] : []),
+];
+if (
+  !tempRoots.some((root) => {
+    const child = relative(root, resolvedProfile);
+    return (
+      child &&
+      child !== '..' &&
+      !child.startsWith(`..${sep}`) &&
+      !isAbsolute(child)
+    );
+  }) ||
+  existsSync(join(resolvedProfile, 'credentials.json'))
+)
+  throw new Error(
+    'Update audit requires a credential-free disposable temp profile.',
+  );
 
 const controls = {
   mode: 'available' as
