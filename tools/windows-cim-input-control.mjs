@@ -74,6 +74,7 @@ export async function runCimInputControls({
         const child = spawnSync(command, argsFor(script), options);
         result = {
           ...child,
+          hasError: Object.hasOwn(child, 'error'),
           killed: child.error?.code === 'ETIMEDOUT',
           closed: child.error?.code !== 'ETIMEDOUT' || child.signal !== null,
           stderrEvents: null,
@@ -86,7 +87,7 @@ export async function runCimInputControls({
         result = await asyncControl(command, argsFor(script), options, mode);
       let rows;
       let parseError;
-      if (result.status === 0 && !result.error) {
+      if (result.status === 0 && !result.hasError) {
         let parsed;
         try {
           parsed = JSON.parse(String(result.stdout));
@@ -117,24 +118,28 @@ export async function runCimInputControls({
         variant,
         mode,
         ok:
-          result.closed && result.status === 0 && !result.error && !parseError,
+          result.closed &&
+          result.status === 0 &&
+          !result.hasError &&
+          !parseError,
         elapsedMs: Date.now() - started,
         timeoutMs,
         status: result.status,
         signal: result.signal,
         killed: result.killed,
         childPid: result.pid ?? null,
-        code: codes.has(result.error?.code)
-          ? result.error.code
-          : result.error
-            ? 'CHILD_ERROR'
-            : null,
-        error: result.error
+        code: result.hasError
+          ? codes.has(result.error?.code)
+            ? result.error.code
+            : 'CHILD_ERROR'
+          : null,
+        error: result.hasError
           ? 'CHILD_OPERATION_FAILED'
           : (parseError ?? (result.status !== 0 ? 'NONZERO_EXIT' : undefined)),
+        operationFailed: result.hasError,
         closed: result.closed,
         cleanupCodes: (result.cleanupErrors ?? []).map((failure) =>
-          codes.has(failure.code) ? failure.code : 'CONTROL_CLEANUP_FAILED',
+          codes.has(failure?.code) ? failure.code : 'CONTROL_CLEANUP_FAILED',
         ),
         spawnedMs: result.spawnedMs,
         stderrEvents: result.stderrEvents,
@@ -176,6 +181,12 @@ function asyncControl(command, args, options, mode) {
     const started = Date.now();
     let child;
     let error;
+    let hasError = false;
+    const recordFailure = (failure) => {
+      if (hasError) return;
+      hasError = true;
+      error = failure;
+    };
     let stdout = '';
     let stdoutBytes = 0;
     let stderrBytes = 0;
@@ -225,6 +236,7 @@ function asyncControl(command, args, options, mode) {
         pid: child?.pid ?? null,
         killed: child?.killed ?? false,
         error,
+        hasError,
         cleanupErrors,
         stdout,
         stdoutBytes,
@@ -235,7 +247,7 @@ function asyncControl(command, args, options, mode) {
       });
     };
     const stop = (failure) => {
-      error ??= failure;
+      recordFailure(failure);
       if (settled || stopping) return;
       stopping = true;
       clearTimeout(timer);
@@ -262,10 +274,13 @@ function asyncControl(command, args, options, mode) {
               stdio: ['ignore', 'pipe', 'pipe'],
             })
           : execFile(command, args, { ...options, timeout: 0 }, (failure) => {
-              error ??= failure;
+              // Native callback null/undefined means successful completion;
+              // explicit event/catch faults always record presence separately.
+              if (failure !== null && failure !== undefined)
+                recordFailure(failure);
             });
     } catch (failure) {
-      error = failure;
+      recordFailure(failure);
       done(null, null, true); // No child was launched.
       return;
     }

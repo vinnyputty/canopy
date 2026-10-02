@@ -4,6 +4,7 @@ export interface CimInputControlRecord {
   ok: boolean;
   elapsedMs: number;
   timeoutMs: number;
+  operationFailed: boolean;
   closed: boolean;
   cleanupCodes: string[];
   childPid: number | null;

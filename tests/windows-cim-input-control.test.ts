@@ -376,3 +376,97 @@ test('real stdout/stderr overflow enforces the cap for every transport and confi
     );
   }
 });
+
+test('falsy transport and stdio faults fail closed zero-exit snapshots while successful native callbacks remain successful', () => {
+  checkModel(`${model}
+    const {runCimInputControls}=await import(${JSON.stringify(helper)});
+    for(const value of [false,0,'',null,undefined]) {
+      for(const channel of ['stdout','stderr','stdin','end','throw','callback','sync']) {
+        cp.spawnSync=()=>({pid:123456,status:0,signal:null,stdout:row,stderr:'',...(channel==='sync'?{error:value}:{})});
+        const create=(callback)=>{
+          if(channel==='throw')throw value;
+          const c=child();
+          c.kill=signal=>{assert.equal(signal,'SIGKILL');return true;};
+          if(channel==='end')c.stdin.end=()=>{throw value;};
+          queueMicrotask(()=>{
+            if(['stdout','stderr','stdin'].includes(channel)) (c[channel]??c.stderr).emit('error',value);
+            if(channel==='callback' && callback) callback(value);
+            c.stdout.emit('data',row);
+            if(channel!=='callback' && callback)callback(null);
+            c.emit('close',0,null);
+          });return c;
+        };
+        cp.execFile=(_command,_args,_options,callback)=>create(callback);
+        cp.spawn=()=>create();syncBuiltinESMExports();
+        const records=await runCimInputControls({timeoutMs:200,report:()=>{}});
+        assert.equal(records.length,7);
+        for(const r of records) {
+          const failed=channel==='sync'?r.mode==='sync':channel==='end'?r.mode==='exec-end':channel==='callback'?r.mode.startsWith('exec-')&&value!==null&&value!==undefined:r.mode!=='sync';
+          assert.equal(r.ok,!failed,channel+' payload '+String(value)+' mode '+r.mode);
+          if(failed){assert.equal(r.operationFailed,true);assert.equal(r.code,'CHILD_ERROR');assert.equal(r.error,'CHILD_OPERATION_FAILED');assert.equal(r.rows,undefined);}
+          else assert.equal(r.rows,1);
+        }
+      }
+    }
+  `);
+});
+
+test('first nullish stream fault stays the exact primary after a later fault and unconfirmed close', () => {
+  checkModel(`${model}
+    import {inspect} from 'node:util';
+    const {runCimInputControls}=await import(${JSON.stringify(helper)});
+    const secret='fixture-private-later-error';
+    for(const value of [null,undefined]) {
+      let launched;
+      cp.execFile=()=>{const c=child();launched=c;c.kill=()=>false;
+        queueMicrotask(()=>{c.stderr.emit('error',value);c.stdout.emit('error',new Error(secret));});return c;};
+      syncBuiltinESMExports();
+      let failure;try{await runCimInputControls({timeoutMs:30,report:()=>{}});}catch(error){failure=error;}
+      assert.ok(failure);assert.equal(failure.child,launched);
+      assert.ok(Object.hasOwn(failure,'primary'));assert.equal(failure.primary,value);
+      assert.equal(failure.record.operationFailed,true);assert.equal(failure.record.code,'CHILD_ERROR');
+      assert.ok(!failure.message.includes(secret));assert.ok(!inspect(failure).includes(secret));
+      assert.equal(failure.record.closed,false);
+    }
+  `);
+});
+
+test('closed comparisons classify arbitrary falsy cleanup throws without losing their operation failure', () => {
+  checkModel(`${model}
+    const {runCimInputControls}=await import(${JSON.stringify(helper)});
+    for(const value of [null,undefined,false,0,'']) {
+      const create=()=>{const c=child();c.kill=()=>{throw value;};
+        queueMicrotask(()=>{c.stderr.emit('error',false);c.stdout.emit('data',row);c.emit('close',0,null);});return c;};
+      cp.execFile=create;cp.spawn=create;syncBuiltinESMExports();
+      const records=await runCimInputControls({timeoutMs:200,report:()=>{}});
+      assert.equal(records.length,7);
+      for(const r of records.filter(r=>r.mode!=='sync')) {
+        assert.equal(r.closed,true);assert.equal(r.ok,false);assert.equal(r.operationFailed,true);
+        assert.deepEqual(r.cleanupCodes,['CONTROL_CLEANUP_FAILED']);
+      }
+    }
+  `);
+});
+
+test('nullish kill, pipe, unref and report throws preserve the direct child and first failure on unconfirmed close', () => {
+  checkModel(`${model}
+    import {inspect} from 'node:util';
+    const {runCimInputControls}=await import(${JSON.stringify(helper)});
+    for(const value of [null,undefined]) {
+      const primary=Object.assign(new Error('fixture-private-primary'),{code:'EPIPE'});
+      let launched;
+      cp.execFile=()=>{const c=child();launched=c;c.kill=()=>{throw value;};
+        for(const stream of [c.stdin,c.stdout,c.stderr])stream.destroy=()=>{throw value;};
+        c.unref=()=>{throw value;};queueMicrotask(()=>c.stderr.emit('error',primary));return c;};
+      syncBuiltinESMExports();
+      let failure;try{await runCimInputControls({timeoutMs:30,report:r=>{if(!r.closed)throw value;}});}catch(error){failure=error;}
+      assert.ok(failure);assert.equal(failure.child,launched);assert.equal(failure.primary,primary);
+      assert.equal(failure.record.closed,false);assert.equal(failure.record.operationFailed,true);
+      assert.ok(Object.hasOwn(failure,'reportError'));assert.equal(failure.reportError,value);
+      assert.equal(failure.cleanupErrors.length,5);assert.ok(failure.cleanupErrors.every(e=>e===value));
+      assert.deepEqual(failure.record.cleanupCodes,Array(5).fill('CONTROL_CLEANUP_FAILED'));
+      for(const emitter of [launched,launched.stdin,launched.stdout,launched.stderr])for(const event of ['spawn','close','error','data'])assert.equal(emitter.listenerCount(event),0);
+      assert.ok(!inspect(failure).includes(primary.message));assert.ok(!JSON.stringify(failure).includes(primary.message));
+    }
+  `);
+});
