@@ -615,6 +615,12 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
   const controllers = [...trees.values()];
   const search = new AbortController();
   const searches = new Map([['search', search]]);
+  let updateCancellations = 0;
+  const updates = {
+    cancel: () => {
+      updateCancellations++;
+    },
+  };
   const listener = (event: string) => {
     let found!: ts.Expression;
     function walk(n: ts.Node) {
@@ -633,7 +639,7 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
       ts.transpileModule(`(${found.getText(mainAst)})`, {
         compilerOptions: { target: ts.ScriptTarget.ES2022 },
       }).outputText,
-      { trees, searches },
+      { trees, searches, updates },
     );
   };
   const navigation = listener('did-start-navigation');
@@ -645,7 +651,9 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
   assert.equal(trees.size, 0);
   const next = new AbortController();
   trees.set('new-renderer', next);
+  assert.equal(updateCancellations, 0);
   listener('destroyed')();
+  assert.equal(updateCancellations, 1);
   assert.equal(next.signal.aborted, true);
   assert.equal(search.signal.aborted, true);
   assert.equal(trees.size, 0);

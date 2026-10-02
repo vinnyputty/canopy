@@ -11,14 +11,18 @@ import { fileURLToPath } from 'node:url';
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const git = (...args) =>
   execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
-const base = 'af0808d41d39d3f9252b620723014bd76baf953f';
+const base = process.env.CANOPY_PERF_BASE;
+if (!/^[a-f0-9]{40}$/.test(base ?? ''))
+  throw new Error('An explicit full CANOPY_PERF_BASE commit is required.');
+if (git('rev-parse', `${base}^{commit}`) !== base)
+  throw new Error('CANOPY_PERF_BASE must identify an exact commit.');
 const candidate = git('rev-parse', 'HEAD');
 if (git('status', '--porcelain'))
   throw new Error(
     'Commit the reviewed candidate before preparing its exact-source pair.',
   );
 if (git('merge-base', base, candidate) !== base)
-  throw new Error('Candidate must descend from the pinned main base.');
+  throw new Error('Candidate must descend from the explicit comparison base.');
 const directory = await mkdtemp(join(tmpdir(), 'canopy-perf-90-pair-'));
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const harnessFiles = [
@@ -171,8 +175,10 @@ for (const [label, source] of [
     hashes[path] = digest(await readFile(join(dist, path)));
   manifest.builds.push({ label, source, stage, files: hashes });
 }
+const manifestBytes = JSON.stringify(manifest, null, 2);
+await writeFile(join(directory, 'manifest.json'), manifestBytes);
 await writeFile(
-  join(directory, 'manifest.json'),
-  JSON.stringify(manifest, null, 2),
+  join(directory, 'manifest.sha256'),
+  digest(manifestBytes) + '\n',
 );
 console.log(join(directory, 'manifest.json'));
