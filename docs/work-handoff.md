@@ -46,18 +46,18 @@ Close, non-same-document navigation, renderer crash/destruction and quit cancel 
 
 ## Disposable native audit — pending fresh review and exclusive token
 
-`//:handoff_check` is a manual desktop target. Build it without executing it while native acceptance is held. After fresh combined source review and an exclusive lead token, run it with the reviewed exact head:
+`//:handoff_check` is a manual desktop target. Build it without executing it while native acceptance is held. Execution is blocked before staging or launch until the shared issue 85 ownership helper is properly integrated and reviewed for this target; Windows qualification remains pending. After that dependency, fresh combined source review and an exclusive lead token, the intended command is:
 
 ```sh
 bazel run //:handoff_check -- REVIEWED_40_CHARACTER_HEAD
 ```
 
-The audit creates a marked temporary sample profile, uses `handoff-audit-main.cjs` with synthetic Jira metadata and no credential loading, and retains profile/results as evidence. The fixture verifies the disposable profile and bounded regular marker file only after acquiring the instance lock. It checks startup navigation, a second CLI launch while minimized, one-window focus restoration, and an explicit sample context copy whose clipboard contents match the reviewed text. It installs no protocol and performs no external handoff. This target has not been executed as part of source implementation.
+The prepared audit requires the shared ownership adapter to create and retain a marked temporary sample profile. Its fixture uses `handoff-audit-main.cjs` with synthetic Jira metadata and no credential loading, and the workflow retains profile/results as evidence. The fixture verifies the disposable profile and bounded regular marker file only after acquiring the instance lock. The prepared workflow checks startup navigation, a second CLI launch while minimized, one-window focus restoration, and an explicit sample context copy delivered through the actual main IPC handler into an isolated, bounded sample sink. The fixture replaces main clipboard methods before the UI starts and rejects native reads and other writes; no system clipboard content is captured. Original method descriptors are restored by the exiting fixture, not while an uncertain sample is alive. The sink comparison does not qualify real system clipboard integration. It installs no protocol and performs no external handoff. This target has not been executed as part of source implementation.
 
-- [ ] Run the audited CLI/clipboard target on macOS, Windows and Linux at the freshly reviewed head under the exclusive native token.
+- [ ] Integrate the qualified shared ownership transport, then run the audited CLI/sample-sink target on macOS, Windows and Linux at the freshly reviewed head under the exclusive native token.
 - [ ] Verify distinct command order and duplicates during held startup/close/recreation on each OS.
 - [ ] Verify unavailable/disconnected accounts, unknown hosts/roots/issues, deleted views, stale sources and malformed command invocations leave the selection unchanged and show a safe error.
 - [ ] Verify hidden/minimized focus and native macOS Dock activation under issue 94's retained acceptance gates.
-- [ ] Edit, save, reload and reset the custom template in the disposable app; verify privacy boundaries and exact reviewed clipboard text.
+- [ ] Edit, save, reload and reset the custom template in the disposable app; verify privacy boundaries and exact reviewed sample-sink text. Real system clipboard integration requires separate authorized native acceptance.
 
 Native duplicate-launch/URL/focus and interactive clipboard/persistence acceptance remain pending. Browser/editor/agent destination handoff is deferred.

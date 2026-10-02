@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createRequire, Module } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { installSampleCopySink } from './handoff-audit-boundary';
 const sourcePath = process.argv[2];
 const scenario = process.argv[3];
 const args = (name: string) => [
@@ -222,6 +223,36 @@ const send = (name: string) =>
   if (scenario === 'early-quit') {
     assert.throws(() => invoke('handoffReady'), /closing/);
     assert.equal(sent.length, 0);
+    return;
+  }
+  if (scenario === 'copy-sink') {
+    const original = Object.getOwnPropertyDescriptors(electron.clipboard);
+    const sink = installSampleCopySink(electron.clipboard);
+    try {
+      assert.deepEqual(sink.inspect(), { count: 0, text: undefined });
+      assert.throws(
+        () =>
+          handlers.get('canopy:copyText')!(
+            { ...event(), sender: {} },
+            'forbidden',
+          ),
+        /Untrusted/,
+      );
+      assert.throws(() => invoke('copyText', 'x'.repeat(100_001)), /Invalid/);
+      invoke('copyText', 'Explicit reviewed sample');
+      assert.deepEqual(sink.inspect(), {
+        count: 1,
+        text: 'Explicit reviewed sample',
+      });
+      assert.throws(() => invoke('copyText', 'second'), /Invalid sample/);
+    } finally {
+      sink.restore();
+    }
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptors(electron.clipboard),
+      original,
+    );
+    app.emit('before-quit');
     return;
   }
   if (scenario === 'preload') {

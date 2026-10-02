@@ -12,6 +12,8 @@ import {
 import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+if (process.argv[2] === 'handoff-check')
+  (await import('./handoff-audit.mjs')).requireHandoffLifecycle();
 const require = createRequire(import.meta.url);
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();

@@ -1,11 +1,26 @@
 // Manual desktop audit only. The lock loser never enters this profile guard.
-import { app } from 'electron';
+import { app, clipboard } from 'electron';
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { launch } from '../../src/main/app';
 import { launchHandoffArguments } from '../../src/main/work-handoff';
 import { createDemoFixture } from '../../src/main/demo';
+import {
+  auditArguments,
+  installSampleCopySink,
+} from './handoff-audit-boundary';
+
+let copySink: ReturnType<typeof installSampleCopySink> | undefined;
+const restoreCopy = () => {
+  app.removeListener('quit', restoreCopy);
+  process.removeListener('exit', restoreCopy);
+  copySink?.restore();
+};
+// Restore method descriptors only when the process is leaving, never while an
+// uncertain live sample might still dispatch another copy.
+app.once('quit', restoreCopy);
+process.once('exit', restoreCopy);
 
 launch(
   async () => {
@@ -33,7 +48,25 @@ launch(
       !/^[a-f0-9]{40}$/.test(marker.reviewedHead)
     )
       throw new Error('Missing handoff audit marker.');
-    const fixture = await createDemoFixture();
+    if (!copySink) {
+      copySink = installSampleCopySink(clipboard);
+      Object.assign(globalThis, { handoffAuditCopy: copySink });
+    }
+    let fixture;
+    try {
+      fixture = await createDemoFixture();
+    } catch (error) {
+      try {
+        restoreCopy();
+      } catch (cleanup) {
+        throw new AggregateError(
+          [error, cleanup],
+          'Sample fixture failed during cleanup.',
+          { cause: error },
+        );
+      }
+      throw error;
+    }
     return {
       ...fixture,
       connection: {
@@ -44,5 +77,9 @@ launch(
     };
   },
   true,
-  launchHandoffArguments(process.argv, app.isPackaged, process.platform),
+  launchHandoffArguments(
+    auditArguments(process.argv, process.platform),
+    app.isPackaged,
+    process.platform,
+  ),
 );

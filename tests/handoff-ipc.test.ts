@@ -45,6 +45,7 @@ for (const scenario of [
   'early-quit',
   'fifo',
   'preload',
+  'copy-sink',
   'navigation',
   'crash',
   'close',
