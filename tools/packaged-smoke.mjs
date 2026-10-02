@@ -133,6 +133,10 @@ async function smoke(executablePath, directory, artifact) {
       expect(await page.evaluate(() => window.canopy.demoMode())).toBe(false);
       if (!restart) {
         await page
+          .getByRole('button', { name: 'Settings', exact: true })
+          .click();
+        await page
+          .getByRole('dialog', { name: 'Settings', exact: true })
           .getByRole('button', { name: 'Appearance', exact: true })
           .click();
         const appearance = page.getByRole('dialog', { name: 'Appearance' });
