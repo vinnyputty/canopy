@@ -83,6 +83,24 @@ function equalNames(actual, expected) {
   )
     throw new Error(`Unexpected asset set: ${actual.join(', ')}`);
 }
+function validateMacPublisher(assets) {
+  const publishers = new Set();
+  for (const asset of assets.filter((item) => item.name.includes('-mac-'))) {
+    const trust = validateTrust(
+      asset.macosTrust,
+      asset.name.includes('-arm64.') ? 'arm64' : 'x64',
+    );
+    publishers.add(
+      JSON.stringify([
+        trust.identity,
+        trust.teamId,
+        trust.certificateSha1.toLowerCase(),
+      ]),
+    );
+  }
+  if (publishers.size !== 1)
+    throw new Error('macOS publisher differs across release assets');
+}
 export async function assemble(
   input,
   output,
@@ -140,18 +158,7 @@ export async function assemble(
       });
     }
   }
-  if (signing === 'signed') {
-    const publishers = new Set(
-      assets
-        .filter((asset) => asset.macosTrust)
-        .map(
-          ({ macosTrust }) =>
-            `${macosTrust.identity}:${macosTrust.certificateSha1}`,
-        ),
-    );
-    if (publishers.size !== 1)
-      throw new Error('macOS publisher differs between architectures');
-  }
+  if (signing === 'signed') validateMacPublisher(assets);
   await mkdir(output); // Refuse stale output from another invocation.
   for (const asset of assets) await cp(asset.source, join(output, asset.name));
   const manifest = {
@@ -211,12 +218,8 @@ export async function verifyDownloads(directory, tag, version, commit) {
     .join('');
   if ((await readFile(join(directory, 'SHA256SUMS'), 'utf8')) !== sums)
     throw new Error('Checksum manifest mismatch');
+  if (manifest.macosSigning === 'signed') validateMacPublisher(manifest.assets);
   for (const asset of manifest.assets) {
-    if (asset.name.includes('-mac-') && manifest.macosSigning === 'signed')
-      validateTrust(
-        asset.macosTrust,
-        asset.name.includes('-arm64.') ? 'arm64' : 'x64',
-      );
     if (!(await lstat(join(directory, asset.name))).isFile())
       throw new Error('Unsafe artifact');
     const bytes = await readFile(join(directory, asset.name));
@@ -228,13 +231,7 @@ export async function verifyDownloads(directory, tag, version, commit) {
 export async function qualify(manifest, path) {
   if (manifest.macosSigning !== 'signed')
     throw new Error('Unsigned macOS distribution cannot publish');
-  for (const asset of manifest.assets.filter((item) =>
-    item.name.includes('-mac-'),
-  ))
-    validateTrust(
-      asset.macosTrust,
-      asset.name.includes('-arm64.') ? 'arm64' : 'x64',
-    );
+  validateMacPublisher(manifest.assets);
   const evidence = await json(path);
   if (
     evidence.tag !== manifest.tag ||

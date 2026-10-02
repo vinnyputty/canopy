@@ -4,6 +4,8 @@ import { spawnSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
+  readlinkSync,
+  realpathSync,
   mkdirSync,
   writeFileSync,
   symlinkSync,
@@ -113,9 +115,34 @@ async function exercise(fault, arch = 'arm64') {
   const app = join(root, 'app', 'Canopy.app');
   await mkdir(join(app, 'Contents/MacOS'), { recursive: true });
   await writeFile(join(app, 'Contents/MacOS/Canopy'), 'mock executable');
+  const framework = join('Contents', 'Frameworks', 'Electron.framework');
+  const internalSymlink = process.platform !== 'win32' && !fault;
+  if (internalSymlink) {
+    await mkdir(join(app, framework, 'Versions/A'), { recursive: true });
+    await writeFile(
+      join(app, framework, 'Versions/A/Electron'),
+      'mock framework',
+    );
+    symlinkSync('A', join(app, framework, 'Versions/Current'), 'dir');
+  }
+  const populate = (payload, format) => {
+    const target = join(payload, 'Canopy.app');
+    if (fault === `${format}-root-link`)
+      symlinkSync(
+        app,
+        target,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    else if (fault === `${format}-root-file`)
+      writeFileSync(target, 'not a directory');
+    else cpSync(app, target, { recursive: true, verbatimSymlinks: true });
+    if (fault === `${format}-extra`)
+      writeFileSync(join(payload, 'extra.txt'), 'extra member');
+  };
   const calls = [];
   let scratch;
   let afterSign = false;
+  let copiedInvalidRoot = false;
   const run = (name, args, options = {}) => {
     calls.push({ name, args, options });
     assert.ok(
@@ -166,6 +193,20 @@ async function exercise(fault, arch = 'arm64') {
         (fault === 'zip-signature' && args.at(-1).includes('/zip/')))
     )
       throw new Error('mock invalid signature');
+    if (
+      internalSymlink &&
+      name === 'codesign' &&
+      args.includes('--verify') &&
+      args.at(-1).endsWith('Canopy.app')
+    ) {
+      const checkedApp = args.at(-1);
+      const link = join(checkedApp, framework, 'Versions/Current');
+      assert.equal(readlinkSync(link), 'A');
+      assert.equal(
+        realpathSync(link),
+        join(realpathSync(checkedApp), framework, 'Versions/A'),
+      );
+    }
     if (name === 'codesign' && args.includes('--extract-certificates'))
       writeFileSync(
         `${args[args.indexOf('--extract-certificates') + 1]}0`,
@@ -177,13 +218,18 @@ async function exercise(fault, arch = 'arm64') {
       return fault === 'arch' ? 'other' : arch === 'x64' ? 'x86_64' : 'arm64';
     if (name === 'spctl' && fault === 'gatekeeper')
       throw new Error('mock Gatekeeper rejection');
-    if (name === 'ditto' && args[0] === '-x')
-      cpSync(app, join(args.at(-1), 'Canopy.app'), { recursive: true });
+    if (name === 'ditto' && args[0] === '-x') populate(args.at(-1), 'zip');
     if (name === 'hdiutil' && args[0] === 'attach') {
       const mount = args[args.indexOf('-mountpoint') + 1];
       mkdirSync(mount, { recursive: true });
-      cpSync(app, join(mount, 'Canopy.app'), { recursive: true });
+      populate(mount, 'dmg');
     }
+    if (
+      name === 'hdiutil' &&
+      args[0] === 'detach' &&
+      fault?.startsWith('dmg-root-')
+    )
+      copiedInvalidRoot = existsSync(join(scratch, 'dmg-app'));
     if (
       name === 'security' &&
       args[0] === 'delete-keychain' &&
@@ -219,7 +265,15 @@ async function exercise(fault, arch = 'arm64') {
         }
       },
     });
-    if (fault) await assert.rejects(action);
+    if (fault)
+      await assert.rejects(
+        action,
+        fault.includes('-root-')
+          ? /app root/
+          : fault === 'zip-extra'
+            ? /Unexpected ZIP payload/
+            : undefined,
+      );
     else {
       const report = await action;
       assert.equal(report.assets.length, 2);
@@ -246,6 +300,34 @@ async function exercise(fault, arch = 'arm64') {
           .at(-1).args,
         ['list-keychains', '-d', 'user', '-s', '/mock/login.keychain-db'],
       );
+    if (fault?.includes('-root-') || fault === 'zip-extra') {
+      const format = fault.split('-')[0];
+      assert.ok(
+        !calls.some(
+          (call) =>
+            ['codesign', 'lipo', 'spctl', 'xcrun'].includes(call.name) &&
+            call.args.some((arg) =>
+              String(arg).startsWith(
+                join(scratch, format === 'zip' ? 'zip' : 'dmg-app'),
+              ),
+            ),
+        ),
+        'invalid container root reached native verification',
+      );
+      if (format === 'dmg') {
+        assert.equal(
+          copiedInvalidRoot,
+          false,
+          'invalid mounted root was copied',
+        );
+        assert.ok(
+          calls.some(
+            (call) => call.name === 'hdiutil' && call.args[0] === 'detach',
+          ),
+          'rejected DMG was not detached',
+        );
+      }
+    }
     assert.ok(!existsSync(scratch), 'temporary credentials survived');
     assert.notEqual(
       process.env.CSC_KEYCHAIN,
@@ -312,4 +394,15 @@ test('signing workflow scopes credentials to protected signing and keeps native/
   assert.match(workflow, /macos-15-intel/);
   assert.doesNotMatch(workflow, /pull_request:|push:|draft=false|release edit/);
   assert.equal(workflow.split('secrets.').length - 1, 3);
+});
+
+test('distributed ZIP and DMG roots reject external links and files before verification; ZIP rejects extra members', async (t) => {
+  for (const fault of [
+    'zip-root-link',
+    'dmg-root-link',
+    'zip-root-file',
+    'dmg-root-file',
+    'zip-extra',
+  ])
+    await t.test(fault, () => exercise(fault));
 });

@@ -8,11 +8,12 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { resolveTagSource, validateTag } from './release.mjs';
 
 // Never include child output or arguments in errors: imports can contain key material.
@@ -114,6 +115,17 @@ export function validateTrust(trust, arch) {
   )
     throw new Error('Verified macOS distribution trust required');
   return trust;
+}
+export async function containedAppRoot(payload) {
+  const app = join(payload, 'Canopy.app');
+  if (!(await lstat(app)).isDirectory())
+    throw new Error('Distributed app root must be a real directory');
+  const boundary = await realpath(payload);
+  const resolved = await realpath(app);
+  const path = relative(boundary, resolved);
+  if (!path || path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path))
+    throw new Error('Distributed app root escapes its payload');
+  return app;
 }
 export async function signedPackages({
   env,
@@ -363,7 +375,7 @@ export async function signedPackages({
       JSON.stringify(['Canopy.app'])
     )
       throw new Error('Unexpected ZIP payload');
-    await verify(join(extracted, 'Canopy.app'), true);
+    await verify(await containedAppRoot(extracted), true);
     const mount = join(scratch, 'mount');
     await mkdir(mount);
     try {
@@ -376,7 +388,8 @@ export async function signedPackages({
         dmg,
       ]);
       const app = join(scratch, 'dmg-app', 'Canopy.app');
-      await cp(join(mount, 'Canopy.app'), app, {
+      const source = await containedAppRoot(mount);
+      await cp(source, app, {
         recursive: true,
         verbatimSymlinks: true,
       });
