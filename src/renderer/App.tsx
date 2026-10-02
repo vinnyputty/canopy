@@ -5688,7 +5688,13 @@ function AssigneeEditor({
           </button>
         ))}
         {!state?.loading && !state?.error && visible?.length === 0 && (
-          <span className="no-choices">No people found in these results</span>
+          <span className="no-choices">
+            {provider === 'github'
+              ? hasMore
+                ? 'Search incomplete. Load more people to continue searching.'
+                : 'No matching assignable people found.'
+              : 'No people found in these results'}
+          </span>
         )}
         <PickerFeedback
           state={state}
@@ -5705,7 +5711,7 @@ function AssigneeEditor({
       </div>
       <p className="picker-note">
         {provider === 'github'
-          ? 'GitHub checks assignment eligibility for this repository when selected. Load more to browse additional assignees.'
+          ? 'GitHub checks assignment eligibility for this repository when selected. Search scans up to 500 people for up to five seconds at a time. Load more to continue when results are incomplete.'
           : 'Recent people are suggestions; Jira checks assignment for this issue when selected. Search covers only Jira’s first 1,000 users and may be incomplete.'}
       </p>
     </div>

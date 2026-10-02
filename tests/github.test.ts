@@ -438,3 +438,134 @@ test('GitHub connection distinguishes an empty repository from missing issue acc
     globalThis.fetch = original;
   }
 });
+
+test('GitHub typed assignee search finds later pages and distinguishes exhausted results', async () => {
+  const paths: string[] = [];
+  let matchPage = 2;
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    const page = Number(
+      new URL(path, 'https://api.github.com').searchParams.get('page'),
+    );
+    return page < matchPage
+      ? Array.from({ length: 100 }, (_, index) => ({
+          login: `other-${page}-${index}`,
+        }))
+      : [{ login: 'LateAda' }];
+  });
+  assert.deepEqual(await provider.assignees('team/a#1', '  lateADA  '), {
+    users: [{ id: 'LateAda', name: 'LateAda' }],
+  });
+  assert.equal(paths.length, 2);
+  matchPage = 3;
+  paths.length = 0;
+  assert.deepEqual(await provider.assignees('team/a#1', 'lateada'), {
+    users: [{ id: 'LateAda', name: 'LateAda' }],
+  });
+  assert.equal(paths.length, 3);
+  assert.deepEqual(await provider.assignees('team/a#1', 'missing'), {
+    users: [],
+  });
+  assert.deepEqual(await provider.assignees('team/a#1', 'LateAda', 100), {
+    users: [{ id: 'LateAda', name: 'LateAda' }],
+  });
+});
+
+test('GitHub assignee scans bound requests and continue past unmatched windows', async () => {
+  const pages: number[] = [];
+  const provider = new GithubProvider(connection, async (path) => {
+    const page = Number(
+      new URL(path, 'https://api.github.com').searchParams.get('page'),
+    );
+    pages.push(page);
+    return page <= 5
+      ? Array.from({ length: 100 }, (_, index) => ({
+          login: `other-${page}-${index}`,
+        }))
+      : [{ login: 'Ada' }];
+  });
+  const first = await provider.assignees('team/a#1', 'ada');
+  assert.deepEqual(first, { users: [], nextStartAt: 500 });
+  assert.deepEqual(pages, [1, 2, 3, 4, 5]);
+  assert.deepEqual(
+    await provider.assignees('team/a#1', 'ada', first.nextStartAt),
+    {
+      users: [{ id: 'Ada', name: 'Ada' }],
+    },
+  );
+  pages.length = 0;
+  assert.equal((await provider.assignees('team/a#1')).nextStartAt, 100);
+  assert.deepEqual(pages, [1]);
+  for (const cursor of [-100, 1, NaN, Infinity])
+    await assert.rejects(
+      () => provider.assignees('team/a#1', 'ada', cursor),
+      /cursor/,
+    );
+  assert.deepEqual(pages, [1]);
+});
+
+test('GitHub assignee deadline preserves matches and retries the interrupted page', async (t) => {
+  const controller = new AbortController();
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    assert.equal(milliseconds, 5_000);
+    return controller.signal;
+  });
+  const paths: string[] = [];
+  const provider = new GithubProvider(connection, async (path, init) => {
+    paths.push(path);
+    assert.equal(init?.signal, controller.signal);
+    if (paths.length === 1)
+      return Array.from({ length: 100 }, (_, index) => ({
+        login: `Ada-${index}`,
+      }));
+    controller.abort();
+    throw new DOMException('Timed out', 'TimeoutError');
+  });
+  const result = await provider.assignees('team/a#1', 'ada');
+  assert.equal(result.users.length, 100);
+  assert.equal(result.nextStartAt, 100);
+  assert.equal(paths.length, 2);
+});
+
+test('GitHub assignee failures remain errors and selection rechecks the selected repository', async () => {
+  const paths: string[] = [];
+  let eligible = true;
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    if (path.startsWith('/repos/team/b/')) throw new Error('Access denied');
+    return eligible ? [{ login: 'Ada' }] : [];
+  });
+  assert.deepEqual((await provider.assignees('team/a#1', 'ada')).users, [
+    { id: 'Ada', name: 'Ada' },
+  ]);
+  eligible = false;
+  assert.equal(await provider.validateAssignee('team/a#1', 'Ada'), null);
+  eligible = true;
+  assert.deepEqual(await provider.validateAssignee('team/a#2', 'ada'), {
+    id: 'Ada',
+    name: 'Ada',
+  });
+  assert.equal(paths.length, 3);
+  await assert.rejects(
+    () => provider.assignees('team/b#1', 'ada'),
+    /Access denied/,
+  );
+  await assert.rejects(
+    () => provider.validateAssignee('team/b#1', 'Ada'),
+    /Access denied/,
+  );
+  await assert.rejects(
+    () => provider.assignees('elsewhere/repo#1', 'ada'),
+    /outside/,
+  );
+});
+
+test('GitHub rejects malformed assignee pages instead of reporting no match', async () => {
+  for (const response of [null, {}, [null], [{ login: 42 }]]) {
+    const provider = new GithubProvider(connection, async () => response);
+    await assert.rejects(
+      () => provider.assignees('team/a#1', 'ada'),
+      /invalid assignee page/,
+    );
+  }
+});

@@ -14,6 +14,8 @@ The preview shows reporter, creation and update times, milestone, and issue fiel
 
 Title, assignee, open/closed state, and labels are writable. Edit title, assignee, and state in the tree; edit labels in the issue preview. GitHub issues have no Jira priority, workflow transitions, or sibling ranking in Canopy. GitHub search is paginated by repository and returns at most the first 1,000 matching issues per repository, following GitHub's Search API limit. Rate limits and authorization changes are shown as errors; retry after the displayed reset time or reconnect if the token was revoked.
 
+Assignee search matches GitHub logins across repository assignable-user pages. Each typed search scans at most five pages of 100 users with a five-second deadline; an empty query browses one page. **Load more people** continues from the first unconsumed page. An incomplete search is shown separately from a completed search with no matches. Selection still verifies assignment eligibility for the selected issue’s repository.
+
 The automated suite uses mocked GitHub responses for cross-repository hierarchy, pagination, writes, access failures, and rate limits. Live verification requires a token with Issues read and write access to two test repositories containing cross-repository sub-issues and dependencies. To share a token for local testing, save it in a file outside this repository and provide only the file path, repository names, and root issue reference.
 
 ## Changes since last seen
