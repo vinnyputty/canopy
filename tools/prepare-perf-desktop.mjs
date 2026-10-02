@@ -27,6 +27,7 @@ const harnessFiles = [
   'tests/fixtures/performance-preload.ts',
   'tests/fixtures/performance-ui.ts',
   'tools/perf-desktop.mjs',
+  'tools/audit-lifecycle.mjs',
   'tools/prepare-perf-desktop.mjs',
 ];
 const manifest = {
@@ -142,7 +143,7 @@ for (const [label, source] of [
           const tree = buildIssueTree(snapshot.issues, fixture.rootKey), expanded = new Set(snapshot.issues.map(i => i.key));
           const count = (query, expand) => { const filtered = filterTree(tree, query, {}, true); return filtered ? flattenVisible(filtered, expand).length : 0; };
           sources.push({ id: shape, connectionId: 'fixture', rootKey: fixture.rootKey }); snapshots[shape] = snapshot;
-          results.push({ provider, shape, root: fixture.rootKey, issues: size, expandedRows: count('', expanded), collapsedRows: count('', new Set([fixture.rootKey])), filterRows: count('region 3', expanded) });
+          results.push({ provider, shape, root: fixture.rootKey, issues: size, expandedRows: count('', expanded), collapsedRows: count('', new Set([fixture.rootKey])), filterRows: count('region 3', expanded), keyboardNextKey: flattenVisible(filterTree(tree, '', {}, true), expanded)[1]?.issue.key });
         }
         const savedRows = viewResults({filters:{assignee:'any',statuses:[],priority:'',hideDone:true},sort:{column:'key',direction:'asc'}}, sources, snapshots, {}).length;
         results.filter(r => r.provider === provider).forEach(r => r.savedRows = savedRows);

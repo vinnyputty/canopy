@@ -8,7 +8,7 @@ if (
     'Explicit CANOPY_DESKTOP_TOKEN, CANOPY_ELECTRON_PATH and prepared CANOPY_PERF_PAIR are required. This audit launches Electron.',
   );
 }
-const { readFile, writeFile, mkdir, rm } = await import('node:fs/promises');
+const { readFile, writeFile, mkdtemp, rm } = await import('node:fs/promises');
 const { createHash } = await import('node:crypto');
 const { join } = await import('node:path');
 const manifest = JSON.parse(
@@ -23,6 +23,12 @@ if (
   !/^[a-f0-9]{40}$/.test(manifest.candidate)
 )
   throw new Error('Expected exact base/current candidate source IDs.');
+for (const [file, hash] of Object.entries(manifest.harness)) {
+  const actual = createHash('sha256')
+    .update(await readFile(new URL(`../${file}`, import.meta.url)))
+    .digest('hex');
+  if (actual !== hash) throw new Error(`Approved harness changed: ${file}`);
+}
 for (const build of manifest.builds) {
   for (const [file, hash] of Object.entries(build.files)) {
     const actual = createHash('sha256')
@@ -32,7 +38,12 @@ for (const build of manifest.builds) {
       throw new Error(`Prepared bundle changed: ${build.label}/${file}`);
   }
 }
-const { _electron: electron, expect } = await import('@playwright/test');
+const { AuditOwner, deadline, finishAudit } =
+  await import('./audit-lifecycle.mjs');
+const { _electron: electron, expect: defaultExpect } =
+  await import('@playwright/test');
+const LOAD_MS = 180000;
+const expect = defaultExpect.configure({ timeout: LOAD_MS });
 const output =
   process.env.CANOPY_PERF_DESKTOP_OUTPUT ?? '/tmp/canopy-perf-90-desktop.json';
 const report = {
@@ -53,9 +64,9 @@ for (const provider of ['jira', 'github'])
       const roots = manifest.scenarios
         .find((s) => s.label === build.label)
         .counts.filter((s) => s.provider === provider);
-      const profile = join(build.stage, `profile-${provider}-${shape}`);
-      await rm(profile, { recursive: true, force: true });
-      await mkdir(profile, { recursive: true });
+      const profile = await mkdtemp(
+        join(build.stage, `profile-${provider}-${shape}-`),
+      );
       const env = {
         ...process.env,
         CANOPY_USER_DATA: profile,
@@ -71,28 +82,52 @@ for (const provider of ['jira', 'github'])
         expected: spec,
         phases: [],
         memory: [],
+        diagnostics: [],
+        stderr: [],
       };
       report.samples.push(sample);
+      const owner = new AuditOwner({
+        profile,
+        executable: process.env.CANOPY_ELECTRON_PATH,
+      });
+      let primary;
       const started = performance.now();
       let app,
         page,
         timer,
         phase = 'launch';
       let memoryPending;
+      const renderer = (callback, argument) =>
+        deadline(
+          () => page.evaluate(callback, argument),
+          LOAD_MS,
+          `Renderer evaluation: ${phase}`,
+        );
+      const main = (callback, argument) =>
+        deadline(
+          () => app.evaluate(callback, argument),
+          LOAD_MS,
+          `Main evaluation: ${phase}`,
+        );
+
       const memory = async () => {
         if (!app) return;
         if (memoryPending) return memoryPending;
-        memoryPending = app
-          .evaluate(
-            async ({ app }, tag) => ({
-              phase: tag,
-              at: performance.now(),
-              timeOrigin: performance.timeOrigin,
-              processes: app.getAppMetrics(),
-              main: await process.getProcessMemoryInfo(),
-            }),
-            phase,
-          )
+        memoryPending = deadline(
+          () =>
+            main(
+              async ({ app }, tag) => ({
+                phase: tag,
+                at: performance.now(),
+                timeOrigin: performance.timeOrigin,
+                processes: app.getAppMetrics(),
+                main: await process.getProcessMemoryInfo(),
+              }),
+              phase,
+            ),
+          5000,
+          'Memory snapshot',
+        )
           .then((entry) => {
             sample.memory.push(entry);
           })
@@ -105,21 +140,26 @@ for (const provider of ['jira', 'github'])
         return memoryPending;
       };
       const paint = () =>
-        page.evaluate(
+        deadline(
           () =>
-            new Promise((resolve) =>
-              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            renderer(
+              () =>
+                new Promise((resolve) =>
+                  requestAnimationFrame(() => requestAnimationFrame(resolve)),
+                ),
             ),
+          LOAD_MS,
+          'Paint opportunities',
         );
       const begin = async (name) => {
         phase = name;
-        await page.evaluate((name) => window.canopyPerfUI.phase(name), name);
+        await renderer((name) => window.canopyPerfUI.phase(name), name);
         await memory();
         return performance.now();
       };
       const end = async (name, start) => {
         await paint();
-        const detail = await page.evaluate(() => ({
+        const detail = await renderer(() => ({
           treeRows: document.querySelectorAll('[data-tree-key]').length,
           savedRows: document.querySelectorAll('.saved-view-result').length,
           elements: document.getElementsByTagName('*').length,
@@ -131,14 +171,14 @@ for (const provider of ['jira', 'github'])
         });
         await memory();
       };
-      const complete = async (selected, cursor = 0) => {
+      const complete = async (selected, cursor = 0, manualGeneration) => {
         // Error/incomplete returns and disappearing Cancel buttons do not satisfy
         // this condition. Require exact normalized counts on each selected root.
         await expect
           .poll(
             async () =>
-              page.evaluate(
-                ({ selected, cursor }) => {
+              renderer(
+                ({ selected, cursor, manualGeneration }) => {
                   const events = window.canopyPerfAudit
                     .events()
                     .events.slice(cursor);
@@ -146,29 +186,48 @@ for (const provider of ['jira', 'github'])
                     events.some(
                       (e) =>
                         e.event === 'ipc-delivery' &&
+                        (manualGeneration === undefined ||
+                          e.manualGeneration === manualGeneration) &&
                         e.root === root.root &&
                         e.count === root.issues &&
                         e.incomplete === false,
                     ),
                   );
                 },
-                { selected, cursor },
+                { selected, cursor, manualGeneration },
               ),
             { timeout: 180000 },
           )
           .toBe(true);
       };
       try {
-        app = await electron.launch({
-          executablePath: process.env.CANOPY_ELECTRON_PATH,
-          args: [build.stage],
-          env,
+        app = await deadline(
+          () =>
+            owner.launch(() =>
+              electron.launch({
+                executablePath: process.env.CANOPY_ELECTRON_PATH,
+                args: [build.stage],
+                env,
+                timeout: LOAD_MS,
+              }),
+            ),
+          LOAD_MS,
+          'Electron launch',
+        );
+        owner.confirm(app.process());
+        app.process().stderr.on('data', (bytes) => {
+          sample.stderr.push(String(bytes).slice(-4096));
+          if (sample.stderr.length > 64) sample.stderr.shift();
         });
         timer = setInterval(() => {
           void memory();
         }, 250);
-        page = await app.firstWindow();
-        page.setDefaultTimeout(180000);
+        page = await deadline(() => app.firstWindow(), LOAD_MS, 'First window');
+        page.on('crash', () => sample.diagnostics.push('Renderer crash event'));
+        page.on('pageerror', (error) =>
+          sample.diagnostics.push(String(error.stack ?? error)),
+        );
+        page.setDefaultTimeout(LOAD_MS);
         phase = 'initial-load';
         await memory();
         await expect(page.getByRole('tree')).toBeVisible();
@@ -178,7 +237,7 @@ for (const provider of ['jira', 'github'])
           spec.expandedRows,
         );
         await end('initial-load', started);
-        const initial = await page.evaluate(() => ({
+        const initial = await renderer(() => ({
           ipc: window.canopyPerfAudit.events(),
           ui: window.canopyPerfUI.events(),
         }));
@@ -257,7 +316,7 @@ for (const provider of ['jira', 'github'])
         );
         await end('tree-filter-clear', start);
         start = await begin('tree-scroll');
-        sample.scroll = await page.evaluate(async () => {
+        sample.scroll = await renderer(async () => {
           const element = document.querySelector('.tree-scroll');
           const intervals = [];
           let previous = performance.now();
@@ -295,7 +354,16 @@ for (const provider of ['jira', 'github'])
         const row = page.locator('[data-tree-key]').first();
         await row.focus();
         await page.keyboard.press('ArrowDown');
-        sample.keyboardFocusedKey = await page.evaluate(() =>
+        await expect
+          .poll(() =>
+            renderer(() =>
+              document.activeElement
+                ?.closest('[data-tree-key]')
+                ?.getAttribute('data-tree-key'),
+            ),
+          )
+          .toBe(spec.keyboardNextKey);
+        sample.keyboardFocusedKey = await renderer(() =>
           document.activeElement
             ?.closest('[data-tree-key]')
             ?.getAttribute('data-tree-key'),
@@ -308,53 +376,91 @@ for (const provider of ['jira', 'github'])
         await expect(page.locator('.saved-view-result')).toHaveCount(
           spec.savedRows,
         );
-        await expect(
-          page.getByRole('button', { name: 'Cancel loads', exact: true }),
-        ).toHaveCount(0);
         await end('saved-view-load', start);
-        const cursor = await page.evaluate(
+        const cursor = await renderer(
           () => window.canopyPerfAudit.events().events.length,
         );
-        sample.callsBeforeSavedRefresh = await app.evaluate(() =>
+        sample.callsBeforeSavedRefresh = await main(() =>
           globalThis.canopyPerf.calls(),
         );
         start = await begin('saved-view-refresh');
-        await page
-          .getByRole('button', { name: 'Refresh', exact: true })
-          .click();
-        await complete(roots, cursor);
+        // Arm and click in one renderer turn after real IPC idle: the first
+        // subsequent request for each root belongs to this manual generation.
+        // Later automatic polls remain telemetry; they cannot invalidate it.
+        let manualGeneration;
+        await expect
+          .poll(
+            async () => {
+              manualGeneration = await renderer((selected) => {
+                if (
+                  window.canopyPerfAudit.events().active ||
+                  [...document.querySelectorAll('button')].some(
+                    (button) => button.textContent.trim() === 'Cancel loads',
+                  )
+                )
+                  return null;
+                const button = [...document.querySelectorAll('button')].find(
+                  (button) => button.textContent.trim() === 'Refresh',
+                );
+                if (!button || button.disabled) return null;
+                const generation = window.canopyPerfAudit.arm(
+                  selected.map((root) => root.root),
+                );
+                button.click();
+                return generation;
+              }, roots);
+              return manualGeneration !== null;
+            },
+            { timeout: LOAD_MS },
+          )
+          .toBe(true);
+        sample.manualGeneration = manualGeneration;
+        await complete(roots, cursor, manualGeneration);
         await expect(page.locator('.saved-view-result')).toHaveCount(
           spec.savedRows,
         );
-        await expect(
-          page.getByRole('button', { name: 'Cancel loads', exact: true }),
-        ).toHaveCount(0);
         await end('saved-view-refresh', start);
-        sample.providerCalls = await app.evaluate(() =>
-          globalThis.canopyPerf.calls(),
-        );
-        sample.providerEvents = await app.evaluate(() =>
+        sample.afterManualCompletion = await renderer(() => ({
+          activeIPC: window.canopyPerfAudit.events().active,
+          cancelLoadsVisible: [...document.querySelectorAll('button')].some(
+            (button) => button.textContent.trim() === 'Cancel loads',
+          ),
+        }));
+        sample.providerCalls = await main(() => globalThis.canopyPerf.calls());
+        sample.providerEvents = await main(() =>
           globalThis.canopyPerf.events(),
         );
-        sample.rendererEvents = await page.evaluate(() => ({
+        sample.rendererEvents = await renderer(() => ({
           ipc: window.canopyPerfAudit.events(),
           ui: window.canopyPerfUI.events(),
         }));
         sample.outcome = 'complete';
       } catch (error) {
+        primary = error;
         sample.outcome = 'failed';
         sample.error = String(error);
         if (page)
-          sample.rendererEvents = await page
-            .evaluate(() => ({
-              ipc: window.canopyPerfAudit?.events(),
-              ui: window.canopyPerfUI?.events(),
-            }))
-            .catch(() => null);
+          sample.rendererEvents = await deadline(
+            () =>
+              renderer(() => ({
+                ipc: window.canopyPerfAudit?.events(),
+                ui: window.canopyPerfUI?.events(),
+              })),
+            3000,
+            'Renderer failure evidence',
+          ).catch((error) => {
+            sample.diagnostics.push(String(error));
+            return null;
+          });
         if (app)
-          sample.providerEvents = await app
-            .evaluate(() => globalThis.canopyPerf?.events())
-            .catch(() => null);
+          sample.providerEvents = await deadline(
+            () => main(() => globalThis.canopyPerf?.events()),
+            3000,
+            'Provider failure evidence',
+          ).catch((error) => {
+            sample.diagnostics.push(String(error));
+            return null;
+          });
       } finally {
         clearInterval(timer);
         await memory();
@@ -392,9 +498,38 @@ for (const provider of ['jira', 'github'])
           ),
         };
         // Persist failures and partial telemetry before closing any session.
-        await persist();
-        await app?.close();
-        await rm(profile, { recursive: true, force: true });
+        try {
+          await deadline(persist, 3000, 'Evidence persistence');
+        } catch (error) {
+          sample.diagnostics.push(String(error));
+          primary ??= error;
+        }
+        try {
+          await finishAudit({
+            owner,
+            primary,
+            close: app ? () => app.close() : undefined,
+            diagnostics: app
+              ? [
+                  {
+                    label: 'Main crash evidence',
+                    run: async () => {
+                      sample.crashes = await main(
+                        () => globalThis.canopyPerfCrashes,
+                      );
+                    },
+                  },
+                ]
+              : [],
+            removeProfile: () => rm(profile, { recursive: true, force: true }),
+            writeEvidence: persist,
+            secondary: (error) => sample.diagnostics.push(String(error)),
+          });
+        } catch (error) {
+          sample.cleanupOrPrimary = String(error);
+          if (!primary) sample.outcome = 'cleanup-failed';
+        }
+        await deadline(persist, 3000, 'Evidence persistence');
       }
     }
   }
