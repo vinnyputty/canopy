@@ -21,7 +21,7 @@ try {
         cwd,
         stdio: 'inherit',
         // Node lifecycle probes repeatedly start PowerShell/CIM on Windows.
-        timeout: process.platform === 'win32' ? 180_000 : 60_000,
+        timeout: process.platform === 'win32' ? 600_000 : 60_000,
       },
     );
     if (result.error) throw result.error;

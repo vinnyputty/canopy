@@ -39,7 +39,7 @@ for (const mode of [
         let failure;
         cp.spawn = () => child;
         cp.execFile = (command, args, options, callback) => {
-          assert.ok(options.timeout > 0 && options.timeout <= 3000);
+          assert.ok(options.timeout > 0 && options.timeout <= 15000);
           if (command === 'powershell.exe') {
             // A source-sensitive transport regression, not a Windows execution claim.
             if (mode === 'cold') {
@@ -59,18 +59,18 @@ for (const mode of [
               });
               queueMicrotask(() => callback(failure));
             } else if (mode === 'cold' && count === 0) {
-              // Success requires a budget exceeding the old fixture's one second.
-              assert.equal(options.timeout, 3000);
-              setTimeout(() => callback(null, { stdout: JSON.stringify(rows), stderr: '' }), 1200);
+              // Success requires a budget exceeding the proven CI three-second timeout.
+              assert.equal(options.timeout, 15000);
+              setTimeout(() => callback(null, { stdout: JSON.stringify(rows), stderr: '' }), 3200);
             } else queueMicrotask(() => callback(null, { stdout: JSON.stringify(rows), stderr: '' }));
           } else if (command === 'taskkill.exe') {
             kills.push(args);
             if (mode === 'denied') {
-              assert.deepEqual(args, ['/PID', '876541', '/T', '/F']);
+              assert.deepEqual(args, ['/PID', '876541', '/F']);
               queueMicrotask(() => callback(new Error('taskkill denied')));
               return;
             }
-            assert.deepEqual(args, ['/PID', '876542', '/T', '/F']);
+            assert.deepEqual(args, ['/PID', '876542', '/F']);
             rows = rows.filter(row => row.pid !== 876542);
             queueMicrotask(() => callback(null, { stdout: '', stderr: '' }));
           } else throw new Error('Unexpected subprocess: ' + command);
@@ -117,7 +117,7 @@ for (const mode of [
           if (mode === 'timeout' || mode === 'syntax') {
             assert.equal(primary.cause, failure);
             const details = JSON.parse(primary.message.slice(primary.message.indexOf('{')));
-            assert.equal(details.timeoutMs, 3000);
+            assert.equal(details.timeoutMs, 15000);
             for (const field of ['code', 'killed', 'signal', 'stdout', 'stderr'])
               assert.equal(details[field], failure[field]);
           } else assert.match(primary.message, /Unestablished process creation identity/);

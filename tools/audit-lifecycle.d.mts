@@ -12,7 +12,7 @@ export class AuditOwner {
     killMs?: number;
     operationMs?: number;
     signalGroup?: (pid: number, signal?: string | number) => boolean;
-    killTree?: (pid: number, timeoutMs: number) => Promise<unknown>;
+    killPid?: (pid: number, timeoutMs: number) => Promise<unknown>;
   });
   readonly child: ChildProcess | undefined;
   profile: string;

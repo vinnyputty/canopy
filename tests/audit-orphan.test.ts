@@ -63,7 +63,7 @@ for (const mode of [
           const pid = Number(args[1]);
           kills.push(pid);
           assert.notEqual(pid, 876543, 'unrelated null-birth process cannot be signaled');
-          rows = rows.filter(row => row.pid !== pid && row.ppid !== pid);
+          rows = rows.filter(row => row.pid !== pid);
           if (pid === child.pid) child.exitCode = 0;
           if (pid === other.pid) other.exitCode = 0;
           queueMicrotask(() => callback(null, { stdout: '', stderr: '' }));

@@ -188,11 +188,23 @@ class OwnedScope {
       potential.add(root.pid);
     if (process.platform !== 'win32' && !this.groupRetired)
       for (const row of rows) if (row.pgid === this.pid) potential.add(row.pid);
+    // Windows keeps stale parent PIDs. Fixed-width UTC tokens preserve all
+    // seven fractional digits; unknown births remain potential, never owned.
+    const edge = (row, verified) => {
+      if (process.platform !== 'win32') return true;
+      const parent = byPid.get(row.ppid);
+      const known = validBirth(row.start) && validBirth(parent?.start);
+      return known ? row.start >= parent.start : !verified;
+    };
     let added;
     do {
       added = false;
       for (const row of rows) {
-        if (!potential.has(row.pid) && potential.has(row.ppid)) {
+        if (
+          !potential.has(row.pid) &&
+          potential.has(row.ppid) &&
+          edge(row, false)
+        ) {
           potential.add(row.pid);
           added = true;
         }
@@ -231,7 +243,11 @@ class OwnedScope {
     do {
       added = false;
       for (const row of rows) {
-        if (!identities.has(row.pid) && identities.has(row.ppid)) {
+        if (
+          !identities.has(row.pid) &&
+          identities.has(row.ppid) &&
+          edge(row, true)
+        ) {
           identities.add(row.pid);
           owned.push(row);
           added = true;
@@ -288,6 +304,20 @@ class OwnedScope {
       if (ms <= 0) throw new Error('Owned scope kill deadline expired');
       return ms;
     };
+    if (process.platform === 'win32') {
+      // Enumerate again after each individual signal, including newly observed
+      // descendants. Never let taskkill follow unverified stale parent links.
+      let live = await this.live(remaining());
+      while (live.length) {
+        const member = live[0];
+        const current = (await this.live(remaining())).find(
+          (row) => row.pid === member.pid && row.start === member.start,
+        );
+        if (current) await this.owner.killPid(member.pid, remaining());
+        live = await this.live(remaining());
+      }
+      return;
+    }
     const live = await this.live();
     if (
       process.platform !== 'win32' &&
@@ -308,14 +338,10 @@ class OwnedScope {
           row.pid === member.pid && row.start === member.start && !row.zombie,
       );
       if (!current) continue;
-      if (process.platform === 'win32') {
-        await this.owner.killTree(member.pid, remaining());
-      } else {
-        try {
-          process.kill(member.pid, 'SIGKILL');
-        } catch (error) {
-          if (error.code !== 'ESRCH') throw error;
-        }
+      try {
+        process.kill(member.pid, 'SIGKILL');
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
       }
     }
   }
@@ -327,11 +353,11 @@ export class AuditOwner {
     profile,
     executable,
     graceMs = 10000,
-    killMs = 5000,
-    operationMs = 3000,
+    killMs = process.platform === 'win32' ? 60000 : 5000,
+    operationMs = process.platform === 'win32' ? 15000 : 3000,
     signalGroup = process.kill.bind(process),
-    killTree = (pid, ms) =>
-      execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+    killPid = (pid, ms) =>
+      execFile('taskkill.exe', ['/PID', String(pid), '/F'], {
         timeout: ms,
         windowsHide: true,
       }),
@@ -343,7 +369,7 @@ export class AuditOwner {
       killMs,
       operationMs,
       signalGroup,
-      killTree,
+      killPid,
     });
     this.scopes = [];
   }

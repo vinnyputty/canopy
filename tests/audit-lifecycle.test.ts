@@ -15,7 +15,7 @@ import {
 // PowerShell/CIM startup is a subprocess operation, not a close-hang probe.
 const processBudgets =
   process.platform === 'win32'
-    ? { operationMs: 3000, killMs: 5000 }
+    ? { operationMs: 15000, killMs: 60000 }
     : { operationMs: 1000, killMs: 1500 };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number) => {
@@ -31,7 +31,7 @@ const alive = (pid: number) => {
 async function fixture(
   signalGroup?: ConstructorParameters<typeof AuditOwner>[0]['signalGroup'],
   escaped = false,
-  killTree?: ConstructorParameters<typeof AuditOwner>[0]['killTree'],
+  killPid?: ConstructorParameters<typeof AuditOwner>[0]['killPid'],
 ) {
   const profile = await mkdtemp(join(tmpdir(), 'canopy-lifecycle-node-'));
   const owner = new AuditOwner({
@@ -40,7 +40,7 @@ async function fixture(
     graceMs: 120,
     ...processBudgets,
     signalGroup,
-    killTree,
+    killPid,
   });
   let child!: ChildProcess;
   let descendant = 0;
@@ -192,7 +192,7 @@ for (const mode of ['reject', 'hang'] as const) {
         },
       );
       assert.ok(
-        Date.now() - start < (process.platform === 'win32' ? 30000 : 6000),
+        Date.now() - start < (process.platform === 'win32' ? 180000 : 6000),
       );
       assert.equal(alive(f.descendant), false);
       assert.equal(alive(unrelated.pid!), true);
