@@ -2,6 +2,7 @@ import { _electron as electron, expect } from '@playwright/test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { auditSetup } from './smoke-setup.mjs';
 import { auditGithub } from './smoke-github.mjs';
 
 const userData = await mkdtemp(join(tmpdir(), 'canopy-github-smoke-'));
@@ -18,6 +19,7 @@ try {
   await expect(
     page.getByRole('heading', { name: 'See the whole tree.' }),
   ).toBeVisible();
+  await auditSetup(app, page);
   await auditGithub(app, page);
 } finally {
   await app?.close();
