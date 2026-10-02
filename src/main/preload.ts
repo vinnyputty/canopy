@@ -11,25 +11,7 @@ const api: CanopyAPI = {
     ready();
   },
   flushWorkspace: async () => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        flushReady,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  'Workspace flush is unavailable. Wait for the window to load, then retry closing.',
-                ),
-              ),
-            10_000,
-          );
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    await flushReady;
     await flushHandler!();
   },
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
