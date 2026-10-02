@@ -253,6 +253,8 @@ export interface CanopyAPI {
   cancelUpdateCheck(): Promise<void>;
   dismissUpdateNotice(): Promise<import('./updates').UpdateState>;
   openRelease(tag: string): Promise<void>;
+  diagnostics(): Promise<string>;
+  exportDiagnostics(reviewed: string): Promise<boolean>;
   demoMode(): Promise<boolean>;
   demoTimeScale(): Promise<number>;
   launchDemo(): Promise<void>;

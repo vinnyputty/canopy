@@ -15,6 +15,7 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import { SetupHelp, TokenPermissions } from './SetupHelp';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -263,6 +264,7 @@ export function App() {
     | 'appearance'
     | 'settings'
     | 'connect'
+    | 'setup'
     | null
   >(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
@@ -273,6 +275,7 @@ export function App() {
       settingsTrigger.current?.focus();
     }
   }, [dialog]);
+  const [setupConnectionId, setSetupConnectionId] = useState<string>();
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
     palette: NonNullable<Workspace['palette']>;
@@ -3520,6 +3523,15 @@ export function App() {
           <span>Settings</span>
         </button>
         {!demoMode && (
+          <button
+            className="sidebar-settings"
+            onClick={() => setDialog('setup')}
+          >
+            <LogIn size={16} />
+            <span>Setup help</span>
+          </button>
+        )}
+        {!demoMode && (
           <button className="sidebar-settings" onClick={launchDemo}>
             <CircleDot size={16} />
             <span>Try demo</span>
@@ -4261,6 +4273,9 @@ export function App() {
                       errors.workspace ??
                       errors.app)}
                 </span>
+                {!demoMode && (
+                  <button onClick={() => setDialog('setup')}>Setup help</button>
+                )}
                 {errors[activeTab.id] && (
                   <button
                     onClick={() => void refreshTab(activeTab, true, true, true)}
@@ -5229,13 +5244,25 @@ export function App() {
           connections={connections}
           recentRoots={workspace.recentRoots ?? []}
           activeRoot={activeTab ?? undefined}
-          onClose={() => setDialog(null)}
-          onOpen={openTab}
+          initialConnectionId={setupConnectionId}
+          onClose={() => {
+            setSetupConnectionId(undefined);
+            setDialog(null);
+          }}
+          onOpen={(id, key) => {
+            setSetupConnectionId(undefined);
+            openTab(id, key);
+          }}
         />
       )}
       {dialog === 'connect' && (
         <ConnectDialog
           initialFocus={settingsFlow.current}
+          connections={connections}
+          onOpen={(id) => {
+            setSetupConnectionId(id);
+            setDialog('open');
+          }}
           onClose={() => setDialog(null)}
           onConnected={(value) => {
             for (const tab of allRefreshTabs)
@@ -5268,9 +5295,20 @@ export function App() {
               delete copy.app;
               return copy;
             });
-            setDialog(null);
           }}
         />
+      )}
+      {dialog === 'setup' && (
+        <Dialog title="Setup help" onClose={() => setDialog(null)} wide>
+          <SetupHelp
+            hasConnections={connections.length > 0}
+            onConnect={() => setDialog('connect')}
+            onOpen={() => {
+              setSetupConnectionId(undefined);
+              setDialog('open');
+            }}
+          />
+        </Dialog>
       )}
       {dialog === 'commands' && (
         <CommandDialog
@@ -6583,11 +6621,40 @@ function ConnectDialog({
   initialFocus,
   onClose,
   onConnected,
+  onOpen,
+  connections,
 }: {
   onClose: () => void;
   onConnected: (connections: Connection[]) => void;
   initialFocus?: boolean;
+  onOpen: (id: string) => void;
+  connections: Connection[];
 }) {
+  const [verified, setVerified] = useState<Connection>();
+  const completed = (value: Connection[], oauth = false) => {
+    const match = oauth
+      ? undefined
+      : [...value].reverse().find((item) =>
+          provider === 'github'
+            ? item.provider === 'github' &&
+              item.repositories?.includes(
+                repositories
+                  .split(/[\s,]+/)
+                  .filter(Boolean)[0]
+                  ?.toLowerCase(),
+              )
+            : item.id.startsWith('token:') &&
+              item.url === siteUrl.trim().replace(/\/$/, ''),
+        );
+    setVerified(
+      match ??
+        value.find((item) => !connections.some((old) => old.id === item.id)) ??
+        value[0],
+    );
+    setToken('');
+    setGithubToken('');
+    onConnected(value);
+  };
   const [siteUrl, setSiteUrl] = useState('');
   const [provider, setProvider] = useState<'jira' | 'github'>('jira');
   const [repositories, setRepositories] = useState('');
@@ -6612,7 +6679,7 @@ function ConnectDialog({
         token,
         scoped,
       });
-      onConnected(value);
+      completed(value);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -6623,7 +6690,7 @@ function ConnectDialog({
     setBusy('oauth');
     setError('');
     try {
-      onConnected(await window.canopy.connect());
+      completed(await window.canopy.connect(), true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -6634,7 +6701,7 @@ function ConnectDialog({
     setBusy('token');
     setError('');
     try {
-      onConnected(
+      completed(
         await window.canopy.connectGithub({
           token: githubToken,
           repositories: repositories.split(/[\s,]+/).filter(Boolean),
@@ -6646,16 +6713,49 @@ function ConnectDialog({
       setBusy(null);
     }
   };
+  if (verified)
+    return (
+      <Dialog title="Connection verified" onClose={() => !busy && onClose()}>
+        <div className="connect-dialog">
+          <p role="status">
+            {verified.name} is saved securely. Choose a first root to start your
+            workspace.
+          </p>
+          <p>
+            {verified.provider === 'github'
+              ? 'Open a selected repository to see its issues, or enter owner/repo#number for one issue tree.'
+              : 'Enter a Jira issue key or browse URL, or search by summary to open an epic, story, or task as a root.'}
+          </p>
+          <p>
+            Closing setup keeps this connection available. You can revisit Setup
+            help from the sidebar.
+          </p>
+          <div className="dialog-footer">
+            <button className="secondary" onClick={onClose}>
+              Later
+            </button>
+            <button className="primary" onClick={() => onOpen(verified.id)}>
+              Open first root
+            </button>
+          </div>
+        </div>
+      </Dialog>
+    );
   return (
     <Dialog
       title={`Connect ${provider === 'github' ? 'GitHub' : 'Jira'}`}
       initialFocus={initialFocus}
-      onClose={onClose}
+      onClose={() => !busy && onClose()}
       wide
     >
       <div className="connect-dialog">
+        <p className="dialog-note">
+          1. Choose provider · 2. Prepare token · 3. Verify connection · 4. Open
+          a root
+        </p>
         <div className="connect-provider">
           <button
+            disabled={Boolean(busy)}
             className={provider === 'jira' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('jira');
@@ -6665,6 +6765,7 @@ function ConnectDialog({
             Jira
           </button>
           <button
+            disabled={Boolean(busy)}
             className={provider === 'github' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('github');
@@ -6674,6 +6775,10 @@ function ConnectDialog({
             GitHub
           </button>
         </div>
+        <details>
+          <summary>Token permissions and verification</summary>
+          <TokenPermissions provider={provider} />
+        </details>
         {provider === 'github' ? (
           <>
             <p className="connect-lead">
@@ -6716,7 +6821,7 @@ function ConnectDialog({
                 }
                 onClick={() => void connectGithub()}
               >
-                {busy ? 'Connecting…' : 'Connect GitHub'}
+                {busy ? 'Verifying…' : 'Verify and save GitHub'}
               </button>
             </div>
           </>
@@ -6826,7 +6931,7 @@ function ConnectDialog({
                 ) : (
                   <LogIn size={15} />
                 )}
-                Connect with token
+                {busy === 'token' ? 'Verifying…' : 'Verify and save Jira'}
               </button>
               <span>or</span>
               <button
@@ -6869,11 +6974,13 @@ function OpenIssueDialog({
   onOpen: (connectionId: string, key: string) => void;
 }) {
   const [connectionId, setConnectionId] = useState(
-    initialConnectionId ??
-      (activeRoot &&
-      connections.some(({ id }) => id === activeRoot.connectionId)
+    initialConnectionId &&
+      connections.some(({ id }) => id === initialConnectionId)
+      ? initialConnectionId
+      : activeRoot &&
+          connections.some(({ id }) => id === activeRoot.connectionId)
         ? activeRoot.connectionId
-        : (connections[0]?.id ?? '')),
+        : (connections[0]?.id ?? ''),
   );
   const [query, setQuery] = useState(initialQuery);
   const [groupRepositories, setGroupRepositories] = useState(false);

@@ -9,6 +9,9 @@ const api: CanopyAPI = {
   cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
   dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
   openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
+  diagnostics: () => ipcRenderer.invoke('canopy:diagnostics'),
+  exportDiagnostics: (reviewed) =>
+    ipcRenderer.invoke('canopy:exportDiagnostics', reviewed),
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),

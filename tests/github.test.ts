@@ -425,7 +425,7 @@ test('GitHub connection distinguishes an empty repository from missing issue acc
         token: 'secret-token',
         repositories: ['team/empty', 'team/missing'],
       }),
-      /verifying.*team\/missing/,
+      /verify team\/missing.*Issues read and write/,
     );
     assert.equal(writes, 0);
     assert.deepEqual(auth.connections(), []);

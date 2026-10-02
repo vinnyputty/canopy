@@ -342,3 +342,144 @@ test('a write waiting for OAuth refresh checks a newly established cooldown befo
     globalThis.fetch = original;
   }
 });
+
+test('verification failures give recovery steps without saving or exposing provider content', async () => {
+  const original = globalThis.fetch;
+  let writes = 0;
+  const auth = new Auth(
+    {
+      assertSecure() {},
+      async writeSecrets() {
+        writes++;
+      },
+    } as unknown as Storage,
+    async () => {},
+  );
+  try {
+    for (const [status, headers, expected] of [
+      [401, {}, /expired.*replacement token/],
+      [403, {}, /Issues read and write.*approve/],
+      [404, {}, /private repository.*404/],
+      [429, { 'retry-after': '60' }, /rate limit.*Retry after/],
+      [
+        403,
+        {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 60),
+        },
+        /rate limit.*Retry after/,
+      ],
+    ] as [number, Record<string, string>, RegExp][]) {
+      globalThis.fetch = async () =>
+        Response.json(
+          { message: 'private-title fixture-secret' },
+          { status, headers },
+        );
+      await assert.rejects(
+        auth.connectGithub({
+          token: 'fixture-secret',
+          repositories: ['fixture/private'],
+        }),
+        (error: Error) => {
+          assert.match(error.message, expected);
+          assert.doesNotMatch(
+            error.message,
+            /private-title|fixture-secret|fixture\/private/,
+          );
+          return true;
+        },
+      );
+      assert.deepEqual(auth.connections(), []);
+    }
+    globalThis.fetch = async () => {
+      throw new TypeError('fetch failed fixture-secret');
+    };
+    await assert.rejects(
+      auth.connectGithub({
+        token: 'fixture-secret',
+        repositories: ['fixture/private'],
+      }),
+      /internet connection, VPN, proxy/,
+    );
+    await assert.rejects(
+      auth.connect({
+        siteUrl: 'https://fixture.atlassian.net',
+        email: 'fixture@example.com',
+        token: 'fixture-secret',
+        scoped: false,
+      }),
+      /internet connection, VPN, proxy/,
+    );
+    assert.equal(writes, 0);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('keyring write failure rolls back a replacement while keeping the prior account usable', async () => {
+  const original = globalThis.fetch;
+  let fail = false;
+  const saved: unknown[] = [];
+  const auth = new Auth(
+    {
+      assertSecure() {},
+      async writeSecrets(value: unknown) {
+        if (fail) throw new Error('Keyring locked. Unlock and retry.');
+        saved.push(structuredClone(value));
+      },
+    } as unknown as Storage,
+    async () => {},
+  );
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/user'))
+      return Response.json({ login: 'fixture' });
+    if (String(url).endsWith('/myself'))
+      return Response.json({ accountId: 'fixture-account' });
+    if (String(url).endsWith('/issues?per_page=1')) return Response.json([]);
+    const authorization = (init?.headers as Record<string, string>)
+      .Authorization;
+    const credential = authorization.startsWith('Basic ')
+      ? Buffer.from(authorization.slice(6), 'base64').toString()
+      : authorization;
+    assert.match(credential, /original-fixture/);
+    return Response.json({});
+  };
+  try {
+    const github = await auth.connectGithub({
+      token: 'original-fixture',
+      repositories: ['fixture/one'],
+    });
+    const jira = await auth.connect({
+      siteUrl: 'https://fixture.atlassian.net',
+      email: 'fixture@example.com',
+      token: 'original-fixture',
+      scoped: false,
+    });
+    fail = true;
+    await assert.rejects(
+      auth.connectGithub({
+        token: 'replacement-fixture',
+        repositories: ['fixture/two'],
+      }),
+      /Keyring locked/,
+    );
+    await assert.rejects(
+      auth.connect({
+        siteUrl: 'https://fixture.atlassian.net',
+        email: 'fixture@example.com',
+        token: 'replacement-fixture',
+        scoped: false,
+      }),
+      /Keyring locked/,
+    );
+    assert.deepEqual(auth.connections(), jira);
+    assert.equal(saved.length, 2);
+    await auth.githubRequest(github[0].id, '/repos/fixture/one/issues');
+    await auth.request(
+      jira.find((item) => item.provider === 'jira')!.id,
+      '/rest/api/3/issue/FIX-1',
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
