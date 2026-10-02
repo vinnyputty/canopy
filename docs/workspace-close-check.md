@@ -101,6 +101,8 @@ New-Item -ItemType Directory -Path (Join-Path $profileDir 'workspace.json')
 
 Toggle **Hide done** and trigger the native logout or shutdown action. Record whether Canopy can retain its window, whether **Couldn’t save workspace** remains visible, and whether the OS cancels the current termination attempt or requires a retry. Verify `workspace.close-check-backup.json` retains the previous saved state. If the OS forces termination, record that limitation explicitly; a forced process exit cannot await persistence.
 
+If the renderer crashes or fails to load while a received workspace write fails, verify a native warning shows the failure with **Keep open** as its default. Keep the window open, repair the destination as below, then retry closing: only the last state received by the main process can be saved. Separately verify **Close anyway** requires an explicit choice and can discard those unsaved changes. An unavailable renderer cannot supply changes it never sent.
+
 Before restarting Canopy, remove only the empty blocker directory and restore the backup. If the desktop remains available, do this while Canopy is still open, then retry the native action:
 
 ```sh

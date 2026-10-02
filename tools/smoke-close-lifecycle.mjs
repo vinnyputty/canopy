@@ -96,6 +96,98 @@ export async function auditCloseLifecycle({
       .sidebarCollapsed,
   ).toBe(true);
 
+  for (const choice of ['recover', 'abandon']) {
+    await launchLifecycle();
+    await page.evaluate(() => window.canopy.flushWorkspace());
+    const previous = JSON.parse(
+      await readFile(join(userData, 'workspace.json'), 'utf8'),
+    );
+    await app.evaluate(({ dialog }) => {
+      const fs = process.getBuiltinModule('node:fs/promises');
+      const original = fs.rename;
+      globalThis.closeFailedWrite = {
+        release: null,
+        restore: () => (fs.rename = original),
+      };
+      fs.rename = (source, destination) => {
+        if (!String(destination).endsWith('workspace.json'))
+          return original(source, destination);
+        return new Promise((_resolve, reject) => {
+          globalThis.closeFailedWrite.release = () => {
+            globalThis.closeFailedWrite.release = null;
+            reject(new Error('Injected received workspace write failure'));
+          };
+        });
+      };
+      globalThis.closeFailureDialogs = [];
+      dialog.showMessageBox = async (_window, options) => {
+        globalThis.closeFailureDialogs.push(options);
+        return {
+          response: globalThis.closeFailureDialogs.length === 1 ? 0 : 1,
+          checkboxChecked: false,
+        };
+      };
+    });
+    await page.evaluate(async () => {
+      const workspace = await window.canopy.loadWorkspace();
+      void window.canopy
+        .saveWorkspace({
+          ...workspace,
+          sidebarCollapsed: !workspace.sidebarCollapsed,
+        })
+        .catch(() => {});
+    });
+    await expect
+      .poll(() => app.evaluate(() => !!globalThis.closeFailedWrite.release))
+      .toBe(true);
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer();
+      BrowserWindow.getAllWindows()[0].close();
+    });
+    await app.evaluate(() => globalThis.closeFailedWrite.release());
+    await expect
+      .poll(() => app.evaluate(() => globalThis.closeFailureDialogs.length))
+      .toBe(1);
+    const failure = await app.evaluate(() => globalThis.closeFailureDialogs[0]);
+    expect(failure.message).toBe('The workspace could not be saved.');
+    expect(failure.detail).toContain(
+      'Injected received workspace write failure',
+    );
+    expect(failure.buttons).toEqual(['Keep open', 'Close anyway']);
+    expect(failure.defaultId).toBe(0);
+    expect(failure.cancelId).toBe(0);
+    expect(
+      await app.evaluate(
+        ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+      ),
+    ).toBe(1);
+    expect(
+      JSON.parse(await readFile(join(userData, 'workspace.json'), 'utf8')),
+    ).toEqual(previous);
+    if (choice === 'recover')
+      await app.evaluate(() => globalThis.closeFailedWrite.restore());
+    const retryClosed = closed(app);
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].close(),
+    );
+    if (choice === 'abandon') {
+      await expect
+        .poll(() => app.evaluate(() => !!globalThis.closeFailedWrite.release))
+        .toBe(true);
+      await app.evaluate(() => globalThis.closeFailedWrite.release());
+    }
+    await retryClosed;
+    await close();
+    const saved = JSON.parse(
+      await readFile(join(userData, 'workspace.json'), 'utf8'),
+    );
+    expect(saved).toEqual(
+      choice === 'recover'
+        ? { ...previous, sidebarCollapsed: !previous.sidebarCollapsed }
+        : previous,
+    );
+  }
+
   await launchLifecycle();
   const failedLoadClosed = closed(app);
   await app.evaluate(async ({ BrowserWindow, app }) => {
@@ -124,6 +216,12 @@ export async function auditCloseLifecycle({
       };
     };
   });
+  const listenerCounts = await app.evaluate(({ BrowserWindow }) => {
+    const contents = BrowserWindow.getAllWindows()[0].webContents;
+    return ['render-process-gone', 'did-fail-load'].map((event) =>
+      contents.listenerCount(event),
+    );
+  });
   await page.evaluate(() => {
     window.setTimeout(() => {
       while (true) {
@@ -148,6 +246,14 @@ export async function auditCloseLifecycle({
   expect(prompt.buttons).toEqual(['Keep open', 'Close anyway']);
   expect(prompt.defaultId).toBe(0);
   expect(prompt.cancelId).toBe(0);
+  expect(
+    await app.evaluate(({ BrowserWindow }) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents;
+      return ['render-process-gone', 'did-fail-load'].map((event) =>
+        contents.listenerCount(event),
+      );
+    }),
+  ).toEqual(listenerCounts);
   const hungClosed = closed(app);
   await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].close(),
