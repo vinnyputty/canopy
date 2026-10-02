@@ -30,7 +30,9 @@ This builds, tests, checks the Bazel scripts from an unrelated working directory
 
 Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. Normal builds start with your saved Jira connections. The local sample provider powers both the guided demo and the smoke-test entry point; smoke-only failure controls stay in the test fixture.
 
-Use **Connect Jira site** to add a Jira Cloud site, your Atlassian account email, and a personal API token. Select **Scoped** for a token created with scopes, or **Classic** for a token created without scopes. Canopy checks `/myself` before saving the connection and uses the operating system credential store to encrypt credentials. Tokens stay in the Electron main process. Each connection is associated with a site and account.
+Use **Connect Jira or GitHub → Jira** to add a Jira Cloud site, your Atlassian account email, and a personal API token. Select **Scoped** for a token created with scopes, or **Classic** for a token created without scopes. Canopy checks `/myself` before saving the connection and uses the operating system credential store to encrypt credentials. Tokens stay in the Electron main process. Each connection is associated with a site and account.
+
+The connection dialog guides provider choice, token permissions, verification, and **Open first root**. Choose **Later** to keep a verified connection without opening a tab. **Setup help** in the sidebar opens over the current workspace and includes credential, permission, keyring, rate-limit, and connectivity recovery steps. It also offers **Review diagnostics** and **Save reviewed diagnostics…** for a local support report; no data is sent automatically. See [setup help and diagnostics](docs/connections.md#setup-help-and-diagnostics).
 
 See [Jira connection setup](docs/connections.md) for token scopes and organization policy checks. [Browser OAuth](docs/oauth.md) is an optional alternative and requires the included broker service.
 

@@ -3,7 +3,7 @@
 Personal API tokens are Canopy's primary authentication method. No Canopy server or OAuth app registration is required for token connections.
 
 1. Create a token from your [Atlassian account security settings](https://id.atlassian.com/manage-profile/security/api-tokens).
-2. In Canopy, choose **Connect Jira site** and enter your site origin (for example, `https://your-team.atlassian.net`), Atlassian account email, and token.
+2. In Canopy, choose **Connect Jira or GitHub → Jira** and enter your site origin (for example, `https://your-team.atlassian.net`), Atlassian account email, and token.
 3. Select the token type matching how you created it. Scoped tokens use `api.atlassian.com/ex/jira/{cloudId}`. Classic tokens use the site's REST API directly.
 4. Canopy verifies the account before saving the connection. Add more connections for other sites or accounts.
 
@@ -22,3 +22,13 @@ Disconnecting a site removes its locally stored credentials. Revoke the token in
 Canopy stores credentials through your desktop keyring. On GNOME and KDE, Electron selects the desktop's normal keyring backend. On other desktops, such as Sway, Canopy checks the session D-Bus for a Secret Service provider and uses it when available. GNOME Keyring and KeePassXC can provide this service.
 
 If Canopy reports that secure credential storage is unavailable, start and unlock a Secret Service keyring in the same desktop session, then restart Canopy. Advanced setups can select Electron's backend explicitly with `--password-store=gnome-libsecret`.
+
+## Setup help and diagnostics
+
+The connection dialog shows the path from provider choice and token permissions to **Verify and save**, then **Open first root**. Jira verification checks `/myself`; GitHub verification checks identity and issue reads on every selected repository. Verification performs no writes and cannot prove every issue, editing, or ranking permission. Use a Jira key/browse URL or search; for GitHub choose a repository root or enter `owner/repo#number`. **Later** retains the saved connection for another session. **Try demo** remains a separate, local guided workspace.
+
+Open **Setup help** from the sidebar or a workspace error banner to revisit instructions while keeping connections, tabs, filters, and position. Replace expired/revoked credentials by connecting the same Jira site/account or GitHub account/owner again. Keep the same repository selection when replacing a GitHub token to retain access to those roots. Denied access needs token scopes, project/repository permissions, and organization policy or approval checks; GitHub may return 404 for inaccessible private repositories. Unlock the OS keychain and restart under the original OS account for credential-storage failures; preserve a backup of saved credentials. Wait until the displayed rate-limit retry time. For offline/timeouts check the network, VPN, proxy, and firewall, then Retry.
+
+**Review diagnostics** prepares an explicit allowlist report: app version, OS, demo mode, credential-storage availability, provider/repository counts, and connection rate-limit times. The exact JSON appears before **Save reviewed diagnostics…** opens a local save dialog. Canceling leaves the workspace intact. Nothing is sent automatically. Tokens and credentials, account/site identities, repository names, workspace roots, issue titles/descriptions/comments, raw errors, and logs are always excluded. The report deliberately contains no private-content opt-in. Review the saved file before sharing it with support.
+
+Static tests use isolated mocked provider responses and synthetic credentials. Native verification still requires the lead’s GUI token for Electron sequencing: provider selection and keyboard navigation, permission disclosure, verification success/failure, first-root selection, help dismissal preserving workspace, diagnostics preview/save/cancel/failure, and guided demo replay/return. Actual encryption/unlock checks depend on Electron `safeStorage` and the target OS keychain (Secret Service on Linux). Live scope and policy verification depends on a disposable provider account and explicitly authorized token; keep it pending rather than using real user data.

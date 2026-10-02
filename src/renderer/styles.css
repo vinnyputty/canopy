@@ -2974,3 +2974,58 @@ kbd {
   border-top: 1px solid var(--border-soft);
   padding-top: 8px;
 }
+
+.setup-help details,
+.setup-permissions p {
+  margin: 12px 0;
+}
+.setup-help dt {
+  font-weight: 600;
+  margin-top: 14px;
+}
+.setup-help dd {
+  margin: 4px 0 0;
+  line-height: 1.5;
+}
+.setup-help summary,
+.connect-dialog summary {
+  cursor: pointer;
+}
+.setup-permissions code {
+  overflow-wrap: anywhere;
+}
+.diagnostics-report {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.setup-help,
+.connect-dialog {
+  max-height: min(590px, calc(100vh - 130px));
+  overflow-y: auto;
+}
+.setup-help {
+  padding: 15px 17px 17px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.setup-help .connect-actions {
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+.connect-dialog > details {
+  margin-bottom: 14px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.diagnostics-report {
+  user-select: text;
+}

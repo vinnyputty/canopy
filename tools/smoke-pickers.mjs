@@ -517,8 +517,9 @@ export async function auditSelfConnections(app, page) {
         .fill('test@example.invalid');
       await page.getByPlaceholder('Paste your token').fill('fixture-token');
       await page
-        .getByRole('button', { name: 'Connect with token', exact: true })
+        .getByRole('button', { name: 'Verify and save Jira', exact: true })
         .click();
+      await page.getByRole('button', { name: 'Later', exact: true }).click();
     };
     await replaceAccount();
     await expect
