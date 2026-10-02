@@ -308,6 +308,8 @@ export interface CanopyAPI {
   priorityOrder(connectionId: string, keys: string[]): Promise<string[]>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;
+  onWorkspaceFlush(handler: () => Promise<void>): void;
+  flushWorkspace(): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;
   openIssue(connectionId: string, key: string): Promise<void>;
   openLink(url: string): Promise<void>;

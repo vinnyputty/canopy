@@ -276,6 +276,7 @@ export function App() {
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
   const appearanceSaving = useRef(false);
+  const workspaceLoaded = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
   workspaceRef.current = workspace;
@@ -876,6 +877,7 @@ export function App() {
       .then(([nextConnections, saved, isDemo, timeScale]) => {
         if (!live) return;
         demoTimeScale.current = timeScale;
+        workspaceLoaded.current = true;
         setDemoMode(isDemo);
         document.title = isDemo ? 'Canopy — Demo' : 'Canopy';
         setConnections(nextConnections);
@@ -955,7 +957,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !workspaceLoaded.current) return;
     const timer = window.setTimeout(() => {
       workspaceSaveTimer.current = null;
       void saveWorkspace(workspace).catch((error) => {
@@ -972,6 +974,31 @@ export function App() {
         workspaceSaveTimer.current = null;
     };
   }, [workspace, ready, saveWorkspace]);
+
+  useLayoutEffect(() => {
+    if (!ready) return;
+    window.canopy.onWorkspaceFlush(async () => {
+      if (!workspaceLoaded.current) return;
+      try {
+        // A change made while an earlier write is in flight must also persist.
+        let saved: Workspace;
+        do {
+          if (workspaceSaveTimer.current !== null) {
+            window.clearTimeout(workspaceSaveTimer.current);
+            workspaceSaveTimer.current = null;
+          }
+          saved = workspaceRef.current;
+          await saveWorkspace(saved);
+        } while (workspaceRef.current !== saved);
+      } catch (error) {
+        setErrors((value) => ({
+          ...value,
+          workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+        throw error;
+      }
+    });
+  }, [ready, saveWorkspace]);
 
   const refreshTab = useCallback(
     async (tab: TabState, quiet = false, explicit = false) => {
@@ -3752,9 +3779,26 @@ export function App() {
                 {activeTab.focusKey && <span>Focused subtree</span>}
               </nav>
             }
+            {errors.workspace && (
+              <div className="error-banner" role="alert">
+                <AlertCircle size={15} />
+                <span>{errors.workspace}</span>
+                <button
+                  aria-label="Dismiss workspace save error"
+                  onClick={() =>
+                    setErrors((value) => {
+                      const copy = { ...value };
+                      delete copy.workspace;
+                      return copy;
+                    })
+                  }
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
             {(errors[activeTab.id] ||
               errors.edit ||
-              errors.workspace ||
               errors.app ||
               (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow) && (
               <div className="error-banner" role="alert">
@@ -3762,10 +3806,7 @@ export function App() {
                 <span>
                   {(cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                     ? `${activeConnection?.provider === 'github' ? 'GitHub' : 'Jira'} rate limit reached. Refresh resumes after ${new Date(cooldownTimes[activeTab.connectionId]).toLocaleTimeString()}.`
-                    : (errors.edit ??
-                      errors[activeTab.id] ??
-                      errors.workspace ??
-                      errors.app)}
+                    : (errors.edit ?? errors[activeTab.id] ?? errors.app)}
                 </span>
                 {errors[activeTab.id] && (
                   <button
@@ -3786,7 +3827,6 @@ export function App() {
                       const copy = { ...value };
                       delete copy.edit;
                       delete copy[activeTab.id];
-                      delete copy.workspace;
                       delete copy.app;
                       return copy;
                     })
@@ -4361,7 +4401,7 @@ export function App() {
             onDemo={launchDemo}
             demoMode={demoMode}
             hasConnections={connections.length > 0}
-            error={errors.app ?? errors.workspace}
+            error={errors.workspace ?? errors.app}
           />
         )}
       </main>
@@ -4731,6 +4771,13 @@ export function App() {
                 theme,
                 palette,
               });
+              // Closing can flush before React commits this update. Preserve
+              // other workspace changes made while the appearance write waited.
+              workspaceRef.current = {
+                ...workspaceRef.current,
+                theme,
+                palette,
+              };
               setWorkspace((current) => ({ ...current, theme, palette }));
               setAppearancePreview(null);
               setDialog((current) =>

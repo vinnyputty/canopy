@@ -1,6 +1,19 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
+let flushHandler: (() => Promise<void>) | undefined;
+let ready: () => void;
+const flushReady = new Promise<void>((resolve) => {
+  ready = resolve;
+});
 const api: CanopyAPI = {
+  onWorkspaceFlush: (handler) => {
+    flushHandler = handler;
+    ready();
+  },
+  flushWorkspace: async () => {
+    await flushReady;
+    await flushHandler!();
+  },
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),
