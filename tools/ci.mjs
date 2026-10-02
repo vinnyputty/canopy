@@ -57,8 +57,18 @@ bazel(
 if (process.platform === 'linux' && !env.DISPLAY) {
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke']);
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:demo_check']);
+  run('xvfb-run', [
+    '-a',
+    'bazel',
+    ...startupOptions,
+    'run',
+    '//:instance_check',
+    '--',
+    '--state-only',
+  ]);
 } else {
   bazel('run', '//:smoke');
   bazel('run', '//:demo_check');
+  bazel('run', '//:instance_check', '--', '--state-only');
 }
 bazel('run', '//:package');
