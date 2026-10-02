@@ -4,6 +4,7 @@ import {
   relationshipKinds,
   relationshipFailure,
 } from '../shared/relationships';
+import { supportLinks, supportUrl } from '../shared/support';
 import { Providers } from './providers';
 import {
   app,
@@ -52,6 +53,8 @@ import {
 } from '../shared/views';
 
 app.setName('Canopy');
+if (process.platform === 'win32') app.setAppUserModelId('app.canopy.desktop');
+if (process.platform === 'linux') app.setDesktopName('canopy.desktop');
 configureLinuxCredentialStore((store) =>
   app.commandLine.appendSwitch('password-store', store),
 );
@@ -331,6 +334,8 @@ async function start(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
 ) {
+  if (process.platform === 'darwin' && !app.isPackaged)
+    app.dock?.setIcon(join(__dirname, 'branding/icons/512x512.png'));
   const storage = new Storage(app.getPath('userData'));
   const auth = new Auth(storage, (url) => shell.openExternal(url));
   let authError: string | undefined;
@@ -436,6 +441,8 @@ async function start(
     dismissUpdateNotice: () => updates.dismiss(),
     openRelease: (tag: unknown) =>
       updates.open(tag, (url) => shell.openExternal(url)),
+    appVersion: () => app.getVersion(),
+    openSupportLink: (link: unknown) => shell.openExternal(supportUrl(link)),
     demoMode: () => demoMode,
     demoTimeScale: () => {
       const scale = Number(process.env.CANOPY_DEMO_TIME_SCALE ?? 1);
@@ -772,7 +779,10 @@ async function start(
       if (
         event.sender !== window?.webContents ||
         event.senderFrame !== window.webContents.mainFrame ||
-        event.senderFrame.url !== pathToFileURL(html).href
+        ![
+          pathToFileURL(html).href,
+          `${pathToFileURL(html).href}?support=1`,
+        ].includes(event.senderFrame.url)
       )
         throw new Error('Untrusted application window.');
       return handler(...args);
@@ -782,7 +792,7 @@ async function start(
     quitting = true;
     updates.cancel();
   });
-  const createWindow = async () => {
+  const createWindow = async (support = false) => {
     const saved = demoMode
       ? null
       : restoreWindow(
@@ -796,6 +806,12 @@ async function start(
       minHeight: Math.min(600, saved?.bounds.height ?? 600),
       ...(saved?.bounds ?? {}),
       title: demoMode ? 'Canopy — Demo' : 'Canopy',
+      icon: join(
+        __dirname,
+        process.platform === 'win32'
+          ? 'branding/icon.ico'
+          : 'branding/icons/256x256.png',
+      ),
       backgroundColor: '#141719',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
       webPreferences: {
@@ -875,7 +891,7 @@ async function start(
     window.on('closed', () => {
       window = null;
     });
-    await window.loadFile(html);
+    await window.loadFile(html, { query: support ? { support: '1' } : {} });
   };
   const openDemoFromMenu = () =>
     void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
@@ -884,6 +900,18 @@ async function start(
         error instanceof Error ? error.message : String(error),
       ),
     );
+  const showSupport = () => {
+    if (window) {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+      window.webContents.send('canopy:showSupport');
+    } else {
+      void createWindow(true).catch((error: Error) =>
+        dialog.showErrorBox('Could not open About & Support', error.message),
+      );
+    }
+  };
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       ...(process.platform === 'darwin'
@@ -891,7 +919,7 @@ async function start(
             {
               label: 'Canopy',
               submenu: [
-                { role: 'about' as const },
+                { label: 'About Canopy', click: showSupport },
                 ...(!demoMode
                   ? [
                       {
@@ -922,6 +950,24 @@ async function start(
               ],
             },
           ]),
+      {
+        label: 'Help',
+        submenu: [
+          { label: 'About & Support', click: showSupport },
+          ...Object.values(supportLinks).map(({ label, url }) => ({
+            label,
+            click: () =>
+              void shell
+                .openExternal(url)
+                .catch((error: Error) =>
+                  dialog.showErrorBox(
+                    'Could not open support link',
+                    error.message,
+                  ),
+                ),
+          })),
+        ],
+      },
       {
         label: 'Edit',
         submenu: [
