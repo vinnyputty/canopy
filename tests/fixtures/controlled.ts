@@ -23,6 +23,7 @@ type Gate = {
 export class ControlledDemoProvider extends DemoProvider {
   retryAt: number | null = null;
   private gates = new Map<string, Gate>();
+  private completedGates = new Set<string>();
   readonly calls: { operation: Operation; key: string; patch?: IssuePatch }[] =
     [];
   hold(id: string, operation: Operation, key: string) {
@@ -30,10 +31,14 @@ export class ControlledDemoProvider extends DemoProvider {
     const wait = new Promise<void>((resolve, reject) => {
       release = (error) => (error ? reject(new Error(error)) : resolve());
     });
+    this.completedGates.delete(id);
     this.gates.set(id, { operation, key, started: false, wait, release });
   }
   started(id: string) {
     return this.gates.get(id)?.started ?? false;
+  }
+  completed(id: string) {
+    return this.completedGates.has(id);
   }
   release(id: string, error?: string) {
     const gate = this.gates.get(id);
@@ -43,13 +48,15 @@ export class ControlledDemoProvider extends DemoProvider {
   }
   private async pause(operation: Operation, key: string, patch?: IssuePatch) {
     this.calls.push({ operation, key, patch });
-    const gate = [...this.gates.values()].find(
-      (value) =>
+    const entry = [...this.gates.entries()].find(
+      ([, value]) =>
         !value.started && value.operation === operation && value.key === key,
     );
-    if (gate) {
+    if (entry) {
+      const [id, gate] = entry;
       gate.started = true;
       await gate.wait;
+      this.completedGates.add(id);
     }
   }
   rankingState?: 'supported' | 'unsupported' | 'unknown';

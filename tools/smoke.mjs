@@ -1,4 +1,5 @@
 import { _electron as electron, expect } from '@playwright/test';
+import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
@@ -1339,11 +1340,80 @@ async function auditMutationViews() {
   );
 }
 
+async function auditSidebarSample() {
+  await close();
+  await rm(userData, { recursive: true, force: true });
+  await mkdir(userData, { recursive: true });
+  const sidebarTabs = ['CAN-100', 'CAN-200'].map((rootKey) => ({
+    id: rootKey,
+    connectionId: 'demo',
+    rootKey,
+    expanded: [rootKey],
+    selectedKey: rootKey,
+    hideDone: true,
+    scrollTop: 0,
+  }));
+  const sidebarRoots = sidebarTabs.map(({ connectionId, rootKey }) => ({
+    connectionId,
+    rootKey,
+  }));
+  await writeFile(
+    join(userData, 'workspace.json'),
+    JSON.stringify({
+      tabs: sidebarTabs,
+      activeTabId: 'CAN-100',
+      rootViews: {
+        '["demo","CAN-100"]': JSON.parse(
+          await readFile(
+            new URL(
+              '../tests/fixtures/sidebar-root-view.json',
+              import.meta.url,
+            ),
+            'utf8',
+          ),
+        ),
+      },
+      pinnedRoots: sidebarRoots,
+      recentRoots: sidebarRoots,
+      savedViews: [
+        {
+          id: 'sidebar-sample',
+          name: 'Sidebar sample',
+          roots: sidebarRoots,
+          connectionIds: [],
+          filters: {
+            assignee: 'any',
+            statuses: [],
+            priority: '',
+            hideDone: true,
+          },
+          sort: { column: 'key', direction: 'asc' },
+        },
+      ],
+      theme: 'system',
+      sidebarCollapsed: false,
+      shortcuts: {},
+    }),
+  );
+  await launch();
+  await auditSidebar(app, page, waitForSavedWorkspace);
+}
+
 try {
   await rm(join(workspace, '.cache', 'smoke-failure'), {
     recursive: true,
     force: true,
   });
+  if (process.env.CANOPY_SMOKE_SIDEBAR_ONLY === '1') {
+    await auditSidebarSample();
+    expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
+    await close();
+    await rm(userData, { recursive: true, force: true });
+    console.log(
+      'Canopy sidebar Electron keyboard and accessibility checks passed.',
+    );
+    process.exit(0);
+  }
   await auditReadingMigration();
   await launch();
   if (process.env.CANOPY_SMOKE_TEST_DIAGNOSTICS === '1') {
@@ -1428,10 +1498,17 @@ try {
   const rootSummary = 'A calmer place to get things done';
   const rootTitle = `CAN-100: ${rootSummary} · Canopy demo`;
   const rootTab = page.locator(`[role="tab"][title="${rootTitle}"]`);
-  const rootSidebar = page.locator(`.side-tab[title="${rootTitle}"]`);
+  const rootSidebar = page
+    .getByRole('navigation', { name: 'Active tabs', exact: true })
+    .locator(`.side-tab[title="${rootTitle}"]`);
+  await expect(rootSidebar).toHaveCount(1);
+  await expect(rootSidebar.locator('small.root-context')).toHaveText(
+    'Jira · Canopy demo',
+  );
   for (const label of [rootTab, rootSidebar]) {
     await expect(label).toHaveAttribute('title', rootTitle);
-    const subtitle = label.locator('small');
+    const subtitle = label.locator('small:not(.root-context)');
+    await expect(subtitle).toHaveCount(1);
     await expect(subtitle).toHaveText(rootSummary);
     await expect(subtitle).toHaveCSS('text-overflow', 'ellipsis');
     await expect(subtitle).toHaveCSS('overflow-x', 'hidden');
@@ -2332,7 +2409,7 @@ try {
   await page.getByRole('menuitem', { name: 'Pin root', exact: true }).click();
   const pinnedRoots = page.getByRole('navigation', { name: 'Pinned roots' });
   await expect(
-    pinnedRoots.getByRole('button', { name: /CAN-100 A calmer/ }),
+    pinnedRoots.getByRole('button', { name: /^Open CAN-100.*A calmer/ }),
   ).toBeVisible();
   await firstTab.click({ button: 'middle' });
   await expect(firstTab).toHaveCount(0);
@@ -2689,7 +2766,7 @@ try {
   // A favorite opens a closed root; reopen restores into that existing tab.
   await page
     .getByRole('navigation', { name: 'Pinned roots' })
-    .getByRole('button', { name: /CAN-100 A calmer/ })
+    .getByRole('button', { name: /^Open CAN-100.*A calmer/ })
     .click();
   await expect(page.getByRole('tab')).toHaveCount(1);
   await page.keyboard.press(`${modifier}+Shift+t`);
@@ -2841,10 +2918,11 @@ try {
     (await page.evaluate(() => window.canopy.loadWorkspace())).previewWidth,
   ).toBe(560);
   await page
-    .getByRole('button', { name: 'Unpin CAN-100', exact: true })
+    .getByRole('navigation', { name: 'Pinned roots', exact: true })
+    .getByRole('button', { name: /^Unpin CAN-100/ })
     .click();
   await expect(
-    page.getByRole('navigation', { name: 'Pinned roots' }),
+    page.getByRole('navigation', { name: 'Pinned roots' }).locator('li'),
   ).toHaveCount(0);
   await expect(page.getByRole('tab')).toHaveCount(1);
   await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
@@ -2852,7 +2930,7 @@ try {
   await page.getByRole('tab', { name: /CAN-100/ }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Unpin root', exact: true }).click();
   await expect(
-    page.getByRole('navigation', { name: 'Pinned roots' }),
+    page.getByRole('navigation', { name: 'Pinned roots' }).locator('li'),
   ).toHaveCount(0);
 
   // Run table scenarios after the workspace held-load fixture has completed.
@@ -3424,7 +3502,7 @@ try {
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await auditAppearance();
   await expect(
-    page.getByRole('navigation', { name: 'Pinned roots' }),
+    page.getByRole('navigation', { name: 'Pinned roots' }).locator('li'),
   ).toHaveCount(0);
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(page.getByRole('tab')).toHaveCount(0);
@@ -3451,6 +3529,8 @@ try {
 
   await auditAppearanceSaveOrdering();
   await auditAppearanceSaveFailure();
+
+  await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
 
