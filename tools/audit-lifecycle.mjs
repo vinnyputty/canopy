@@ -138,6 +138,9 @@ class OwnedScope {
     this.owner = owner;
     this.members = new Map();
     this.observed = new Set();
+    // Departed identities can reveal possible late descendants, but never
+    // authorize signals. Keep full birth tokens and any proven reuse boundary.
+    this.ancestry = new Map();
     this.capturedRows = false;
     this.groupRetired = false;
     this.valid =
@@ -159,6 +162,43 @@ class OwnedScope {
       );
     const rows = await processes(ms);
     const byPid = new Map(rows.map((row) => [row.pid, row]));
+    const historicalPotential = new Set();
+    if (process.platform === 'win32') {
+      for (const [pid, births] of this.ancestry) {
+        const current = byPid.get(pid);
+        if (!validBirth(current?.start)) continue;
+        for (const history of births.values()) {
+          if (
+            current.start !== history.start &&
+            (!history.until || current.start < history.until)
+          )
+            history.until = current.start;
+        }
+      }
+      for (const row of rows) {
+        const identity = this.ancestry.get(row.pid);
+        if (
+          validBirth(row.start) &&
+          identity &&
+          !identity.get(row.start)?.verified &&
+          [...identity.values()].some((history) => history.verified)
+        )
+          continue; // Proven replacement of a previously verified member.
+        const parent = byPid.get(row.ppid);
+        const births = this.ancestry.get(row.ppid);
+        if (!births) continue;
+        for (const history of births.values()) {
+          if (parent?.start === history.start) continue;
+          if (
+            !validBirth(row.start) ||
+            ((!history.start || row.start >= history.start) &&
+              (!history.until || row.start < history.until) &&
+              (!validBirth(parent?.start) || row.start < parent.start))
+          )
+            historicalPotential.add(row.pid);
+        }
+      }
+    }
     // A complete successful snapshot can prove absence or valid PID reuse.
     // Unavailable/malformed birth information proves neither.
     for (const [pid, birth] of this.members) {
@@ -184,6 +224,7 @@ class OwnedScope {
     // Retain every potential descendant BEFORE validation can reject a partial
     // capture. Unknown identities seed observation only, never signaling.
     const potential = new Set([...this.members.keys(), ...this.observed]);
+    for (const pid of historicalPotential) potential.add(pid);
     if (root && !this.groupRetired && (this.rootStart || !this.exited()))
       potential.add(root.pid);
     if (process.platform !== 'win32' && !this.groupRetired)
@@ -211,6 +252,14 @@ class OwnedScope {
       }
     } while (added);
     for (const pid of potential) this.observed.add(pid);
+    if (process.platform === 'win32')
+      for (const row of rows) {
+        if (!potential.has(row.pid)) continue;
+        const start = validBirth(row.start) ? row.start : null;
+        let births = this.ancestry.get(row.pid);
+        if (!births) this.ancestry.set(row.pid, (births = new Map()));
+        if (!births.has(start)) births.set(start, { start });
+      }
     this.capturedRows ||= potential.size > 0;
     if (root && !this.groupRetired && (this.rootStart || !this.exited())) {
       if (!validBirth(root.start))
@@ -260,7 +309,11 @@ class OwnedScope {
         throw new Error(
           'Refusing to include the audit process in its child scope',
         );
-      if (validBirth(row.start)) this.members.set(row.pid, row.start);
+      if (validBirth(row.start)) {
+        this.members.set(row.pid, row.start);
+        if (process.platform === 'win32')
+          this.ancestry.get(row.pid).get(row.start).verified = true;
+      }
     }
     const uncertain = rows.filter(
       (row) =>
