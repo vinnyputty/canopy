@@ -64,13 +64,23 @@ export async function auditCloseLifecycle({
   await expect
     .poll(() => app.evaluate(() => !!globalThis.closePendingWrite.release))
     .toBe(true);
-  await app.evaluate(({ BrowserWindow }) => {
-    const window = BrowserWindow.getAllWindows()[0];
-    window.webContents.forcefullyCrashRenderer();
+  // A renderer can die after executeJavaScript has begun awaiting its flush.
+  await page.evaluate(() => {
+    window.canopy.onWorkspaceFlush(() => {
+      window.closeFlushStarted = true;
+      return new Promise(() => {});
+    });
   });
   await app.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].close(),
   );
+  await expect
+    .poll(() => page.evaluate(() => window.closeFlushStarted))
+    .toBe(true);
+  await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    window.webContents.forcefullyCrashRenderer();
+  });
   await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 300)));
   expect(
     await app.evaluate(

@@ -162,7 +162,18 @@ async function launch(production = false, fixtureEnv = {}) {
 
 async function close() {
   if (!app) return;
-  await app.close();
+  if (smokeFailure) {
+    // Failed fixtures may retain a crashed/hung renderer or a native close
+    // warning. Preserve the assertion failure and terminate only this launch.
+    const process = app.process();
+    if (process.exitCode === null && process.signalCode === null)
+      process.kill('SIGKILL');
+    await expect
+      .poll(() => process.exitCode !== null || process.signalCode !== null, {
+        timeout: 5000,
+      })
+      .toBe(true);
+  } else await app.close();
   app = undefined;
   page = undefined;
 }
