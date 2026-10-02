@@ -134,6 +134,18 @@ const report = {
   limitations: manifest.limitations,
 };
 const persist = () => writeFile(output, JSON.stringify(report, null, 2));
+const failures = [];
+async function persistFinal(errors) {
+  try {
+    await deadline(persist, 3000, 'Evidence persistence');
+  } catch (error) {
+    throw new AggregateError(
+      [...errors, error],
+      `Evidence persistence failed: ${output}`,
+      { cause: errors.length ? errors[0] : error },
+    );
+  }
+}
 // Alternating pairs reduce ordering drift. These are single samples; repeat
 // complete pairs with a new output file for a distribution, never mix sources.
 for (const provider of ['jira', 'github'])
@@ -171,7 +183,9 @@ for (const provider of ['jira', 'github'])
         profile,
         executable: process.env.CANOPY_ELECTRON_PATH,
       });
-      let primary;
+      const sampleFailures = [];
+      let primary,
+        hasPrimary = false;
       const started = performance.now();
       let app,
         page,
@@ -518,6 +532,8 @@ for (const provider of ['jira', 'github'])
         sample.outcome = 'complete';
       } catch (error) {
         primary = error;
+        hasPrimary = true;
+        sampleFailures.push(error);
         sample.outcome = 'failed';
         sample.error = String(error);
         if (page)
@@ -583,7 +599,11 @@ for (const provider of ['jira', 'github'])
           await deadline(persist, 3000, 'Evidence persistence');
         } catch (error) {
           sample.diagnostics.push(String(error));
-          primary ??= error;
+          sampleFailures.push(error);
+          if (!hasPrimary) {
+            primary = error;
+            hasPrimary = true;
+          }
         }
         try {
           await finishAudit({
@@ -608,12 +628,19 @@ for (const provider of ['jira', 'github'])
           });
         } catch (error) {
           sample.cleanupOrPrimary = String(error);
-          if (!primary) sample.outcome = 'cleanup-failed';
+          if (!hasPrimary) sample.outcome = 'cleanup-failed';
+          for (const failure of error instanceof AggregateError
+            ? error.errors
+            : [error])
+            if (!sampleFailures.includes(failure)) sampleFailures.push(failure);
         }
-        await deadline(persist, 3000, 'Evidence persistence');
+        failures.push(...sampleFailures);
+        await persistFinal(failures);
       }
     }
   }
-await persist();
-if (report.samples.some((s) => s.outcome !== 'complete'))
-  throw new Error(`Incomplete audit: see ${output}`);
+await persistFinal(failures);
+if (failures.length || report.samples.some((s) => s.outcome !== 'complete'))
+  throw new AggregateError(failures, `Incomplete audit: see ${output}`, {
+    cause: failures[0],
+  });
