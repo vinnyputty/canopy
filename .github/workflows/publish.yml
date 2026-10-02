@@ -1,0 +1,40 @@
+name: Publish qualified Canopy release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag with a verified draft and committed native qualification evidence
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: canopy-release-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    environment: public-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '22.16.0'
+      - name: Verify draft, tag, downloaded bytes and native evidence before publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          node tools/release.mjs tag "$RELEASE_TAG"
+          version=$(node -p 'require("./package.json").version')
+          source_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          gh release download "$RELEASE_TAG" --dir downloaded
+          node tools/release.mjs qualify downloaded "$RELEASE_TAG" "$version" "$source_sha" "release-qualification/$RELEASE_TAG.json"
+          gh release edit "$RELEASE_TAG" --notes-file "release-qualification/$RELEASE_TAG.md" --draft=false --verify-tag
