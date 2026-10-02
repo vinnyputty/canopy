@@ -16,6 +16,12 @@ const require = createRequire(import.meta.url);
 const supported = { darwin: 'arm64', win32: 'x64', linux: 'x64' };
 if (
   ['package', 'packaged-smoke'].includes(process.argv[2]) &&
+  !(
+    process.argv[2] === 'packaged-smoke' &&
+    process.env.CANOPY_SIGNED_RELEASE === '1' &&
+    process.platform === 'darwin' &&
+    ['arm64', 'x64'].includes(process.arch)
+  ) &&
   supported[process.platform] !== process.arch
 )
   throw new Error(
@@ -24,6 +30,20 @@ if (
 if (process.argv[2] === 'packaged-smoke') {
   await import('./packaged-smoke.mjs');
   process.exit(0);
+}
+if (process.argv[2] === 'signed-package') {
+  const { signingGate, command } = await import('./macos-release.mjs');
+  const { version } = JSON.parse(
+    await readFile(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'),
+      'utf8',
+    ),
+  );
+  signingGate(process.env, process.platform, process.arch, version, (args) =>
+    command('git', args, {
+      cwd: process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd(),
+    }),
+  );
 }
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
@@ -135,6 +155,37 @@ if (
   }
   const { build } = require('electron-builder');
   const { version } = require('electron/package.json');
+  if (mode === 'signed-package') {
+    const { signedPackages } = await import('./macos-release.mjs');
+    const output = join(workspace, 'release');
+    await rm(output, { recursive: true, force: true });
+    const signingEnv = { ...process.env };
+    for (const key of [
+      'MAC_CERTIFICATE_P12',
+      'MAC_CERTIFICATE_PASSWORD',
+      'MAC_NOTARY_KEY',
+    ])
+      delete process.env[key];
+    const report = await signedPackages({
+      env: signingEnv,
+      arch: process.arch,
+      version: manifest.version,
+      projectDir: staging,
+      output,
+      build: (options) =>
+        build({
+          ...options,
+          config: {
+            ...options.config,
+            electronVersion: version,
+            npmRebuild: false,
+          },
+        }),
+    });
+    await writeFile(join(output, 'macos-trust.json'), JSON.stringify(report));
+    await rm(staging, { recursive: true, force: true });
+    process.exit(0);
+  }
   await build({
     projectDir: staging,
     config: {
