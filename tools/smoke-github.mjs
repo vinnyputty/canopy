@@ -20,13 +20,14 @@ export async function auditGithub(app, page) {
       ...extra,
     });
     globalThis.githubSmokeIssues = {
-      'team/a#1': issue('team/a', 1, { comments: 205 }),
+      'team/a#1': issue('team/a', 1, { comments: 200 }),
       'team/a#3': issue('team/a', 3, { state: 'closed' }),
       'team/a#4': issue('team/a', 4),
       'team/b#2': issue('team/b', 2),
     };
     globalThis.githubSmokePatches = [];
     globalThis.githubSmokeAssigneePages = [];
+    globalThis.githubSearchPages = [];
     const channel = 'canopy:transitions';
     globalThis.githubSmokeTransitionHandler =
       ipcMain._invokeHandlers.get(channel);
@@ -111,6 +112,11 @@ export async function auditGithub(app, page) {
       }
       if (path === '/repos/team/a/issues/1/comments') {
         const page = Number(parsed.searchParams.get('page'));
+        const hold = page === 2 && globalThis.githubCommentHold;
+        if (hold) {
+          hold.started = true;
+          await hold.promise;
+        }
         if (page === 2 && globalThis.githubSmokeOlderFailure) {
           globalThis.githubSmokeOlderFailure = false;
           return Response.json(
@@ -118,12 +124,19 @@ export async function auditGithub(app, page) {
             { status: 500 },
           );
         }
+        if (hold) hold.completed = true;
         return Response.json(
           Array.from({ length: page === 3 ? 5 : 100 }, (_, index) => ({
-            id: (page - 1) * 100 + index + 1,
+            id: page === 2 && index === 99 ? 201 : (page - 1) * 100 + index + 1,
             user: { login: 'tester' },
-            created_at: '2026-01-01T00:00:00Z',
-            body: `Fixture comment ${(page - 1) * 100 + index + 1}`,
+            created_at:
+              page === 3
+                ? new Date(Date.now() + 60_000).toISOString()
+                : '2026-01-01T00:00:00Z',
+            body:
+              page === 2 && index === 99
+                ? 'Older duplicate of comment 201'
+                : `Fixture comment ${(page - 1) * 100 + index + 1}`,
           })),
         );
       }
@@ -153,10 +166,18 @@ export async function auditGithub(app, page) {
         const repo = parsed.searchParams.get('q')?.includes('repo:team/b')
           ? 'team/b'
           : 'team/a';
+        const limited = parsed.searchParams.get('q')?.includes('limited');
+        if (limited)
+          globalThis.githubSearchPages.push({
+            repo,
+            page: Number(parsed.searchParams.get('page')),
+          });
         return Response.json({
-          total_count: parsed.searchParams.get('q')?.includes('limited')
-            ? 1001
-            : 1,
+          total_count: limited ? (repo === 'team/a' ? 1001 : 101) : 1,
+          incomplete_results:
+            limited &&
+            repo === 'team/b' &&
+            Number(parsed.searchParams.get('page')) === 1,
           items: [
             globalThis.githubSmokeIssues[
               repo === 'team/a' ? 'team/a#1' : 'team/b#2'
@@ -315,6 +336,7 @@ export async function auditGithub(app, page) {
     ).toBeVisible();
     await app.evaluate(() => {
       globalThis.githubSmokeAssigneePages = [];
+      globalThis.githubSearchPages = [];
     });
     await page.getByLabel('Search assignees').fill('late-user');
     await expect(
@@ -325,6 +347,7 @@ export async function auditGithub(app, page) {
     ).toEqual([1, 2, 3, 4, 5]);
     await app.evaluate(() => {
       globalThis.githubSmokeAssigneePages = [];
+      globalThis.githubSearchPages = [];
     });
     await page.getByLabel('Search assignees').fill('last-user');
     await expect(
@@ -438,6 +461,9 @@ export async function auditGithub(app, page) {
       await app.evaluate(() => globalThis.githubSmokeTransitionCalls.length),
     ).toBe(firstStatusCalls + 1);
     await root.getByRole('menuitem', { name: 'Open' }).press('Escape');
+    await app.evaluate(() => {
+      globalThis.githubSmokeIssues['team/a#1'].comments = 205;
+    });
     await tree.getByRole('treeitem', { name: /team\/a#1/ }).press('Space');
     const preview = page.getByRole('complementary', {
       name: 'Preview team/a#1',
@@ -451,6 +477,24 @@ export async function auditGithub(app, page) {
     await expect(
       preview.getByText('Loaded comments 201–205 of 205.'),
     ).toBeVisible();
+    await expect(
+      preview.getByText('5 more comments than at the last view.'),
+    ).toBeVisible();
+    await expect(
+      preview.getByRole('button', { name: /New comment by tester/ }),
+    ).toHaveCount(5);
+    const baselineForIssue = () =>
+      page.evaluate(async () => {
+        const saved = await window.canopy.loadWorkspace();
+        return Object.values(saved.seenRoots ?? {})
+          .map((root) => root.issues['team/a#1'])
+          .filter(Boolean);
+      });
+    await expect
+      .poll(async () => (await baselineForIssue())[0]?.fields.Status)
+      .toBe('Closed');
+    const baselineBeforeOlder = await baselineForIssue();
+    expect(baselineBeforeOlder[0].commentCount).toBe(200);
     const unreadBeforeOlder = await preview
       .locator('.preview-changes')
       .innerText();
@@ -478,12 +522,64 @@ export async function auditGithub(app, page) {
     const commentBodies = await preview
       .locator('.preview-comment .preview-text')
       .allTextContents();
-    expect(commentBodies).toHaveLength(205);
+    expect(commentBodies).toHaveLength(204);
     expect(commentBodies[0]).toBe('Fixture comment 1');
-    expect(commentBodies[204]).toBe('Fixture comment 205');
+    expect(commentBodies[203]).toBe('Fixture comment 205');
     await expect(preview.locator('.preview-changes')).toHaveText(
       unreadBeforeOlder,
+      { useInnerText: true },
     );
+    expect(await baselineForIssue()).toEqual(baselineBeforeOlder);
+    await expect(
+      preview.getByText('Older duplicate of comment 201'),
+    ).toHaveCount(0);
+    await preview.getByRole('button', { name: 'Close issue preview' }).click();
+    await tree.getByRole('treeitem', { name: /team\/a#1/ }).press('Space');
+    await expect(
+      preview.getByText('Loaded comments 201–205 of 205.'),
+    ).toBeVisible();
+    await app.evaluate(() => {
+      const hold = { started: false, completed: false };
+      hold.promise = new Promise((resolve) => {
+        hold.release = resolve;
+      });
+      globalThis.githubCommentHold = hold;
+    });
+    await preview.getByRole('button', { name: 'Load older comments' }).click();
+    await expect
+      .poll(() => app.evaluate(() => globalThis.githubCommentHold.started))
+      .toBe(true);
+    await tree.getByRole('treeitem', { name: /team\/b#2/ }).focus();
+    const heldDestination = page.getByRole('complementary', {
+      name: 'Preview team/b#2',
+    });
+    await expect(
+      heldDestination.getByText('Loaded 0 of 0 comments.'),
+    ).toBeVisible();
+    await app.evaluate(() => {
+      globalThis.githubCommentHold.release();
+    });
+    await expect
+      .poll(() => app.evaluate(() => globalThis.githubCommentHold.completed))
+      .toBe(true);
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    await expect(heldDestination.locator('h2')).toHaveText('team/b issue 2');
+    await expect(heldDestination.locator('.preview-comment')).toHaveCount(0);
+    await expect(
+      heldDestination.getByRole('button', { name: 'Load older comments' }),
+    ).toHaveCount(0);
+    await app.evaluate(() => {
+      delete globalThis.githubCommentHold;
+    });
+    await tree.getByRole('treeitem', { name: /team\/a#1/ }).focus();
+    await expect(
+      preview.getByText('Loaded comments 201–205 of 205.'),
+    ).toBeVisible();
     await preview.getByRole('button', { name: 'Edit labels' }).click();
     await preview.getByRole('checkbox', { name: 'ready' }).click();
     await expect(
@@ -591,6 +687,64 @@ export async function auditGithub(app, page) {
     await expect(
       search.getByText(/GitHub search results are truncated/),
     ).toBeVisible();
+    for (let pageNumber = 3; pageNumber <= 10; pageNumber++) {
+      await search
+        .getByRole('button', { name: 'Load more', exact: true })
+        .click();
+      await expect
+        .poll(() =>
+          app.evaluate(
+            () =>
+              globalThis.githubSearchPages.filter(
+                (request) => request.repo === 'team/a',
+              ).length,
+          ),
+        )
+        .toBe(pageNumber);
+    }
+    const boundaryWarning = search.getByText(
+      /GitHub search results are truncated/,
+    );
+    await expect(boundaryWarning).toContainText(
+      'team/b: GitHub returned incomplete results',
+    );
+    await expect(boundaryWarning).toContainText('team/a: only the first 1,000');
+    await expect(boundaryWarning).toContainText(
+      'Add more specific title or body words',
+    );
+    await expect(boundaryWarning).toContainText('GitHub issue URL');
+    await expect(search.getByRole('option', { name: /team\/b#2/ })).toHaveCount(
+      1,
+    );
+    await search
+      .getByRole('button', { name: 'Load more', exact: true })
+      .click();
+    await expect(boundaryWarning).toContainText(
+      'team/b: GitHub returned incomplete results',
+    );
+    await expect(boundaryWarning).toContainText('team/a: only the first 1,000');
+    await expect(search.getByRole('option', { name: /team\/b#2/ })).toHaveCount(
+      1,
+    );
+    await expect(
+      search.getByRole('button', { name: 'Load more', exact: true }),
+    ).toHaveCount(0);
+    expect(await app.evaluate(() => globalThis.githubSearchPages)).toEqual([
+      ...Array.from({ length: 10 }, (_, index) => ({
+        repo: 'team/a',
+        page: index + 1,
+      })),
+      { repo: 'team/b', page: 1 },
+      { repo: 'team/b', page: 2 },
+    ]);
+    await limitInput.fill('team/a#1');
+    await limitInput.press('Enter');
+    await expect(search).toHaveCount(0);
+    await expect(tree).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Open issue', exact: true })
+      .first()
+      .click();
     await limitInput.fill('only-b');
     await expect(
       search.getByRole('option', { name: /team\/b#2/ }),
