@@ -58,7 +58,11 @@ for (const winner of [false, true]) {
         const assert = require('node:assert/strict');
         const { EventEmitter } = require('node:events');
         const { rmSync } = require('node:fs');
-        let ready = 0, quits = 0;
+        let ready = 0, quits = 0, received = 0;
+        const handoffs = {
+          receive(args) { assert.deepEqual(args, []); received++; },
+          stop() { throw new Error('Unexpected quit event'); },
+        };
         const app = Object.assign(new EventEmitter(), {
           requestSingleInstanceLock: () => ${winner},
           whenReady: () => { ready++; return new Promise(() => {}); },
@@ -72,6 +76,7 @@ for (const winner of [false, true]) {
         launch(undefined, ${demoMode});
         app.emit('window-all-closed');
         assert.equal(ready, ${winner ? 1 : 0});
+        assert.equal(received, ${winner ? 1 : 0});
         assert.equal(quits, ${winner ? '(process.platform === "darwin" && !' + demoMode + ' ? 0 : 1)' : '1'});
       `;
       const result = spawnSync(process.execPath, ['-e', script], {
