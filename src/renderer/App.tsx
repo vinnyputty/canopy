@@ -239,6 +239,14 @@ export function App() {
     | 'connect'
     | null
   >(null);
+  const settingsTrigger = useRef<HTMLButtonElement>(null);
+  const settingsFlow = useRef(false);
+  useLayoutEffect(() => {
+    if (dialog === null && settingsFlow.current) {
+      settingsFlow.current = false;
+      settingsTrigger.current?.focus();
+    }
+  }, [dialog]);
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
     palette: NonNullable<Workspace['palette']>;
@@ -3075,7 +3083,11 @@ export function App() {
         </div>
         <button
           className="sidebar-settings"
-          onClick={() => setDialog('settings')}
+          ref={settingsTrigger}
+          onClick={() => {
+            settingsFlow.current = true;
+            setDialog('settings');
+          }}
         >
           <Settings2 size={16} />
           <span>Settings</span>
@@ -4625,6 +4637,7 @@ export function App() {
       )}
       {dialog === 'connect' && (
         <ConnectDialog
+          initialFocus={settingsFlow.current}
           onClose={() => setDialog(null)}
           onConnected={(value) => {
             for (const tab of allRefreshTabs)
@@ -4670,6 +4683,7 @@ export function App() {
       )}
       {dialog === 'shortcuts' && (
         <ShortcutsDialog
+          initialFocus={settingsFlow.current}
           shortcuts={workspace.shortcuts}
           onChange={(shortcuts) =>
             setWorkspace((value) => ({ ...value, shortcuts }))
@@ -4678,7 +4692,7 @@ export function App() {
         />
       )}
       {dialog === 'settings' && (
-        <Dialog title="Settings" onClose={() => setDialog(null)}>
+        <Dialog title="Settings" onClose={() => setDialog(null)} initialFocus>
           <Settings
             reading={workspace.reading ?? DEFAULT_READING}
             onReading={(reading) =>
@@ -5915,11 +5929,13 @@ function LinkedIssues({
 }
 
 function ConnectDialog({
+  initialFocus,
   onClose,
   onConnected,
 }: {
   onClose: () => void;
   onConnected: (connections: Connection[]) => void;
+  initialFocus?: boolean;
 }) {
   const [siteUrl, setSiteUrl] = useState('');
   const [provider, setProvider] = useState<'jira' | 'github'>('jira');
@@ -5982,6 +5998,7 @@ function ConnectDialog({
   return (
     <Dialog
       title={`Connect ${provider === 'github' ? 'GitHub' : 'Jira'}`}
+      initialFocus={initialFocus}
       onClose={onClose}
       wide
     >
@@ -6748,10 +6765,12 @@ function AppearanceDialog({
 }
 
 function ShortcutsDialog({
+  initialFocus,
   shortcuts,
   onChange,
   onClose,
 }: {
+  initialFocus?: boolean;
   shortcuts: Record<string, string>;
   onChange: (value: Record<string, string>) => void;
   onClose: () => void;
@@ -6779,7 +6798,12 @@ function ShortcutsDialog({
     return () => window.removeEventListener('keydown', capture, true);
   }, [recording]);
   return (
-    <Dialog title="Keyboard shortcuts" onClose={onClose} wide>
+    <Dialog
+      title="Keyboard shortcuts"
+      onClose={onClose}
+      wide
+      initialFocus={initialFocus}
+    >
       <div className="shortcut-intro">
         Click a shortcut, then press the new key combination. Conflicting
         shortcuts must be resolved before saving.

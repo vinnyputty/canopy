@@ -233,6 +233,66 @@ async function expectReading(label, value) {
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   if (viewWasOpen) await page.locator('.view-settings > summary').click();
 }
+async function auditSettingsKeyboard() {
+  const trigger = page.getByRole('button', { name: 'Settings', exact: true });
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const open = async () => {
+    await trigger.focus();
+    await trigger.press('Enter');
+    await expect(
+      settings.getByRole('button', { name: 'Close dialog' }),
+    ).toBeFocused();
+  };
+  await open();
+  const controls = settings.locator(
+    'button:not(:disabled), select:not(:disabled)',
+  );
+  const count = await controls.count();
+  await page.keyboard.press('Shift+Tab');
+  await expect(
+    settings.getByRole('button', { name: 'Done', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(controls.first()).toBeFocused();
+  for (let index = 1; index <= count; index++) {
+    await page.keyboard.press('Tab');
+    await expect(controls.nth(index % count)).toBeFocused();
+  }
+  await page.keyboard.press('Escape');
+  await expect(settings).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await open();
+  await settings.getByRole('button', { name: 'Close dialog' }).press('Enter');
+  await expect(trigger).toBeFocused();
+  await open();
+  await settings.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(trigger).toBeFocused();
+  await open();
+  await page.locator('.dialog-backdrop').click({ position: { x: 3, y: 3 } });
+  await expect(trigger).toBeFocused();
+  for (const [link, title] of [
+    ['Appearance', 'Appearance'],
+    ['Keyboard shortcuts', 'Keyboard shortcuts'],
+    ['Connection setup', 'Connect Jira'],
+  ]) {
+    await open();
+    await settings.getByRole('button', { name: link, exact: true }).click();
+    const destination = page.getByRole('dialog', { name: title, exact: true });
+    await expect(destination).toBeVisible();
+    await expect
+      .poll(() =>
+        destination.evaluate((panel) => panel.contains(document.activeElement)),
+      )
+      .toBe(true);
+    await expect(trigger).not.toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(destination).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  }
+  console.log(
+    'Settings keyboard checks passed: initial focus, Tab/Shift+Tab containment, close restoration, and destination focus.',
+  );
+}
 async function auditReadingMigration() {
   const rootView = {
     columns: ['issue', 'priority', 'assignee', 'status'],
@@ -276,6 +336,7 @@ async function auditReadingMigration() {
     }),
   );
   await launch();
+  await auditSettingsKeyboard();
   await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
   await expect(page.locator('.issue-row').first()).toHaveCSS(
     'min-height',
