@@ -517,10 +517,12 @@ async function auditGlobalReading() {
   );
   await close();
   await launch();
-  await expect(page.locator('.saved-view-choice').first()).toHaveCSS(
-    'font-size',
-    '13px',
-  );
+  await expect(
+    page
+      .getByRole('region', { name: 'New view saved view', exact: true })
+      .locator('.saved-view-choice')
+      .first(),
+  ).toHaveCSS('font-size', '13px');
   await expectReading('Text size', 'medium');
   await expectReading('Row spacing', 'compact');
   await page.getByRole('tab', { name: /CAN-100/ }).click();

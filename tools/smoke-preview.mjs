@@ -393,7 +393,12 @@ export async function auditPreview(app, page, restart) {
   await expect(pane.getByRole('status')).toHaveText(
     'Select an issue to preview.',
   );
-  const choices = page.locator('.saved-view-choice');
+  await expect(
+    page.getByRole('button', { name: 'Triage inbox', exact: true }),
+  ).toBeVisible();
+  const choices = page
+    .getByRole('region', { name: 'All issues saved view', exact: true })
+    .locator('.saved-view-choice');
   await expect(choices).toHaveCount(2);
   // Saved-view selections also discard a linked preview before returning to A.
   await choices.nth(0).click();
