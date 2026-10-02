@@ -438,3 +438,237 @@ test('GitHub connection distinguishes an empty repository from missing issue acc
     globalThis.fetch = original;
   }
 });
+
+test('GitHub typed assignee search finds later pages and distinguishes exhausted results', async () => {
+  const paths: string[] = [];
+  let matchPage = 2;
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    const page = Number(
+      new URL(path, 'https://api.github.com').searchParams.get('page'),
+    );
+    return page < matchPage
+      ? Array.from({ length: 100 }, (_, index) => ({
+          login: `other-${page}-${index}`,
+        }))
+      : [{ login: 'LateAda' }];
+  });
+  assert.deepEqual(await provider.assignees('team/a#1', '  lateADA  '), {
+    users: [{ id: 'LateAda', name: 'LateAda' }],
+  });
+  assert.equal(paths.length, 2);
+  matchPage = 3;
+  paths.length = 0;
+  assert.deepEqual(await provider.assignees('team/a#1', 'lateada'), {
+    users: [{ id: 'LateAda', name: 'LateAda' }],
+  });
+  assert.equal(paths.length, 3);
+  assert.deepEqual(await provider.assignees('team/a#1', 'missing'), {
+    users: [],
+  });
+  assert.deepEqual(await provider.assignees('team/a#1', 'LateAda', 100), {
+    users: [{ id: 'LateAda', name: 'LateAda' }],
+  });
+});
+
+test('GitHub assignee scans bound requests and continue past unmatched windows', async () => {
+  const pages: number[] = [];
+  const provider = new GithubProvider(connection, async (path) => {
+    const page = Number(
+      new URL(path, 'https://api.github.com').searchParams.get('page'),
+    );
+    pages.push(page);
+    return page <= 5
+      ? Array.from({ length: 100 }, (_, index) => ({
+          login: `other-${page}-${index}`,
+        }))
+      : [{ login: 'Ada' }];
+  });
+  const first = await provider.assignees('team/a#1', 'ada');
+  assert.deepEqual(first, { users: [], nextStartAt: 500 });
+  assert.deepEqual(pages, [1, 2, 3, 4, 5]);
+  assert.deepEqual(
+    await provider.assignees('team/a#1', 'ada', first.nextStartAt),
+    {
+      users: [{ id: 'Ada', name: 'Ada' }],
+    },
+  );
+  pages.length = 0;
+  assert.equal((await provider.assignees('team/a#1')).nextStartAt, 100);
+  assert.deepEqual(pages, [1]);
+  for (const cursor of [-100, 1, NaN, Infinity])
+    await assert.rejects(
+      () => provider.assignees('team/a#1', 'ada', cursor),
+      /cursor/,
+    );
+  assert.deepEqual(pages, [1]);
+});
+
+test('GitHub assignee deadline preserves matches and retries the interrupted page', async (t) => {
+  const controller = new AbortController();
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    assert.equal(milliseconds, 5_000);
+    return controller.signal;
+  });
+  const paths: string[] = [];
+  const provider = new GithubProvider(connection, async (path, init) => {
+    paths.push(path);
+    assert.equal(init?.signal, controller.signal);
+    if (paths.length === 1)
+      return Array.from({ length: 100 }, (_, index) => ({
+        login: `Ada-${index}`,
+      }));
+    controller.abort(new DOMException('Timed out', 'TimeoutError'));
+    throw controller.signal.reason;
+  });
+  const result = await provider.assignees('team/a#1', 'ada');
+  assert.equal(result.users.length, 100);
+  assert.equal(result.nextStartAt, 100);
+  assert.equal(paths.length, 2);
+});
+
+test('GitHub assignee failures remain errors and selection rechecks the selected repository', async () => {
+  const paths: string[] = [];
+  let eligible = true;
+  const provider = new GithubProvider(connection, async (path) => {
+    paths.push(path);
+    if (path.startsWith('/repos/team/b/')) throw new Error('Access denied');
+    return eligible ? [{ login: 'Ada' }] : [];
+  });
+  assert.deepEqual((await provider.assignees('team/a#1', 'ada')).users, [
+    { id: 'Ada', name: 'Ada' },
+  ]);
+  eligible = false;
+  assert.equal(await provider.validateAssignee('team/a#1', 'Ada'), null);
+  eligible = true;
+  assert.deepEqual(await provider.validateAssignee('team/a#2', 'ada'), {
+    id: 'Ada',
+    name: 'Ada',
+  });
+  assert.equal(paths.length, 3);
+  await assert.rejects(
+    () => provider.assignees('team/b#1', 'ada'),
+    /Access denied/,
+  );
+  await assert.rejects(
+    () => provider.validateAssignee('team/b#1', 'Ada'),
+    /Access denied/,
+  );
+  await assert.rejects(
+    () => provider.assignees('elsewhere/repo#1', 'ada'),
+    /outside/,
+  );
+});
+
+test('GitHub rejects malformed assignee pages instead of reporting no match', async () => {
+  for (const response of [null, {}, [null], [{ login: 42 }]]) {
+    const provider = new GithubProvider(connection, async () => response);
+    await assert.rejects(
+      () => provider.assignees('team/a#1', 'ada'),
+      /invalid assignee page/,
+    );
+  }
+});
+
+test('GitHub assignee deadline overlap preserves HTTP errors and rate-limit reset', async (t) => {
+  let scanController: AbortController;
+  let status = 429;
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) =>
+    milliseconds === 5_000 ? scanController.signal : timeout(milliseconds),
+  );
+  const reset = Math.ceil((Date.now() + 3_600_000) / 1000);
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
+    const path = new URL(String(url)).pathname;
+    if (path === '/user') return Response.json({ login: 'tester' });
+    if (path.endsWith('/issues')) return Response.json([]);
+    assert.equal(path, '/repos/team/a/assignees');
+    const response = new Response('{}', {
+      status,
+      headers: {
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-reset': String(reset),
+      },
+    });
+    // Headers have arrived, but the deadline interrupts the error body read.
+    t.mock.method(response, 'clone', () => ({
+      async json() {
+        scanController.abort(new DOMException('Timed out', 'TimeoutError'));
+        throw scanController.signal.reason;
+      },
+    }));
+    return response;
+  });
+  for (status of [429, 401, 503]) {
+    scanController = new AbortController();
+    const auth = new Auth(
+      { assertSecure() {}, async writeSecrets() {} } as unknown as Storage,
+      async () => {},
+    );
+    const [connected] = await auth.connectGithub({
+      token: 'synthetic-token',
+      repositories: ['team/a'],
+    });
+    const provider = new GithubProvider(connected, (path, init) =>
+      auth.githubRequest(connected.id, path, init),
+    );
+    const expected =
+      status === 429
+        ? `GitHub rate limit reached. Retry after ${new Date(reset * 1000).toLocaleTimeString()}.`
+        : status === 401
+          ? 'GitHub authorization expired or was revoked. Reconnect this account.'
+          : 'GitHub returned 503 for /repos/team/a/assignees?per_page=100&page=1.';
+    await assert.rejects(() => provider.assignees('team/a#1', 'ada'), {
+      message: expected,
+    });
+    assert.equal(scanController.signal.aborted, true);
+    if (status === 429) {
+      assert.equal(auth.githubSyncStatus(connected.id).retryAt, reset * 1000);
+      await assert.rejects(() => provider.assignees('team/a#1', 'ada'), {
+        message: expected,
+      });
+    }
+  }
+});
+
+test('GitHub assignee deadline overlap preserves a network rejection', async (t) => {
+  const controller = new AbortController();
+  t.mock.method(AbortSignal, 'timeout', () => controller.signal);
+  const failure = new TypeError('fetch failed');
+  const provider = new GithubProvider(connection, async () => {
+    controller.abort(new DOMException('Timed out', 'TimeoutError'));
+    throw failure;
+  });
+  await assert.rejects(
+    () => provider.assignees('team/a#1', 'ada'),
+    (error) => error === failure,
+  );
+});
+
+test('GitHub actual scan timeouts preserve matches and the interrupted cursor for fetch and body rejections', async (t) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    assert.equal(milliseconds, 5_000);
+    return timeout(5);
+  });
+  for (const bodyRead of [false, true]) {
+    let requests = 0;
+    const provider = new GithubProvider(connection, async (_path, init) => {
+      requests++;
+      if (requests === 1)
+        return Array.from({ length: 100 }, (_, index) => ({
+          login: `Ada-${index}`,
+        }));
+      // A referenced timer lets the real AbortSignal deadline fire in Node tests.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(init?.signal?.aborted, true);
+      assert.equal(init.signal.reason.name, 'TimeoutError');
+      if (bodyRead) throw new DOMException('Body read aborted', 'AbortError');
+      throw init.signal.reason;
+    });
+    const page = await provider.assignees('team/a#1', 'ada');
+    assert.equal(page.users.length, 100);
+    assert.equal(page.nextStartAt, 100);
+    assert.equal(requests, 2);
+  }
+});

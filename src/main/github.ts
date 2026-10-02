@@ -529,18 +529,50 @@ export class GithubProvider {
   }
   async assignees(key: string, query = '', startAt = 0): Promise<AssigneePage> {
     const { repo } = this.assertSelected(key);
-    const users = await this.request(
-      `/repos/${repo}/assignees?per_page=100&page=${Math.floor(startAt / 100) + 1}`,
-    );
-    return {
-      users: users
-        .filter((item: any) =>
-          item.login.toLowerCase().includes(query.toLowerCase()),
+    if (!Number.isSafeInteger(startAt) || startAt < 0 || startAt % 100)
+      throw new Error('Invalid GitHub assignee cursor.');
+    const normalized = query.trim().toLowerCase();
+    const matches: Choice[] = [];
+    // REST has no assignee query filter. Bound each scan, including network time;
+    // the cursor always points to the first page we have not fully consumed.
+    const signal = AbortSignal.timeout(5_000);
+    let cursor = startAt;
+    for (let page = 0; page < (normalized ? 5 : 1); page++) {
+      let users: any;
+      try {
+        users = await this.request(
+          `/repos/${repo}/assignees?per_page=100&page=${cursor / 100 + 1}`,
+          { signal },
+        );
+      } catch (error) {
+        // Fetch rejects with the signal reason before headers, or AbortError
+        // during body consumption. An elapsed deadline alone is not an error type.
+        if (
+          signal.aborted &&
+          (error === signal.reason ||
+            (error instanceof DOMException && error.name === 'AbortError'))
         )
-        .map((item: any) => ({ id: item.login, name: item.login })),
-      nextStartAt: users.length === 100 ? startAt + 100 : undefined,
-    };
+          return { users: matches, nextStartAt: cursor };
+        throw error;
+      }
+      if (
+        !Array.isArray(users) ||
+        users.length > 100 ||
+        users.some((user) => typeof user?.login !== 'string')
+      )
+        throw new Error('GitHub returned an invalid assignee page.');
+      matches.push(
+        ...users
+          .filter((user) => user.login.toLowerCase().includes(normalized))
+          .map((user) => ({ id: user.login, name: user.login })),
+      );
+      if (users.length < 100) return { users: matches };
+      cursor += 100;
+      if (signal.aborted) break;
+    }
+    return { users: matches, nextStartAt: cursor };
   }
+
   async validateAssignee(
     key: string,
     accountId: string,

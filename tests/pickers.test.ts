@@ -546,3 +546,28 @@ it('adds graph-only edges after cached status choices when workflow loading reco
     ['finish'],
   );
 });
+
+it('retains incomplete empty assignee searches and loading until continuation completes', async () => {
+  const continued = deferred<{ users: Choice[] }>();
+  const cursors: number[] = [];
+  const { pickers } = harness({
+    assignees: async (_id, _key, _query, startAt) => {
+      cursors.push(startAt ?? 0);
+      return startAt === 500
+        ? continued.promise
+        : { users: [], nextStartAt: 500 };
+    },
+  });
+  await pickers.load('a', 'ABC-1', 'assignee', 'ada');
+  assert.deepEqual(pickers.values['a:ABC-1'].assignees, []);
+  assert.equal(pickers.values['a:ABC-1'].nextStartAt, 500);
+  const pending = pickers.load('a', 'ABC-1', 'assignee', 'ada', true);
+  assert.equal(pickers.values['a:ABC-1'].assignee?.loading, true);
+  await pickers.load('a', 'ABC-1', 'assignee', 'ada', true);
+  assert.deepEqual(cursors, [0, 500]);
+  continued.resolve({ users: [ada] });
+  await pending;
+  assert.deepEqual(pickers.values['a:ABC-1'].assignees, [ada]);
+  assert.equal(pickers.values['a:ABC-1'].nextStartAt, undefined);
+  assert.equal(pickers.values['a:ABC-1'].assignee?.loading, undefined);
+});
