@@ -11,18 +11,99 @@ if (
 const { readFile, writeFile, mkdtemp, rm } = await import('node:fs/promises');
 const { createHash } = await import('node:crypto');
 const { join } = await import('node:path');
-const manifest = JSON.parse(
-  await readFile(process.env.CANOPY_PERF_PAIR, 'utf8'),
-);
-if (process.env.CANOPY_PERF_APPROVED_HEAD !== manifest.candidate)
+const manifestBytes = await readFile(process.env.CANOPY_PERF_PAIR);
+const manifest = JSON.parse(manifestBytes.toString('utf8'));
+const approvedBase = process.env.CANOPY_PERF_APPROVED_BASE;
+const approvedHead = process.env.CANOPY_PERF_APPROVED_HEAD;
+const approvedManifest = process.env.CANOPY_PERF_APPROVED_MANIFEST_SHA256;
+if (
+  !/^[a-f0-9]{40}$/.test(approvedBase ?? '') ||
+  !/^[a-f0-9]{40}$/.test(approvedHead ?? '') ||
+  !/^[a-f0-9]{64}$/.test(approvedManifest ?? '')
+)
   throw new Error(
-    'Fresh source approval must identify this exact candidate via CANOPY_PERF_APPROVED_HEAD.',
+    'Fresh source approval must identify exact CANOPY_PERF_APPROVED_BASE, CANOPY_PERF_APPROVED_HEAD and CANOPY_PERF_APPROVED_MANIFEST_SHA256.',
   );
 if (
-  manifest.base !== 'af0808d41d39d3f9252b620723014bd76baf953f' ||
-  !/^[a-f0-9]{40}$/.test(manifest.candidate)
+  createHash('sha256').update(manifestBytes).digest('hex') !== approvedManifest
 )
-  throw new Error('Expected exact base/current candidate source IDs.');
+  throw new Error('Approved manifest changed.');
+if (
+  manifest.base !== approvedBase ||
+  manifest.candidate !== approvedHead ||
+  manifest.harnessSource !== approvedHead
+)
+  throw new Error('Approved base/candidate/harness source mismatch.');
+const harnessFiles = [
+  'tests/fixtures/performance-main.ts',
+  'tests/fixtures/large-trees.ts',
+  'tests/fixtures/performance-preload.ts',
+  'tests/fixtures/performance-ui.ts',
+  'tools/perf-desktop.mjs',
+  'tools/audit-lifecycle.mjs',
+  'tools/prepare-perf-desktop.mjs',
+];
+const bundleFiles = [
+  'performance-main.cjs',
+  'production-preload.cjs',
+  'preload.cjs',
+  'renderer/app.js',
+  'renderer/app.css',
+  'renderer/audit.js',
+  'renderer/index.html',
+];
+const exactHashes = (hashes, files) =>
+  hashes &&
+  Object.keys(hashes).length === files.length &&
+  files.every((file) => /^[a-f0-9]{64}$/.test(hashes[file] ?? ''));
+if (
+  !exactHashes(manifest.harness, harnessFiles) ||
+  manifest.builds?.length !== 2 ||
+  manifest.scenarios?.length !== 2
+)
+  throw new Error('Incomplete approved paired manifest.');
+for (const [label, source] of [
+  ['base', approvedBase],
+  ['candidate', approvedHead],
+]) {
+  const builds = manifest.builds.filter(
+    (build) => build.label === label && build.source === source,
+  );
+  const scenarios = manifest.scenarios.filter(
+    (scenario) => scenario.label === label && scenario.source === source,
+  );
+  if (
+    builds.length !== 1 ||
+    scenarios.length !== 1 ||
+    !exactHashes(builds[0].files, bundleFiles) ||
+    scenarios[0].counts?.length !== 6
+  )
+    throw new Error(
+      'Paired source ownership or complete scenario coverage changed.',
+    );
+  for (const provider of ['jira', 'github'])
+    for (const shape of ['wide', 'tiered', 'deep']) {
+      const specs = scenarios[0].counts.filter(
+        (spec) => spec.provider === provider && spec.shape === shape,
+      );
+      if (
+        specs.length !== 1 ||
+        !specs[0].root ||
+        !specs[0].keyboardNextKey ||
+        [
+          'issues',
+          'expandedRows',
+          'collapsedRows',
+          'filterRows',
+          'savedRows',
+        ].some(
+          (field) =>
+            !Number.isSafeInteger(specs[0][field]) || specs[0][field] < 1,
+        )
+      )
+        throw new Error('Required full-count scenario conditions changed.');
+    }
+}
 for (const [file, hash] of Object.entries(manifest.harness)) {
   const actual = createHash('sha256')
     .update(await readFile(new URL(`../${file}`, import.meta.url)))
