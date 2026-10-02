@@ -2357,7 +2357,8 @@ export function App() {
         id: 'refresh',
         label: 'Refresh current tree',
         icon: RefreshCw,
-        run: () => activeTab && void refreshTab(activeTab, true, true, true),
+        run: () =>
+          activeTab && void refreshTab(activeTab, true, true, true, true),
       },
       {
         id: 'expandAll',
@@ -3904,7 +3905,7 @@ export function App() {
                       const tab = allRefreshTabs.find((tab) =>
                         sameRoot(tab, source),
                       );
-                      if (tab) void refreshTab(tab, true, true, true);
+                      if (tab) void refreshTab(tab, true, true, true, true);
                     }
                   }}
                 />
@@ -3977,7 +3978,7 @@ export function App() {
                       const tab = allRefreshTabs.find((item) =>
                         sameRoot(item, source),
                       );
-                      if (tab) void refreshTab(tab, true, true, true);
+                      if (tab) void refreshTab(tab, true, true, true, true);
                     }
                   }}
                 />
@@ -4095,7 +4096,9 @@ export function App() {
                     refreshing.has(activeTab.id) ||
                     (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                   }
-                  onClick={() => void refreshTab(activeTab, true, true, true)}
+                  onClick={() =>
+                    void refreshTab(activeTab, true, true, true, true)
+                  }
                   title="Refresh"
                 >
                   <RefreshCw
@@ -4412,7 +4415,9 @@ export function App() {
                 </span>
                 {errors[activeTab.id] && (
                   <button
-                    onClick={() => void refreshTab(activeTab, true, true, true)}
+                    onClick={() =>
+                      void refreshTab(activeTab, true, true, true, true)
+                    }
                     disabled={
                       (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
@@ -4480,7 +4485,9 @@ export function App() {
                       !online ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                     }
-                    onClick={() => void refreshTab(activeTab, true, true, true)}
+                    onClick={() =>
+                      void refreshTab(activeTab, true, true, true, true)
+                    }
                   >
                     Retry load
                   </button>
@@ -4891,7 +4898,7 @@ export function App() {
                       detail="Unread baselines are retained. Reload this tree when online; open drafts and the current view are protected."
                       action="Reload tree"
                       onAction={() =>
-                        void refreshTab(activeTab, false, true, true)
+                        void refreshTab(activeTab, false, true, true, true)
                       }
                     />
                   ) : errors[activeTab.id] && !snapshot ? (
@@ -4901,7 +4908,7 @@ export function App() {
                       detail={errors[activeTab.id]}
                       action="Try again"
                       onAction={() =>
-                        void refreshTab(activeTab, false, true, true)
+                        void refreshTab(activeTab, false, true, true, true)
                       }
                     />
                   ) : shownTree ? (

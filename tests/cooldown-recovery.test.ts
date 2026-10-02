@@ -103,6 +103,8 @@ function fixture() {
     forcedRefreshes: ref(new Set<string>()),
     deferredRefreshes: ref(new Set<string>()),
     cancelledTrees: ref(new Set<string>()),
+    manualRelationshipRefreshes: ref(new Set<string>()),
+    invalidateRelationships: () => {},
     treeMounted: ref(true),
     treeRequests: ref(new Map()),
     refreshSequences: ref({}),
@@ -170,6 +172,7 @@ function fixture() {
     tab: TabState,
     quiet?: boolean,
     explicit?: boolean,
+    userRequested?: boolean,
     retry?: boolean,
   ) => Promise<void>;
   context.refreshTab = (...args: Parameters<typeof refresh>) => {
@@ -370,7 +373,7 @@ test('actual App expired cooldown cannot restart cancellation; user Retry can', 
     f.provider.retryAt = null;
     await f.run(11_000);
     assert.equal(f.calls(), count);
-    await f.refresh(f.a, true, true, true);
+    await f.refresh(f.a, true, true, true, true);
     await f.settle();
     assert.equal(f.calls(), count + 1);
   } finally {

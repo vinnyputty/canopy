@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { relationshipChangedKeys } from '../src/renderer/relationships';
 import { Mutations } from '../src/renderer/mutations';
 import { RootRefreshGate } from '../src/renderer/refresh';
 import { buildIssueTree, type IssueNode } from '../src/renderer/tree';
@@ -117,6 +118,11 @@ function app(budget: number, api: Partial<CanopyAPI> = {}) {
     Mutations,
     window: { canopy: api },
     tabsRef,
+    relationshipChangedKeys,
+    relationshipConfirmedSnapshots: {
+      current: {} as Record<string, TreeSnapshot>,
+    },
+    invalidateRelationships: () => {},
     rootRefreshes: { current: gate },
     refreshRootKey: key,
     displayedTrees,
@@ -163,6 +169,7 @@ function app(budget: number, api: Partial<CanopyAPI> = {}) {
     display,
     receive,
     sizes,
+    relationshipConfirmed: () => context.relationshipConfirmedSnapshots.current,
     snapshots: () => snapshots,
     confirmed: () => confirmed,
     evicted: () => evicted,
@@ -184,6 +191,8 @@ test('actual App admission releases an inactive distinct displayed owner under t
   assert.equal(state.displayedTrees.current.has(a.id), false);
   assert.equal(state.snapshots().a, undefined);
   assert.equal(state.confirmed().a, undefined);
+  assert.equal(state.relationshipConfirmed().a, undefined);
+  assert.equal(state.relationshipConfirmed(), state.confirmed());
   assert.equal(state.gate.snapshot(key(a)), undefined);
   assert.ok(state.snapshots().b);
   assert.ok(
