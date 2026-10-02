@@ -1,11 +1,16 @@
 import { expect } from '@playwright/test';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { auditSavedFeedback } from './smoke-saved-feedback.mjs';
 
 // Barrier regressions from the issue #88 baseline. These are Chromium/Electron
 // observations; native API and spoken screen-reader qualification is separate.
 export async function auditAccessibility(app, page, evidence) {
   await mkdir(evidence, { recursive: true });
+  // Install before constructing renderer controllers: RootRefreshGate captures
+  // Date.now at construction. Keep its clock aligned with the actual scheduler.
+  await page.clock.install();
+  await page.reload();
   const capture = async (name) => {
     await page.screenshot({ path: join(evidence, `${name}.png`) });
     await writeFile(
@@ -264,7 +269,7 @@ export async function auditAccessibility(app, page, evidence) {
   await page.getByRole('button', { name: 'Back to root', exact: true }).click();
   await page.locator('.tree-view-menu > summary').press('Escape');
 
-  const statusSelector = '.statusbar > .sr-only:first-child';
+  const statusSelector = '#refresh-status';
   const live = page.locator(statusSelector);
   const liveNode = await live.elementHandle();
   expect(liveNode).not.toBeNull();
@@ -276,7 +281,7 @@ export async function auditAccessibility(app, page, evidence) {
       await liveNode.evaluate(
         (node) =>
           node.isConnected &&
-          node === document.querySelector('.statusbar > .sr-only:first-child'),
+          node === document.querySelector('#refresh-status'),
       ),
     ).toBe(true);
     await expect(live).toHaveAttribute('role', 'status');
@@ -301,9 +306,13 @@ export async function auditAccessibility(app, page, evidence) {
       state,
       snapshot,
       text: await live.textContent(),
-      connection: await page
+      connection: (await page
         .getByRole('status', { name: 'Connection status' })
-        .textContent(),
+        .count())
+        ? await page
+            .getByRole('status', { name: 'Connection status' })
+            .textContent()
+        : null,
       nodeId,
       ax,
     });
@@ -407,7 +416,6 @@ export async function auditAccessibility(app, page, evidence) {
 
   // Controlled scheduler time drives the actual App cadence/IPC, not a parallel
   // status implementation. The sample provider's completion clock stays real.
-  await page.clock.install();
   await page.clock.pauseAt(new Date(Date.now() + 1000));
   await live.evaluate((node) => {
     globalThis.canopyLiveChanges = [];
@@ -550,6 +558,15 @@ export async function auditAccessibility(app, page, evidence) {
   await expect(live).not.toContainText('Checking CAN-100');
   await checkLive('navigation-late-completion', await latestTree('CAN-100'));
   await fixture('update', 'CAN-100', { summary: originalSummary });
+  await auditSavedFeedback({
+    app,
+    page,
+    fixture,
+    live,
+    checkLive,
+    capture,
+    latestTree,
+  });
   await page.clock.resume();
   await cdp.detach();
   await liveNode.dispose();

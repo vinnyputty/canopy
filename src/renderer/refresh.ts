@@ -177,6 +177,22 @@ export class RefreshSchedule {
   }
 }
 
+export function refreshDestination(tabId: string | null, savedViewId?: string) {
+  return savedViewId ? JSON.stringify(['saved-view', savedViewId]) : tabId;
+}
+
+export type RefreshView = {
+  name: string;
+  roots: { id: string; label: string; tabIds: string[] }[];
+};
+
+type ViewOutcome = { error?: string; warnings?: string[] };
+type ViewRequest = ViewOutcome & {
+  request?: AnnouncementRequest;
+  tabId?: string;
+  settled: boolean;
+};
+
 export type RefreshAnnouncement = {
   tabId: string;
   scope: number;
@@ -193,33 +209,74 @@ type AnnouncementRequest = {
 export class RefreshAnnouncements {
   private activeTabId: string | null = null;
   scope = 0;
-  private requested = new Set<string>();
+  private requested = new Map<string, number>();
+  private view?: RefreshView;
+  private membership = '';
+  private viewText?: string;
+  private batch?: Map<string, ViewRequest>;
+  private outcomes = new Map<string, ViewOutcome>();
+  private affected = new Set<string>();
+  private changed = false;
+  private recovered = false;
   private running = new Map<string, AnnouncementRequest>();
   private failures = new Set<string>();
 
   constructor(private publish: (message: RefreshAnnouncement) => void) {}
 
-  activate(tabId: string | null) {
-    if (this.activeTabId !== tabId) {
-      this.activeTabId = tabId;
+  activate(destination: string | null, view?: RefreshView) {
+    const membership = JSON.stringify(
+      view?.roots.map((root) => root.id).sort() ?? [],
+    );
+    if (this.activeTabId !== destination || this.membership !== membership) {
+      this.activeTabId = destination;
+      this.membership = membership;
       this.scope++;
+      this.batch = undefined;
+      this.viewText = undefined;
+      this.outcomes.clear();
+      this.affected.clear();
+      this.changed = this.recovered = false;
     }
+    this.view = view;
+  }
+
+  requestView() {
+    if (!this.view || this.batch) return false;
+    this.batch = new Map(
+      this.view.roots.map((root) => [
+        root.id,
+        { settled: false, tabId: root.tabIds[0] },
+      ]),
+    );
+    this.reportView();
+    return true;
   }
 
   request(tabId: string) {
-    if (!this.running.get(tabId)?.manual) this.requested.add(tabId);
+    const running = this.running.get(tabId);
+    if (!running?.manual || running.scope !== this.scope)
+      this.requested.set(tabId, this.scope);
     return this.requested.has(tabId);
   }
 
   begin(tabId: string, rootKey: string, previous?: TreeSnapshot) {
+    const requestedScope = this.requested.get(tabId);
+    this.requested.delete(tabId);
     const request = {
       tabId,
-      scope: this.scope,
-      manual: this.requested.delete(tabId),
+      scope: requestedScope ?? this.scope,
+      manual: requestedScope !== undefined,
       previous,
     };
     this.running.set(tabId, request);
-    if (request.manual || !previous)
+    const root = this.viewRoot(request);
+    if (root) {
+      const pending = this.batch?.get(root.id);
+      if (request.manual && pending && !pending.settled) {
+        pending.request = request;
+        this.reportView();
+      }
+    } else if (!this.view && (request.manual || !previous))
       this.emit(request, `Checking ${rootKey} for changes`);
     return request;
   }
@@ -231,19 +288,40 @@ export class RefreshAnnouncements {
       JSON.stringify(data);
     const changed =
       !!request.previous && content(request.previous) !== content(next);
-    if (request.manual || recovered || !request.previous || changed)
+    const root = this.viewRoot(request);
+    if (root) {
+      const outcome = { warnings: next.warnings };
+      this.outcomes.set(root.id, outcome);
+      const pending = this.batch?.get(root.id);
+      if (pending?.request === request)
+        Object.assign(pending, outcome, { error: undefined, settled: true });
+      else if (changed || recovered || !request.previous) {
+        this.affected.add(root.id);
+        this.changed ||= changed;
+        this.recovered ||= recovered;
+      }
+    } else if (
+      !this.view &&
+      (request.manual || recovered || !request.previous || changed)
+    )
       this.emit(
         request,
         `${!request.manual && changed ? 'Changes found. ' : ''}${next.rootKey}: ${next.issues.length} issues, last updated at ${new Date(next.fetchedAt).toLocaleTimeString()}`,
       );
     this.running.delete(request.tabId);
+    this.reportView();
   }
 
   // A current root generation can also deliver to another tab for that root.
-  receive(tabId: string, next: TreeSnapshot, previous?: TreeSnapshot) {
+  receive(
+    tabId: string,
+    next: TreeSnapshot,
+    previous?: TreeSnapshot,
+    scope = this.scope,
+  ) {
     const request = this.running.get(tabId) ?? {
       tabId,
-      scope: this.scope,
+      scope,
       manual: false,
       previous,
     };
@@ -257,21 +335,117 @@ export class RefreshAnnouncements {
     const retained = request.previous
       ? `; ${request.previous.issues.length} issues retained, last updated at ${new Date(request.previous.fetchedAt).toLocaleTimeString()}`
       : '';
-    this.emit(request, `Couldn’t refresh ${rootKey}: ${error}${retained}`);
+    const text = `Couldn’t refresh ${rootKey}: ${error}${retained}`;
+    const root = this.viewRoot(request);
+    if (root) {
+      this.outcomes.set(root.id, { error: text });
+      const pending = this.batch?.get(root.id);
+      if (pending?.request === request)
+        Object.assign(pending, {
+          error: text,
+          warnings: undefined,
+          settled: true,
+        });
+      else this.affected.add(root.id);
+    } else if (!this.view) this.emit(request, text);
     this.running.delete(request.tabId);
+    this.reportView();
   }
 
   end(request: AnnouncementRequest) {
     if (this.running.get(request.tabId) === request) {
-      if (request.manual || !request.previous) this.emit(request, '');
+      const root = this.viewRoot(request);
+      const pending = root && this.batch?.get(root.id);
+      if (pending && pending.request === request) {
+        pending.settled = true;
+        pending.error = `${root.label}: refresh interrupted`;
+      } else if (!this.view && (request.manual || !request.previous))
+        this.emit(request, '');
       this.running.delete(request.tabId);
+      this.reportView();
     }
   }
 
   forget(tabId: string) {
+    const running = this.running.get(tabId);
+    if (this.view && running) this.end(running);
+    for (const [id, pending] of this.batch ?? []) {
+      if (!pending.settled && pending.tabId === tabId) {
+        pending.settled = true;
+        pending.error = `${this.view?.roots.find((root) => root.id === id)?.label ?? id}: refresh interrupted`;
+      }
+    }
+    this.reportView();
     this.requested.delete(tabId);
     this.running.delete(tabId);
     this.failures.delete(tabId);
+  }
+
+  private viewRoot(request: AnnouncementRequest) {
+    return request.scope === this.scope
+      ? this.view?.roots.find((root) => root.tabIds.includes(request.tabId))
+      : undefined;
+  }
+
+  private reportView() {
+    if (!this.view || this.activeTabId === null) return;
+    let text: string;
+    if (this.batch) {
+      const pending = [...this.batch.values()].filter((root) => !root.settled);
+      const waiting = pending.filter((root) => !root.request).length;
+      const errors = [...this.batch.values()].flatMap((root) =>
+        root.error ? [root.error] : [],
+      );
+      const partial = this.view.roots.flatMap((root) => {
+        const warnings = this.batch?.get(root.id)?.warnings ?? [];
+        return warnings.length ? [`${root.label}: ${warnings.join('; ')}`] : [];
+      });
+      text =
+        this.batch.size === 0
+          ? `${this.view.name}: no roots selected to refresh.`
+          : pending.length
+            ? `${waiting === pending.length ? 'Waiting to refresh' : 'Refreshing'} ${this.view.name}: ${pending.length} of ${this.batch.size} roots pending${waiting ? `; ${waiting} waiting to start` : ''}.`
+            : `${this.view.name}: refreshed ${this.batch.size - errors.length} of ${this.batch.size} roots.`;
+      if (errors.length)
+        text += ` ${errors.length} roots failed. ${errors.join('; ')}`;
+      if (partial.length)
+        text += ` ${partial.length} roots returned partial results. ${partial.join('; ')}`;
+      if (!pending.length) {
+        this.batch = undefined;
+        this.affected.clear();
+        this.changed = this.recovered = false;
+      }
+    } else {
+      if (
+        !this.affected.size ||
+        [...this.running.values()].some((request) => this.viewRoot(request))
+      )
+        return;
+      const errors = [...this.outcomes.values()].flatMap((root) =>
+        root.error ? [root.error] : [],
+      );
+      const partial = this.view.roots.flatMap((root) => {
+        const warnings = this.outcomes.get(root.id)?.warnings ?? [];
+        return warnings.length ? [`${root.label}: ${warnings.join('; ')}`] : [];
+      });
+      const reason = this.changed
+        ? 'Changes found'
+        : this.recovered
+          ? 'Refresh recovered'
+          : errors.length
+            ? 'Refresh failed'
+            : 'Roots updated';
+      text = `${this.view.name}: ${reason} across ${this.affected.size} roots.`;
+      if (errors.length)
+        text += ` ${errors.length} roots failed. ${errors.join('; ')}`;
+      if (partial.length)
+        text += ` ${partial.length} roots returned partial results. ${partial.join('; ')}`;
+      this.affected.clear();
+      this.changed = this.recovered = false;
+    }
+    if (this.viewText === text) return;
+    this.viewText = text;
+    this.publish({ tabId: this.activeTabId, scope: this.scope, text });
   }
 
   private emit(request: AnnouncementRequest, text: string) {

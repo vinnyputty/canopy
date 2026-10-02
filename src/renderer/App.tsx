@@ -148,11 +148,13 @@ import {
 } from './table-view';
 import { Mutations } from './mutations';
 import {
+  refreshDestination,
   RefreshAnnouncements,
   type RefreshAnnouncement,
   RefreshSchedule,
   RootRefreshGate,
 } from './refresh';
+import { RefreshStatus } from './RefreshStatus';
 import {
   configuredRoots,
   sourceTabId,
@@ -647,7 +649,6 @@ export function App() {
   const [refreshAnnouncements] = useState(
     () => new RefreshAnnouncements(setRefreshAnnouncement),
   );
-  refreshAnnouncements.activate(workspace.activeTabId);
   const refreshSchedule = useRef(new RefreshSchedule());
   const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
   const snapshotsRef = useRef(snapshots);
@@ -821,6 +822,25 @@ export function App() {
         .filter((tab) => savedSources.some((source) => sameRoot(source, tab)))
         .map((tab) => tab.id)
     : [];
+  const refreshOwner = refreshDestination(
+    workspace.activeTabId,
+    activeSavedView?.id,
+  );
+  refreshAnnouncements.activate(
+    refreshOwner,
+    activeSavedView
+      ? {
+          name: activeSavedView.name,
+          roots: savedSources.map((source) => ({
+            id: refreshRootKey(source),
+            label: `${connections.find((connection) => connection.id === source.connectionId)?.name ?? source.connectionId} · ${source.rootKey}`,
+            tabIds: allRefreshTabs
+              .filter((tab) => sameRoot(source, tab))
+              .map((tab) => tab.id),
+          })),
+        }
+      : undefined,
+  );
   const sourceTabKeys = JSON.stringify(
     workspace.tabs.map(({ id, connectionId, rootKey }) => [
       id,
@@ -1439,6 +1459,7 @@ export function App() {
                 target.id,
                 mutations.confirmedSnapshot(target.id) ?? next,
                 previous,
+                announcement.scope,
               );
             delivered.add(target.id);
           }
@@ -3616,6 +3637,11 @@ export function App() {
       </aside>
 
       <main className="main">
+        <RefreshStatus
+          message={refreshAnnouncement}
+          owner={refreshOwner}
+          scope={refreshAnnouncements.scope}
+        />
         <div className="tabstrip" role="tablist" aria-label="Open issue trees">
           <button
             className="icon-button sidebar-reveal"
@@ -3814,6 +3840,7 @@ export function App() {
                   }}
                   onMoreRoots={() => setInboxRootLimit((limit) => limit + 10)}
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((tab) =>
@@ -3826,6 +3853,7 @@ export function App() {
               ) : (
                 <SavedViewsPanel
                   view={activeSavedView}
+                  refreshStatusId="refresh-status"
                   connections={connections}
                   availableRoots={availableRoots}
                   sources={savedSources}
@@ -3871,6 +3899,7 @@ export function App() {
                     }))
                   }
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((item) =>
@@ -4921,12 +4950,6 @@ export function App() {
                   )}
                 </div>
                 <footer className="statusbar">
-                  <span className="sr-only" role="status" aria-atomic="true">
-                    {refreshAnnouncement?.tabId === activeTab.id &&
-                    refreshAnnouncement.scope === refreshAnnouncements.scope
-                      ? refreshAnnouncement.text
-                      : ''}
-                  </span>
                   <span className="sr-only" role="status" aria-atomic="true">
                     {savingKeys.length > 0
                       ? `Saving ${savingKeys.join(', ')}`

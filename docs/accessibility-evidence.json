@@ -76,6 +76,7 @@
     "Windows_UIA_Narrator": "pending",
     "Linux_AT_SPI_Orca": "pending",
     "poll_feedback_follow_on_GUI": "pending fresh independent review and exclusive lead GUI token",
-    "limits": "No native speech/events qualification, native preferences or exhaustive provider/dialog/long-label/clipping acceptance; Chromium trees and formula ratios are separate evidence categories."
+    "limits": "No native speech/events qualification, native preferences or exhaustive provider/dialog/long-label/clipping acceptance; Chromium trees and formula ratios are separate evidence categories.",
+    "saved_view_destination_follow_on_GUI": "pending fresh independent delta review, then focused/full Mac acceptance under an exclusive lead GUI token"
   }
 }
