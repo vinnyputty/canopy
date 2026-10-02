@@ -751,3 +751,79 @@ it('organization Undo preserves live triage, owning selection and root presentat
   assert.deepEqual(undone.rootViews, selected.rootViews);
   assert.deepEqual(undone.pinnedRoots, []);
 });
+
+it('keeps changed targets unknown in a held Inbox read and drops cached references only on their owning account', async () => {
+  for (const targetAccount of ['a', 'b']) {
+    const first = sample()[0];
+    const target = {
+      ...first,
+      issue: issue('org/repo#9'),
+      source: source(targetAccount, 'org/repo#9'),
+      stamp: 'target-old',
+    };
+    let release!: () => void;
+    let latest: Record<string, InboxGraph> = {};
+    const controller = new InboxInspection(
+      {
+        syncStatus: async () => ({ retryAt: null }),
+        cancelRelationships: async () => {},
+        relationships: async (_id, key) => {
+          await new Promise<void>((resolve) => (release = resolve));
+          return blocked(key);
+        },
+      },
+      (entries) => (latest = entries),
+    );
+    controller.reset([first, target]);
+    const pending = controller.load([first, target]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const fresh = { ...target, stamp: 'target-new' };
+    controller.reset([first, fresh]);
+    release();
+    await pending;
+    const result =
+      latest[triageIdentity('a', first.issue.key)].graph!.groups[0];
+    assert.equal(
+      result.items[0].statusCategory,
+      targetAccount === 'a' ? undefined : 'new',
+    );
+    assert.equal(
+      result.items[0].access,
+      targetAccount === 'a' ? 'unknown' : 'available',
+    );
+    controller.reset([first, { ...fresh, stamp: 'target-newer' }]);
+    assert.equal(
+      Boolean(latest[triageIdentity('a', first.issue.key)]),
+      targetAccount !== 'a',
+    );
+  }
+});
+
+it('a failed held retry cannot restore a blocker invalidated by a confirmed target refresh', async () => {
+  const first = sample()[0];
+  const target = { ...first, issue: issue('org/repo#9'), stamp: 'target-old' };
+  const id = triageIdentity(first.source.connectionId, first.issue.key);
+  let release!: () => void;
+  let latest: Record<string, InboxGraph> = {};
+  const controller = new InboxInspection(
+    {
+      syncStatus: async () => ({ retryAt: null }),
+      cancelRelationships: async () => {},
+      relationships: async () => {
+        await new Promise<void>((resolve) => (release = resolve));
+        throw new Error('fixture failed');
+      },
+    },
+    (entries) => (latest = entries),
+  );
+  controller.reset([first, target], {
+    [id]: { stamp: first.stamp, graph: blocked(first.issue.key) },
+  });
+  const pending = controller.load([first, target], true);
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.reset([first, { ...target, stamp: 'target-new' }]);
+  release();
+  await pending;
+  assert.equal(latest[id].graph, undefined);
+  assert.match(latest[id].error!, /Retry/);
+});

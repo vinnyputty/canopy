@@ -1,3 +1,9 @@
+import {
+  emptySidebarSession,
+  organizeSidebar,
+} from '../src/renderer/sidebar-organization';
+import { changeTriage } from '../src/shared/triage';
+import { ancestorPath, buildIssueTree } from '../src/renderer/tree';
 import { inboxStamp } from '../src/renderer/inbox';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -1260,12 +1266,30 @@ for (const [checkpoint, name] of [
       source,
       (n) =>
         ts.isVariableDeclaration(n) &&
-        ['navigate', 'jumpToRelationship'].includes(n.name.getText(source)),
+        [
+          'navigate',
+          'jumpToRelationship',
+          'organize',
+          'openSavedResult',
+        ].includes(n.name.getText(source)),
     )
       .map((n) => `const ${n.getText(source)};`)
       .join('\n');
     const context: any = {
       relationshipDestination,
+      organizeSidebar,
+      ancestorPath,
+      buildIssueTree,
+      savedSources: initial.tabs.map((tab) => ({ ...tab, id: tab.id })),
+      viewSnapshots: Object.fromEntries(
+        initial.tabs.map((tab) => [
+          tab.id,
+          handlers.get('canopy:tree')!(null, tab.connectionId, tab.rootKey),
+        ]),
+      ),
+      sidebarSessionRef: { current: emptySidebarSession() },
+      setSidebarSession: () => {},
+      connectionsRef: { current: handlers.get('canopy:connections')!() },
       activateTab,
       rootView,
       sameRoot,
@@ -1276,12 +1300,18 @@ for (const [checkpoint, name] of [
       pendingScrollRestore: { current: null },
       navigationReveal: { current: null },
       setHistory: () => {},
+      setInboxOpen: (value: boolean) => {
+        context.inboxOpen = value;
+      },
       setNextTaskViews: () => {},
       setReveal: (value: unknown) => {
         context.reveal = value;
       },
-      setWorkspace: (update: (value: Workspace) => Workspace) => {
-        context.workspaceRef.current = update(context.workspaceRef.current);
+      setWorkspace: (update: Workspace | ((value: Workspace) => Workspace)) => {
+        context.workspaceRef.current =
+          typeof update === 'function'
+            ? update(context.workspaceRef.current)
+            : update;
       },
       snapshots: Object.fromEntries(
         initial.tabs.map((tab) => [
@@ -1298,7 +1328,7 @@ for (const [checkpoint, name] of [
     };
     runInNewContext(
       js(
-        `${declarations}\nglobalThis.api = { jump: jumpToRelationship, navigate };`,
+        `${declarations}\nglobalThis.api = { jump: jumpToRelationship, navigate, organize, openSavedResult };`,
       ),
       context,
     );
@@ -1362,6 +1392,47 @@ for (const [checkpoint, name] of [
     assert.equal(current().tabs.length, hierarchyWorkspace.tabs.length + 1);
     jump('work', 'team/b#5');
     assert.equal(active().id, outside.id);
+    const owner = current().tabs.find((tab) => tab.id === 'owner')!;
+    context.api.organize({ type: 'pin', root: owner });
+    const triage = changeTriage(
+      undefined,
+      'work',
+      'team/a#11',
+      'pin',
+      Date.now(),
+    );
+    context.workspaceRef.current = {
+      ...current(),
+      triage,
+      rootViews: {
+        '["work","TEAM/A#10"]': {
+          ...rootView(current(), owner),
+          filters: { status: 'Open' },
+        },
+      },
+    };
+    context.api.navigate(current().tabs.find((tab) => tab.id === 'wrong'));
+    context.inboxOpen = true;
+    context.api.openSavedResult({
+      issue: issue('team/a#11', 'team/a#10'),
+      source: owner,
+    });
+    assert.equal(
+      active().id,
+      'owner',
+      'Inbox selection resolves the exact owning account/root',
+    );
+    assert.equal(active().selectedKey, 'team/a#11');
+    assert.equal(context.inboxOpen, false);
+    assert.equal(context.reveal.tabId, 'owner');
+    assert.equal(context.navigationReveal.current.key, 'team/a#11');
+    const rootViews = current().rootViews;
+    context.api.organize({ type: 'undo' });
+    assert.equal(active().id, 'owner');
+    assert.equal(active().selectedKey, 'team/a#11');
+    assert.deepEqual(current().triage, triage);
+    assert.deepEqual(current().rootViews, rootViews);
+    assert.deepEqual(current().pinnedRoots, []);
     const checkpoints = [
       blockerWorkspace,
       outsideWorkspace,
@@ -1845,7 +1916,10 @@ test('inbox cache handoff preserves unrelated typed graphs and own refresh inval
   api.pending[1].resolve(graph('A-1'));
   await other;
   api.receiveInbox({
-    '["work","A-1"]': { stamp: 'current', graph: graph('A-1') },
+    '["work","A-1"]': {
+      stamp: inboxStamp(api.context.snapshots['a'], issue('A-1')),
+      graph: graph('A-1'),
+    },
   });
   assert.equal(api.graphs()['["other","A-1"]']?.key, 'A-1');
   assert.equal(api.inboxGraphs()['["other","A-1"]']?.graph.key, 'A-1');
@@ -1854,4 +1928,73 @@ test('inbox cache handoff preserves unrelated typed graphs and own refresh inval
   assert.equal(api.inboxGraphs()['["work","A-1"]'], undefined);
   assert.equal(api.graphs()['["other","A-1"]']?.key, 'A-1');
   assert.equal(api.inboxGraphs()['["other","A-1"]']?.graph.key, 'A-1');
+});
+
+test('actual Inbox handoff rejects stale provenance and invalidates referenced targets through the live graph ref', () => {
+  const api = rendererRequests();
+  const identity = '["work","A-1"]';
+  const stamped = inboxStamp(api.context.snapshots.a, issue('A-1'));
+  api.receiveInbox({
+    [identity]: { stamp: 'old', graph: blockerGraph('A-1', 'B-1', 'new') },
+  });
+  assert.equal(api.graphs()[identity], undefined);
+  api.receiveInbox({
+    [identity]: { stamp: stamped, graph: blockerGraph('wrong', 'B-1', 'new') },
+  });
+  assert.equal(api.graphs()[identity], undefined);
+  api.receiveInbox({
+    [identity]: { stamp: stamped, graph: blockerGraph('A-1', 'B-1', 'new') },
+  });
+  assert.equal(api.graphRef()[identity]?.key, 'A-1');
+  api.confirmed(api.tabs[1], [
+    { ...issue('B-1'), status: { id: 'done', name: 'Done', category: 'done' } },
+  ]);
+  assert.equal(
+    api.graphs()[identity],
+    undefined,
+    'a confirmed target change invalidates the handed-off typed graph',
+  );
+  assert.equal(api.inboxGraphs()[identity], undefined);
+  const fresh = treeSnapshot('A-1', [{ ...issue('A-1'), summary: 'fresh' }]);
+  api.confirmed(api.tabs[0], fresh.issues);
+  api.receiveInbox({ [identity]: { stamp: stamped, graph: graph('A-1') } });
+  assert.equal(
+    api.graphs()[identity],
+    undefined,
+    'a stale Inbox publication cannot restore invalidated data',
+  );
+});
+
+test('actual Inbox and saved-view refresh callbacks carry manual relationship intent', async () => {
+  const source = parsed('../src/renderer/App.tsx');
+  for (const name of ['InboxPanel', 'SavedViewsPanel']) {
+    const panel = nodes(
+      source,
+      (n) =>
+        ts.isJsxSelfClosingElement(n) && n.tagName.getText(source) === name,
+    )[0] as ts.JsxSelfClosingElement;
+    const attribute = panel.attributes.properties.find(
+      (n) => ts.isJsxAttribute(n) && n.name.getText(source) === 'onRefresh',
+    ) as ts.JsxAttribute;
+    const expression = (attribute.initializer as ts.JsxExpression).expression!;
+    const api = rendererRequests();
+    const first = api.inspect('work', 'A-1');
+    api.pending[0].resolve(graph('A-1'));
+    await first;
+    const context = {
+      setIdentityRetry: () => {},
+      savedSources: [api.tabs[0]],
+      allRefreshTabs: api.tabs,
+      sameRoot,
+      refreshTab: (...args: Parameters<typeof api.context.api.refresh>) =>
+        api.context.api.refresh(...args),
+    };
+    await runInNewContext(js(`(${expression.getText(source)})();`), context);
+    await api.settle();
+    assert.equal(
+      api.graphs()['["work","A-1"]'],
+      undefined,
+      `${name} refresh invalidates its cached inspection`,
+    );
+  }
 });

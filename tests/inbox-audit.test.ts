@@ -292,7 +292,7 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
         workspace,
         connections,
         sources,
-        totalRoots: 14,
+        totalRoots: sources.length,
         snapshots,
         errors,
         identityErrors,
@@ -312,8 +312,8 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
       value: previousWindow,
     });
   }
-  assert.match(html, /4 of 14 known roots/);
-  assert.match(html, /Load 10 more roots/);
+  assert.match(html, /4 of 4 known roots/);
+  assert.doesNotMatch(html, /Load 10 more roots/);
   assert.match(html, /Sample root unavailable/);
   assert.match(html, /Sample Jira account lookup failed/);
   assert.match(html, /Sample partial hierarchy/);

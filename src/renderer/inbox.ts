@@ -207,6 +207,7 @@ export class InboxInspection {
     issueKey: string;
     stamp: string;
     requestId: string;
+    changed: Set<string>;
   };
   private candidates?: Map<string, string>;
   private entries: Record<string, InboxGraph> = {};
@@ -231,12 +232,24 @@ export class InboxInspection {
     this.busy = false;
   }
   reset(candidates: InboxCandidate[], seed: Record<string, InboxGraph> = {}) {
-    this.candidates = new Map(
+    const next = new Map(
       candidates.map((candidate) => [
         triageIdentity(candidate.source.connectionId, candidate.issue.key),
         candidate.stamp,
       ]),
     );
+    const changed = new Map<string, Set<string>>();
+    for (const [identity, stamp] of this.candidates ?? []) {
+      const [connectionId, key] = JSON.parse(identity);
+      if (next.get(identity) !== stamp) {
+        const keys = changed.get(connectionId) ?? new Set<string>();
+        keys.add(key);
+        changed.set(connectionId, keys);
+        if (this.pending && connectionId === this.pending.connectionId)
+          this.pending.changed.add(key);
+      }
+    }
+    this.candidates = next;
     if (
       this.pending &&
       this.candidates.get(
@@ -256,7 +269,13 @@ export class InboxInspection {
             : seed[id]?.stamp === candidate.stamp
               ? seed[id]
               : undefined;
+        const targetChanged = entry?.graph?.groups.some((group) =>
+          group.items.some((link) =>
+            changed.get(candidate.source.connectionId)?.has(link.key),
+          ),
+        );
         return entry &&
+          !targetChanged &&
           (!entry.graph || entry.graph.key === candidate.issue.key)
           ? [[id, entry]]
           : [];
@@ -307,15 +326,16 @@ export class InboxInspection {
         issueKey: candidate.issue.key,
         stamp: candidate.stamp,
         requestId,
+        changed: new Set(),
       };
-      const previous =
+      const previous = () =>
         this.entries[id]?.stamp === candidate.stamp
           ? this.entries[id]
           : undefined;
       try {
         if (throttled.has(connectionId)) {
           this.entries[id] = {
-            ...previous,
+            ...previous(),
             stamp: candidate.stamp,
             error: throttled.get(connectionId),
           };
@@ -326,7 +346,7 @@ export class InboxInspection {
         if (generation !== this.generation) return;
         if (status.retryAt && status.retryAt > Date.now()) {
           this.entries[id] = {
-            ...previous,
+            ...previous(),
             stamp: candidate.stamp,
             error: `Rate limited until ${new Date(status.retryAt).toLocaleString()}. Retry after this time.`,
           };
@@ -342,11 +362,41 @@ export class InboxInspection {
         );
         if (generation !== this.generation) return;
         if (graph.key !== candidate.issue.key) throw new Error('Wrong issue');
-        this.entries[id] = { stamp: candidate.stamp, graph };
+        const changed = this.pending?.changed ?? new Set<string>();
+        this.entries[id] = {
+          stamp: candidate.stamp,
+          graph: {
+            ...graph,
+            groups: graph.groups.map((group) =>
+              group.items.some((link) => changed.has(link.key))
+                ? {
+                    ...group,
+                    state:
+                      group.state === 'unavailable' ? 'unavailable' : 'partial',
+                    problem: 'invalid',
+                    reason:
+                      'Target data changed while relationships were loading. Inspect again for current results.',
+                    items: group.items.map((link) =>
+                      changed.has(link.key)
+                        ? {
+                            ...link,
+                            statusCategory: undefined,
+                            access:
+                              link.access === 'outside-connection'
+                                ? 'outside-connection'
+                                : 'unknown',
+                          }
+                        : link,
+                    ),
+                  }
+                : group,
+            ),
+          },
+        };
       } catch {
         if (generation !== this.generation) return;
         this.entries[id] = {
-          ...previous,
+          ...previous(),
           stamp: candidate.stamp,
           error: 'Blockers could not be inspected. Retry.',
         };

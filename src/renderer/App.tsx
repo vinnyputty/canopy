@@ -327,11 +327,29 @@ export function App() {
   );
   const receiveInboxGraphs = useCallback(
     (entries: Record<string, InboxGraph>) => {
-      setInboxGraphs((current) => ({ ...current, ...entries }));
-      setRelationshipGraphs((current) => ({
+      const accepted = Object.fromEntries(
+        Object.entries(entries).filter(([identity, entry]) => {
+          const [connectionId, key] = JSON.parse(identity);
+          const confirmed = tabsRef.current
+            .filter((tab) => tab.connectionId === connectionId)
+            .flatMap((tab) => {
+              const snapshot = relationshipConfirmedSnapshots.current[tab.id];
+              const issue = snapshot?.issues.find((issue) => issue.key === key);
+              return snapshot && issue ? [{ snapshot, issue }] : [];
+            })
+            .sort((a, b) => b.snapshot.fetchedAt - a.snapshot.fetchedAt)[0];
+          return (
+            confirmed &&
+            entry.stamp === inboxStamp(confirmed.snapshot, confirmed.issue) &&
+            (!entry.graph || entry.graph.key === key)
+          );
+        }),
+      );
+      setInboxGraphs((current) => ({ ...current, ...accepted }));
+      updateRelationshipGraphs((current) => ({
         ...current,
         ...Object.fromEntries(
-          Object.entries(entries).flatMap(([id, entry]) =>
+          Object.entries(accepted).flatMap(([id, entry]) =>
             entry.graph ? [[id, entry.graph]] : [],
           ),
         ),
@@ -364,10 +382,10 @@ export function App() {
     if (relationshipRequests.current.has(identity)) return;
     const requestId = crypto.randomUUID();
     const generation = relationshipGeneration.current;
-    const confirmed = workspaceRef.current.tabs
+    const confirmed = tabsRef.current
       .filter((tab) => tab.connectionId === connectionId)
       .flatMap((tab) => {
-        const snapshot = confirmedSnapshots[tab.id];
+        const snapshot = relationshipConfirmedSnapshots.current[tab.id];
         const issue = snapshot?.issues.find((issue) => issue.key === key);
         return snapshot && issue ? [{ snapshot, issue }] : [];
       })
@@ -3704,7 +3722,7 @@ export function App() {
                       const tab = allRefreshTabs.find((tab) =>
                         sameRoot(tab, source),
                       );
-                      if (tab) void refreshTab(tab, true, true);
+                      if (tab) void refreshTab(tab, true, true, true);
                     }
                   }}
                 />
@@ -3761,7 +3779,7 @@ export function App() {
                       const tab = allRefreshTabs.find((item) =>
                         sameRoot(item, source),
                       );
-                      if (tab) void refreshTab(tab, true, true);
+                      if (tab) void refreshTab(tab, true, true, true);
                     }
                   }}
                 />
