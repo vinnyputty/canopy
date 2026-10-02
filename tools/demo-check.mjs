@@ -362,7 +362,13 @@ try {
           return originalSpawn(executable, args, options);
         const child = originalSpawn(
           executable,
-          [...args, '--remote-debugging-port=0'],
+          [
+            ...args,
+            '--remote-debugging-port=0',
+            // Match Playwright's test launch for the downloaded Linux runtime,
+            // whose chrome-sandbox helper is not installed with setuid privileges.
+            ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+          ],
           {
             ...options,
             stdio: ['ignore', 'pipe', 'pipe'],
