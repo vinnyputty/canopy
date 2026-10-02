@@ -99,10 +99,31 @@ async function processes(ms) {
 function validBirth(start) {
   if (typeof start !== 'string' || !Number.isFinite(Date.parse(start)))
     return false;
-  if (process.platform !== 'win32')
-    return /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(
-      start,
+  if (process.platform !== 'win32') {
+    // LC_ALL=C lstart uses local calendar components and a space-padded day.
+    // Validate in UTC to avoid local timezone/DST normalization. Keep the
+    // original token for identity comparisons, not this validation-only date.
+    const match = start.match(
+      /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/,
     );
+    if (!match) return false;
+    const month = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'
+      .split(' ')
+      .indexOf(match[2]);
+    const [day, hour, minute, second, year] = match.slice(3).map(Number);
+    const date = new Date(0);
+    date.setUTCFullYear(year, month, day);
+    date.setUTCHours(hour, minute, second, 0);
+    return (
+      date.getUTCFullYear() === year &&
+      date.getUTCMonth() === month &&
+      date.getUTCDate() === day &&
+      date.getUTCHours() === hour &&
+      date.getUTCMinutes() === minute &&
+      date.getUTCSeconds() === second &&
+      'Sun Mon Tue Wed Thu Fri Sat'.split(' ')[date.getUTCDay()] === match[1]
+    );
+  }
   // Exact UTC round-trip form emitted by CreationDate.ToString("o").
   return (
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/.test(start) &&
