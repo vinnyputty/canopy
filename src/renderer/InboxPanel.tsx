@@ -71,8 +71,8 @@ export function InboxPanel(props: Props) {
   const initialInspection = useRef(false);
   useEffect(() => {
     inspection.reset(candidates, props.seedGraphs);
-    return () => inspection.cancel();
   }, [inspection, candidateKey]);
+  useEffect(() => () => inspection.cancel(), [inspection]);
   useEffect(() => {
     let live = true;
     queueMicrotask(() => {

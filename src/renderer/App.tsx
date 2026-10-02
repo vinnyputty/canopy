@@ -327,14 +327,15 @@ export function App() {
   );
   const receiveInboxGraphs = useCallback(
     (entries: Record<string, InboxGraph>) => {
-      setInboxGraphs(entries);
-      setRelationshipGraphs(
-        Object.fromEntries(
+      setInboxGraphs((current) => ({ ...current, ...entries }));
+      setRelationshipGraphs((current) => ({
+        ...current,
+        ...Object.fromEntries(
           Object.entries(entries).flatMap(([id, entry]) =>
             entry.graph ? [[id, entry.graph]] : [],
           ),
         ),
-      );
+      }));
     },
     [],
   );

@@ -202,7 +202,13 @@ export function inboxItems(
 /** One bounded read at a time; cancellation guards even transports that ignore abort. */
 export class InboxInspection {
   private generation = 0;
-  private pending?: { connectionId: string; requestId: string };
+  private pending?: {
+    connectionId: string;
+    issueKey: string;
+    stamp: string;
+    requestId: string;
+  };
+  private candidates?: Map<string, string>;
   private entries: Record<string, InboxGraph> = {};
   busy = false;
   constructor(
@@ -225,7 +231,19 @@ export class InboxInspection {
     this.busy = false;
   }
   reset(candidates: InboxCandidate[], seed: Record<string, InboxGraph> = {}) {
-    this.cancel();
+    this.candidates = new Map(
+      candidates.map((candidate) => [
+        triageIdentity(candidate.source.connectionId, candidate.issue.key),
+        candidate.stamp,
+      ]),
+    );
+    if (
+      this.pending &&
+      this.candidates.get(
+        triageIdentity(this.pending.connectionId, this.pending.issueKey),
+      ) !== this.pending.stamp
+    )
+      this.cancel();
     this.entries = Object.fromEntries(
       candidates.flatMap((candidate) => {
         const id = triageIdentity(
@@ -244,10 +262,16 @@ export class InboxInspection {
           : [];
       }),
     );
-    this.publish({ ...this.entries }, false);
+    this.publish({ ...this.entries }, this.busy);
   }
   async load(candidates: InboxCandidate[], retry = false) {
     if (this.busy) return;
+    this.candidates = new Map(
+      candidates.map((candidate) => [
+        triageIdentity(candidate.source.connectionId, candidate.issue.key),
+        candidate.stamp,
+      ]),
+    );
     const generation = this.generation;
     const selected = candidates
       .filter((candidate) => {
@@ -275,8 +299,15 @@ export class InboxInspection {
     for (const candidate of selected) {
       const { connectionId } = candidate.source;
       const id = triageIdentity(connectionId, candidate.issue.key);
+      if (this.candidates && this.candidates.get(id) !== candidate.stamp)
+        continue;
       const requestId = globalThis.crypto.randomUUID();
-      this.pending = { connectionId, requestId };
+      this.pending = {
+        connectionId,
+        issueKey: candidate.issue.key,
+        stamp: candidate.stamp,
+        requestId,
+      };
       const previous =
         this.entries[id]?.stamp === candidate.stamp
           ? this.entries[id]

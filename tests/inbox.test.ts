@@ -1,3 +1,9 @@
+import { DEFAULT_VIEW } from '../src/renderer/table-view';
+import {
+  emptySidebarSession,
+  organizeSidebar,
+} from '../src/renderer/sidebar-organization';
+import { activateTab } from '../src/renderer/workspace';
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type {
@@ -643,4 +649,105 @@ it('reuses matching stamped Next tasks graphs and rejects stale or other-account
     latest[triageIdentity('a', 'org/repo#1')].graph?.groups[0].items.length,
     0,
   );
+});
+it('keeps the exact held inbox read during unrelated same-account or other-account refreshes', async () => {
+  for (const connectionId of ['a', 'b']) {
+    let release!: () => void;
+    const calls: string[] = [];
+    const cancelled: string[] = [];
+    let latest: Record<string, InboxGraph> = {};
+    const first = sample()[0];
+    const second = {
+      ...first,
+      issue: issue(connectionId === 'a' ? 'other/root#1' : first.issue.key),
+      source: source(connectionId, 'other/root#1'),
+      stamp: 'unrelated-old',
+    };
+    const controller = new InboxInspection(
+      {
+        syncStatus: async () => ({ retryAt: null }),
+        cancelRelationships: async (id, requestId) => {
+          cancelled.push(triageIdentity(id, requestId));
+        },
+        relationships: async (id, key) => {
+          calls.push(triageIdentity(id, key));
+          if (calls.length === 1)
+            await new Promise<void>((resolve) => (release = resolve));
+          return blocked(key);
+        },
+      },
+      (entries) => (latest = entries),
+    );
+    controller.reset([first, second]);
+    const pending = controller.load([first, second]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const refreshed = { ...second, stamp: 'unrelated-fresh' };
+    controller.reset([first, refreshed]);
+    assert.deepEqual(
+      cancelled,
+      [],
+      'unrelated refresh must preserve exact held request',
+    );
+    assert.equal(controller.busy, true);
+    release();
+    await pending;
+    assert.equal(
+      latest[triageIdentity(first.source.connectionId, first.issue.key)].graph
+        ?.key,
+      first.issue.key,
+    );
+    assert.equal(calls.length, 1, 'queued old snapshot must be skipped');
+    await controller.load([first, refreshed]);
+    assert.equal(calls.length, 2);
+    assert.equal(
+      latest[triageIdentity(second.source.connectionId, second.issue.key)]
+        .stamp,
+      'unrelated-fresh',
+    );
+  }
+});
+
+it('organization Undo preserves live triage, owning selection and root presentation', () => {
+  const tab = {
+    id: 'owner',
+    connectionId: 'a',
+    rootKey: 'org/repo#1',
+    selectedKey: 'org/repo#1',
+    expanded: ['org/repo#1'],
+    hideDone: false,
+    scrollTop: 0,
+  };
+  const organized = organizeSidebar(
+    { ...base, tabs: [tab], activeTabId: tab.id },
+    emptySidebarSession(),
+    { type: 'pin', root: tab },
+  );
+  const triage = changeTriage(
+    undefined,
+    'a',
+    tab.rootKey,
+    'snooze',
+    Date.now(),
+    3600000,
+  );
+  const selected = activateTab(
+    {
+      ...organized.workspace,
+      triage,
+      rootViews: {
+        '["a","ORG/REPO#1"]': { ...DEFAULT_VIEW, filters: { status: 'Open' } },
+      },
+    },
+    { ...tab, selectedKey: 'org/repo#2' },
+    false,
+  );
+  const undone = organizeSidebar(selected, organized.session, {
+    type: 'undo',
+  }).workspace;
+  assert.deepEqual(undone.triage, triage);
+  assert.equal(undone.activeTabId, 'owner');
+  assert.equal(undone.tabs[0].connectionId, 'a');
+  assert.equal(undone.tabs[0].selectedKey, 'org/repo#2');
+  assert.deepEqual(undone.rootViews, selected.rootViews);
+  assert.deepEqual(undone.pinnedRoots, []);
 });

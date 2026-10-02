@@ -24,6 +24,10 @@ export async function auditInbox(app, page) {
       release: null,
       mode: 'normal',
       failed: true,
+      accountFailed: true,
+      accountCalls: [],
+      treeCalls: [],
+      searches: 0,
       reads: 0,
       lateCompleted: 0,
     };
@@ -39,8 +43,17 @@ export async function auditInbox(app, page) {
           hideDone: true,
           scrollTop: 0,
         },
+        {
+          id: 'other-source',
+          connectionId: 'other',
+          rootKey: roots[0],
+          selectedKey: roots[0],
+          expanded: [roots[0]],
+          hideDone: false,
+          scrollTop: 0,
+        },
       ],
-      activeTabId: 'source',
+      activeTabId: 'other-source',
       shortcuts: {},
       theme: 'light',
       sidebarCollapsed: false,
@@ -83,7 +96,16 @@ export async function auditInbox(app, page) {
           url: 'https://sample.invalid',
         },
       ],
-      currentUser: () => ({ id: 'me', name: 'Me' }),
+      currentUser: (_event, connection) => {
+        controls.accountCalls.push(connection);
+        if (connection === 'jira' && controls.accountFailed)
+          throw new Error('Sample Jira account lookup failed');
+        return { id: `${connection}-user`, name: `${connection} user` };
+      },
+      search: () => {
+        controls.searches++;
+        throw new Error('Inbox must stay within known roots');
+      },
       syncStatus: () => ({ retryAt: null }),
       priorityOrder: () => [],
       loadWorkspace: () => controls.saved ?? base,
@@ -91,6 +113,7 @@ export async function auditInbox(app, page) {
         controls.saved = value;
       },
       tree: (_event, connection, key) => {
+        controls.treeCalls.push({ connection, key });
         if (key === 'org/repo#10' && controls.failed)
           throw new Error('Sample root unavailable');
         controls.reads++;
@@ -104,13 +127,22 @@ export async function auditInbox(app, page) {
               undefined,
               key === 'A-1'
                 ? {
+                    assignee: {
+                      id: `${connection}-user`,
+                      name: `${connection} user`,
+                    },
                     status: {
                       id: 'review',
                       name: 'Review',
                       category: 'indeterminate',
                     },
                   }
-                : {},
+                : {
+                    assignee: {
+                      id: `${connection}-user`,
+                      name: `${connection} user`,
+                    },
+                  },
             ),
           ],
         };
@@ -174,6 +206,45 @@ export async function auditInbox(app, page) {
       .getByRole('button', { name: 'Triage inbox', exact: true })
       .click();
     const inbox = page.getByRole('region', { name: 'Triage inbox' });
+    const expectOwner = async (id, connection, key) => {
+      await expect
+        .poll(() =>
+          app.evaluate(
+            (_electron, { id, connection, key }) => {
+              const saved = globalThis.inboxAudit.saved;
+              const active = saved?.tabs.find(
+                (tab) => tab.id === saved.activeTabId,
+              );
+              return (
+                active?.id === id &&
+                active.connectionId === connection &&
+                active.rootKey === key &&
+                active.selectedKey === key
+              );
+            },
+            { id, connection, key },
+          ),
+        )
+        .toBe(true);
+      const index = await app.evaluate(
+        (_electron, id) =>
+          globalThis.inboxAudit.saved.tabs.findIndex((tab) => tab.id === id),
+        id,
+      );
+      await expect(page.getByRole('tab').nth(index)).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      await expect(page.locator('[data-tree-key="' + key + '"]')).toHaveCount(
+        1,
+      );
+      await expect(page.locator('[data-tree-key="' + key + '"]')).toBeVisible();
+      await expect(page.locator('[data-tree-key="' + key + '"]')).toBeFocused();
+    };
+    await expect(
+      inbox.getByText(/Sample Jira account lookup failed/),
+    ).toBeVisible();
+
     await expect(inbox.getByText(/Sample root unavailable/)).toBeVisible();
     await expect(inbox.getByText(/Sample partial hierarchy/)).toBeVisible();
     await expect(inbox.getByText(/Blocked by org\/repo#9/)).toBeVisible();
@@ -186,6 +257,13 @@ export async function auditInbox(app, page) {
       .filter({ hasText: '· Other · other' });
     await expect(work).toHaveCount(1);
     await expect(other).toHaveCount(1);
+    await expect(other.getByText(/Assigned to you/)).toBeVisible();
+    await expect(work.getByText(/Assigned to you/)).toBeVisible();
+    const jira = inbox
+      .locator('.inbox-item')
+      .filter({ hasText: '· Jira · jira' });
+    await expect(jira.getByText(/Review: Review/)).toBeVisible();
+    await expect(jira.getByText(/Assigned to you/)).toHaveCount(0);
     await expect(work.getByText(/Unread changes/)).toBeVisible();
     await work.getByRole('button', { name: 'Mark seen', exact: true }).click();
     await expect(work.getByText(/Unread changes/)).toHaveCount(0);
@@ -196,9 +274,21 @@ export async function auditInbox(app, page) {
     await expect(work.getByText(/Snoozed until/)).toBeVisible();
     await expect
       .poll(() =>
-        app.evaluate(() => globalThis.inboxAudit.saved?.triage.items.length),
+        app.evaluate(() => {
+          const triage = globalThis.inboxAudit.saved?.triage;
+          const item = triage?.items.find(
+            (item) =>
+              item.connectionId === 'work' && item.issueKey === 'org/repo#1',
+          );
+          return (
+            item?.pinned === true &&
+            item.snoozedUntil > Date.now() &&
+            JSON.stringify(triage.history.map((item) => item.action)) ===
+              JSON.stringify(['seen', 'pin', 'snooze'])
+          );
+        }),
       )
-      .toBe(1);
+      .toBe(true);
     await page.reload();
     await page
       .getByRole('button', { name: 'Triage inbox', exact: true })
@@ -207,17 +297,54 @@ export async function auditInbox(app, page) {
     await expect(
       work.getByRole('button', { name: 'Unpin', exact: true }),
     ).toBeVisible();
+    await expect(work.getByText(/Unread changes/)).toHaveCount(0);
+    await expect
+      .poll(() =>
+        app.evaluate(() =>
+          globalThis.inboxAudit.saved?.triage.history.map(
+            (item) => item.action,
+          ),
+        ),
+      )
+      .toEqual(['seen', 'pin', 'snooze']);
     await work.getByRole('button', { name: 'Wake now', exact: true }).click();
+    await expect
+      .poll(() => app.evaluate(() => globalThis.inboxAudit.saved?.activeTabId))
+      .toBe('other-source');
     await work.getByRole('button', { name: /org\/repo#1 Sample/ }).click();
-    await expect(
-      page.locator('[role="tab"][aria-selected="true"]'),
-    ).toContainText('org/repo#1');
-    await expect(page.locator('[data-tree-key="org/repo#1"]')).toBeFocused();
+    await expectOwner('source', 'work', 'org/repo#1');
+    await expect
+      .poll(() =>
+        app.evaluate(() => {
+          const triage = globalThis.inboxAudit.saved?.triage;
+          const preference = triage?.items.find(
+            (item) =>
+              item.connectionId === 'work' && item.issueKey === 'org/repo#1',
+          );
+          return (
+            preference?.pinned === true &&
+            preference.snoozedUntil === undefined &&
+            triage.history.at(-1)?.action === 'wake'
+          );
+        }),
+      )
+      .toBe(true);
+    await page
+      .getByRole('button', { name: 'Triage inbox', exact: true })
+      .click();
+    await other.getByRole('button', { name: /org\/repo#1 Sample/ }).click();
+    await expectOwner('other-source', 'other', 'org/repo#1');
+    await page
+      .getByRole('button', { name: 'Triage inbox', exact: true })
+      .click();
+    await work.getByRole('button', { name: /org\/repo#1 Sample/ }).click();
+    await expectOwner('source', 'work', 'org/repo#1');
     await page
       .getByRole('button', { name: 'Triage inbox', exact: true })
       .click();
     await app.evaluate(() => {
       globalThis.inboxAudit.failed = false;
+      globalThis.inboxAudit.accountFailed = false;
     });
     await inbox
       .getByRole('button', {
@@ -226,6 +353,32 @@ export async function auditInbox(app, page) {
       })
       .click();
     await expect(inbox.getByText(/Sample root unavailable/)).toHaveCount(0);
+    await expect(
+      inbox.getByText(/Sample Jira account lookup failed/),
+    ).toHaveCount(0);
+    await expect(jira.getByText(/Assigned to you/)).toBeVisible();
+    await expect(other.getByText(/Assigned to you/)).toBeVisible();
+    await expect(work.getByText(/Assigned to you/)).toBeVisible();
+    await expect(inbox.getByText(/Sample partial hierarchy/)).toBeVisible();
+    expect(await app.evaluate(() => globalThis.inboxAudit.searches)).toBe(0);
+    expect(
+      await app.evaluate(() =>
+        [
+          ...new Set(
+            globalThis.inboxAudit.treeCalls.map((item) =>
+              JSON.stringify([item.connection, item.key]),
+            ),
+          ),
+        ].sort(),
+      ),
+    ).toEqual(
+      [
+        JSON.stringify(['work', 'org/repo#1']),
+        JSON.stringify(['other', 'org/repo#1']),
+        JSON.stringify(['work', 'org/repo#10']),
+        JSON.stringify(['jira', 'A-1']),
+      ].sort(),
+    );
     await expect(
       inbox.locator('.inbox-item').filter({ hasText: 'roots: org/repo#10' }),
     ).toBeVisible();
@@ -246,7 +399,7 @@ export async function auditInbox(app, page) {
     await expect
       .poll(() =>
         app.evaluate(
-          ({ held, boundary }) =>
+          (_electron, { held, boundary }) =>
             globalThis.inboxAudit.cancelled
               .slice(boundary)
               .some(

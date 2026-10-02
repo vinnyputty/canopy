@@ -41,7 +41,12 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
         handlers.set(channel, handler),
     },
     inboxAudit: undefined as unknown as {
+      saved: Workspace | null;
       failed: boolean;
+      accountFailed: boolean;
+      accountCalls: string[];
+      treeCalls: { connection: string; key: string }[];
+      searches: number;
       mode: string;
       release: () => void;
       calls: { connection: string; key: string; requestId: string }[];
@@ -91,9 +96,93 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
         ),
       };
   }
-  const users = Object.fromEntries(
-    connections.map((connection) => [connection.id, { id: 'me' }]),
+  const helperStart = source.indexOf('const expectOwner =');
+  const helperEnd = source.indexOf(
+    '    await expect(\n      inbox.getByText(/Sample Jira account lookup failed/)',
+    helperStart,
   );
+  assert.ok(helperStart > 0 && helperEnd > helperStart);
+  context.inboxAudit.saved = workspace;
+  const active = () =>
+    workspace.tabs.find((tab) => tab.id === workspace.activeTabId)!;
+  const nativeExpect = Object.assign(
+    (value: any) => ({
+      toHaveAttribute: (_name: string, expected: string) =>
+        assert.equal(value.selected ? 'true' : 'false', expected),
+      toHaveCount: (expected: number) => assert.equal(value.count, expected),
+      toBeVisible: () => assert.equal(value.visible, true),
+      toBeFocused: () => assert.equal(value.focused, true),
+    }),
+    {
+      poll: (callback: () => Promise<unknown>) => ({
+        toBe: async (expected: unknown) =>
+          assert.equal(await callback(), expected),
+      }),
+    },
+  );
+  const helperContext = {
+    ...context,
+    expect: nativeExpect,
+    app: {
+      evaluate: async (
+        callback: (electron: unknown, payload: unknown) => unknown,
+        payload: unknown,
+      ) => callback({ ipcMain: context.ipcMain }, payload),
+    },
+    page: {
+      getByRole: () => ({
+        nth: (index: number) => ({
+          selected: workspace.tabs[index]?.id === workspace.activeTabId,
+        }),
+      }),
+      locator: (selector: string) => ({
+        count: selector.includes(active().selectedKey ?? 'missing') ? 1 : 0,
+        visible: true,
+        focused: selector.includes(active().selectedKey ?? 'missing'),
+      }),
+    },
+    expectOwner: undefined as unknown as (
+      id: string,
+      connection: string,
+      key: string,
+    ) => Promise<void>,
+  };
+  runInNewContext(
+    `${source.slice(helperStart, helperEnd)};globalThis.expectOwner = expectOwner;`,
+    helperContext,
+  );
+  await helperContext.expectOwner('other-source', 'other', 'org/repo#1');
+  await assert.rejects(
+    helperContext.expectOwner('source', 'work', 'org/repo#1'),
+  );
+  workspace.activeTabId = 'source';
+  workspace.tabs.find((tab) => tab.id === 'source')!.selectedKey = 'org/repo#1';
+  await helperContext.expectOwner('source', 'work', 'org/repo#1');
+  await assert.rejects(
+    helperContext.expectOwner('source', 'other', 'org/repo#1'),
+  );
+  workspace.activeTabId = 'other-source';
+  assert.equal(workspace.activeTabId, 'other-source');
+  assert.equal(
+    workspace.tabs.find((tab) => tab.id === 'source')?.connectionId,
+    'work',
+  );
+  assert.equal(
+    workspace.tabs.find((tab) => tab.id === 'other-source')?.connectionId,
+    'other',
+  );
+  const users: Record<string, { id: string }> = {};
+  const identityErrors: Record<string, string> = {};
+  for (const connection of connections) {
+    try {
+      users[connection.id] = call('currentUser', connection.id);
+    } catch {
+      identityErrors[connection.id] = 'Sample Jira account lookup failed';
+    }
+  }
+  assert.notEqual(users.work.id, users.other.id);
+  assert.equal(users.jira, undefined);
+  assert.equal(identityErrors.jira, 'Sample Jira account lookup failed');
   const items = inboxItems(
     candidates,
     workspace,
@@ -121,6 +210,42 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
       .find((item) => item.source.connectionId === 'jira')
       ?.reasons.includes('Review: Review'),
   );
+  assert.equal(
+    items
+      .find((item) => item.source.connectionId === 'jira')
+      ?.reasons.includes('Assigned to you'),
+    false,
+  );
+  const wrongUsers = { ...users, work: users.other };
+  assert.equal(
+    inboxItems(
+      candidates,
+      workspace,
+      connections,
+      snapshots,
+      wrongUsers,
+      graphs,
+      Date.now(),
+    )
+      .find((item) => item.source.connectionId === 'work')
+      ?.reasons.includes('Assigned to you'),
+    false,
+  );
+  context.inboxAudit.accountFailed = false;
+  users.jira = call('currentUser', 'jira');
+  assert.ok(
+    inboxItems(
+      candidates,
+      workspace,
+      connections,
+      snapshots,
+      users,
+      graphs,
+      Date.now(),
+    )
+      .find((item) => item.source.connectionId === 'jira')
+      ?.reasons.includes('Assigned to you'),
+  );
   const snapshot = snapshots[work.source.id];
   assert.equal(
     nextTasks(snapshot, 'github', 'blocked', undefined, false, undefined, {
@@ -130,6 +255,15 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
   );
   context.inboxAudit.failed = false;
   assert.equal(call('tree', 'work', 'org/repo#10').issues.length, 1);
+  assert.equal(context.inboxAudit.searches, 0);
+  assert.equal(
+    new Set(
+      context.inboxAudit.treeCalls.map((item) =>
+        JSON.stringify([item.connection, item.key]),
+      ),
+    ).size,
+    4,
+  );
   context.inboxAudit.mode = 'hold';
   const held: Promise<IssueRelationships> = call(
     'relationships',
@@ -161,8 +295,8 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
         totalRoots: 14,
         snapshots,
         errors,
-        identityErrors: { other: 'Sample account lookup failure' },
-        users,
+        identityErrors,
+        users: { work: users.work, other: users.other },
         loading: new Set<string>(),
         now: Date.now(),
         onChange: () => {},
@@ -181,7 +315,7 @@ it('executes the real inbox sample IPC fixture without Electron and renders cano
   assert.match(html, /4 of 14 known roots/);
   assert.match(html, /Load 10 more roots/);
   assert.match(html, /Sample root unavailable/);
-  assert.match(html, /Sample account lookup failure/);
+  assert.match(html, /Sample Jira account lookup failed/);
   assert.match(html, /Sample partial hierarchy/);
   assert.match(html, /Last confirmed update:/);
   assert.match(html, /cannot establish global absence/);

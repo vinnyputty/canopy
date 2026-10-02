@@ -240,6 +240,7 @@ test('inspected immediate parent seeds known ancestors without inheriting the ol
 function rendererRequests(realRefresh = false) {
   const source = parsed('../src/renderer/App.tsx');
   const names = new Set([
+    'receiveInboxGraphs',
     'relationshipGraphs',
     'relationshipLoading',
     'relationshipRequests',
@@ -430,7 +431,7 @@ function rendererRequests(realRefresh = false) {
   assert.ok(publish, 'production mutation snapshot callback');
   runInNewContext(
     js(
-      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current], graphRef: () => relationshipGraphsRef.current };`,
+      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, receiveInbox: receiveInboxGraphs, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current], graphRef: () => relationshipGraphsRef.current };`,
     ),
     context,
   );
@@ -592,6 +593,7 @@ for (const change of [
     else await api.refresh(api.tabs[change === 'other account' ? 2 : 1]);
     assert.equal(api.cancelled.length, 0);
     assert.equal(api.graphs()['["work","A-1"]']?.key, 'A-1');
+    assert.equal(api.inboxGraphs()['["work","A-1"]']?.graph.key, 'A-1');
     api.pending[1].resolve(graph('A-1'));
     await held;
     assert.equal(api.graphs()['["work","A-1"]']?.key, 'A-1');
@@ -1832,4 +1834,24 @@ test('demo related-work step inspects the lazy graph before highlighting CAN-200
   );
   assert.equal(highlighted, true);
   assert.equal(inspected?.key, 'CAN-108');
+});
+
+test('inbox cache handoff preserves unrelated typed graphs and own refresh invalidates both caches', async () => {
+  const api = rendererRequests();
+  const first = api.inspect('work', 'A-1');
+  api.pending[0].resolve(graph('A-1'));
+  await first;
+  const other = api.inspect('other', 'A-1');
+  api.pending[1].resolve(graph('A-1'));
+  await other;
+  api.receiveInbox({
+    '["work","A-1"]': { stamp: 'current', graph: graph('A-1') },
+  });
+  assert.equal(api.graphs()['["other","A-1"]']?.key, 'A-1');
+  assert.equal(api.inboxGraphs()['["other","A-1"]']?.graph.key, 'A-1');
+  await api.refresh(api.tabs[0]);
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  assert.equal(api.inboxGraphs()['["work","A-1"]'], undefined);
+  assert.equal(api.graphs()['["other","A-1"]']?.key, 'A-1');
+  assert.equal(api.inboxGraphs()['["other","A-1"]']?.graph.key, 'A-1');
 });
