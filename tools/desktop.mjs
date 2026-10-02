@@ -125,14 +125,19 @@ if (
   process.env.PATH = `${dirname(nodeBinary)}${delimiter}${process.env.PATH ?? ''}`;
   if (process.platform === 'linux') {
     await mkdir(join(staging, 'tools'));
-    await cp(join(root, 'tools', 'AppRun'), join(staging, 'tools', 'AppRun'));
+    // Bazel runfiles are read-only. Materialize owned, writable launcher bytes
+    // so the builder can copy/replace them while generating package targets.
+    await writeFile(
+      join(staging, 'tools', 'AppRun'),
+      await readFile(join(root, 'tools', 'AppRun')),
+      { mode: 0o755 },
+    );
   }
   const { build } = require('electron-builder');
   const { version } = require('electron/package.json');
   await build({
     projectDir: staging,
     config: {
-      ...manifest.build,
       electronVersion: version,
       npmRebuild: false,
       directories: { output: join(workspace, 'release') },
