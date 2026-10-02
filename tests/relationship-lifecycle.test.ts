@@ -1087,6 +1087,125 @@ test('late target conflict preserves unaffected active blockers and outside-conn
   assert.deepEqual(blockers.blockers, ['B-2']);
 });
 
+for (const mode of [
+  'status change',
+  'removal',
+  'other account',
+  'unreferenced root',
+]) {
+  test(`first outside-root delivery preserves inspected authority before ${mode}`, async () => {
+    const api = rendererRequests(true);
+    const first = api.inspect('work', 'A-1');
+    api.pending[0].resolve(blockerGraph('A-1'));
+    await first;
+    const cached = api.graphs()['["work","A-1"]'];
+    const held = api.inspect('work', 'A-1');
+    const tab = {
+      ...api.tabs[0],
+      id: 'outside',
+      connectionId: mode === 'other account' ? 'other' : 'work',
+      rootKey: mode === 'unreferenced root' ? 'Z-1' : 'B-2',
+    } as TabState;
+    api.tabs.push(tab);
+    api.context.refreshSchedule.current.sync(
+      api.tabs.map((tab: TabState) => tab.id),
+      'a',
+      api.context.Date.now(),
+    );
+    let changed = false;
+    api.setTree(async (_connection: string, key: string) =>
+      treeSnapshot(
+        key,
+        key === tab.rootKey && changed && mode === 'removal'
+          ? []
+          : [
+              {
+                ...issue(key),
+                status:
+                  key === tab.rootKey && !changed
+                    ? { id: 'done', name: 'Done', category: 'done' }
+                    : issue(key).status,
+              },
+            ],
+      ),
+    );
+    await api.refresh(tab, false, true);
+    assert.equal(
+      api.context.mutations.confirmedSnapshot(tab.id).rootKey,
+      tab.rootKey,
+    );
+    assert.equal(
+      api.graphs()['["work","A-1"]'],
+      cached,
+      'first confirmed evidence preserves the exact graph',
+    );
+    assert.equal(api.loading()['["work","A-1"]'], true);
+    assert.deepEqual(api.cancelled, []);
+    assert.equal(
+      relationshipBlockers(
+        issue('A-1'),
+        cached,
+        new Map([
+          [
+            tab.rootKey,
+            api.context.mutations.confirmedSnapshot(tab.id).issues[0],
+          ],
+        ]),
+      ).blocker,
+      'blocked',
+      'inspected active status wins over a newly loaded completed tree',
+    );
+    await api.advance(31_000);
+    await api.refresh(tab, false, true);
+    assert.equal(
+      api.graphs()['["work","A-1"]'],
+      cached,
+      'unchanged subsequent quiet reads retain authority',
+    );
+    assert.deepEqual(api.cancelled, []);
+    changed = true;
+    await api.refresh(tab, false, true);
+    const affected = mode === 'status change' || mode === 'removal';
+    assert.equal(!!api.graphs()['["work","A-1"]'], !affected);
+    assert.deepEqual(api.cancelled, affected ? ['work:request-1'] : []);
+    if (affected) {
+      const replacement = api.inspect('work', 'A-1');
+      api.pending[1].resolve(blockerGraph('A-1', 'B-2', 'done'));
+      await held;
+      assert.equal(api.graphs()['["work","A-1"]'], undefined);
+      assert.equal(
+        api.loading()['["work","A-1"]'],
+        true,
+        'old finalizer cannot erase current request',
+      );
+      const missing = blockerGraph('A-1');
+      missing.groups[0].items[0].statusCategory = undefined;
+      api.pending[2].resolve(missing);
+      await replacement;
+      assert.equal(
+        relationshipBlockers(issue('A-1'), api.graphs()['["work","A-1"]'])
+          .blocker,
+        'unknown',
+      );
+    } else {
+      api.pending[1].resolve(blockerGraph('A-1'));
+      await held;
+    }
+    const manualHeld = api.inspect('work', 'A-1');
+    const index = api.pending.length - 1;
+    await api.refresh(api.tabs[0], true, true);
+    assert.equal(
+      api.graphs()['["work","A-1"]'],
+      undefined,
+      'manual owning-source invalidation is intentional',
+    );
+    assert.equal(api.cancelled.at(-1), `work:request-${index}`);
+    api.pending[index].resolve(blockerGraph('A-1'));
+    await manualHeld;
+    assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  });
+}
+
 for (const [checkpoint, name] of [
   [0, 'blocker owner reuse'],
   [2, 'parent and child owner reuse'],

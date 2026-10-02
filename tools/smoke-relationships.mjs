@@ -367,6 +367,9 @@ export async function auditRelationships(app, page) {
       await pane
         .getByRole('button', { name: 'Inspect relationships', exact: true })
         .click();
+    const beforeOutsideInspection = await app.evaluate(
+      () => globalThis.relationshipAudit.calls.length,
+    );
     await pane
       .getByRole('button', { name: 'Show team/b#5 in tree', exact: true })
       .click();
@@ -383,6 +386,24 @@ export async function auditRelationships(app, page) {
       )
       .toBe('team/b#5');
     await page.getByRole('tab').first().click();
+    await source.focus();
+    if (!(await pane.isVisible())) await page.keyboard.press('Space');
+    await expect(pane).toHaveAttribute('aria-label', 'Preview team/a#1');
+    await expect(
+      pane.getByRole('button', { name: 'Inspect relationships', exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      pane.getByRole('region', { name: 'Blockers', exact: true }),
+    ).toContainText('team/a#11');
+    await expect(pane).toContainText('GitHub · work account');
+    await expect(pane).toContainText('children; more may exist');
+    await expect(pane).toContainText('Outside this connection');
+    await expect(
+      pane.getByRole('button', { name: 'Show private/repo#9 in tree' }),
+    ).toHaveCount(0);
+    expect(
+      await app.evaluate(() => globalThis.relationshipAudit.calls.length),
+    ).toBe(beforeOutsideInspection);
     const ensureSourcePreview = async () => {
       await source.focus();
       if (!(await pane.isVisible())) await page.keyboard.press('Space');
@@ -420,7 +441,6 @@ export async function auditRelationships(app, page) {
         page.locator(`[data-tree-key="${selectedKey}"]`),
       ).toBeFocused();
     };
-    await ensureSourcePreview();
     await pane
       .getByRole('region', { name: 'Parent path', exact: true })
       .getByRole('button', { name: 'Show team/a#10 in tree', exact: true })

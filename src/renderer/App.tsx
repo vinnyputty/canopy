@@ -589,15 +589,10 @@ export function App() {
         window.canopy,
         (view) => {
           for (const tab of tabsRef.current) {
+            const previous = relationshipConfirmedSnapshots.current[tab.id];
             const next = view.confirmedSnapshots[tab.id];
-            if (
-              next &&
-              next !== relationshipConfirmedSnapshots.current[tab.id]
-            ) {
-              const changed = relationshipChangedKeys(
-                relationshipConfirmedSnapshots.current[tab.id],
-                next,
-              );
+            if (previous && next && next !== previous) {
+              const changed = relationshipChangedKeys(previous, next);
               invalidateRelationships(tab.connectionId, [...changed]);
             }
           }
@@ -4301,41 +4296,62 @@ export function App() {
                                 </div>
                               </div>
                               <div className="next-task-relationships">
-                                {task.blockerDetails.map((link) => (
-                                  <div key={link.key}>
-                                    <span>
-                                      {activeConnection?.provider === 'github'
-                                        ? 'GitHub'
-                                        : activeConnection?.provider === 'jira'
-                                          ? 'Jira'
-                                          : 'Demo'}{' '}
-                                      · {activeConnection?.name} ·{' '}
-                                      {task.issue.key} blocked by {link.key} ·{' '}
-                                      {link.summary}
-                                      {link.statusCategory
-                                        ? ''
-                                        : ' · Status unknown'}
-                                      {link.crossRepository
-                                        ? ' · Cross-repository'
-                                        : ''}
-                                    </span>{' '}
-                                    {link.access === 'outside-connection' ? (
-                                      <span>Outside selected repositories</span>
-                                    ) : (
-                                      <button
-                                        className="text-button"
-                                        onClick={() =>
-                                          jumpToRelationship(
-                                            activeTab.connectionId,
-                                            link.key,
-                                          )
-                                        }
-                                      >
-                                        Show blocker in tree
-                                      </button>
-                                    )}
-                                  </div>
-                                ))}
+                                {task.blockerDetails.map(
+                                  (link, index, links) => (
+                                    <div
+                                      key={JSON.stringify([
+                                        link.key,
+                                        link.relationship,
+                                        link.direction,
+                                        links
+                                          .slice(0, index)
+                                          .filter(
+                                            (other) =>
+                                              other.key === link.key &&
+                                              other.relationship ===
+                                                link.relationship &&
+                                              other.direction ===
+                                                link.direction,
+                                          ).length,
+                                      ])}
+                                    >
+                                      <span>
+                                        {activeConnection?.provider === 'github'
+                                          ? 'GitHub'
+                                          : activeConnection?.provider ===
+                                              'jira'
+                                            ? 'Jira'
+                                            : 'Demo'}{' '}
+                                        · {activeConnection?.name} ·{' '}
+                                        {task.issue.key} blocked by {link.key} ·{' '}
+                                        {link.summary}
+                                        {link.statusCategory
+                                          ? ''
+                                          : ' · Status unknown'}
+                                        {link.crossRepository
+                                          ? ' · Cross-repository'
+                                          : ''}
+                                      </span>{' '}
+                                      {link.access === 'outside-connection' ? (
+                                        <span>
+                                          Outside selected repositories
+                                        </span>
+                                      ) : (
+                                        <button
+                                          className="text-button"
+                                          onClick={() =>
+                                            jumpToRelationship(
+                                              activeTab.connectionId,
+                                              link.key,
+                                            )
+                                          }
+                                        >
+                                          Show blocker in tree
+                                        </button>
+                                      )}
+                                    </div>
+                                  ),
+                                )}
                                 {task.blockerReason && (
                                   <span role="status">
                                     {task.blockerReason}{' '}
