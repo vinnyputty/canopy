@@ -221,12 +221,12 @@ export async function auditGithub(app, page) {
     await app.evaluate(({ BrowserWindow }, size) => {
       BrowserWindow.getAllWindows()[0].setSize(...size);
     }, originalWindowSize);
-    await page.locator('.view-settings > summary').click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByLabel('Text size', { exact: true }).selectOption('large');
     await expect(tree).toHaveCSS('font-size', '15px');
     expect(await statusesFit(tree)).toBe(true);
     await page.getByLabel('Text size', { exact: true }).selectOption('medium');
-    await page.locator('.view-settings > summary').click();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
     await statusResize.press('ArrowRight');
     await expect(statusResize).toHaveAttribute('aria-valuenow', '138');
     const root = tree.locator('[data-tree-key="team/a#1"]');

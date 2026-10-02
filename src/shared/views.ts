@@ -1,11 +1,50 @@
 import type {
   RootView,
+  ReadingSettings,
   SavedIssueView,
   TableColumn,
   TabState,
   Workspace,
 } from './types';
 
+export const DEFAULT_READING: ReadingSettings = {
+  textSize: 'medium',
+  spacing: 'compact',
+};
+export function validReading(value: unknown): value is ReadingSettings {
+  return (
+    record(value) &&
+    ['small', 'medium', 'large'].includes(String(value.textSize)) &&
+    ['compact', 'comfortable'].includes(String(value.spacing))
+  );
+}
+/** Active effective view wins; fallback order is open tabs, closed tabs, then sorted defaults/roots. */
+export function migrateReading(workspace: Workspace): Workspace {
+  if (validReading(workspace.reading)) return workspace;
+  const effective = (tab: TabState) =>
+    workspace.rootViews?.[
+      JSON.stringify([tab.connectionId, tab.rootKey.toUpperCase()])
+    ] ??
+    workspace.viewDefaults?.[tab.connectionId] ??
+    tab.view;
+  const active = workspace.tabs.find((tab) => tab.id === workspace.activeTabId);
+  const candidates: unknown[] = [
+    active && effective(active),
+    ...workspace.tabs.map(effective),
+    ...(workspace.closedTabs ?? []).map(effective),
+    ...Object.entries(workspace.viewDefaults ?? {})
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, view]) => view),
+    ...Object.entries(workspace.rootViews ?? {})
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, view]) => view),
+  ];
+  const selected = candidates.find(validReading) ?? DEFAULT_READING;
+  return {
+    ...workspace,
+    reading: { textSize: selected.textSize, spacing: selected.spacing },
+  };
+}
 export const COLUMN_BOUNDS: Record<TableColumn, readonly [number, number]> = {
   issue: [240, 1200],
   priority: [80, 480],
@@ -21,8 +60,6 @@ export function validRootView(value: unknown): value is RootView {
     columns,
     widths,
     sort,
-    textSize,
-    spacing,
     hideDone,
     assumeMatchingStatusTransitions,
     filters,
@@ -49,8 +86,6 @@ export function validRootView(value: unknown): value is RootView {
     typeof sort.column === 'string' &&
     (sort.column === 'rank' || Object.hasOwn(COLUMN_BOUNDS, sort.column)) &&
     (sort.direction === 'asc' || sort.direction === 'desc') &&
-    ['small', 'medium', 'large'].includes(String(textSize)) &&
-    ['compact', 'comfortable'].includes(String(spacing)) &&
     typeof hideDone === 'boolean' &&
     typeof assumeMatchingStatusTransitions === 'boolean' &&
     record(filters) &&
@@ -79,7 +114,10 @@ function restoredRootView(value: unknown): RootView | undefined {
     record(value) && !Object.hasOwn(value, 'assumeMatchingStatusTransitions')
       ? { ...value, assumeMatchingStatusTransitions: true }
       : value;
-  return validRootView(candidate) ? candidate : undefined;
+  if (!validRootView(candidate)) return undefined;
+  const { textSize, spacing, ...view } = candidate as RootView &
+    Partial<ReadingSettings>;
+  return textSize !== undefined || spacing !== undefined ? view : candidate;
 }
 export function validSavedViews(value: unknown): value is SavedIssueView[] {
   return (
@@ -145,6 +183,7 @@ export function recoverWorkspaceViews(workspace: Workspace): Workspace {
         workspace.closedTabs.some((tab) => !record(tab))))
   )
     throw new Error('Invalid saved workspace.');
+  workspace = migrateReading(workspace);
   const recover = (value: unknown) =>
     Object.fromEntries(
       Object.entries(record(value) ? value : {}).flatMap(([key, value]) => {

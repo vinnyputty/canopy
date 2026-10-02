@@ -101,33 +101,6 @@ export function ViewSettings({
             </select>
           </label>
         )}
-        <label>
-          Text size
-          <select
-            aria-label="Text size"
-            value={view.textSize}
-            onChange={(event) =>
-              update({ textSize: event.target.value as RootView['textSize'] })
-            }
-          >
-            <option value="small">Small</option>
-            <option value="medium">Medium</option>
-            <option value="large">Large</option>
-          </select>
-        </label>
-        <label>
-          Row spacing
-          <select
-            aria-label="Row spacing"
-            value={view.spacing}
-            onChange={(event) =>
-              update({ spacing: event.target.value as RootView['spacing'] })
-            }
-          >
-            <option value="compact">Compact</option>
-            <option value="comfortable">Comfortable</option>
-          </select>
-        </label>
         {provider === 'jira' && (
           <label>
             <span>Assume matching status transitions for this root</span>

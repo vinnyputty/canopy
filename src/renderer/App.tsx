@@ -105,6 +105,8 @@ import {
   visit,
   type Navigation,
 } from './workspace';
+import { Settings } from './Settings';
+import { DEFAULT_READING } from '../shared/views';
 import { TableHeader, ViewSettings } from './TableView';
 import {
   canRank,
@@ -117,6 +119,7 @@ import {
   setRootView,
   sortIssueTree,
   tableStyle,
+  readingStyle,
 } from './table-view';
 import { Mutations } from './mutations';
 import { RefreshSchedule, RootRefreshGate } from './refresh';
@@ -228,7 +231,13 @@ export function App() {
   const tourProgressRef = useRef<HTMLProgressElement>(null);
   const tourEditor = useRef(false);
   const [dialog, setDialog] = useState<
-    'open' | 'commands' | 'shortcuts' | 'appearance' | 'connect' | null
+    | 'open'
+    | 'commands'
+    | 'shortcuts'
+    | 'appearance'
+    | 'settings'
+    | 'connect'
+    | null
   >(null);
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
@@ -2863,6 +2872,7 @@ export function App() {
     <div
       style={
         {
+          ...readingStyle(workspace.reading),
           '--sidebar-width': `${workspace.sidebarWidth ?? 220}px`,
         } as React.CSSProperties
       }
@@ -3065,17 +3075,10 @@ export function App() {
         </div>
         <button
           className="sidebar-settings"
-          onClick={() => setDialog('appearance')}
+          onClick={() => setDialog('settings')}
         >
           <Settings2 size={16} />
-          <span>Appearance</span>
-        </button>
-        <button
-          className="sidebar-settings"
-          onClick={() => setDialog('shortcuts')}
-        >
-          <Keyboard size={16} />
-          <span>Keyboard shortcuts</span>
+          <span>Settings</span>
         </button>
         {!demoMode && (
           <button className="sidebar-settings" onClick={launchDemo}>
@@ -4673,6 +4676,24 @@ export function App() {
           }
           onClose={() => setDialog(null)}
         />
+      )}
+      {dialog === 'settings' && (
+        <Dialog title="Settings" onClose={() => setDialog(null)}>
+          <Settings
+            reading={workspace.reading ?? DEFAULT_READING}
+            onReading={(reading) =>
+              setWorkspace((value) => ({ ...value, reading }))
+            }
+            onAppearance={() => setDialog('appearance')}
+            onShortcuts={() => setDialog('shortcuts')}
+            onConnect={() => setDialog('connect')}
+          />
+          <div className="dialog-footer">
+            <button className="primary" onClick={() => setDialog(null)}>
+              Done
+            </button>
+          </div>
+        </Dialog>
       )}
       {dialog === 'appearance' && (
         <AppearanceDialog
@@ -6702,6 +6723,13 @@ function AppearanceDialog({
       <div className="dialog-footer">
         <button className="secondary" onClick={onShortcuts} disabled={isSaving}>
           Keyboard shortcuts
+        </button>
+        <button
+          className="secondary"
+          disabled={isSaving}
+          onClick={() => preview('system', 'default')}
+        >
+          Reset appearance
         </button>
         <span className="footer-spacer" />
         <button className="secondary" onClick={onClose} disabled={isSaving}>
