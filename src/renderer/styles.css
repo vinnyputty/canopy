@@ -3161,3 +3161,32 @@ kbd {
   color: var(--muted);
   margin-top: 3px;
 }
+
+.rich-authoring label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 10px 0;
+}
+.rich-authoring textarea {
+  min-height: 110px;
+  resize: vertical;
+  width: 100%;
+}
+.rich-authoring input,
+.rich-authoring textarea,
+.rich-authoring select {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+.rich-authoring pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rich-authoring button {
+  margin: 3px;
+}
+.rich-authoring .authoring-recovery label {
+  flex-direction: row;
+  align-items: center;
+}

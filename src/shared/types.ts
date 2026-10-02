@@ -1,3 +1,9 @@
+import type {
+  AuthoringOptions,
+  AuthoringAction,
+  AuthoringResult,
+  ParentPlan,
+} from './authoring';
 export type Choice = { id: string; name: string };
 export type Status = Choice & { category: 'new' | 'indeterminate' | 'done' };
 export type Connection = {
@@ -253,6 +259,26 @@ export interface CanopyAPI {
   cancelUpdateCheck(): Promise<void>;
   dismissUpdateNotice(): Promise<import('./updates').UpdateState>;
   openRelease(tag: string): Promise<void>;
+  authoringOptions(
+    connectionId: string,
+    key: string,
+  ): Promise<AuthoringOptions>;
+  previewParent(
+    connectionId: string,
+    key: string,
+    parentKey: string | null,
+  ): Promise<ParentPlan>;
+  author(
+    connectionId: string,
+    key: string,
+    action: AuthoringAction,
+  ): Promise<AuthoringResult>;
+  openAttachment(
+    connectionId: string,
+    key: string,
+    attachmentId: string,
+  ): Promise<void>;
+
   demoMode(): Promise<boolean>;
   demoTimeScale(): Promise<number>;
   launchDemo(): Promise<void>;

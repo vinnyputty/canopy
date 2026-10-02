@@ -2,6 +2,7 @@ import {
   issueRelationships,
   relationshipFailure,
 } from '../shared/relationships';
+import { JiraAuthoring } from './authoring';
 import { JiraConsistency } from './jira-consistency';
 import { isIP } from 'node:net';
 
@@ -323,7 +324,17 @@ export class JiraProvider {
     return [...this.identities.values()].reverse();
   }
 
-  constructor(private readonly request: JiraRequest) {}
+  readonly authoring: JiraAuthoring;
+  constructor(private readonly request: JiraRequest) {
+    this.authoring = new JiraAuthoring(request, async (key, action) => {
+      this.consistency.changed(key);
+      if (action.kind === 'parent') {
+        const issue = await this.getIssue(key);
+        this.consistency.changed(key, issue.id);
+        this.created.set(issue.key, { issue, at: Date.now() });
+      }
+    });
+  }
 
   async tree(rootKey: string): Promise<TreeSnapshot> {
     const normalizedRoot = rootKey.trim();

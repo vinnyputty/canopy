@@ -246,8 +246,11 @@ export class Auth {
           'GitHub authorization expired or was revoked. Reconnect this account.',
         );
       if (response.status === 403 || response.status === 404)
-        throw new Error(
-          `GitHub denied access to ${path}. Check that the repository is selected and the token has Issues permission.${detail ? ` ${detail}` : ''}`,
+        throw Object.assign(
+          new Error(
+            `GitHub denied access to ${path}. Check that the repository is selected and the token has Issues permission.${detail ? ` ${detail}` : ''}`,
+          ),
+          { status: response.status },
         );
       throw new Error(
         `GitHub returned ${response.status} for ${path}.${detail ? ` ${detail}` : ''}`,
@@ -515,8 +518,11 @@ export class Auth {
         } catch {}
         assertCurrent();
         if (response.status === 403)
-          throw new Error(
-            `Jira denied access. Check issue permissions and your organization’s app-access policy. ${details}`,
+          throw Object.assign(
+            new Error(
+              `Jira denied access. Check issue permissions and your organization’s app-access policy. ${details}`,
+            ),
+            { status: response.status },
           );
         if (response.status === 401)
           throw new Error(

@@ -9,6 +9,14 @@ const api: CanopyAPI = {
   cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
   dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
   openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
+  authoringOptions: (id, key) =>
+    ipcRenderer.invoke('canopy:authoringOptions', id, key),
+  previewParent: (id, key, parent) =>
+    ipcRenderer.invoke('canopy:previewParent', id, key, parent),
+  author: (id, key, action) =>
+    ipcRenderer.invoke('canopy:author', id, key, action),
+  openAttachment: (id, key, attachment) =>
+    ipcRenderer.invoke('canopy:openAttachment', id, key, attachment),
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),
