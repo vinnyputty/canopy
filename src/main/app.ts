@@ -424,6 +424,7 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let savingWorkspace: Promise<void> = Promise.resolve();
   const handlers: Record<string, (...args: any[]) => unknown> = {
     updateState: () => updates.snapshot(),
     updatePreferences: (value: unknown) => updates.preferences(value),
@@ -741,7 +742,8 @@ async function start(
         demoWorkspaceState = structuredClone(valid);
         return;
       }
-      return storage.write('workspace', valid);
+      savingWorkspace = storage.write('workspace', valid);
+      return savingWorkspace;
     },
     copyIssueLink: (id: string, issue: string) =>
       demoMode && id === fixture?.connection.id
@@ -823,6 +825,64 @@ async function start(
     let closeApproved = false;
     let closing = false;
     let rendererLoaded: Promise<void>;
+    let rendererUnavailable = false;
+    let forceClose = false;
+    created.webContents.on('render-process-gone', () => {
+      rendererUnavailable = true;
+    });
+    created.webContents.on(
+      'did-fail-load',
+      (_event, code, _description, _url, mainFrame) => {
+        if (mainFrame && code !== -3) rendererUnavailable = true;
+      },
+    );
+    created.webContents.on('did-finish-load', () => {
+      rendererUnavailable =
+        created.webContents.getURL() !== pathToFileURL(html).href;
+    });
+    const flushBeforeClose = async () => {
+      const timedOut = new Error(
+        'Workspace save did not finish before the close deadline.',
+      );
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        if (!rendererUnavailable && !created.webContents.isCrashed()) {
+          await Promise.race([
+            rendererLoaded.then(() =>
+              created.webContents.executeJavaScript(
+                'window.canopy.flushWorkspace()',
+              ),
+            ),
+            new Promise<never>((_, reject) => {
+              deadline = setTimeout(() => reject(timedOut), 15_000);
+            }),
+          ]);
+          return;
+        }
+      } catch (error) {
+        if (!rendererUnavailable && !created.webContents.isCrashed()) {
+          if (error !== timedOut) throw error;
+          const { response } = await dialog.showMessageBox(created, {
+            type: 'warning',
+            message: 'The workspace save has not finished.',
+            detail:
+              'Keep Canopy open to allow saving or recovery. Closing anyway may lose the latest workspace changes.',
+            buttons: ['Keep open', 'Close anyway'],
+            defaultId: 0,
+            cancelId: 0,
+          });
+          if (response !== 1) throw error;
+        }
+      } finally {
+        clearTimeout(deadline);
+      }
+      // The renderer cannot supply newer state. Finish writes already received
+      // by the main process before destroying the unavailable window.
+      await savingWorkspace.catch((error) =>
+        console.error('Could not finish workspace save:', error),
+      );
+      forceClose = true;
+    };
     const saveBounds = () => {
       if (
         demoMode ||
@@ -849,28 +909,17 @@ async function start(
       if (closing) return;
       closing = true;
       saveBounds();
-      void Promise.all([
-        savingWindow.catch(() => {}),
-        rendererLoaded.then(() =>
-          created.webContents.executeJavaScript(
-            'window.canopy.flushWorkspace()',
-          ),
-        ),
-      ])
+      void Promise.all([savingWindow.catch(() => {}), flushBeforeClose()])
         .then(() => {
           closeApproved = true;
+          if (forceClose) created.destroy();
           if (quitting) app.quit();
-          else created.close();
+          else if (!created.isDestroyed()) created.close();
         })
         .catch((error) => {
           closing = false;
           quitting = false;
           console.error('Could not save workspace before closing:', error);
-          if (
-            created.webContents.isCrashed() ||
-            String(error).includes('Workspace flush is unavailable')
-          )
-            dialog.showErrorBox('Could not close Canopy', String(error));
         });
     });
     created.on('query-session-end', (event) => {
@@ -900,7 +949,10 @@ async function start(
     window.on('closed', () => {
       window = null;
     });
-    rendererLoaded = created.loadFile(html);
+    rendererLoaded = created.loadFile(html).catch((error) => {
+      rendererUnavailable = true;
+      throw error;
+    });
     await rendererLoaded;
   };
   const openDemoFromMenu = () =>

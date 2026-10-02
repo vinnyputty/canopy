@@ -1,6 +1,7 @@
 import { auditInbox } from './smoke-inbox.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSidebar } from './smoke-sidebar.mjs';
+import { auditCloseLifecycle } from './smoke-close-lifecycle.mjs';
 import { auditWorkspaceClose } from './smoke-close.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
@@ -3546,6 +3547,13 @@ try {
 
   await auditChildCreation(appPath, executablePath, env);
   await auditWorkspaceClose({
+    launch,
+    close,
+    current: () => ({ app, page }),
+    userData,
+  });
+
+  await auditCloseLifecycle({
     launch,
     close,
     current: () => ({ app, page }),
