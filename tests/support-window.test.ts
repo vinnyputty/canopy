@@ -16,10 +16,12 @@ const main = transformSync(readFileSync('src/main/app.ts', 'utf8'), {
 }).code;
 function gate() {
   let release!: () => void;
-  const wait = new Promise<void>((resolve) => {
+  let reject!: (error: Error) => void;
+  const wait = new Promise<void>((resolve, rejectWait) => {
     release = resolve;
+    reject = rejectWait;
   });
-  return { wait, release };
+  return { wait, release, reject };
 }
 
 // Execute the real main-process module with in-memory Electron/storage doubles.
@@ -60,6 +62,11 @@ async function fixture() {
       this.webContents.emit('did-start-loading');
       this.webContents.mainFrame.url = pathToFileURL(path).href;
       await loadGate.wait;
+    }
+    destroy() {
+      this.destroyed = true;
+      this.webContents.emit('destroyed');
+      this.emit('closed');
     }
     isDestroyed() {
       return this.destroyed;
@@ -171,6 +178,7 @@ async function fixture() {
     },
     releaseRead: () => readGate.release(),
     releaseLoad: () => loadGate.release(),
+    rejectLoad: () => loadGate.reject(new Error('Renderer load failed')),
     hold: () => {
       readGate = gate();
       loadGate = gate();
@@ -278,4 +286,51 @@ it('waits for the new subscription when About is requested during a reload', asy
   assert.deepEqual(window.messages, []);
   f.invoke(window, 'supportReady');
   assert.deepEqual(window.messages, ['canopy:showSupport']);
+});
+
+it('disposes a failed About window and retries activation with the queued request', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  f.windows[0].close();
+  await setImmediate();
+  f.hold();
+  f.about();
+  f.releaseRead();
+  await setImmediate();
+  const failed = f.windows[1];
+  f.rejectLoad();
+  await setImmediate();
+  assert.equal(failed.destroyed, true);
+  assert.equal(f.windows.filter((window) => !window.destroyed).length, 0);
+  assert.deepEqual(f.errors, ['Renderer load failed']);
+  assert.deepEqual(failed.messages, []);
+  assert.throws(
+    () => f.invoke(failed, 'supportReady'),
+    /Untrusted application window/,
+  );
+  f.hold();
+  f.app.emit('activate');
+  f.app.emit('activate');
+  await setImmediate();
+  assert.equal(f.reads, 3);
+  f.releaseRead();
+  await setImmediate();
+  const replacement = f.windows[2];
+  failed.emit('closed');
+  f.releaseLoad();
+  await setImmediate();
+  assert.deepEqual(replacement.messages, []);
+  f.invoke(replacement, 'supportReady');
+  assert.deepEqual(replacement.messages, ['canopy:showSupport']);
+  f.about();
+  await setImmediate();
+  assert.deepEqual(replacement.messages, [
+    'canopy:showSupport',
+    'canopy:showSupport',
+  ]);
+  assert.equal(f.windows.length, 3);
+  assert.equal(f.windows.filter((window) => !window.destroyed).length, 1);
+  assert.deepEqual(f.errors, ['Renderer load failed']);
 });

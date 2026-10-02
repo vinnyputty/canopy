@@ -912,7 +912,16 @@ async function start(
         supportSubscriber = null;
       }
     });
-    await created.loadFile(html);
+    try {
+      await created.loadFile(html);
+    } catch (error) {
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+        if (!created.isDestroyed()) created.destroy();
+      }
+      throw error;
+    }
   };
   const ensureWindow = (): Promise<void> => {
     if (creatingWindow) return creatingWindow;
