@@ -1,3 +1,4 @@
+import { checkPackagingPermissions } from './packaging-permissions-check.mjs';
 import { checkPackagedInstallCleanup } from './packaged-install-check.mjs';
 import assert from 'node:assert/strict';
 import { runPackagedCheck } from './packaged-check-log.mjs';
@@ -14,6 +15,7 @@ const directory = dirname(fileURLToPath(import.meta.url));
 const cwd = await mkdtemp(join(tmpdir(), 'canopy tooling '));
 try {
   await checkPackagedInstallCleanup();
+  await checkPackagingPermissions();
   // Exercise the pinned builder's actual desktop entry generation on every OS.
   const require = createRequire(import.meta.url);
   const builderRequire = createRequire(require.resolve('electron-builder'));
