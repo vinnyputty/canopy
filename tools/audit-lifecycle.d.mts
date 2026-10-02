@@ -1,4 +1,8 @@
 import type { ChildProcess } from 'node:child_process';
+export function powershellEnvironment(
+  env?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv;
+export function windowsSnapshotScript(): string;
 export function deadline<T>(
   operation: () => T | Promise<T>,
   ms: number,

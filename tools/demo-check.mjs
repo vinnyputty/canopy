@@ -59,14 +59,17 @@ function installDemoHold() {
   const observer = new MutationObserver(() => {
     const target = sessionStorage.getItem('canopy-check-hold');
     const ready =
-      target === 'editor'
-        ? document.querySelector(
-            '[data-tree-key="CAN-111"] .priority-editor select',
-          )
-        : target === 'edited' &&
-          document
-            .querySelector('[aria-label="Edit priority for CAN-111"]')
-            ?.textContent?.includes('Highest');
+      target === 'start'
+        ? document.querySelector('.demo-tour-progress')?.textContent?.trim() ===
+          'Starting tour'
+        : target === 'editor'
+          ? document.querySelector(
+              '[data-tree-key="CAN-111"] .priority-editor select',
+            )
+          : target === 'edited' &&
+            document
+              .querySelector('[aria-label="Edit priority for CAN-111"]')
+              ?.textContent?.includes('Highest');
     const pause = [...document.querySelectorAll('button')].find(
       (button) => button.textContent === 'Pause demo',
     );
@@ -99,7 +102,6 @@ function installDemoHold() {
     characterData: true,
   });
 }
-await first.page.addInitScript(installDemoHold);
 
 async function demoFailureState() {
   return {
@@ -169,6 +171,8 @@ async function resetAndHold(page, target) {
         timeout: 30000,
       },
     );
+    if (target === 'start')
+      await expect(page.getByText('Starting tour · Paused')).toBeVisible();
   } catch (error) {
     await reportDemoFailure(page, target, error);
     throw error;
@@ -179,6 +183,10 @@ async function resetAndHold(page, target) {
 
 try {
   const { page } = first;
+  // Install before the reset reload renders. Freeze step zero synchronously,
+  // so UI assertion time cannot advance the initial Pause/Next test to step one.
+  await page.addInitScript(installDemoHold);
+  await resetAndHold(page, 'start');
   expect(await page.evaluate(() => window.canopy.demoTimeScale())).toBe(
     timeScale,
   );
@@ -191,7 +199,7 @@ try {
   await expect(
     page.getByRole('tree', { name: 'CAN-100 issue tree' }),
   ).toHaveClass(/demo-target-highlight/);
-  await page.getByRole('button', { name: 'Pause demo' }).click();
+  await expect(page.getByText('Starting tour · Paused')).toBeVisible();
   const pausedProgress = await progress.evaluate((bar) => bar.value);
   // Observe long enough for multiple progress ticks, even at test speed.
   await page.waitForTimeout(timingWindow(800));
@@ -412,6 +420,11 @@ try {
   console.log(
     'Demo checks passed: pause and progress, highlighted targets, step navigation, Stop, Reset, complete tour, manual takeover.',
   );
+} catch (error) {
+  // Initial Pause/Next and later tour assertions need the same bounded evidence
+  // as a failed transient-state hold, without replacing the original assertion.
+  await reportDemoFailure(first.page, 'tour-assertion', error);
+  throw error;
 } finally {
   await closeDemo(first);
 }

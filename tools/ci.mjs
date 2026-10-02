@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { runCimModuleControls } from './windows-cim-control.mjs';
 
 const cwd = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 const startupOptions = process.argv.slice(2);
@@ -22,6 +23,7 @@ function run(command, args) {
 function bazel(...args) {
   run('bazel', [...startupOptions, ...args]);
 }
+if (process.platform === 'win32') runCimModuleControls();
 bazel('build', '//:build');
 bazel(
   'test',

@@ -34,12 +34,19 @@ export async function deadline(operation, ms, label) {
   }
 }
 
-async function processes(ms) {
-  if (process.platform === 'win32') {
-    // CreationDate distinguishes a retained tree member from a reused PID.
-    // Flush phase markers independently of stdout's complete identity snapshot.
-    // A timeout before script-entry is different from a slow query or serializer.
-    const script = `
+// Windows PowerShell launched through Node inherits PowerShell 7 module paths.
+// Let this child construct its compatible defaults; leave the caller untouched.
+// https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath
+export function powershellEnvironment(env = process.env) {
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'),
+  );
+}
+
+export function windowsSnapshotScript() {
+  // CreationDate distinguishes a retained tree member from a reused PID.
+  // Flush phase markers independently of stdout's complete identity snapshot.
+  return `
 [Console]::Error.WriteLine("canopy-cim phase=script-entry"); [Console]::Error.Flush();
 $ErrorActionPreference = "Stop";
 $clock = [System.Diagnostics.Stopwatch]::StartNew();
@@ -59,6 +66,11 @@ $json = $rows | ConvertTo-Json -Compress;
 Mark "complete" $rows.Count;
 [Console]::Out.WriteLine($json);
 `;
+}
+
+async function processes(ms) {
+  if (process.platform === 'win32') {
+    const script = windowsSnapshotScript();
     const started = Date.now();
     const concurrentSnapshots = ++activeCimSnapshots;
     const cpuStarted = process.cpuUsage();
@@ -75,7 +87,12 @@ Mark "complete" $rows.Count;
           '-EncodedCommand',
           Buffer.from(script, 'utf16le').toString('base64'),
         ],
-        { timeout: ms, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+        {
+          timeout: ms,
+          windowsHide: true,
+          maxBuffer: 16 * 1024 * 1024,
+          env: powershellEnvironment(),
+        },
       );
       pending.child?.once('spawn', () => {
         spawnedMs = Date.now() - started;

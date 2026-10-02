@@ -5,7 +5,7 @@ npm_link_all_packages(name = "node_modules")
 
 filegroup(
     name = "sources",
-    srcs = glob(["src/**/*.ts", "src/**/*.tsx", "src/**/*.css", "broker/**/*.ts", "tests/**/*.ts"]) + ["package.json", "tsconfig.json", "tests/fixtures/sidebar-root-view.json", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts", "tools/palette-check.mjs", "tools/demo-check.mjs"],
+    srcs = glob(["src/**/*.ts", "src/**/*.tsx", "src/**/*.css", "broker/**/*.ts", "tests/**/*.ts"]) + ["package.json", "tsconfig.json", "tests/fixtures/sidebar-root-view.json", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts", "tools/palette-check.mjs", "tools/demo-check.mjs", "tools/windows-cim-control.mjs", "tools/windows-cim-control.d.mts"],
 )
 
 js_binary(
@@ -113,6 +113,7 @@ js_binary(
 js_binary(
     name = "ci",
     entry_point = "tools/ci.mjs",
+    data = ["tools/windows-cim-control.mjs", "tools/audit-lifecycle.mjs"],
     patch_node_fs = False,
     tags = ["manual"],
 )
