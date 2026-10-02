@@ -2,8 +2,6 @@ import { _electron as electron, chromium, expect } from '@playwright/test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { createServer } from 'node:net';
 
 const appPath = process.env.CANOPY_APP_PATH;
 const packagedExecutable = process.env.CANOPY_PACKAGED_EXE;
@@ -323,7 +321,7 @@ try {
   await closeDemo(first);
 }
 
-if (process.platform !== 'win32') {
+{
   const directory = await mkdtemp(join(tmpdir(), 'canopy-demo-launch-check-'));
   const env = { ...process.env, CANOPY_USER_DATA: directory };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -353,49 +351,43 @@ if (process.platform !== 'win32') {
     const credentialFile = join(directory, 'credentials.json');
     const credentialSentinel = JSON.stringify('encrypted-test-credentials');
     await writeFile(credentialFile, credentialSentinel);
-    const server = createServer();
-    await new Promise((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolve);
-    });
-    const debugPort = server.address().port;
-    await new Promise((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-    // Instrument only the test process's demo launch so the real child UI can
-    // report readiness without introducing a production automation endpoint.
-    await app.evaluate((_, port) => {
+    // Capture the real child and its assigned DevTools endpoint in the test
+    // process, so readiness and cleanup work on every desktop platform.
+    await app.evaluate(() => {
       const childProcess = process.getBuiltinModule('child_process');
       const originalSpawn = childProcess.spawn;
-      childProcess.spawn = (executable, args, options) =>
-        originalSpawn(
+      globalThis.canopyCheckOutput = '';
+      childProcess.spawn = (executable, args, options) => {
+        if (!args.includes('--canopy-demo'))
+          return originalSpawn(executable, args, options);
+        const child = originalSpawn(
           executable,
-          args.includes('--canopy-demo')
-            ? [...args, `--remote-debugging-port=${port}`]
-            : args,
-          options,
+          [...args, '--remote-debugging-port=0'],
+          {
+            ...options,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
         );
-    }, debugPort);
+        globalThis.canopyCheckChild = child;
+        const record = (chunk) => {
+          globalThis.canopyCheckOutput = (
+            globalThis.canopyCheckOutput + chunk.toString()
+          ).slice(-8000);
+          const match = globalThis.canopyCheckOutput.match(
+            /DevTools listening on (ws:\/\/\S+)/,
+          );
+          if (match) globalThis.canopyCheckEndpoint = match[1];
+        };
+        child.stdout.on('data', record);
+        child.stderr.on('data', record);
+        return child;
+      };
+    });
     await page.getByRole('button', { name: 'Try demo' }).first().click();
     await expect
-      .poll(
-        () => {
-          const table = execFileSync('ps', ['-axo', 'pid=,ppid=,command='], {
-            encoding: 'utf8',
-          });
-          const processId = app.process().pid;
-          const match = table.split('\n').find((line) => {
-            const parts = line.trim().split(/\s+/, 3);
-            return (
-              Number(parts[1]) === processId && line.includes('--canopy-demo')
-            );
-          });
-          childPid = match ? Number(match.trim().split(/\s+/)[0]) : undefined;
-          return childPid;
-        },
-        { timeout: 10000 },
-      )
+      .poll(() => app.evaluate(() => globalThis.canopyCheckChild?.pid))
       .toBeGreaterThan(0);
+    childPid = await app.evaluate(() => globalThis.canopyCheckChild.pid);
     const duplicateLaunch = await page.evaluate(async () => {
       try {
         await window.canopy.launchDemo();
@@ -408,19 +400,29 @@ if (process.platform !== 'win32') {
     await expect
       .poll(
         async () => {
-          try {
-            childBrowser = await chromium.connectOverCDP(
-              `http://127.0.0.1:${debugPort}`,
-              { timeout: 1000 },
+          const state = await app.evaluate(() => ({
+            endpoint: globalThis.canopyCheckEndpoint,
+            exitCode: globalThis.canopyCheckChild?.exitCode,
+            output: globalThis.canopyCheckOutput,
+          }));
+          if (state.exitCode !== null && state.exitCode !== undefined)
+            throw new Error(
+              `Demo child exited (${state.exitCode}) before readiness:\n${state.output}`,
             );
-            return true;
-          } catch {
-            return false;
+          if (!state.endpoint)
+            return state.output || 'Waiting for child DevTools endpoint';
+          try {
+            childBrowser = await chromium.connectOverCDP(state.endpoint, {
+              timeout: 1000,
+            });
+            return 'connected';
+          } catch (error) {
+            return `${error}\n${state.output}`;
           }
         },
         { timeout: 10000 },
       )
-      .toBe(true);
+      .toBe('connected');
     await expect
       .poll(() => childBrowser.contexts()[0]?.pages().length ?? 0)
       .toBeGreaterThan(0);
@@ -458,18 +460,11 @@ if (process.platform !== 'win32') {
         } catch {}
         await expect
           .poll(
-            () => {
-              try {
-                const state = execFileSync(
-                  'ps',
-                  ['-p', String(childPid), '-o', 'stat='],
-                  { encoding: 'utf8' },
-                ).trim();
-                return !state || state.startsWith('Z');
-              } catch {
-                return true;
-              }
-            },
+            () =>
+              app.evaluate(() => {
+                const child = globalThis.canopyCheckChild;
+                return child.exitCode !== null || child.signalCode !== null;
+              }),
             { timeout: 10000 },
           )
           .toBe(true);
