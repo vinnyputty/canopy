@@ -182,6 +182,7 @@ function asyncControl(command, args, options, mode) {
     let child;
     let error;
     let hasError = false;
+    let exitFailure;
     const recordFailure = (failure) => {
       if (hasError) return;
       hasError = true;
@@ -207,6 +208,18 @@ function asyncControl(command, args, options, mode) {
     };
     const done = (status, signal, closed) => {
       if (settled) return;
+      // execFile reports script exits through its callback. Only an observed,
+      // matching unsignaled exit can establish that this was not a transport fault.
+      if (
+        exitFailure &&
+        !(
+          closed &&
+          status === exitFailure.code &&
+          signal === null &&
+          !child.killed
+        )
+      )
+        recordFailure(exitFailure);
       settled = true;
       clearTimeout(timer);
       clearTimeout(closureTimer);
@@ -276,8 +289,17 @@ function asyncControl(command, args, options, mode) {
           : execFile(command, args, { ...options, timeout: 0 }, (failure) => {
               // Native callback null/undefined means successful completion;
               // explicit event/catch faults always record presence separately.
-              if (failure !== null && failure !== undefined)
-                recordFailure(failure);
+              if (failure !== null && failure !== undefined) {
+                if (
+                  failure instanceof Error &&
+                  Number.isSafeInteger(failure.code) &&
+                  failure.code > 0 &&
+                  failure.signal === null &&
+                  failure.killed === false
+                )
+                  exitFailure = failure;
+                else recordFailure(failure);
+              }
             });
     } catch (failure) {
       recordFailure(failure);

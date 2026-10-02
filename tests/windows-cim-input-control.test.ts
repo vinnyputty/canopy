@@ -470,3 +470,67 @@ test('nullish kill, pipe, unref and report throws preserve the direct child and 
     }
   `);
 });
+
+test('real ordinary exit status is comparable across all seven input transports', async () => {
+  const run = await reviewedControl();
+  for (const status of [0, 9]) {
+    const records = await run({
+      command: process.execPath,
+      argsFor: () => [
+        '-e',
+        `${output} console.error('private-exit-token'); process.exit(${status});`,
+      ],
+      timeoutMs: 1000,
+      report: (record) => assertGone(record.childPid),
+    });
+    for (const record of records) {
+      assert.equal(record.status, status);
+      assert.equal(record.signal, null);
+      assert.equal(record.killed, false);
+      assert.equal(record.operationFailed, false);
+      assert.equal(record.code, null);
+      assert.equal(record.error, status ? 'NONZERO_EXIT' : undefined);
+      assert.equal(record.ok, status === 0);
+      assert.ok(!JSON.stringify(record).includes('private-exit-token'));
+    }
+  }
+});
+
+test('numeric callback errors require matching unsignaled close and never erase transport or prior faults', () => {
+  checkModel(`${model}
+    const {runCimInputControls}=await import(${JSON.stringify(helper)});
+    const faults=[
+      {code:9,signal:null,killed:false,status:9,expected:false},
+      {code:9,signal:null,killed:false,status:8,expected:true},
+      {code:9,signal:'SIGTERM',killed:false,status:9,expected:true},
+      {code:9,signal:null,killed:true,status:9,expected:true},
+      {code:9,signal:null,killed:false,status:9,childKilled:true,expected:true},
+      {code:'EPIPE',signal:null,killed:false,status:9,expected:true},
+      {code:'ETIMEDOUT',signal:null,killed:false,status:9,expected:true},
+      {code:9,signal:null,killed:false,status:9,prior:Object.assign(new Error('private numeric stream fault'),{code:9,signal:null,killed:false}),expected:true},
+      {code:9,signal:null,killed:false,status:9,prior:false,expected:true},
+      {code:9,signal:null,killed:false,status:9,prior:undefined,expected:true},
+      {code:9,signal:null,killed:false,status:9,plain:true,expected:true},
+    ];
+    for(const fault of faults){
+      cp.execFile=(cmd,args,options,callback)=>{
+        const c=child();c.killed=Boolean(fault.childKilled);
+        c.kill=()=>true;
+        queueMicrotask(()=>{
+          if(Object.hasOwn(fault,'prior'))c.stderr.emit('error',fault.prior);
+          callback(Object.assign(fault.plain?{}:new Error('private callback text'), {code:fault.code,signal:fault.signal,killed:fault.killed}));
+          c.stdout.emit('data',row);c.emit('close',fault.status,null);
+        });
+        return c;
+      };
+      cp.spawn=()=>{const c=child();queueMicrotask(()=>{c.stdout.emit('data',row);c.emit('close',0,null);});return c;};
+      syncBuiltinESMExports();
+      const result=await runCimInputControls({timeoutMs:300,report:()=>{}});
+      for(const record of result.filter(r=>r.mode.startsWith('exec-'))){
+        assert.equal(record.operationFailed,fault.expected,JSON.stringify(fault));
+        assert.equal(record.error,fault.expected?'CHILD_OPERATION_FAILED':'NONZERO_EXIT');
+        assert.ok(!JSON.stringify(record).includes('private callback text'));
+      }
+    }
+  `);
+});

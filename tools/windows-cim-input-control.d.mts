@@ -5,6 +5,9 @@ export interface CimInputControlRecord {
   elapsedMs: number;
   timeoutMs: number;
   operationFailed: boolean;
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  killed: boolean;
   closed: boolean;
   cleanupCodes: string[];
   childPid: number | null;

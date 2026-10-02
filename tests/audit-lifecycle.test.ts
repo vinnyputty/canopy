@@ -12,6 +12,8 @@ import {
   finishAudit,
 } from '../tools/audit-lifecycle.mjs';
 
+import { disposeProcess, withCleanup } from './fixtures/owned-process.js';
+
 import { runCimInputControls } from '../tools/windows-cim-input-control.mjs';
 
 // These comparisons execute in the same Bazel/Node worker as the required
@@ -57,12 +59,11 @@ async function fixture(
   const dispose = async () => {
     // Only the subprocess handles/PIDs created and observed by this fixture.
     owner.restore();
-    if (child && child.exitCode === null && child.signalCode === null) {
-      const exit = once(child, 'exit');
-      if (process.platform !== 'win32') process.kill(-child.pid!, 'SIGKILL');
-      else child.kill('SIGKILL');
-      await deadline(() => exit, 5000, 'Fixture process exit');
-    }
+    await disposeProcess(child, () =>
+      process.platform !== 'win32'
+        ? process.kill(-child!.pid!, 'SIGKILL')
+        : child!.kill('SIGKILL'),
+    );
     if (descendant) {
       try {
         process.kill(descendant, 'SIGKILL');
@@ -153,21 +154,23 @@ test('normal shutdown reaps its real descendant before profile removal and leave
     ['-e', 'setInterval(()=>{},1000)'],
     { stdio: 'ignore' },
   );
-  await once(unrelated, 'spawn');
-  try {
-    await finishAudit({
-      owner: f.owner,
-      close: () => normalClose(f.child),
-      removeProfile: () => f.remove(),
-      writeEvidence: noop,
-    });
-    await assert.rejects(access(f.profile));
-    assert.equal(alive(unrelated.pid!), true);
-  } finally {
-    await f.dispose();
-    unrelated.kill('SIGKILL');
-    await once(unrelated, 'exit');
-  }
+  await withCleanup(
+    async () => {
+      await once(unrelated, 'spawn');
+      await finishAudit({
+        owner: f.owner,
+        close: () => normalClose(f.child),
+        removeProfile: () => f.remove(),
+        writeEvidence: noop,
+      });
+      await assert.rejects(access(f.profile));
+      assert.equal(alive(unrelated.pid!), true);
+    },
+    () => f.dispose(),
+    async () => {
+      await disposeProcess(unrelated);
+    },
+  );
 });
 
 for (const mode of ['reject', 'hang'] as const) {
@@ -178,40 +181,42 @@ for (const mode of ['reject', 'hang'] as const) {
       ['-e', 'setInterval(()=>{},1000)'],
       { stdio: 'ignore' },
     );
-    await once(unrelated, 'spawn');
-    try {
-      const start = Date.now();
-      await assert.rejects(
-        finishAudit({
-          owner: f.owner,
-          close:
-            mode === 'reject'
-              ? async () => {
-                  throw new Error('close rejected');
-                }
-              : () => new Promise(() => {}),
-          removeProfile: () => f.remove(),
-          writeEvidence: noop,
-        }),
-        (error: AggregateError) => {
-          assert.match(
-            error.message,
-            mode === 'reject' ? /close rejected/ : /timed out/,
-          );
-          return true;
-        },
-      );
-      assert.ok(
-        Date.now() - start < (process.platform === 'win32' ? 180000 : 6000),
-      );
-      assert.equal(alive(f.descendant), false);
-      assert.equal(alive(unrelated.pid!), true);
-      await assert.rejects(access(f.profile));
-    } finally {
-      await f.dispose();
-      unrelated.kill('SIGKILL');
-      await once(unrelated, 'exit');
-    }
+    await withCleanup(
+      async () => {
+        await once(unrelated, 'spawn');
+        const start = Date.now();
+        await assert.rejects(
+          finishAudit({
+            owner: f.owner,
+            close:
+              mode === 'reject'
+                ? async () => {
+                    throw new Error('close rejected');
+                  }
+                : () => new Promise(() => {}),
+            removeProfile: () => f.remove(),
+            writeEvidence: noop,
+          }),
+          (error: AggregateError) => {
+            assert.match(
+              error.message,
+              mode === 'reject' ? /close rejected/ : /timed out/,
+            );
+            return true;
+          },
+        );
+        assert.ok(
+          Date.now() - start < (process.platform === 'win32' ? 180000 : 6000),
+        );
+        assert.equal(alive(f.descendant), false);
+        assert.equal(alive(unrelated.pid!), true);
+        await assert.rejects(access(f.profile));
+      },
+      () => f.dispose(),
+      async () => {
+        await disposeProcess(unrelated);
+      },
+    );
   });
 }
 
@@ -368,51 +373,53 @@ test('launch rejection after actual spawn retains original launch error while cl
   });
   const original = new Error('ORIGINAL LAUNCH');
   let child!: ChildProcess;
-  try {
-    await assert.rejects(
-      owner.launch(async () => {
-        child = childProcess.spawn(
-          process.execPath,
-          ['-e', 'setInterval(()=>{},1000)'],
-          {
-            detached: process.platform !== 'win32',
-            env: { ...process.env, CANOPY_USER_DATA: profile },
-            stdio: 'ignore',
-          },
-        );
-        await once(child, 'spawn');
-        throw original;
-      }),
-      (error) => error === original,
-    );
-    await assert.rejects(
-      finishAudit({
-        owner,
-        primary: original,
-        diagnostics: [
-          {
-            label: 'Launch evidence',
-            run: async () => {
-              throw new Error('EVIDENCE ENOTDIR');
+  await withCleanup(
+    async () => {
+      await assert.rejects(
+        owner.launch(async () => {
+          child = childProcess.spawn(
+            process.execPath,
+            ['-e', 'setInterval(()=>{},1000)'],
+            {
+              detached: process.platform !== 'win32',
+              env: { ...process.env, CANOPY_USER_DATA: profile },
+              stdio: 'ignore',
             },
+          );
+          await once(child, 'spawn');
+          throw original;
+        }),
+        (error) => error === original,
+      );
+      await assert.rejects(
+        finishAudit({
+          owner,
+          primary: original,
+          diagnostics: [
+            {
+              label: 'Launch evidence',
+              run: async () => {
+                throw new Error('EVIDENCE ENOTDIR');
+              },
+            },
+          ],
+          removeProfile: async () => {
+            assert.ok(child.exitCode !== null || child.signalCode !== null);
+            await rm(profile, { recursive: true, force: true });
           },
-        ],
-        removeProfile: async () => {
-          assert.ok(child.exitCode !== null || child.signalCode !== null);
-          await rm(profile, { recursive: true, force: true });
-        },
-        writeEvidence: noop,
-      }),
-      (error: AggregateError) =>
-        error.cause === original && error.errors[0] === original,
-    );
-    assert.equal(alive(child.pid!), false);
-  } finally {
-    owner.restore();
-    if (child.exitCode === null && child.signalCode === null)
-      child.kill('SIGKILL');
-    await rm(profile, { recursive: true, force: true });
-  }
+          writeEvidence: noop,
+        }),
+        (error: AggregateError) =>
+          error.cause === original && error.errors[0] === original,
+      );
+      assert.equal(alive(child.pid!), false);
+    },
+    async () => {
+      owner.restore();
+      await disposeProcess(child);
+      await rm(profile, { recursive: true, force: true });
+    },
+  );
 });
 
 test('launch failure without spawned process preserves primary while reporting filesystem faults', async () => {
@@ -717,43 +724,44 @@ test(
     });
     let child!: ChildProcess;
     let removed = false;
-    try {
-      await assert.rejects(
-        owner.launch(async () => {
-          child = childProcess.spawn(
-            process.execPath,
-            ['-e', 'setInterval(()=>{},1000)'],
-            {
-              detached: false,
-              env: { ...process.env, CANOPY_USER_DATA: profile },
-              stdio: 'ignore',
+    await withCleanup(
+      async () => {
+        await assert.rejects(
+          owner.launch(async () => {
+            child = childProcess.spawn(
+              process.execPath,
+              ['-e', 'setInterval(()=>{},1000)'],
+              {
+                detached: false,
+                env: { ...process.env, CANOPY_USER_DATA: profile },
+                stdio: 'ignore',
+              },
+            );
+            await once(child, 'spawn');
+            return child;
+          }),
+          /isolated owned process scope/,
+        );
+        await assert.rejects(
+          finishAudit({
+            owner,
+            removeProfile: async () => {
+              removed = true;
             },
-          );
-          await once(child, 'spawn');
-          return child;
-        }),
-        /isolated owned process scope/,
-      );
-      await assert.rejects(
-        finishAudit({
-          owner,
-          removeProfile: async () => {
-            removed = true;
-          },
-          writeEvidence: noop,
-        }),
-        AggregateError,
-      );
-      assert.equal(removed, false);
-      assert.equal(alive(child.pid!), true);
-      await access(profile);
-    } finally {
-      owner.restore();
-      const exit = once(child, 'exit');
-      child.kill('SIGKILL');
-      await exit;
-      await rm(profile, { recursive: true, force: true });
-    }
+            writeEvidence: noop,
+          }),
+          AggregateError,
+        );
+        assert.equal(removed, false);
+        assert.equal(alive(child.pid!), true);
+        await access(profile);
+      },
+      async () => {
+        owner.restore();
+        await disposeProcess(child);
+        await rm(profile, { recursive: true, force: true });
+      },
+    );
   },
 );
 
@@ -764,32 +772,33 @@ test('mismatched application handle is never closed and unrelated process stays 
     ['-e', 'setInterval(()=>{},1000)'],
     { stdio: 'ignore' },
   );
-  await once(other, 'spawn');
   let closed = false;
-  try {
-    assert.throws(() => f.owner.confirm(other), /does not match/);
-    await assert.rejects(
-      finishAudit({
-        owner: f.owner,
-        close: async () => {
-          closed = true;
-          other.kill('SIGKILL');
-        },
-        removeProfile: () => f.remove(),
-        writeEvidence: noop,
-      }),
-      AggregateError,
-    );
-    assert.equal(closed, false);
-    assert.equal(alive(other.pid!), true);
-    assert.equal(alive(f.descendant), false);
-    await access(f.profile);
-  } finally {
-    await f.dispose();
-    const exit = once(other, 'exit');
-    other.kill('SIGKILL');
-    await exit;
-  }
+  await withCleanup(
+    async () => {
+      await once(other, 'spawn');
+      assert.throws(() => f.owner.confirm(other), /does not match/);
+      await assert.rejects(
+        finishAudit({
+          owner: f.owner,
+          close: async () => {
+            closed = true;
+            other.kill('SIGKILL');
+          },
+          removeProfile: () => f.remove(),
+          writeEvidence: noop,
+        }),
+        AggregateError,
+      );
+      assert.equal(closed, false);
+      assert.equal(alive(other.pid!), true);
+      assert.equal(alive(f.descendant), false);
+      await access(f.profile);
+    },
+    () => f.dispose(),
+    async () => {
+      await disposeProcess(other);
+    },
+  );
 });
 
 // These probes retain real subprocess handles outside capture so an unknown
@@ -852,107 +861,108 @@ async function captureProbe(
     assert.equal(alive(actual.pid!), true);
     return { actual, returned };
   };
-  try {
-    const operation = async () => {
-      if (mode === 'mixed' || mode === 'exact' || mode === 'irrelevant')
-        known = (await spawn(process.execPath)).actual;
-      if (mode !== 'exact') {
-        const result = await spawn(
-          mode === 'command' || mode === 'mixed'
-            ? `${process.execPath}.different-command-form`
-            : process.execPath,
-          mode !== 'irrelevant',
-        );
-        unknown = result.actual;
-      }
-      if (mode === 'exact' || mode === 'irrelevant') return known!;
-      throw primary;
-    };
-    if (mode === 'exact' || mode === 'irrelevant') {
-      const app = await owner.launch(operation);
-      owner.confirm(app);
-      await finishAudit({
-        owner,
-        close: async () => {
-          closed = true;
-          const exit = once(known!, 'exit');
-          known!.send('normal');
-          await exit;
-        },
-        removeProfile: async () => {
-          assert.equal(known!.exitCode, 0);
-          removed = true;
-          await rm(profile, { recursive: true, force: true });
-        },
-        writeEvidence: noop,
-      });
-      assert.equal(closed, true);
-      assert.equal(removed, true);
-      assert.deepEqual(signals, []);
-      if (unknown) assert.equal(alive(unknown.pid!), true);
-    } else {
-      await assert.rejects(
-        owner.launch(operation),
-        (error) => error === primary,
-      );
-      await assert.rejects(
-        finishAudit({
+  await withCleanup(
+    async () => {
+      const operation = async () => {
+        if (mode === 'mixed' || mode === 'exact' || mode === 'irrelevant')
+          known = (await spawn(process.execPath)).actual;
+        if (mode !== 'exact') {
+          const result = await spawn(
+            mode === 'command' || mode === 'mixed'
+              ? `${process.execPath}.different-command-form`
+              : process.execPath,
+            mode !== 'irrelevant',
+          );
+          unknown = result.actual;
+        }
+        if (mode === 'exact' || mode === 'irrelevant') return known!;
+        throw primary;
+      };
+      if (mode === 'exact' || mode === 'irrelevant') {
+        const app = await owner.launch(operation);
+        owner.confirm(app);
+        await finishAudit({
           owner,
-          primary,
           close: async () => {
             closed = true;
+            const exit = once(known!, 'exit');
+            known!.send('normal');
+            await exit;
           },
           removeProfile: async () => {
+            assert.equal(known!.exitCode, 0);
             removed = true;
             await rm(profile, { recursive: true, force: true });
           },
           writeEvidence: noop,
-        }),
-        (error: AggregateError) => {
-          assert.equal(error.cause, primary);
-          assert.equal(error.errors[0], primary);
-          assert.ok(
-            error.errors.some((e: Error) =>
-              /Unestablished launch ownership/.test(e.message),
-            ),
-          );
-          return true;
-        },
+        });
+        assert.equal(closed, true);
+        assert.equal(removed, true);
+        assert.deepEqual(signals, []);
+        if (unknown) assert.equal(alive(unknown.pid!), true);
+      } else {
+        await assert.rejects(
+          owner.launch(operation),
+          (error) => error === primary,
+        );
+        await assert.rejects(
+          finishAudit({
+            owner,
+            primary,
+            close: async () => {
+              closed = true;
+            },
+            removeProfile: async () => {
+              removed = true;
+              await rm(profile, { recursive: true, force: true });
+            },
+            writeEvidence: noop,
+          }),
+          (error: AggregateError) => {
+            assert.equal(error.cause, primary);
+            assert.equal(error.errors[0], primary);
+            assert.ok(
+              error.errors.some((e: Error) =>
+                /Unestablished launch ownership/.test(e.message),
+              ),
+            );
+            return true;
+          },
+        );
+        assert.equal(
+          removed,
+          false,
+          'live unverified writer forbids profile removal',
+        );
+        assert.equal(
+          closed,
+          false,
+          'unverified application close must not be called',
+        );
+        assert.equal(
+          alive(unknown!.pid!),
+          true,
+          'unknown process must not be signaled',
+        );
+        await access(profile);
+        if (known) {
+          assert.ok(known.exitCode !== null || known.signalCode !== null);
+          if (process.platform !== 'win32')
+            assert.deepEqual(signals, [-known.pid!]);
+        } else assert.deepEqual(signals, []);
+      }
+    },
+    async () => {
+      owner.restore();
+      childProcess.spawn = original;
+      syncBuiltinESMExports();
+      await withCleanup(
+        noop,
+        ...children.map((child) => () => disposeProcess(child)),
       );
-      assert.equal(
-        removed,
-        false,
-        'live unverified writer forbids profile removal',
-      );
-      assert.equal(
-        closed,
-        false,
-        'unverified application close must not be called',
-      );
-      assert.equal(
-        alive(unknown!.pid!),
-        true,
-        'unknown process must not be signaled',
-      );
-      await access(profile);
-      if (known) {
-        assert.ok(known.exitCode !== null || known.signalCode !== null);
-        if (process.platform !== 'win32')
-          assert.deepEqual(signals, [-known.pid!]);
-      } else assert.deepEqual(signals, []);
-    }
-  } finally {
-    owner.restore();
-    childProcess.spawn = original;
-    syncBuiltinESMExports();
-    for (const child of children) {
-      if (child.exitCode !== null || child.signalCode !== null) continue;
-      const exit = once(child, 'exit');
-      child.kill('SIGKILL');
-      await exit;
-    }
-    await rm(profile, { recursive: true, force: true });
-  }
+      await rm(profile, { recursive: true, force: true });
+    },
+  );
 }
 
 test('profile-bearing unmatched command retains the live writer profile without signaling it', async () => {
@@ -1008,12 +1018,11 @@ test('fixture initialization failure preserves its error and cleans observed rea
     AuditOwner.prototype.launch = originalLaunch;
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
-    if (child && child.exitCode === null && child.signalCode === null) {
-      const exit = once(child, 'exit');
-      if (process.platform !== 'win32') process.kill(-child.pid!, 'SIGKILL');
-      else child.kill('SIGKILL');
-      await exit;
-    }
+    await disposeProcess(child, () =>
+      process.platform !== 'win32'
+        ? process.kill(-child!.pid!, 'SIGKILL')
+        : child!.kill('SIGKILL'),
+    );
     if (descendant && alive(descendant)) {
       process.kill(descendant, 'SIGKILL');
       for (let i = 0; i < 100 && alive(descendant); i++) await sleep(20);
