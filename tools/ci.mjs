@@ -2,6 +2,13 @@ import { spawnSync } from 'node:child_process';
 
 const cwd = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 const startupOptions = process.argv.slice(2);
+if (
+  process.env.CANOPY_EXPECT_PLATFORM &&
+  process.env.CANOPY_EXPECT_PLATFORM !== `${process.platform}/${process.arch}`
+)
+  throw new Error(
+    `Runner platform mismatch: ${process.platform}/${process.arch}`,
+  );
 const env = { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' };
 // Nested Bazel launchers must resolve their own runfiles and Node toolchain.
 for (const key of Object.keys(env)) {
@@ -39,3 +46,14 @@ if (process.platform === 'linux' && !env.DISPLAY) {
   bazel('run', '//:demo_check');
 }
 bazel('run', '//:package');
+if (process.platform === 'linux' && !env.DISPLAY) {
+  run('xvfb-run', [
+    '-a',
+    'bazel',
+    ...startupOptions,
+    'run',
+    '//:packaged_smoke',
+  ]);
+} else {
+  bazel('run', '//:packaged_smoke');
+}

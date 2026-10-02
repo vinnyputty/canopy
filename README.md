@@ -2,7 +2,7 @@
 
 A focused Electron desktop workspace for Jira and GitHub issue trees, with one root issue per tab. Expand the provider's parent/child hierarchy and open linked issues in their own tabs. Jira supports inline summaries, priorities, assignees, status, and sibling ranking. GitHub supports title, assignee, labels, and open/closed state.
 
-Canopy targets macOS, Windows, and Linux. Its provider boundary keeps the tree UI independent of Jira and GitHub REST payloads.
+Canopy’s candidate package matrix is macOS arm64, Windows x64, and Linux x64; see [platform requirements and release blockers](docs/platforms.md). Its provider boundary keeps the tree UI independent of Jira and GitHub REST payloads.
 
 ## Run
 
@@ -16,7 +16,7 @@ bazel run //:dev
 
 Choose **Try demo** on the welcome screen or from the sidebar or app menu to open a separate local sample workspace. Each guided step highlights its target before acting, then shows the result while its progress bar fills. **Pause demo** freezes the step until **Resume demo**; use the Previous and Next buttons or Left and Right arrows to revisit steps. **Stop demo** leaves the sample tree available, and **Reset and replay** restores its starting data. Closing the demo returns to the original Canopy window. No account or network connection is needed, and demo changes last only for that launch. From a source checkout, `bazel run //:demo` opens the same experience and `bazel run //:demo_check` runs its Electron interaction checks at ten times the tour speed. Interactive demos retain their readable pace; `CANOPY_DEMO_TIME_SCALE` accepts a presentation delay multiplier between 0 and 1 (exclusive of 0). Element readiness timeouts remain unchanged.
 
-Run `bazel run //:smoke` for an automated Electron demo test covering editing, tree controls, linked tabs, shortcuts, global reading settings and migration, scoped resets, and persistence across restarts. Failures print visible app errors and recent process output, and save a screenshot plus `failure.json` under `.cache/smoke-failure/`; CI uploads these as `smoke-failure-<OS>` artifacts. Set `CANOPY_SMOKE_TEST_DIAGNOSTICS=1` to verify capture with an intentional failure. It opens isolated app windows and writes a screenshot to `.cache/tree.png`; it does not use your saved connections.
+Run `bazel run //:smoke` for an automated Electron demo test covering editing, tree controls, linked tabs, shortcuts, global reading settings and migration, scoped resets, and persistence across restarts. Failures print visible app errors and recent process output, and save a screenshot plus `failure.json` under `.cache/smoke-failure/`; CI uploads these as `smoke-failure-<OS>-<CPU>` artifacts. Set `CANOPY_SMOKE_TEST_DIAGNOSTICS=1` to verify capture with an intentional failure. It opens isolated app windows and writes a screenshot to `.cache/tree.png`; it does not use your saved connections.
 
 Run `bazel run //:smoke_github` for a focused Electron test with mocked GitHub API responses covering connection, cross-repository sub-issues, edits, labels, and grouped search. It uses isolated app data and does not use your saved credentials.
 
@@ -26,7 +26,7 @@ Run the full CI sequence locally with:
 bazel run //:ci
 ```
 
-This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke and guided demo checks, and packages Canopy. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
+This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke and guided demo checks, packages Canopy, and launches every extracted download for a credential-free first-run and restart check. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
 
 Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. Normal builds start with your saved Jira connections. The local sample provider powers both the guided demo and the smoke-test entry point; smoke-only failure controls stay in the test fixture.
 
@@ -80,7 +80,7 @@ Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/
 bazel run //:package
 ```
 
-Installers are written to `release/`: DMG/ZIP on macOS, NSIS on Windows, and AppImage/DEB on Linux. Packaging runs on the target operating system. Builds are unsigned; macOS distribution needs signing and notarization for a smooth installation experience. CI builds and checks each OS and creates platform artifacts for pull requests. GUI launch and real-site integration must also be verified on the target machine.
+Installers are written to `release/`: DMG/ZIP for macOS arm64, NSIS for Windows x64, and AppImage/DEB for Linux x64. Packaging requires a host OS/CPU in this matrix. `bazel run //:packaged_smoke` checks each download’s production executable after packaging; CI uploads only checked downloads and their hash report. Builds are unsigned. Native clean installation, upgrade, removal, signing trust, and Linux desktop/keyring qualification remain pending user desktop access and block public release. See [minimum OS targets, installer prerequisites, and the release checklist](docs/platforms.md).
 
 ## Development
 
