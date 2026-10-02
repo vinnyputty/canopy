@@ -39,14 +39,14 @@ js_test(
     name = "format_check",
     entry_point = "tools/check.mjs",
     args = ["format"],
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", "docs/*.json", ".github/**/*.yml"]),
 )
 
 js_test(
     name = "portable_checks",
     timeout = "long",
     entry_point = "tools/portable-check.mjs",
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", "docs/*.json", ".github/**/*.yml"]),
 )
 
 js_binary(

@@ -1,3 +1,5 @@
+import type { TreeSnapshot } from '../shared/types';
+
 export const ACTIVE_REFRESH_MS = 30_000;
 export const MAX_BACKGROUND_REFRESH_MS = 60 * 60_000;
 
@@ -172,5 +174,108 @@ export class RefreshSchedule {
     if (!entry) return;
     entry.inflight = false;
     entry.due = Math.max(entry.due, due);
+  }
+}
+
+export type RefreshAnnouncement = {
+  tabId: string;
+  scope: number;
+  text: string;
+};
+type AnnouncementRequest = {
+  tabId: string;
+  scope: number;
+  manual: boolean;
+  previous?: TreeSnapshot;
+};
+
+// Scheduling may force an automatic recovery. Only a user action requests speech.
+export class RefreshAnnouncements {
+  private activeTabId: string | null = null;
+  scope = 0;
+  private requested = new Set<string>();
+  private running = new Map<string, AnnouncementRequest>();
+  private failures = new Set<string>();
+
+  constructor(private publish: (message: RefreshAnnouncement) => void) {}
+
+  activate(tabId: string | null) {
+    if (this.activeTabId !== tabId) {
+      this.activeTabId = tabId;
+      this.scope++;
+    }
+  }
+
+  request(tabId: string) {
+    if (!this.running.get(tabId)?.manual) this.requested.add(tabId);
+    return this.requested.has(tabId);
+  }
+
+  begin(tabId: string, rootKey: string, previous?: TreeSnapshot) {
+    const request = {
+      tabId,
+      scope: this.scope,
+      manual: this.requested.delete(tabId),
+      previous,
+    };
+    this.running.set(tabId, request);
+    if (request.manual || !previous)
+      this.emit(request, `Checking ${rootKey} for changes`);
+    return request;
+  }
+
+  complete(request: AnnouncementRequest, next: TreeSnapshot) {
+    if (this.running.get(request.tabId) !== request) return;
+    const recovered = this.failures.delete(request.tabId);
+    const content = ({ fetchedAt: _timestamp, ...data }: TreeSnapshot) =>
+      JSON.stringify(data);
+    const changed =
+      !!request.previous && content(request.previous) !== content(next);
+    if (request.manual || recovered || !request.previous || changed)
+      this.emit(
+        request,
+        `${!request.manual && changed ? 'Changes found. ' : ''}${next.rootKey}: ${next.issues.length} issues, last updated at ${new Date(next.fetchedAt).toLocaleTimeString()}`,
+      );
+    this.running.delete(request.tabId);
+  }
+
+  // A current root generation can also deliver to another tab for that root.
+  receive(tabId: string, next: TreeSnapshot, previous?: TreeSnapshot) {
+    const request = this.running.get(tabId) ?? {
+      tabId,
+      scope: this.scope,
+      manual: false,
+      previous,
+    };
+    this.running.set(tabId, request);
+    this.complete(request, next);
+  }
+
+  fail(request: AnnouncementRequest, rootKey: string, error: string) {
+    if (this.running.get(request.tabId) !== request) return;
+    this.failures.add(request.tabId);
+    const retained = request.previous
+      ? `; ${request.previous.issues.length} issues retained, last updated at ${new Date(request.previous.fetchedAt).toLocaleTimeString()}`
+      : '';
+    this.emit(request, `Couldn’t refresh ${rootKey}: ${error}${retained}`);
+    this.running.delete(request.tabId);
+  }
+
+  end(request: AnnouncementRequest) {
+    if (this.running.get(request.tabId) === request) {
+      if (request.manual || !request.previous) this.emit(request, '');
+      this.running.delete(request.tabId);
+    }
+  }
+
+  forget(tabId: string) {
+    this.requested.delete(tabId);
+    this.running.delete(tabId);
+    this.failures.delete(tabId);
+  }
+
+  private emit(request: AnnouncementRequest, text: string) {
+    if (request.tabId === this.activeTabId && request.scope === this.scope)
+      this.publish({ tabId: request.tabId, scope: request.scope, text });
   }
 }

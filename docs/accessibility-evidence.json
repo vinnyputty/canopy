@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "issue": 88,
+  "evidence_kind": "Observed sample Electron/Chromium rendering and interaction; native accessibility and speech pending",
+  "runtime": {
+    "electron": "44.3.0",
+    "chromium": "152.0.7977.78",
+    "platform": "macOS arm64",
+    "archive_sha256": "49b91ef265c603c8888500f807484b63816069c30f87ba2b403e7c87f0f45035",
+    "archive_entries_verified": 273,
+    "lockfile_sha256": "7cf78133da32054aaad94f7226dc4aea0145344783805b6bee54bfaea91756b1"
+  },
+  "baseline": {
+    "source_commit": "af0808d41d39d3f9252b620723014bd76baf953f",
+    "source_tree": "89889c9915746368843f220eed94b2a744534ad9",
+    "manifest_sha256": "19d91ef3b80467a82f9a30ed75147f28304e0974a9154b0b9d2a7aac5a0ca926",
+    "provenance": "Reconstructed manifest: its original filename was overwritten by the changed-candidate staging helper. Restored from the untouched baseline stage and hash validation of 30 source/app files, 96 audit/evidence files, 10747 dependency files and 273 archive entries. This is not original manifest byte preservation or a new historical execution.",
+    "reconstruction_report_sha256": "08fcea914f6e4114ece1058e53683a1ad6ab8124fccb7384e1ab85a0f203937c",
+    "app_hashes": {
+      "app/dist/smoke-main.cjs": "a53f7e9b5428f7149aa386a78d05965ea44ef985206b2eeff8091e5af8f6ce2d",
+      "app/dist/renderer/app.css": "ef18d7d2a93e93f0d7d8ae1c73b9a97cb8fa0e28968161433b4b2e55bcb6c7bc",
+      "app/dist/renderer/app.js": "fdc78fdde1f445d838ba736b80959d571ce13d4f71eb8588a44b40fff788beb5",
+      "harness/tools/smoke.mjs": "c745f51c9b5cc33f34cf375a913d5efe37c48d9dd3f8402c06402e9cac61fe2d"
+    },
+    "observation_hashes": {
+      "evidence-states-v3/observations.json": "c0919fb7b33acbacd881c46eff6471ed6b557b0962e4f951dec2aa92a9d304cb",
+      "evidence/zoom200-settings.png": "130ae7c835b4b810a85a36b5a49928e0d1b4a4278d18de739e2a8cabd897831a",
+      "evidence/tree.aria.txt": "a1c612d92e8628c1d9085ebb5546ec4eb655f9b6f956e7ecf0973cac45bcd985",
+      "evidence/observations.json": "bf8f90e70e15cdd2cc6bd1479bc0654d083b4e255a2888b48d06aa63a2c5115c",
+      "evidence/refresh-error.aria.txt": "2ea19db89c510853f22f751009ff43e566c1d8c804f6a9eb84d5217f78d61f82"
+    }
+  },
+  "observed_barriers": [
+    "Open issue/Command palette Escape leaves body focus",
+    "Focused summary cancel/save leaves body focus",
+    "Refresh/pending edit feedback and decorative loading lack live text",
+    "Partial warning lacks status semantics; error dismiss lacks a name",
+    "Secondary and selected text and dark primary-button text fall below 4.5:1",
+    "Settings clips content and toolbar extends beyond viewport at 200% zoom",
+    "Reduced-motion spinners retain infinite animations"
+  ],
+  "observed_mac_candidate": {
+    "source_commit": "5b8b00442a4190b6afa1f0072cbb98c3be830c7c",
+    "source_tree": "4ffc1c5cb8ffb0f66ef59e0279d29df7fdf9767a",
+    "manifest_sha256": "ce329234a9e0560d389b61fc2d0cb66d62e3f2bd154796ee999eafc59c105bf2",
+    "app_hashes": {
+      "app/dist/renderer/app.css": "0b2df49e671996a86cdd3d600195fac2d9e69d33924b9dee49825eaac26dbf55",
+      "app/dist/renderer/app.js": "07700589ca0f19931c3a2a46596b469f6267cbae6946c521daefe703dee39f9d",
+      "app/dist/smoke-main.cjs": "a53f7e9b5428f7149aa386a78d05965ea44ef985206b2eeff8091e5af8f6ce2d",
+      "harness/tools/smoke-accessibility.mjs": "298398186655146549ba11830cdfe9065efe089490c88bc9512bd68181b5e12a",
+      "harness/tools/smoke.mjs": "8e34f5d591f95ed3f9ff26325fb86b19a1a79551e02de71111ead3705b0fa215"
+    },
+    "results": {
+      "focused": "PASS",
+      "full": "PASS",
+      "scope": "Actual sample app keyboard/pointer/rendered layout and Chromium accessibility tree; all twelve theme combinations, enabled primary rest/hover, held summary success/rollback/focus, retained refresh failure/retry, partial/loading, emulated reduced motion and 200% zoom"
+    },
+    "evidence_hashes": {
+      "focused.log": "1661191786060e420b04e3979abcd46e1bae77ba03a33d521f082d52dc13e578",
+      "full.log": "f06f34cfc04dc9dec12ec640566a43a310e05247c3b0273d342a6018ba66870f",
+      "cache/accessibility/rendered-contrast.json": "2174e6f896d7e452f4963f4986c14135d5e73d19eeb77b00ba4a703e0e43aa6a",
+      "cache/accessibility/refresh-transitions.json": "e1b589d753ddfcb7c30c5e60defb73718ab7c9c8d20e8d6b37287dbb64da88b0"
+    },
+    "acceptance_report_sha256": "7b8c5f021971fc1129287eaafb23fe5a6b3aee2242fa6879b940f58747c057a7",
+    "cleanup_report_sha256": "54961c15349920a4c4fcf23879a48e739b324c094febaa6dabc22577876eba5f",
+    "cleanup": {
+      "owned_processes": [],
+      "new_profiles": [],
+      "hashes_unchanged": true,
+      "candidate_clean": true,
+      "owned_changed_stage_removed": true
+    }
+  },
+  "remaining": {
+    "macOS_AX_VoiceOver": "pending",
+    "Windows_UIA_Narrator": "pending",
+    "Linux_AT_SPI_Orca": "pending",
+    "poll_feedback_follow_on_GUI": "pending fresh independent review and exclusive lead GUI token",
+    "limits": "No native speech/events qualification, native preferences or exhaustive provider/dialog/long-label/clipping acceptance; Chromium trees and formula ratios are separate evidence categories."
+  }
+}

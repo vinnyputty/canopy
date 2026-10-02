@@ -319,6 +319,9 @@ export async function auditAccessibility(app, page, evidence) {
       snapshot,
     );
   const timestamp = page.locator('.statusbar').getByText(/Last updated/);
+  // Establish user-request completion after the navigation scope changed.
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.locator('.spin:visible')).toHaveCount(0);
   const before = await latestTree('CAN-100');
   expect(before).toBeDefined();
   const previousStatus = await completion(before);
@@ -352,7 +355,13 @@ export async function auditAccessibility(app, page, evidence) {
   await expect(
     page.getByText('Checking for changes', { exact: true }),
   ).toHaveCount(0);
-  await expect(live).toHaveText(previousStatus);
+  await expect(live).toHaveText(
+    await page.evaluate(
+      (snapshot) =>
+        `Couldn’t refresh CAN-100: Sample refresh failure; ${snapshot.issues.length} issues retained, last updated at ${new Date(snapshot.fetchedAt).toLocaleTimeString()}`,
+      before,
+    ),
+  );
   await expect(timestamp).toHaveAttribute('title', previousTitle);
   expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);
   await expect(
@@ -395,6 +404,153 @@ export async function auditAccessibility(app, page, evidence) {
   ).toHaveText('Connected');
   await checkLive('retry-completed-delivery', delivered);
   await capture('refresh-retry-completed');
+
+  // Controlled scheduler time drives the actual App cadence/IPC, not a parallel
+  // status implementation. The sample provider's completion clock stays real.
+  await page.clock.install();
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await live.evaluate((node) => {
+    globalThis.canopyLiveChanges = [];
+    new MutationObserver(() =>
+      globalThis.canopyLiveChanges.push(node.textContent),
+    ).observe(node, { childList: true, subtree: true, characterData: true });
+  });
+  const changes = () => page.evaluate(() => globalThis.canopyLiveChanges);
+  const resetChanges = () =>
+    page.evaluate(() => {
+      globalThis.canopyLiveChanges = [];
+    });
+  const automatic = async (id) => {
+    await fixture('hold', id, 'tree', 'CAN-100');
+    await page.clock.runFor(31_000);
+    await expect.poll(() => fixture('started', id)).toBe(true);
+    expect(await fixture('completed', id)).toBe(false);
+    expect(await page.locator('.spin:visible').count()).toBeGreaterThan(0);
+  };
+  const quietText = await live.textContent();
+  await expect
+    .poll(() => app.evaluate(() => Date.now()))
+    .toBeGreaterThan(delivered.fetchedAt);
+  await automatic('a11y-automatic-unchanged');
+  await expect(live).toHaveText(quietText);
+  await checkLive('automatic-unchanged-held', delivered);
+  await fixture('release', 'a11y-automatic-unchanged');
+  await expect
+    .poll(() => fixture('completed', 'a11y-automatic-unchanged'))
+    .toBe(true);
+  await expect(page.locator('.spin:visible')).toHaveCount(0);
+  await expect(live).toHaveText(quietText);
+  expect(await changes()).toEqual([]);
+  const automaticDelivery = await latestTree('CAN-100');
+  expect(automaticDelivery.fetchedAt).toBeGreaterThan(delivered.fetchedAt);
+  const { fetchedAt: _oldTime, ...oldContent } = delivered;
+  const { fetchedAt: _newTime, ...newContent } = automaticDelivery;
+  expect(newContent).toEqual(oldContent);
+  await expect(timestamp).toHaveAttribute(
+    'title',
+    await page.evaluate(
+      (time) => new Date(time).toLocaleString(),
+      automaticDelivery.fetchedAt,
+    ),
+  );
+  await checkLive('automatic-unchanged-settled', automaticDelivery);
+
+  // Actual fixture data changes, with unchanged issue count, deserve feedback.
+  const originalSummary = automaticDelivery.issues.find(
+    (issue) => issue.key === 'CAN-100',
+  ).summary;
+  await fixture('update', 'CAN-100', {
+    summary: 'Sample automatic accessibility change',
+  });
+  await resetChanges();
+  await automatic('a11y-automatic-new-data');
+  await expect(live).toHaveText(quietText);
+  await fixture('release', 'a11y-automatic-new-data');
+  await expect
+    .poll(() => fixture('completed', 'a11y-automatic-new-data'))
+    .toBe(true);
+  await expect(page.locator('.spin:visible')).toHaveCount(0);
+  const newData = await latestTree('CAN-100');
+  expect(newData.issues.find((issue) => issue.key === 'CAN-100').summary).toBe(
+    'Sample automatic accessibility change',
+  );
+  await expect(live).toHaveText(`Changes found. ${await completion(newData)}`);
+  expect((await changes()).length).toBeGreaterThan(0);
+  await checkLive('automatic-new-data-settled', newData);
+
+  // A cooldown recovery is forced by the scheduler, not requested by the user.
+  await automatic('a11y-automatic-failure');
+  const retryAt = await page.evaluate(() => Date.now() + 2000);
+  await app.evaluate((_electron, retryAt) => {
+    globalThis.canopySmoke.retryAt = retryAt;
+  }, retryAt);
+  await fixture(
+    'release',
+    'a11y-automatic-failure',
+    'Sample automatic failure',
+  );
+  await expect(live).toContainText('Sample automatic failure');
+  await expect(timestamp).toHaveAttribute(
+    'title',
+    await page.evaluate(
+      (time) => new Date(time).toLocaleString(),
+      newData.fetchedAt,
+    ),
+  );
+  await checkLive('automatic-failure-retained', newData);
+  const failureText = await live.textContent();
+  await fixture('hold', 'a11y-forced-recovery', 'tree', 'CAN-100');
+  await app.evaluate(() => {
+    globalThis.canopySmoke.retryAt = null;
+  });
+  await resetChanges();
+  await page.clock.runFor(3000);
+  await expect
+    .poll(() => fixture('started', 'a11y-forced-recovery'))
+    .toBe(true);
+  await expect(live).toHaveText(failureText);
+  expect(await changes()).toEqual([]);
+  await fixture('release', 'a11y-forced-recovery');
+  await expect
+    .poll(() => fixture('completed', 'a11y-forced-recovery'))
+    .toBe(true);
+  await expect(page.locator('.spin:visible')).toHaveCount(0);
+  await expect(live).toHaveText(await completion(await latestTree('CAN-100')));
+  await checkLive(
+    'automatic-forced-recovery-completed',
+    await latestTree('CAN-100'),
+  );
+
+  // A command Refresh during a held poll must retain user intent until the
+  // deferred read starts; automatic completion cannot steal that feedback.
+  await automatic('a11y-overlap-poll');
+  await fixture('hold', 'a11y-overlap-manual', 'tree', 'CAN-100');
+  await page.getByRole('button', { name: 'More commands' }).click();
+  await page
+    .getByRole('dialog', { name: 'Command palette' })
+    .getByRole('button', { name: /Refresh current tree/ })
+    .click();
+  expect(await fixture('started', 'a11y-overlap-manual')).toBe(false);
+  await fixture('release', 'a11y-overlap-poll');
+  await expect.poll(() => fixture('completed', 'a11y-overlap-poll')).toBe(true);
+  await page.clock.runFor(2000);
+  await expect.poll(() => fixture('started', 'a11y-overlap-manual')).toBe(true);
+  await expect(live).toHaveText('Checking CAN-100 for changes');
+  await checkLive('overlap-manual-held', await latestTree('CAN-100'));
+  // Navigation removes the outgoing scope's progress; its late completion
+  // must not change the current tab's status or reappear when returning.
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  const destinationText = await live.textContent();
+  await fixture('release', 'a11y-overlap-manual');
+  await expect
+    .poll(() => fixture('completed', 'a11y-overlap-manual'))
+    .toBe(true);
+  await expect(live).toHaveText(destinationText);
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await expect(live).not.toContainText('Checking CAN-100');
+  await checkLive('navigation-late-completion', await latestTree('CAN-100'));
+  await fixture('update', 'CAN-100', { summary: originalSummary });
+  await page.clock.resume();
   await cdp.detach();
   await liveNode.dispose();
 

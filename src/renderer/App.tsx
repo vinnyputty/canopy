@@ -147,7 +147,12 @@ import {
   readingStyle,
 } from './table-view';
 import { Mutations } from './mutations';
-import { RefreshSchedule, RootRefreshGate } from './refresh';
+import {
+  RefreshAnnouncements,
+  type RefreshAnnouncement,
+  RefreshSchedule,
+  RootRefreshGate,
+} from './refresh';
 import {
   configuredRoots,
   sourceTabId,
@@ -637,6 +642,12 @@ export function App() {
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const previousVirtualTabs = useRef(new Map<string, TabState>());
+  const [refreshAnnouncement, setRefreshAnnouncement] =
+    useState<RefreshAnnouncement | null>(null);
+  const [refreshAnnouncements] = useState(
+    () => new RefreshAnnouncements(setRefreshAnnouncement),
+  );
+  refreshAnnouncements.activate(workspace.activeTabId);
   const refreshSchedule = useRef(new RefreshSchedule());
   const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
   const snapshotsRef = useRef(snapshots);
@@ -1328,6 +1339,7 @@ export function App() {
     ) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       if (userRequested) manualRelationshipRefreshes.current.add(tab.id);
+      const userQueued = userRequested && refreshAnnouncements.request(tab.id);
       explicit ||= forcedRefreshes.current.has(tab.id);
       if (
         (!navigator.onLine && !demoMode) ||
@@ -1339,7 +1351,10 @@ export function App() {
       }
       if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
       if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) {
-        if (explicit && !runningExplicitRefreshes.current.has(tab.id)) {
+        if (
+          userQueued ||
+          (explicit && !runningExplicitRefreshes.current.has(tab.id))
+        ) {
           forcedRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
         }
@@ -1364,6 +1379,11 @@ export function App() {
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
       refreshSequences.current[tab.id] = sequence;
       if (explicit) runningExplicitRefreshes.current.set(tab.id, sequence);
+      const announcement = refreshAnnouncements.begin(
+        tab.id,
+        tab.rootKey,
+        mutations.confirmedSnapshot(tab.id) ?? snapshotsRef.current[tab.id],
+      );
       const epoch = mutations.beginRefresh();
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
@@ -1397,7 +1417,9 @@ export function App() {
                 refreshSequences.current[tab.id] !== sequence)
             )
               continue;
-            const previous = mutations.confirmedSnapshot(target.id);
+            const previous =
+              mutations.confirmedSnapshot(target.id) ??
+              snapshotsRef.current[target.id];
             mutations.receive(target, next, epoch);
             const confirmed = mutations.confirmedSnapshot(target.id) ?? next;
             if (manualRelationships)
@@ -1411,6 +1433,12 @@ export function App() {
                   ),
                 ],
                 new Set(),
+              );
+            if (target.id !== tab.id)
+              refreshAnnouncements.receive(
+                target.id,
+                mutations.confirmedSnapshot(target.id) ?? next,
+                previous,
               );
             delivered.add(target.id);
           }
@@ -1445,6 +1473,11 @@ export function App() {
           deferredRefreshes.current.add(tab.id);
         }
         if (!delivered.size) return;
+        if (delivered.has(tab.id))
+          refreshAnnouncements.complete(
+            announcement,
+            mutations.confirmedSnapshot(tab.id) ?? next,
+          );
         setConnectionErrors((current) => {
           const copy = new Set(current);
           for (const id of delivered) copy.delete(id);
@@ -1467,19 +1500,26 @@ export function App() {
         if (
           refreshSequences.current[tab.id] !== sequence ||
           !rootRefreshes.current.isCurrent(rootKey, load.generation) ||
-          !tabsRef.current.some((item) => item.id === tab.id)
+          !tabsRef.current.some((item) => item.id === tab.id) ||
+          refreshBlocked.current(tab.connectionId)
         )
           return;
         if (status?.retryAt) {
           cooldowns.current[tab.connectionId] = status.retryAt;
           setCooldownTimes({ ...cooldowns.current });
         }
+        refreshAnnouncements.fail(
+          announcement,
+          tab.rootKey,
+          error instanceof Error ? error.message : String(error),
+        );
         setConnectionErrors((current) => new Set(current).add(tab.id));
         setErrors((current) => ({
           ...current,
           [tab.id]: error instanceof Error ? error.message : String(error),
         }));
       } finally {
+        refreshAnnouncements.end(announcement);
         mutations.endRefresh(epoch);
         if (runningExplicitRefreshes.current.get(tab.id) === sequence)
           runningExplicitRefreshes.current.delete(tab.id);
@@ -1829,6 +1869,7 @@ export function App() {
         forcedRefreshes.current.delete(id);
         manualRelationshipRefreshes.current.delete(id);
         runningExplicitRefreshes.current.delete(id);
+        refreshAnnouncements.forget(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
         setter(
@@ -4881,11 +4922,10 @@ export function App() {
                 </div>
                 <footer className="statusbar">
                   <span className="sr-only" role="status" aria-atomic="true">
-                    {refreshing.has(activeTab.id) || loading.has(activeTab.id)
-                      ? `Checking ${activeTab.rootKey} for changes`
-                      : snapshot
-                        ? `${activeTab.rootKey}: ${snapshot.issues.length} issues, last updated at ${new Date(snapshot.fetchedAt).toLocaleTimeString()}`
-                        : ''}
+                    {refreshAnnouncement?.tabId === activeTab.id &&
+                    refreshAnnouncement.scope === refreshAnnouncements.scope
+                      ? refreshAnnouncement.text
+                      : ''}
                   </span>
                   <span className="sr-only" role="status" aria-atomic="true">
                     {savingKeys.length > 0
