@@ -1,4 +1,5 @@
 import { _electron as electron, expect } from '@playwright/test';
+import { auditWorkspaceClose } from './smoke-close.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPickers, auditSelfConnections } from './smoke-pickers.mjs';
@@ -3453,6 +3454,12 @@ try {
   await auditAppearanceSaveFailure();
 
   await auditChildCreation(appPath, executablePath, env);
+  await auditWorkspaceClose({
+    launch,
+    close,
+    current: () => ({ app, page }),
+    userData,
+  });
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

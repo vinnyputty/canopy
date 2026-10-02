@@ -735,6 +735,8 @@ async function start(
     if (saved?.maximized) created.maximize();
     let savingWindow: Promise<void> = Promise.resolve();
     let closeApproved = false;
+    let closing = false;
+    let rendererLoaded: Promise<void>;
     const saveBounds = () => {
       if (
         demoMode ||
@@ -758,14 +760,37 @@ async function start(
     created.on('close', (event) => {
       if (closeApproved) return;
       event.preventDefault();
+      if (closing) return;
+      closing = true;
       saveBounds();
-      void savingWindow
-        .catch(() => {})
-        .finally(() => {
+      void Promise.all([
+        savingWindow.catch(() => {}),
+        rendererLoaded.then(() =>
+          created.webContents.executeJavaScript(
+            'window.canopy.flushWorkspace()',
+          ),
+        ),
+      ])
+        .then(() => {
           closeApproved = true;
           if (quitting) app.quit();
           else created.close();
+        })
+        .catch((error) => {
+          closing = false;
+          quitting = false;
+          console.error('Could not save workspace before closing:', error);
+          if (
+            created.webContents.isCrashed() ||
+            String(error).includes('Workspace flush is unavailable')
+          )
+            dialog.showErrorBox('Could not close Canopy', String(error));
         });
+    });
+    created.on('query-session-end', (event) => {
+      if (closeApproved) return;
+      event.preventDefault();
+      app.quit();
     });
     window.webContents.on('before-input-event', (event, input) => {
       const modifier =
@@ -789,7 +814,8 @@ async function start(
     window.on('closed', () => {
       window = null;
     });
-    await window.loadFile(html);
+    rendererLoaded = created.loadFile(html);
+    await rendererLoaded;
   };
   const openDemoFromMenu = () =>
     void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
