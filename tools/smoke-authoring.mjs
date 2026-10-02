@@ -9,192 +9,202 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
   const env = { ...baseEnv, CANOPY_USER_DATA: userData };
   delete env.ELECTRON_RUN_AS_NODE;
   let app;
+  let page;
   const errors = [];
   try {
     app = await electron.launch({ executablePath, args: [appPath], env });
-    const page = await app.firstWindow();
+    page = await app.firstWindow();
     page.on('pageerror', (error) => errors.push(error));
     await page.getByRole('heading', { name: 'See the whole tree.' }).waitFor();
-    await app.evaluate(({ ipcMain }) => {
-      const state = {
-        mode: 'saved',
-        requests: [],
-        browser: [],
-        attachments: [],
-        parent: 'team/a#9',
-        description: 'Original **Markdown**',
-        comments: [],
-        creates: 0,
-        plans: 0,
-      };
-      globalThis.authoringSmoke = state;
-      const issue = (key = 'team/a#1') => ({
-        id: key,
-        key,
-        summary: key,
-        type: 'Issue',
-        priority: null,
-        assignee: null,
-        status: { id: 'open', name: 'Open', category: 'new' },
-        links: [],
-      });
-      const connections = ['first', 'second'].map((id) => ({
-        id,
-        name: `Authoring ${id}`,
-        accountName: id,
-        url: 'https://github.com',
-        provider: 'github',
-        repositories: ['team/a'],
-      }));
-      const handlers = {
-        connections: () => connections,
-        currentUser: (_event, id) => ({ id, name: id }),
-        loadWorkspace: () => ({
-          tabs: [
-            {
-              id: 'first',
-              connectionId: 'first',
-              rootKey: 'team/a#1',
-              selectedKey: 'team/a#1',
-              expanded: ['team/a#1'],
-              hideDone: false,
-              scrollTop: 0,
-            },
-            {
-              id: 'second',
-              connectionId: 'second',
-              rootKey: 'team/a#1',
-              selectedKey: 'team/a#1',
-              expanded: ['team/a#1'],
-              hideDone: false,
-              scrollTop: 0,
-            },
-            {
-              id: 'other',
-              connectionId: 'first',
-              rootKey: 'team/a#2',
-              selectedKey: 'team/a#2',
-              expanded: ['team/a#2'],
-              hideDone: false,
-              scrollTop: 0,
-            },
-          ],
-          activeTabId: 'first',
-          shortcuts: {},
-          theme: 'system',
-          sidebarCollapsed: false,
-        }),
-        saveWorkspace: () => {},
-        tree: (_event, _id, key) => ({
-          rootKey: key,
-          issues: [issue(key)],
-          fetchedAt: Date.now(),
-          warnings: [],
-        }),
-        preview: (_event, _id, key) => ({
-          issue: issue(key),
-          description: state.description,
-          comments: state.comments,
-          totalComments: state.comments.length,
-        }),
-        authoringOptions: () => ({
-          description: {
-            editable: true,
-            value: state.description,
-            revision: JSON.stringify(state.description),
-          },
-          comment: { allowed: true },
-          parent: { allowed: true },
-          createChild: true,
-          fields: [
-            {
-              id: 'milestone',
-              name: 'Milestone',
-              kind: 'choice',
-              value: '',
-              choices: [{ id: '7', name: 'Release' }],
-            },
-          ],
-          attachments: [
-            {
-              id: 'file',
-              name: 'spec.pdf',
-              url: 'https://github.com/user-attachments/assets/sample',
-            },
-          ],
-          handoffs: [
-            'Attachment uploads and repository transfers open in GitHub.',
-          ],
-        }),
-        previewParent: (_event, _id, key, parent) => {
-          state.plans++;
-          return {
-            key,
-            parentKey: parent,
-            previousParent: state.parent,
-            revision: 'hierarchy',
-            effects: [
-              `${key}: parent ${state.parent} → ${parent ?? 'none'}.`,
-              `${key} leaves the child list of ${state.parent}.`,
-              `${key} enters the child list of ${parent}.`,
-              'Existing descendants remain attached to this issue and follow its subtree.',
+    const installGithubHandlers = async () => {
+      await app.evaluate(({ ipcMain }) => {
+        const state = {
+          mode: 'saved',
+          release: null,
+          requests: [],
+          browser: [],
+          attachments: [],
+          parent: 'team/a#9',
+          description: 'Original **Markdown**',
+          comments: [],
+          creates: 0,
+          plans: 0,
+        };
+        globalThis.authoringSmoke = state;
+        const issue = (key = 'team/a#1') => ({
+          id: key,
+          key,
+          summary: key,
+          type: 'Issue',
+          priority: null,
+          assignee: null,
+          status: { id: 'open', name: 'Open', category: 'new' },
+          links: [],
+        });
+        const connections = ['first', 'second'].map((id) => ({
+          id,
+          name: `Authoring ${id}`,
+          accountName: id,
+          url: 'https://github.com',
+          provider: 'github',
+          repositories: ['team/a'],
+        }));
+        const handlers = {
+          connections: () => connections,
+          currentUser: (_event, id) => ({ id, name: id }),
+          loadWorkspace: () => ({
+            tabs: [
+              {
+                id: 'first',
+                connectionId: 'first',
+                rootKey: 'team/a#1',
+                selectedKey: 'team/a#1',
+                expanded: ['team/a#1'],
+                hideDone: false,
+                scrollTop: 0,
+              },
+              {
+                id: 'second',
+                connectionId: 'second',
+                rootKey: 'team/a#1',
+                selectedKey: 'team/a#1',
+                expanded: ['team/a#1'],
+                hideDone: false,
+                scrollTop: 0,
+              },
+              {
+                id: 'other',
+                connectionId: 'first',
+                rootKey: 'team/a#2',
+                selectedKey: 'team/a#2',
+                expanded: ['team/a#2'],
+                hideDone: false,
+                scrollTop: 0,
+              },
             ],
-          };
-        },
-        author: async (_event, id, key, action) => {
-          state.requests.push({ id, key, action });
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          if (state.mode === 'rejected')
+            activeTabId: 'first',
+            shortcuts: {},
+            theme: 'system',
+            sidebarCollapsed: false,
+          }),
+          saveWorkspace: () => {},
+          tree: (_event, _id, key) => ({
+            rootKey: key,
+            issues: [issue(key)],
+            fetchedAt: Date.now(),
+            warnings: [],
+          }),
+          preview: (_event, _id, key) => ({
+            issue: issue(key),
+            description: state.description,
+            comments: state.comments,
+            totalComments: state.comments.length,
+          }),
+          authoringOptions: () => ({
+            description: {
+              editable: true,
+              value: state.description,
+              revision: JSON.stringify(state.description),
+            },
+            comment: { allowed: true },
+            parent: { allowed: true },
+            createChild: true,
+            fields: [
+              {
+                id: 'milestone',
+                name: 'Milestone',
+                kind: 'choice',
+                value: '',
+                choices: [{ id: '7', name: 'Release' }],
+              },
+            ],
+            attachments: [
+              {
+                id: 'file',
+                name: 'spec.pdf',
+                url: 'https://github.com/user-attachments/assets/sample',
+              },
+            ],
+            handoffs: [
+              'Attachment uploads and repository transfers open in GitHub.',
+            ],
+          }),
+          previewParent: (_event, _id, key, parent) => {
+            state.plans++;
             return {
-              state: 'rejected',
-              message:
-                'Permission denied; draft retained. Correct access and retry.',
+              key,
+              parentKey: parent,
+              previousParent: state.parent,
+              revision: 'hierarchy',
+              effects: [
+                `${key}: parent ${state.parent} → ${parent ?? 'none'}.`,
+                `${key} leaves the child list of ${state.parent}.`,
+                `${key} enters the child list of ${parent}.`,
+                'Existing descendants remain attached to this issue and follow its subtree.',
+              ],
             };
-          if (state.mode === 'unknown')
-            return {
-              state: 'unknown',
-              message: 'Lost comment response. Check provider before retrying.',
-            };
-          if (action.kind === 'child') {
-            state.creates++;
+          },
+          author: async (_event, id, key, action) => {
+            state.requests.push({ id, key, action });
+            if (state.mode === 'deferred')
+              await new Promise((resolve) => {
+                state.release = resolve;
+              });
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            if (state.mode === 'rejected')
+              return {
+                state: 'rejected',
+                message:
+                  'Permission denied; draft retained. Correct access and retry.',
+              };
+            if (state.mode === 'unknown')
+              return {
+                state: 'unknown',
+                message:
+                  'Lost comment response. Check provider before retrying.',
+              };
+            if (action.kind === 'child') {
+              state.creates++;
+              if (state.mode === 'partial')
+                return {
+                  state: 'partial',
+                  key: 'team/a#4',
+                  message:
+                    'Created team/a#4; parent linking failed. Do not create another issue.',
+                };
+            }
             if (state.mode === 'partial')
               return {
                 state: 'partial',
-                key: 'team/a#4',
                 message:
-                  'Created team/a#4; parent linking failed. Do not create another issue.',
+                  'Write accepted; refresh verification failed. Refresh before retrying.',
               };
-          }
-          if (state.mode === 'partial')
-            return {
-              state: 'partial',
-              message:
-                'Write accepted; refresh verification failed. Refresh before retrying.',
-            };
-          if (action.kind === 'description') state.description = action.value;
-          if (action.kind === 'comment')
-            state.comments.push({
-              id: '100',
-              author: id,
-              created: '2026-10-02T00:00:00Z',
-              body: action.value,
-            });
-          if (action.kind === 'parent') state.parent = action.plan.parentKey;
-          return { state: 'saved', message: 'Saved and verified.' };
-        },
-        openIssue: (_event, id, key) => {
-          state.browser.push([id, key]);
-        },
-        openAttachment: (_event, id, key, attachment) => {
-          state.attachments.push([id, key, attachment]);
-        },
-        syncStatus: () => ({ retryAt: null }),
-      };
-      for (const [name, handler] of Object.entries(handlers)) {
-        ipcMain.removeHandler(`canopy:${name}`);
-        ipcMain.handle(`canopy:${name}`, handler);
-      }
-    });
+            if (action.kind === 'description') state.description = action.value;
+            if (action.kind === 'comment')
+              state.comments.push({
+                id: '100',
+                author: id,
+                created: '2026-10-02T00:00:00Z',
+                body: action.value,
+              });
+            if (action.kind === 'parent') state.parent = action.plan.parentKey;
+            return { state: 'saved', message: 'Saved and verified.' };
+          },
+          openIssue: (_event, id, key) => {
+            state.browser.push([id, key]);
+          },
+          openAttachment: (_event, id, key, attachment) => {
+            state.attachments.push([id, key, attachment]);
+          },
+          syncStatus: () => ({ retryAt: null }),
+        };
+        for (const [name, handler] of Object.entries(handlers)) {
+          ipcMain.removeHandler(`canopy:${name}`);
+          ipcMain.handle(`canopy:${name}`, handler);
+        }
+      });
+    };
+    await installGithubHandlers();
     await page.reload();
     const open = async (key = 'team/a#1') => {
       const pane = page.locator('.issue-preview');
@@ -253,6 +263,65 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
       editor.getByLabel('Comment draft', { exact: true }),
     ).toHaveValue('Recovered comment');
     await app.evaluate(() => {
+      globalThis.authoringSmoke.mode = 'deferred';
+    });
+    const deferredCount = await app.evaluate(
+      () => globalThis.authoringSmoke.requests.length,
+    );
+    // Two native click attempts in one renderer turn dispatch only one write.
+    await editor
+      .getByRole('button', { name: 'Post comment', exact: true })
+      .evaluate((button) => {
+        button.click();
+        button.click();
+      });
+    await expect
+      .poll(() =>
+        app.evaluate(() => Boolean(globalThis.authoringSmoke.release)),
+      )
+      .toBe(true);
+    await page
+      .locator('.issue-preview')
+      .getByRole('button', { name: 'Close issue preview', exact: true })
+      .click();
+    editor = await open();
+    await editor
+      .getByLabel('I checked the provider’s current content and hierarchy')
+      .check();
+    await expect(
+      editor.getByRole('button', { name: 'Allow a new write after review' }),
+    ).toBeDisabled();
+    await editor
+      .getByLabel('Comment draft', { exact: true })
+      .fill('New unsent draft while old request settles');
+    await expect(
+      editor.getByRole('button', { name: 'Post comment', exact: true }),
+    ).toBeDisabled();
+    await app.evaluate(() => {
+      globalThis.authoringSmoke.mode = 'saved';
+      globalThis.authoringSmoke.release();
+    });
+    await expect(
+      editor.getByRole('button', { name: 'Post comment', exact: true }),
+    ).toBeEnabled();
+    await expect(
+      editor.getByLabel('Comment draft', { exact: true }),
+    ).toHaveValue('New unsent draft while old request settles');
+    expect(
+      await app.evaluate(() => globalThis.authoringSmoke.requests.length),
+    ).toBe(deferredCount + 1);
+    await page
+      .locator('.issue-preview')
+      .getByRole('button', { name: 'Close issue preview', exact: true })
+      .click();
+    editor = await open();
+    await expect(
+      editor.getByLabel('Comment draft', { exact: true }),
+    ).toHaveValue('New unsent draft while old request settles');
+    await editor
+      .getByLabel('Comment draft', { exact: true })
+      .fill('Recovered comment');
+    await app.evaluate(() => {
       globalThis.authoringSmoke.mode = 'rejected';
     });
     await editor
@@ -274,11 +343,21 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(
       editor.getByRole('button', { name: 'Post comment', exact: true }),
     ).toBeDisabled();
+    await app.close();
+    app = undefined;
+    app = await electron.launch({ executablePath, args: [appPath], env });
+    page = await app.firstWindow();
+    page.on('pageerror', (error) => errors.push(error));
+    await page.waitForLoadState('domcontentloaded');
+    await installGithubHandlers();
     await page.reload();
     editor = await open();
     await expect(
       editor.getByRole('button', { name: 'Post comment', exact: true }),
     ).toBeDisabled();
+    expect(
+      await app.evaluate(() => globalThis.authoringSmoke.requests.length),
+    ).toBe(0);
     await expect(
       editor.getByLabel('Comment draft', { exact: true }),
     ).toHaveValue('Recovered comment');

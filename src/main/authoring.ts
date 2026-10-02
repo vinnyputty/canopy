@@ -56,6 +56,18 @@ export function plainDocument(value: any): boolean {
   if (value == null) return true;
   if (!value || typeof value !== 'object' || value.attrs || value.marks?.length)
     return false;
+  if (value.type === 'doc' && value.version !== 1) return false;
+  const allowed =
+    value.type === 'doc'
+      ? ['type', 'version', 'content']
+      : value.type === 'paragraph'
+        ? ['type', 'content']
+        : value.type === 'text'
+          ? ['type', 'text']
+          : value.type === 'hardBreak'
+            ? ['type']
+            : [];
+  if (Object.keys(value).some((key) => !allowed.includes(key))) return false;
   if (value.type === 'text') return typeof value.text === 'string';
   if (value.type === 'hardBreak') return true;
   return (
@@ -105,11 +117,14 @@ export function editDocumentFragments(
       index = Number(part);
       node = node.content[index];
     }
-    return { edit, node, parent, index };
+    return { edit, node, parent };
   });
   for (const { edit, node } of nodes) node.text = edit.value;
-  for (const { edit, parent, index } of [...nodes].reverse())
-    if (!edit.value) parent.content.splice(index, 1);
+  for (const { edit, parent, node } of nodes)
+    if (!edit.value) {
+      const index = parent.content.indexOf(node);
+      if (index >= 0) parent.content.splice(index, 1);
+    }
   return copy;
 }
 function effects(
