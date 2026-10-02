@@ -90,6 +90,12 @@ for (const [label, source] of [
         specs.length !== 1 ||
         !specs[0].root ||
         !specs[0].keyboardNextKey ||
+        ['treeMiddleKey', 'treeLastKey', 'savedMiddleKey', 'savedLastKey'].some(
+          (field) => !specs[0][field],
+        ) ||
+        ['treeMembersSha256', 'filterMembersSha256', 'savedMembersSha256'].some(
+          (field) => !/^[a-f0-9]{64}$/.test(specs[0][field] ?? ''),
+        ) ||
         [
           'issues',
           'expandedRows',
@@ -254,17 +260,193 @@ for (const provider of ['jira', 'github'])
       };
       const end = async (name, start) => {
         await paint();
-        const detail = await renderer(() => ({
-          treeRows: document.querySelectorAll('[data-tree-key]').length,
-          savedRows: document.querySelectorAll('.saved-view-result').length,
-          elements: document.getElementsByTagName('*').length,
-        }));
+        const detail = await renderer(() => window.canopyPerfUI.counts());
         sample.phases.push({
           name,
           wallThroughPaintOpportunityMs: performance.now() - start,
           ...detail,
         });
         await memory();
+      };
+      const logical = async (kind, count, digest) => {
+        let observed;
+        await expect
+          .poll(
+            async () => {
+              observed = await renderer(
+                async ({ kind, count, digest }) => {
+                  const members = window.canopyPerfUI.members(kind);
+                  const ui = window.canopyPerfUI.counts();
+                  const container = document.querySelector(
+                    kind === 'tree' ? '[role="tree"]' : '.saved-view-list',
+                  );
+                  const mounted = [
+                    ...(container?.querySelectorAll(
+                      kind === 'tree'
+                        ? '[data-tree-key]'
+                        : '.saved-view-result',
+                    ) ?? []),
+                  ];
+                  const mountedKeys = mounted.map((row) =>
+                    kind === 'tree'
+                      ? row.getAttribute('data-tree-key')
+                      : row.querySelector('strong')?.textContent,
+                  );
+                  const membership = new Set(members);
+                  const bytes = await crypto.subtle.digest(
+                    'SHA-256',
+                    new TextEncoder().encode(JSON.stringify(members)),
+                  );
+                  const sha256 = [...new Uint8Array(bytes)]
+                    .map((byte) => byte.toString(16).padStart(2, '0'))
+                    .join('');
+                  const windowed = Boolean(
+                    container?.querySelector('[data-row-window="viewport"]'),
+                  );
+                  const positionsValid =
+                    !windowed ||
+                    mounted.every((row) => {
+                      const position = Number(
+                          row.getAttribute('aria-posinset'),
+                        ),
+                        size = Number(row.getAttribute('aria-setsize'));
+                      return (
+                        position > 0 &&
+                        size >= position &&
+                        (kind !== 'tree' ||
+                          Number(row.getAttribute('aria-level')) > 0)
+                      );
+                    });
+                  const spacersValid = [
+                    ...(container?.querySelectorAll('[data-window-spacer]') ??
+                      []),
+                  ].every(
+                    (gap) =>
+                      gap.getAttribute('aria-hidden') === 'true' &&
+                      gap.getBoundingClientRect().height >= 0,
+                  );
+                  return {
+                    kind,
+                    logicalCount: members.length,
+                    uniqueMembers: membership.size,
+                    sha256,
+                    mountedCount: mounted.length,
+                    windowed,
+                    positionsValid,
+                    spacersValid,
+                    valid:
+                      !(kind === 'tree'
+                        ? ui.treeLoading || ui.treeIncomplete
+                        : ui.savedLoading || ui.savedIncomplete) &&
+                      members.length === count &&
+                      membership.size === count &&
+                      sha256 === digest &&
+                      mounted.length > 0 &&
+                      mountedKeys.every((key) => membership.has(key)) &&
+                      positionsValid &&
+                      spacersValid &&
+                      (!windowed || mounted.length < count),
+                  };
+                },
+                { kind, count, digest },
+              );
+              return observed.valid;
+            },
+            { timeout: LOAD_MS },
+          )
+          .toBe(true);
+        sample.logicalModels ??= [];
+        sample.logicalModels.push({ phase, ...observed });
+      };
+      const viewport = async (kind) => {
+        const moves = [];
+        for (const [name, fraction] of [
+          ['middle', 0.5],
+          ['end', 1],
+          ['top', 0],
+        ]) {
+          await renderer(
+            ({ kind, fraction }) => {
+              const element = document.querySelector(
+                kind === 'tree' ? '.tree-scroll' : '.saved-view-page',
+              );
+              element.scrollTop =
+                (element.scrollHeight - element.clientHeight) * fraction;
+            },
+            { kind, fraction },
+          );
+          await paint();
+          let observation;
+          await expect
+            .poll(
+              async () => {
+                observation = await renderer(
+                  ({ kind, name }) => {
+                    const container = document.querySelector(
+                      kind === 'tree' ? '.tree-scroll' : '.saved-view-page',
+                    );
+                    const model = window.canopyPerfUI.members(kind);
+                    const selector =
+                      kind === 'tree'
+                        ? '[data-tree-key]'
+                        : '.saved-view-result';
+                    const rows = [...container.querySelectorAll(selector)];
+                    const visible = rows
+                      .filter((row) => {
+                        const rect = (
+                            kind === 'tree'
+                              ? row.querySelector(':scope > .issue-row')
+                              : row
+                          ).getBoundingClientRect(),
+                          bounds = container.getBoundingClientRect();
+                        return (
+                          rect.bottom > bounds.top && rect.top < bounds.bottom
+                        );
+                      })
+                      .map((row) =>
+                        kind === 'tree'
+                          ? row.getAttribute('data-tree-key')
+                          : row.querySelector('strong').textContent,
+                      );
+                    const members = new Set(model);
+                    return {
+                      name,
+                      logicalCount: model.length,
+                      mountedCount: rows.length,
+                      visibleKeys: visible,
+                      scrollTop: container.scrollTop,
+                      scrollHeight: container.scrollHeight,
+                      valid:
+                        visible.length > 0 &&
+                        visible.every((key) => members.has(key)) &&
+                        (name !== 'end' ||
+                          rows.some(
+                            (row) =>
+                              (kind === 'tree'
+                                ? row.getAttribute('data-tree-key')
+                                : row.querySelector('strong').textContent) ===
+                              model.at(-1),
+                          )) &&
+                        (name !== 'top' ||
+                          rows.some(
+                            (row) =>
+                              (kind === 'tree'
+                                ? row.getAttribute('data-tree-key')
+                                : row.querySelector('strong').textContent) ===
+                              model[0],
+                          )),
+                    };
+                  },
+                  { kind, name },
+                );
+                return observation.valid;
+              },
+              { timeout: LOAD_MS },
+            )
+            .toBe(true);
+          moves.push(observation);
+        }
+        return moves;
       };
       const complete = async (selected, cursor = 0, manualGeneration) => {
         // Error/incomplete returns and disappearing Cancel buttons do not satisfy
@@ -328,9 +510,7 @@ for (const provider of ['jira', 'github'])
         await expect(page.getByRole('tree')).toBeVisible();
         sample.firstVisibleTreeWallMs = performance.now() - started;
         await complete([spec]);
-        await expect(page.locator('[data-tree-key]')).toHaveCount(
-          spec.expandedRows,
-        );
+        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
         await end('initial-load', started);
         const initial = await renderer(() => ({
           ipc: window.canopyPerfAudit.events(),
@@ -351,7 +531,12 @@ for (const provider of ['jira', 'github'])
             e.count === spec.issues,
         );
         const fullCommit = initial.ui.events.find(
-          (e) => e.event === 'dom-commit' && e.treeRows === spec.expandedRows,
+          (e) =>
+            e.event === 'dom-commit' &&
+            e.treeLogicalRows === spec.expandedRows &&
+            !e.treeLoading &&
+            !e.treeIncomplete &&
+            e.at >= full.at,
         );
         const fullPaint =
           fullCommit &&
@@ -359,7 +544,10 @@ for (const provider of ['jira', 'github'])
             (e) =>
               e.event === 'paint-opportunity' &&
               e.at >= fullCommit.at &&
-              e.treeRows === spec.expandedRows,
+              e.treeLogicalRows === spec.expandedRows &&
+              !e.treeLoading &&
+              !e.treeIncomplete &&
+              e.at >= full.at,
           );
         const partialCommit =
           progress &&
@@ -367,8 +555,8 @@ for (const provider of ['jira', 'github'])
           initial.ui.events.find(
             (e) =>
               e.event === 'dom-commit' &&
-              e.treeRows > 0 &&
-              e.treeRows < spec.expandedRows &&
+              e.treeLogicalRows > 0 &&
+              e.treeLogicalRows < spec.expandedRows &&
               initial.ui.timeOrigin + e.at >=
                 initial.ipc.timeOrigin + progress.at &&
               e.at < fullCommit.at,
@@ -380,8 +568,8 @@ for (const provider of ['jira', 'github'])
               e.event === 'paint-opportunity' &&
               e.at >= partialCommit.at &&
               e.at < fullCommit.at &&
-              e.treeRows > 0 &&
-              e.treeRows < spec.expandedRows,
+              e.treeLogicalRows > 0 &&
+              e.treeLogicalRows < spec.expandedRows,
           );
         sample.firstPartial = progress
           ? {
@@ -391,8 +579,22 @@ for (const provider of ['jira', 'github'])
               paintOpportunityBeforeFullCommit: Boolean(partialPaint),
             }
           : { state: 'No partial progress emitted by this exact source' };
+        if (!fullCommit || !fullPaint)
+          throw new Error(
+            'Complete renderer commit/paint-opportunity evidence missing.',
+          );
+        if (
+          progress &&
+          (!partialCommit || !partialPaint || partialPaint.at >= fullCommit.at)
+        )
+          throw new Error(
+            'Partial renderer paint opportunity before full completion missing.',
+          );
         sample.fullCompletion = {
           ipc: full,
+          logicalModel: sample.logicalModels.find(
+            (model) => model.phase === 'initial-load',
+          ),
           domCommit: fullCommit ?? null,
           paintOpportunity: fullPaint ?? null,
         };
@@ -400,15 +602,11 @@ for (const provider of ['jira', 'github'])
         await page
           .getByRole('textbox', { name: 'Find in tree' })
           .fill('region 3');
-        await expect(page.locator('[data-tree-key]')).toHaveCount(
-          spec.filterRows,
-        );
+        await logical('tree', spec.filterRows, spec.filterMembersSha256);
         await end('tree-filter', start);
         start = await begin('tree-filter-clear');
         await page.getByRole('textbox', { name: 'Find in tree' }).fill('');
-        await expect(page.locator('[data-tree-key]')).toHaveCount(
-          spec.expandedRows,
-        );
+        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
         await end('tree-filter-clear', start);
         start = await begin('tree-scroll');
         sample.scroll = await renderer(async () => {
@@ -431,6 +629,7 @@ for (const provider of ['jira', 'github'])
             scrollHeight: element.scrollHeight,
           };
         });
+        sample.treeViewports = await viewport('tree');
         await end('tree-scroll', start);
         start = await begin('tree-collapse');
         await page
@@ -438,13 +637,17 @@ for (const provider of ['jira', 'github'])
           .click();
         // Collapse all keeps only the root; the fixture's initial root expansion
         // (spec.collapsedRows) is a separate recorded state.
-        await expect(page.locator('[data-tree-key]')).toHaveCount(1);
+        await logical(
+          'tree',
+          1,
+          createHash('sha256')
+            .update(JSON.stringify([spec.root]))
+            .digest('hex'),
+        );
         await end('tree-collapse', start);
         start = await begin('tree-expand');
         await page.getByRole('button', { name: 'Expand', exact: true }).click();
-        await expect(page.locator('[data-tree-key]')).toHaveCount(
-          spec.expandedRows,
-        );
+        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
         await end('tree-expand', start);
         const row = page.locator('[data-tree-key]').first();
         await row.focus();
@@ -458,6 +661,64 @@ for (const provider of ['jira', 'github'])
             ),
           )
           .toBe(spec.keyboardNextKey);
+        await renderer(() => {
+          const container = document.querySelector('.tree-scroll');
+          container.scrollTop =
+            (container.scrollHeight - container.clientHeight) / 2;
+        });
+        await paint();
+        const neighbor = await renderer(() => {
+          const container = document.querySelector('.tree-scroll'),
+            bounds = container.getBoundingClientRect(),
+            members = window.canopyPerfUI.members('tree');
+          const choices = [...container.querySelectorAll('[data-tree-key]')]
+            .map((row) => ({
+              row,
+              top: row
+                .querySelector(':scope > .issue-row')
+                .getBoundingClientRect().top,
+            }))
+            .filter(
+              ({ top }) =>
+                top >= bounds.top &&
+                top <= bounds.top + container.clientHeight * 2,
+            );
+          const start = choices.sort((a, b) => b.top - a.top)[0]?.row;
+          if (!start) throw new Error('No keyboard viewport boundary row');
+          const index = members.indexOf(start.getAttribute('data-tree-key')),
+            key = members[index + 1];
+          if (!key) throw new Error('No next logical keyboard member');
+          const mountedBefore = Boolean(
+            [...container.querySelectorAll('[data-tree-key]')].find(
+              (row) => row.getAttribute('data-tree-key') === key,
+            ),
+          );
+          start.focus({ preventScroll: true });
+          return {
+            start: start.getAttribute('data-tree-key'),
+            target: key,
+            mountedBefore,
+            windowed: Boolean(
+              container.querySelector('[data-row-window="viewport"]'),
+            ),
+          };
+        });
+        await page.keyboard.press('ArrowDown');
+        await expect
+          .poll(() =>
+            renderer(() =>
+              document.activeElement
+                ?.closest('[data-tree-key]')
+                ?.getAttribute('data-tree-key'),
+            ),
+          )
+          .toBe(neighbor.target);
+        if (neighbor.windowed && neighbor.mountedBefore)
+          throw new Error(
+            'Viewport keyboard target was already mounted; offscreen control did not execute',
+          );
+        sample.viewportKeyboard = neighbor;
+        await logical('tree', spec.expandedRows, spec.treeMembersSha256);
         sample.keyboardFocusedKey = await renderer(() =>
           document.activeElement
             ?.closest('[data-tree-key]')
@@ -468,9 +729,9 @@ for (const provider of ['jira', 'github'])
           .getByRole('button', { name: 'Saved view: Large roots', exact: true })
           .click();
         await complete(roots);
-        await expect(page.locator('.saved-view-result')).toHaveCount(
-          spec.savedRows,
-        );
+        await logical('saved', spec.savedRows, spec.savedMembersSha256);
+        sample.savedViewports = await viewport('saved');
+        await logical('saved', spec.savedRows, spec.savedMembersSha256);
         await end('saved-view-load', start);
         const cursor = await renderer(
           () => window.canopyPerfAudit.events().events.length,
@@ -511,9 +772,7 @@ for (const provider of ['jira', 'github'])
           .toBe(true);
         sample.manualGeneration = manualGeneration;
         await complete(roots, cursor, manualGeneration);
-        await expect(page.locator('.saved-view-result')).toHaveCount(
-          spec.savedRows,
-        );
+        await logical('saved', spec.savedRows, spec.savedMembersSha256);
         await end('saved-view-refresh', start);
         sample.afterManualCompletion = await renderer(() => ({
           activeIPC: window.canopyPerfAudit.events().active,

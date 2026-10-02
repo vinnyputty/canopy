@@ -1,3 +1,4 @@
+import { WindowedRows, type RowWindow } from './WindowedRows';
 import React from 'react';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 import type {
@@ -41,6 +42,18 @@ export function SavedViewsPanel(props: Props) {
     setNameDraft(view.name);
     setStatusesDraft(view.filters.statuses.join(', '));
   }, [view.id]);
+  const rowWindow = React.useRef<RowWindow | null>(null);
+  const identities = React.useMemo(
+    () =>
+      results.map((result) =>
+        JSON.stringify([result.source.connectionId, result.issue.id]),
+      ),
+    [results],
+  );
+  const rowKeys = React.useMemo(
+    () => results.map((result) => result.issue.key),
+    [results],
+  );
   const patch = (value: Partial<SavedIssueView>) =>
     props.onChange({ ...view, ...value });
   const filters = (value: Partial<SavedIssueView['filters']>) =>
@@ -282,41 +295,80 @@ export function SavedViewsPanel(props: Props) {
         className="saved-view-list"
         role="list"
         aria-label={`${view.name} results`}
+        onKeyDown={(event) => {
+          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key))
+            return;
+          const identity = (event.target as HTMLElement).closest<HTMLElement>(
+            '[data-window-row]',
+          )?.dataset.windowRow;
+          if (!identity) return;
+          const index = identities.indexOf(identity);
+          const target =
+            event.key === 'Home'
+              ? 0
+              : event.key === 'End'
+                ? results.length - 1
+                : index + (event.key === 'ArrowDown' ? 1 : -1);
+          if (target < 0 || target >= identities.length) return;
+          event.preventDefault();
+          props.onSelect(identities[target]);
+          rowWindow.current
+            ?.ensure(identities[target])
+            ?.querySelector<HTMLElement>('.saved-view-choice')
+            ?.focus({ preventScroll: true });
+        }}
       >
-        {results.map((result) => {
-          const connection = connections.find(
-            (item) => item.id === result.source.connectionId,
-          );
-          const identity = JSON.stringify([
-            result.source.connectionId,
-            result.issue.id,
-          ]);
-          return (
-            <div className="saved-view-result" role="listitem" key={identity}>
-              <button
-                className={`saved-view-choice ${identity === props.selected ? 'selected' : ''}`}
-                aria-current={identity === props.selected ? 'true' : undefined}
-                onClick={() => props.onSelect(identity)}
-                onDoubleClick={() => props.onOpen(result)}
+        <WindowedRows
+          key={view.id}
+          api={rowWindow}
+          ids={identities}
+          rowKeys={rowKeys}
+          pinned={[props.selected]}
+          scrollSelector=".saved-view-page"
+          renderRow={(index) => {
+            const result = results[index];
+            const connection = connections.find(
+              (item) => item.id === result.source.connectionId,
+            );
+            const identity = JSON.stringify([
+              result.source.connectionId,
+              result.issue.id,
+            ]);
+            return (
+              <div
+                className="saved-view-result"
+                role="listitem"
+                aria-posinset={index + 1}
+                aria-setsize={results.length}
+                data-result-identity={identity}
               >
-                <strong>{result.issue.key}</strong>
-                <span>{result.issue.summary}</span>
-                <small>
-                  {connection?.provider ?? 'Unknown provider'} ·{' '}
-                  {connection?.name ?? result.source.connectionId} ·{' '}
-                  {result.source.rootKey} · {result.issue.status.name}
-                </small>
-              </button>
-              <button
-                className="saved-view-open"
-                aria-label={`Open ${result.issue.key} in tree`}
-                onClick={() => props.onOpen(result)}
-              >
-                Open in tree
-              </button>
-            </div>
-          );
-        })}
+                <button
+                  className={`saved-view-choice ${identity === props.selected ? 'selected' : ''}`}
+                  aria-current={
+                    identity === props.selected ? 'true' : undefined
+                  }
+                  onClick={() => props.onSelect(identity)}
+                  onDoubleClick={() => props.onOpen(result)}
+                >
+                  <strong>{result.issue.key}</strong>
+                  <span>{result.issue.summary}</span>
+                  <small>
+                    {connection?.provider ?? 'Unknown provider'} ·{' '}
+                    {connection?.name ?? result.source.connectionId} ·{' '}
+                    {result.source.rootKey} · {result.issue.status.name}
+                  </small>
+                </button>
+                <button
+                  className="saved-view-open"
+                  aria-label={`Open ${result.issue.key} in tree`}
+                  onClick={() => props.onOpen(result)}
+                >
+                  Open in tree
+                </button>
+              </div>
+            );
+          }}
+        />
         {!results.length && sources.length > 0 && (
           <p className="saved-view-notice">
             {sources.some((source) => props.loading.has(source.id))

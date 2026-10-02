@@ -133,6 +133,7 @@ for (const [label, source] of [
     ...nodeOptions,
     stdin: {
       contents: `
+    import { createHash } from 'node:crypto';
     import { largeProvider } from './tests/fixtures/large-trees';
     import { buildIssueTree, filterTree, flattenVisible } from '${join(archive, 'src/renderer/tree.ts')}';
     import { viewResults } from '${join(archive, 'src/renderer/saved-views.ts')}';
@@ -145,12 +146,16 @@ for (const [label, source] of [
           const snapshot = await fixture.provider.tree(fixture.rootKey);
           if (snapshot.incomplete || snapshot.issues.length !== size) throw new Error('Incomplete expected fixture');
           const tree = buildIssueTree(snapshot.issues, fixture.rootKey), expanded = new Set(snapshot.issues.map(i => i.key));
-          const count = (query, expand) => { const filtered = filterTree(tree, query, {}, true); return filtered ? flattenVisible(filtered, expand).length : 0; };
+          const keys = (query, expand) => { const filtered = filterTree(tree, query, {}, true); return filtered ? flattenVisible(filtered, expand).map(n => n.issue.key) : []; };
+          const count = (query, expand) => keys(query, expand).length;
+          const digest = (values) => createHash('sha256').update(JSON.stringify(values)).digest('hex');
+          const full = keys('', expanded), filtered = keys('region 3', expanded);
           sources.push({ id: shape, connectionId: 'fixture', rootKey: fixture.rootKey }); snapshots[shape] = snapshot;
-          results.push({ provider, shape, root: fixture.rootKey, issues: size, expandedRows: count('', expanded), collapsedRows: count('', new Set([fixture.rootKey])), filterRows: count('region 3', expanded), keyboardNextKey: flattenVisible(filterTree(tree, '', {}, true), expanded)[1]?.issue.key });
+          results.push({ provider, shape, root: fixture.rootKey, issues: size, expandedRows: count('', expanded), collapsedRows: count('', new Set([fixture.rootKey])), filterRows: count('region 3', expanded), keyboardNextKey: full[1], treeMembersSha256: digest(full), filterMembersSha256: digest(filtered), treeMiddleKey: full[Math.floor(full.length/2)], treeLastKey: full.at(-1) });
         }
-        const savedRows = viewResults({filters:{assignee:'any',statuses:[],priority:'',hideDone:true},sort:{column:'key',direction:'asc'}}, sources, snapshots, {}).length;
-        results.filter(r => r.provider === provider).forEach(r => r.savedRows = savedRows);
+        const saved = viewResults({filters:{assignee:'any',statuses:[],priority:'',hideDone:true},sort:{column:'key',direction:'asc'}}, sources, snapshots, {}).map(r => r.issue.key);
+        const savedMembersSha256 = createHash('sha256').update(JSON.stringify(saved)).digest('hex');
+        results.filter(r => r.provider === provider).forEach(r => Object.assign(r, {savedRows:saved.length, savedMembersSha256, savedMiddleKey:saved[Math.floor(saved.length/2)], savedLastKey:saved.at(-1)}));
       }
       return results;
     }`,

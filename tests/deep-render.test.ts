@@ -93,15 +93,15 @@ export const rowProps = (
   };
 };
 
-test('actual rich React rows render the representative 2001-depth chain with shallow DOM and complete identities', () => {
+test('actual rich React rows expose the complete deep logical count with a bounded initial viewport', () => {
   const html = renderToStaticMarkup(
     React.createElement(TreeRows, rowProps(2001)),
   );
-  assert.equal((html.match(/data-tree-key=/g) ?? []).length, 2001);
-  assert.ok(html.includes('aria-level="2001"'));
+  assert.ok((html.match(/data-tree-key=/g) ?? []).length < 100);
+  assert.ok(html.includes('data-logical-count="2001"'));
   assert.ok(html.includes('aria-posinset="1" aria-setsize="1"'));
-  assert.ok(html.includes('Actions for D-2000'));
-  assert.ok(html.includes('Edit priority for D-2000'));
+  assert.ok(html.includes('Actions for D-1'));
+  assert.ok(html.includes('Edit priority for D-1'));
   assert.ok(!html.includes('role="group"'));
 });
 

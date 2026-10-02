@@ -1,6 +1,7 @@
 import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
 import { recoverTriage } from '../shared/triage';
 import { InboxPanel } from './InboxPanel';
+import { WindowedRows, type RowWindow } from './WindowedRows';
 import {
   relationshipChangedKeys,
   relationshipDestination,
@@ -2738,6 +2739,9 @@ export function App() {
   const expandedSet = new Set(
     filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
+  if (editor && editor.connectionId === activeTab?.connectionId)
+    for (const node of ancestorPath(shownTree, editor.key))
+      expandedSet.add(node.issue.key);
   const linkedSet = new Set(activeTab?.linkedExpanded ?? []);
   const counts = useMemo(() => treeCounts(tree), [tree]);
   const breadcrumb = ancestorPath(
@@ -4918,6 +4922,7 @@ export function App() {
                       className="issue-tree"
                     >
                       <TreeRows
+                        key={activeTab.id}
                         provider={activeConnection?.provider ?? 'jira'}
                         node={shownTree}
                         currentUser={currentUsers[activeTab.connectionId]}
@@ -4997,7 +5002,11 @@ export function App() {
                               : { issue, x, y, trigger: toggle },
                           );
                         }}
-                        editor={editor}
+                        editor={
+                          editor?.connectionId === activeTab.connectionId
+                            ? editor
+                            : null
+                        }
                         beginEdit={beginEdit}
                         onOpenWorkflow={(key) => void openWorkflow(key)}
                         cancelEdit={() => setEditor(null)}
@@ -5701,27 +5710,75 @@ type RowsProps = {
 };
 
 export function TreeRows(props: RowsProps) {
-  // Sibling DOM nodes keep adversarial depth out of React/browser recursion.
-  // Each row retains its full controls, key, indentation and logical hierarchy.
+  const api = useRef<RowWindow | null>(null);
+  const expanded = useMemo(() => {
+    if (!props.editor) return props.expanded;
+    // An open editor owns its row even if a collapse action hides its ancestry.
+    const next = new Set(props.expanded);
+    for (const node of ancestorPath(props.node, props.editor.key))
+      next.add(node.issue.key);
+    return next;
+  }, [props.node, props.expanded, props.editor?.key]);
+  const rows = useMemo(
+    () => visibleRows(props.node, expanded),
+    [props.node, expanded],
+  );
+  const ids = useMemo(() => rows.map((row) => row.node.issue.key), [rows]);
+  const focus = (key: string, extend = false) => {
+    const element = api.current?.ensure(key);
+    if (!element) return;
+    props.suppressFocus.current = true;
+    if (extend) {
+      props.onMultiSelect(key, true, false);
+    } else props.onSelect(key);
+    element
+      .querySelector<HTMLElement>('[data-tree-key]')
+      ?.focus({ preventScroll: true });
+    props.suppressFocus.current = false;
+  };
   return (
-    <>
-      {visibleRows(props.node, props.expanded).map(
-        ({ node, depth, position, siblings }) => (
+    <WindowedRows
+      ids={ids}
+      api={api}
+      scrollSelector=".tree-scroll"
+      pinned={[
+        props.selectedKey,
+        props.editor?.key,
+        props.menuKey,
+        props.dragKey,
+        props.revealedKey,
+      ]}
+      renderRow={(index) => {
+        const { node, depth, position, siblings } = rows[index];
+        return (
           <TreeRow
-            key={node.issue.key}
             {...props}
             node={node}
             depth={props.depth + depth}
+            expanded={expanded}
             position={position}
             siblings={siblings}
+            focusDestination={focus}
+            edgeKeys={[ids[0], ids.at(-1)!]}
+            focusNeighbor={(key, direction, extend) => {
+              const target = ids[ids.indexOf(key) + direction];
+              if (target) focus(target, extend);
+            }}
           />
-        ),
-      )}
-    </>
+        );
+      }}
+    />
   );
 }
 
-function TreeRow(props: RowsProps & { position: number; siblings: number }) {
+function TreeRow(
+  props: RowsProps & {
+    position: number;
+    siblings: number;
+    focusDestination: (key: string, extend?: boolean) => void;
+    edgeKeys: [string, string];
+  },
+) {
   const {
     node,
     depth,
@@ -5770,6 +5827,21 @@ function TreeRow(props: RowsProps & { position: number; siblings: number }) {
       const rect = event.currentTarget.getBoundingClientRect();
       props.onContextMenu(issue, rect.left + 30, rect.top + 30);
       return;
+    }
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      props.focusDestination(
+        props.edgeKeys[event.key === 'Home' ? 0 : 1],
+        event.shiftKey,
+      );
+    }
+    if (event.key === 'ArrowRight' && open && node.children.length) {
+      event.preventDefault();
+      props.focusDestination(node.children[0].issue.key);
+    }
+    if (event.key === 'ArrowLeft' && !open && issue.parentKey) {
+      event.preventDefault();
+      props.focusDestination(issue.parentKey);
     }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
