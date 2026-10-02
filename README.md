@@ -80,7 +80,7 @@ Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/
 bazel run //:package
 ```
 
-Installers are written to `release/`: DMG/ZIP for macOS arm64, NSIS for Windows x64, and AppImage/DEB for Linux x64. Packaging requires a host OS/CPU in this matrix. `bazel run //:packaged_smoke` checks each download’s production executable after packaging; CI uploads only checked downloads and their hash report. Builds are unsigned. Native clean installation, upgrade, removal, signing trust, and Linux desktop/keyring qualification remain pending user desktop access and block public release. See [minimum OS targets, installer prerequisites, and the release checklist](docs/platforms.md), and [version-tag releases, exact asset names, installation, and publication gates](docs/releases.md).
+Installers are written to `release/`: DMG/ZIP for macOS arm64, NSIS for Windows x64, and AppImage/DEB for Linux x64. Packaging requires a host OS/CPU in this matrix. `bazel run //:packaged_smoke` checks each download’s production executable after packaging; CI uploads only checked downloads and their hash report. Local/PR builds are unsigned; protected version-tag Windows packages require Authenticode signing and actual installer/executable verification. See the [DRAFT Windows signing configuration and guarded lifecycle fixture](docs/windows-signing.md). Native clean installation, upgrade, removal, signing trust, and Linux desktop/keyring qualification remain pending user desktop access and block public release. See [minimum OS targets, installer prerequisites, and the release checklist](docs/platforms.md), and [version-tag releases, exact asset names, installation, and publication gates](docs/releases.md).
 
 ## Development
 
