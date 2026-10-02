@@ -254,6 +254,7 @@ export interface CanopyAPI {
   cancelUpdateCheck(): Promise<void>;
   dismissUpdateNotice(): Promise<import('./updates').UpdateState>;
   openRelease(tag: string): Promise<void>;
+  supportReady(): Promise<void>;
   appVersion(): Promise<string>;
   openSupportLink(link: SupportLink): Promise<void>;
   onShowSupport(callback: () => void): () => void;

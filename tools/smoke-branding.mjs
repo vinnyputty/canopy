@@ -12,6 +12,7 @@ const manifest = JSON.parse(
 );
 const env = { ...process.env, CANOPY_USER_DATA: directory };
 delete env.ELECTRON_RUN_AS_NODE;
+if (!packaged) env.CANOPY_SMOKE_BRANDING = '1';
 let app;
 const errors = [];
 try {
@@ -20,12 +21,91 @@ try {
     args: packaged ? [] : [appPath],
     env,
   });
+  if (!packaged) {
+    await expect
+      .poll(() =>
+        app.evaluate(() => globalThis.canopyBrandingCreation?.reading),
+      )
+      .toBe(true);
+    await app.evaluate(({ app, Menu }) => {
+      const about = Menu.getApplicationMenu()
+        .items.find((item) => item.label === 'Help')
+        .submenu.items.find((item) => item.label === 'About & Support');
+      app.emit('activate');
+      about.click();
+      about.click();
+      about.click();
+    });
+    assert.equal(
+      await app.evaluate(
+        ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+      ),
+      0,
+    );
+    await app.evaluate(() =>
+      globalThis.canopyBrandingCreation.releaseCreation(),
+    );
+  }
   let page = await app.firstWindow();
   const watch = (page) => page.on('pageerror', (error) => errors.push(error));
   watch(page);
   await expect(
     page.getByRole('button', { name: 'About & Support', exact: true }),
   ).toBeVisible();
+  if (!packaged) {
+    await expect
+      .poll(() =>
+        app.evaluate(() => globalThis.canopyBrandingCreation.subscribing),
+      )
+      .toBe(true);
+    await expect(
+      page.getByRole('dialog', { name: 'About & Support' }),
+    ).toBeHidden();
+    await app.evaluate(() =>
+      globalThis.canopyBrandingCreation.releaseSubscription(),
+    );
+    const early = page.getByRole('dialog', { name: 'About & Support' });
+    await expect(
+      early.getByText(`Version ${manifest.version}`, { exact: true }),
+    ).toBeVisible();
+    await expect(
+      early.getByRole('button', { name: 'Close dialog' }),
+    ).toBeFocused();
+    assert.equal(
+      await app.evaluate(
+        ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+      ),
+      1,
+    );
+    await page.keyboard.press('Escape');
+  }
+  const supportButton = page.getByRole('button', {
+    name: 'About & Support',
+    exact: true,
+  });
+  for (const close of ['escape', 'button', 'backdrop']) {
+    await supportButton.focus();
+    await supportButton.press('Enter');
+    const modal = page.getByRole('dialog', { name: 'About & Support' });
+    const first = modal.getByRole('button', { name: 'Close dialog' });
+    const last = modal.getByRole('button', {
+      name: 'Report an issue',
+      exact: true,
+    });
+    await expect(first).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(last).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(first).toBeFocused();
+    if (close === 'escape') await page.keyboard.press('Escape');
+    else if (close === 'button') await first.click();
+    else
+      await page
+        .locator('.dialog-backdrop')
+        .click({ position: { x: 1, y: 1 } });
+    await expect(modal).toBeHidden();
+    await expect(supportButton).toBeFocused();
+  }
   // Intercept the OS browser boundary in this disposable test process. Exercise
   // the real validated IPC handlers and menu callbacks, including failure/retry.
   await app.evaluate(({ shell }) => {
@@ -98,6 +178,11 @@ try {
     .click();
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  const priorFocus = page.getByRole('button', {
+    name: 'Settings',
+    exact: true,
+  });
+  await priorFocus.focus();
   await app.evaluate(({ Menu }) =>
     Menu.getApplicationMenu()
       .items.find((item) => item.label === 'Help')
@@ -118,6 +203,27 @@ try {
   await expect
     .poll(() => app.evaluate(() => globalThis.brandingTest.urls.slice(-3)))
     .toEqual(destinations.map(([, url]) => url));
+  await dialog.getByRole('button', { name: 'Close dialog' }).click();
+  await expect(priorFocus).toBeFocused();
+  // About can replace Settings without changing its reading preferences or
+  // stranding Settings' keyboard return target.
+  await priorFocus.press('Enter');
+  await expect(
+    page.getByRole('dialog', { name: 'Settings', exact: true }),
+  ).toBeVisible();
+  await app.evaluate(({ Menu }) => {
+    const about = Menu.getApplicationMenu()
+      .items.find((item) => item.label === 'Help')
+      .submenu.items.find((item) => item.label === 'About & Support');
+    about.click();
+    about.click();
+  });
+  await expect(
+    dialog.getByRole('button', { name: 'Close dialog' }),
+  ).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(priorFocus).toBeFocused();
   const identity = await app.evaluate(({ app, BrowserWindow, nativeImage }) => {
     const { join } = process.getBuiltinModule('node:path');
     const { existsSync } = process.getBuiltinModule('node:fs');
@@ -136,7 +242,6 @@ try {
   assert.equal(identity.ico, true);
   assert.equal(identity.icns, true);
   if (process.platform === 'darwin') {
-    await dialog.getByRole('button', { name: 'Close dialog' }).click();
     await app.evaluate(({ Menu }) =>
       Menu.getApplicationMenu()
         .items.find((item) => item.label === 'Canopy')
@@ -149,15 +254,56 @@ try {
     );
     await expect.poll(() => app.windows().length).toBe(0);
     const next = app.waitForEvent('window');
-    await app.evaluate(({ Menu }) =>
-      Menu.getApplicationMenu()
+    if (!packaged)
+      await app.evaluate(() => {
+        globalThis.canopyBrandingCreation.holdCreation = true;
+        globalThis.canopyBrandingCreation.holdSubscription = true;
+      });
+    await app.evaluate(({ app, Menu }) => {
+      const about = Menu.getApplicationMenu()
         .items.find((item) => item.label === 'Canopy')
-        .submenu.items.find((item) => item.label === 'About Canopy')
-        .click(),
-    );
+        .submenu.items.find((item) => item.label === 'About Canopy');
+      app.emit('activate');
+      about.click();
+      about.click();
+      about.click();
+    });
+    if (!packaged) {
+      await expect
+        .poll(() =>
+          app.evaluate(() => globalThis.canopyBrandingCreation.reading),
+        )
+        .toBe(true);
+      assert.equal(
+        await app.evaluate(
+          ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+        ),
+        0,
+      );
+      await app.evaluate(() =>
+        globalThis.canopyBrandingCreation.releaseCreation(),
+      );
+    }
     page = await next;
     watch(page);
     dialog = page.getByRole('dialog', { name: 'About & Support' });
+    if (!packaged) {
+      await expect
+        .poll(() =>
+          app.evaluate(() => globalThis.canopyBrandingCreation.subscribing),
+        )
+        .toBe(true);
+      await expect(dialog).toBeHidden();
+      await app.evaluate(() =>
+        globalThis.canopyBrandingCreation.releaseSubscription(),
+      );
+    }
+    assert.equal(
+      await app.evaluate(
+        ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+      ),
+      1,
+    );
     await expect(
       dialog.getByText(`Version ${manifest.version}`, { exact: true }),
     ).toBeVisible();
@@ -168,7 +314,7 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log(
-    `Branding Electron checks passed (${packaged ? 'packaged' : 'staged'}): version, links, failure/retry, menus, palette, icons, About reopening.`,
+    `Branding Electron checks passed (${packaged ? 'packaged' : 'staged'}): version, links, failure/retry, menus, palette, icons, serialized creation/readiness, modal focus/restoration, About reopening.`,
   );
 } finally {
   if (app) await app.close();
