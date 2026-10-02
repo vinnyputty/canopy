@@ -34,8 +34,7 @@ jobs:
       - name: Verify draft, tag, downloaded bytes and native evidence before publication
         shell: bash
         env:
-          CANOPY_WINDOWS_SUBJECT: ${{ vars.WINDOWS_SIGNING_SUBJECT }}
-          CANOPY_WINDOWS_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_THUMBPRINT }}
+          CANOPY_WINDOWS_POLICY: ${{ vars.WINDOWS_SIGNING_POLICY }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |

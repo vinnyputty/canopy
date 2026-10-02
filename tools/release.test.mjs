@@ -1,3 +1,4 @@
+import { fixturePolicy, fixtureSignature } from './windows-signing-fixture.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -19,18 +20,7 @@ import {
 const version = '0.1.0';
 const tag = `v${version}`;
 const commit = 'a'.repeat(40);
-const windowsIdentity = {
-  subject: 'CN=Fixture publisher',
-  thumbprint: 'A'.repeat(40),
-};
-const signature = (sha256) => ({
-  status: 'Valid',
-  ...windowsIdentity,
-  timestamp: true,
-  notBefore: '2020-01-01T00:00:00Z',
-  notAfter: '2099-01-01T00:00:00Z',
-  sha256,
-});
+const signature = fixtureSignature;
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 async function fixture(fn) {
   const root = await mkdtemp(join(tmpdir(), 'canopy-release-'));
@@ -59,7 +49,7 @@ async function fixture(fn) {
           ? {
               windowsSigning: {
                 policy: 'Authenticode signed and timestamped',
-                ...windowsIdentity,
+                service: fixturePolicy,
                 installer: signature(checks[0].sha256),
                 executable: signature(digest('synthetic executable')),
               },
@@ -697,4 +687,3 @@ test('actual Windows signature verification failure blocks publication before re
     assert.deepEqual(calls, []);
   });
 });
-
