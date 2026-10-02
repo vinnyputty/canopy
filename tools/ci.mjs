@@ -69,6 +69,7 @@ if (process.platform === 'linux' && !env.DISPLAY) {
   bazel('run', '//:demo_check');
 }
 bazel('run', '//:package');
+if (process.platform === 'darwin') bazel('run', '//:packaged_smoke_failure');
 if (process.platform === 'linux' && !env.DISPLAY) {
   run('xvfb-run', [
     '-a',

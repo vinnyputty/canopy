@@ -113,6 +113,14 @@ js_binary(
 )
 
 js_binary(
+    name = "packaged_smoke_failure",
+    entry_point = "tools/packaged-smoke-failure.mjs",
+    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
     name = "broker",
     entry_point = "tools/broker.mjs",
     data = [":build"],
