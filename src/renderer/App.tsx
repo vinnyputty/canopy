@@ -100,12 +100,18 @@ import {
   reorderTab,
   reopenTab,
   sameRoot,
-  togglePinned,
   travel,
   visit,
   type Navigation,
 } from './workspace';
 import { Settings } from './Settings';
+import { SidebarWork } from './SidebarWork';
+import {
+  emptySidebarSession,
+  forgetSidebarConnections,
+  organizeSidebar,
+  type OrganizationAction,
+} from './sidebar-organization';
 import { DEFAULT_READING } from '../shared/views';
 import { TableHeader, ViewSettings } from './TableView';
 import {
@@ -281,6 +287,25 @@ export function App() {
   workspaceRef.current = workspace;
   connectionsRef.current = connections;
   historyRef.current = history;
+  const [sidebarSession, setSidebarSession] = useState(emptySidebarSession);
+  const sidebarSessionRef = useRef(sidebarSession);
+  sidebarSessionRef.current = sidebarSession;
+  const organize = (action: OrganizationAction) => {
+    const next = organizeSidebar(
+      workspaceRef.current,
+      sidebarSessionRef.current,
+      action,
+      action.type === 'undo'
+        ? undefined
+        : connectionsRef.current.find(
+            (connection) => connection.id === action.root.connectionId,
+          )?.name,
+    );
+    workspaceRef.current = next.workspace;
+    sidebarSessionRef.current = next.session;
+    setWorkspace(next.workspace);
+    setSidebarSession(next.session);
+  };
   const [queries, setQueries] = useState<Record<string, string>>({});
   const [nextTaskViews, setNextTaskViews] = useState<Record<string, boolean>>(
     {},
@@ -2911,135 +2936,43 @@ export function App() {
           <Menu size={17} />
         </button>
         <div className="sidebar-body">
-          <div className="side-heading">
-            <span>SAVED VIEWS</span>
-            <button
-              className="icon-button"
-              aria-label="Create saved view"
-              onClick={() => {
-                const id = crypto.randomUUID();
-                const view: SavedIssueView = {
-                  id,
-                  name: 'New view',
-                  roots: [],
-                  connectionIds: [],
-                  filters: {
-                    assignee: 'any',
-                    statuses: [],
-                    priority: '',
-                    hideDone: true,
-                  },
-                  sort: { column: 'key', direction: 'asc' },
-                };
-                setWorkspace((current) => ({
-                  ...current,
-                  savedViews: [...(current.savedViews ?? []), view],
-                  activeSavedViewId: id,
-                }));
-              }}
-            >
-              <Plus size={15} />
-            </button>
-          </div>
-          <nav className="side-tabs" aria-label="Saved views">
-            {(workspace.savedViews ?? []).map((item) => (
-              <button
-                key={item.id}
-                aria-label={`Saved view: ${item.name}`}
-                className={cx(
-                  'side-tab',
-                  item.id === activeSavedView?.id && 'active',
-                )}
-                onClick={() => {
-                  setSelectedViewIssue(null);
-                  setWorkspace((current) => ({
-                    ...current,
-                    activeSavedViewId: item.id,
-                  }));
-                }}
-              >
-                <span>
-                  <b>{item.name}</b>
-                </span>
-              </button>
-            ))}
-          </nav>
-          {(workspace.pinnedRoots?.length ?? 0) > 0 && (
-            <>
-              <div className="side-heading">
-                <span>PINNED ROOTS</span>
-              </div>
-              <nav className="side-tabs" aria-label="Pinned roots">
-                {workspace.pinnedRoots!.map((root) => (
-                  <div
-                    className="pinned-root"
-                    key={`${root.connectionId}:${root.rootKey}`}
-                  >
-                    <button
-                      className={cx(
-                        'side-tab',
-                        activeTab && sameRoot(root, activeTab) && 'active',
-                      )}
-                      title={`${root.rootKey}: ${root.summary ?? ''} · ${connections.find((item) => item.id === root.connectionId)?.name ?? 'Unavailable site'}`}
-                      onClick={() => openTab(root.connectionId, root.rootKey)}
-                    >
-                      <Pin size={14} />
-                      <span>
-                        <b>{root.rootKey}</b>
-                        <small>{root.summary ?? root.rootKey}</small>
-                      </span>
-                    </button>
-                    <button
-                      className="icon-button unpin-root"
-                      aria-label={`Unpin ${root.rootKey}`}
-                      onClick={() =>
-                        setWorkspace((current) => togglePinned(current, root))
-                      }
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-                ))}
-              </nav>
-            </>
-          )}
-
-          <div className="side-heading">
-            <span>OPEN TREES</span>
-            <button
-              className="icon-button"
-              onClick={() => setDialog('open')}
-              aria-label="Open issue"
-            >
-              <Plus size={15} />
-            </button>
-          </div>
-          <nav className="side-tabs">
-            {workspace.tabs.map((tab) => (
-              <button
-                key={tab.id}
-                title={`${tab.rootKey}: ${tab.summary ?? ''} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable site'}`}
-                className={cx('side-tab', tab.id === activeTab?.id && 'active')}
-                onClick={() => selectTab(tab.id)}
-              >
-                <ChevronRight size={14} />
-                <span>
-                  <b>{tab.rootKey}</b>
-                  <small>
-                    {tab.summary ??
-                      connections.find((item) => item.id === tab.connectionId)
-                        ?.name ??
-                      'Unknown site'}
-                  </small>
-                </span>
-              </button>
-            ))}
-            {workspace.tabs.length === 0 && (
-              <p className="sidebar-empty">
-                Open an issue to start exploring its tree.
-              </p>
-            )}
-          </nav>
+          <SidebarWork
+            workspace={workspace}
+            connections={connections}
+            session={sidebarSession}
+            onOrganize={organize}
+            onOpen={(root) => void openTab(root.connectionId, root.rootKey)}
+            onSelectTab={selectTab}
+            onSelectView={(id) => {
+              setSelectedViewIssue(null);
+              setWorkspace((current) => ({
+                ...current,
+                activeSavedViewId: id,
+              }));
+            }}
+            onOpenPicker={() => setDialog('open')}
+            onCreateView={() => {
+              const id = crypto.randomUUID();
+              const view: SavedIssueView = {
+                id,
+                name: 'New view',
+                roots: [],
+                connectionIds: [],
+                filters: {
+                  assignee: 'any',
+                  statuses: [],
+                  priority: '',
+                  hideDone: true,
+                },
+                sort: { column: 'key', direction: 'asc' },
+              };
+              setWorkspace((current) => ({
+                ...current,
+                savedViews: [...(current.savedViews ?? []), view],
+                activeSavedViewId: id,
+              }));
+            }}
+          />
           <Connections
             connections={connections}
             demoMode={demoMode}
@@ -3048,6 +2981,14 @@ export function App() {
               const removed = connections.filter(
                 (item) => !nextConnections.some((next) => next.id === item.id),
               );
+              if (removed.length) {
+                const clean = forgetSidebarConnections(
+                  sidebarSessionRef.current,
+                  removed.map((item) => item.id),
+                );
+                sidebarSessionRef.current = clean;
+                setSidebarSession(clean);
+              }
               for (const connection of removed)
                 delete cooldowns.current[connection.id];
               setCooldownTimes({ ...cooldowns.current });
@@ -4523,9 +4464,7 @@ export function App() {
               <button
                 role="menuitem"
                 onClick={() =>
-                  action(() =>
-                    setWorkspace((current) => togglePinned(current, tab)),
-                  )
+                  action(() => organize({ type: 'pin', root: tab }))
                 }
               >
                 {pinned ? 'Unpin root' : 'Pin root'}
