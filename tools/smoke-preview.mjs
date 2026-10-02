@@ -50,6 +50,21 @@ export async function installPreviewHandlers(
             scrollTop: 0,
           })),
           activeTabId: 'first',
+          savedViews: [
+            {
+              id: 'all',
+              name: 'All issues',
+              roots: [],
+              connectionIds: ['first', 'second'],
+              filters: {
+                assignee: 'any',
+                statuses: [],
+                priority: '',
+                hideDone: false,
+              },
+              sort: { column: 'key', direction: 'asc' },
+            },
+          ],
           shortcuts: {},
           theme: 'system',
           sidebarCollapsed: false,
@@ -68,7 +83,7 @@ export async function installPreviewHandlers(
           fetchedAt: Date.now(),
           warnings: [],
         }),
-        preview: async (_event, connection) => {
+        preview: async (_event, connection, key) => {
           const mode = controls.mode;
           if (mode === 'brief-fail') throw new Error('Preview unavailable');
           if (
@@ -90,7 +105,19 @@ export async function installPreviewHandlers(
           return {
             issue: {
               ...issue,
-              summary: `${connection} issue`,
+              key,
+              summary:
+                key === 'LINK-9' ? 'Linked issue' : `${connection} issue`,
+              links:
+                key === 'TEST-1'
+                  ? [
+                      {
+                        key: 'LINK-9',
+                        summary: 'Linked issue',
+                        relationship: 'relates to',
+                      },
+                    ]
+                  : [],
               ...(mode === 'metadata-permission'
                 ? {
                     type: 'Issue',
@@ -308,9 +335,10 @@ export async function auditPreview(app, page, restart) {
       .poll(() => app.evaluate(() => globalThis.previewRecovery.started))
       .toBe(true);
     await page.getByRole('tab').nth(1).click();
-    await expect(pane).toHaveCount(0);
-    await open();
-    await expect(pane.locator('h2')).toHaveText('second issue');
+    await expect(pane).toBeVisible();
+    await expect(pane.locator('.preview-content > h2')).toHaveText(
+      'second issue',
+    );
     await app.evaluate(() => globalThis.previewRecovery.release());
     await expect
       .poll(() => app.evaluate(() => globalThis.previewRecovery.completed))
@@ -322,11 +350,69 @@ export async function auditPreview(app, page, restart) {
           requestAnimationFrame(() => requestAnimationFrame(resolve)),
         ),
     );
-    await expect(pane.locator('h2')).toHaveText('second issue');
+    await expect(pane.locator('.preview-content > h2')).toHaveText(
+      'second issue',
+    );
     await expect(pane.getByRole('alert')).toHaveCount(0);
     await page.keyboard.press('Escape');
     await expect(row).toBeFocused();
   }
+  await mode('success');
+  await open();
+  const resize = pane.getByRole('separator', { name: 'Resize issue preview' });
+  await resize.press('ArrowLeft');
+  await expect(resize).toHaveAttribute('aria-valuenow', '440');
+  await page.getByRole('tab').nth(0).click();
+  await expect(pane.locator('.preview-content > h2')).toHaveText('first issue');
+  await expect(resize).toHaveAttribute('aria-valuenow', '440');
+  await page
+    .getByRole('button', { name: 'Saved view: All issues', exact: true })
+    .click();
+  await expect(pane.getByRole('status')).toHaveText(
+    'Select an issue to preview.',
+  );
+  const choices = page.locator('.saved-view-choice');
+  await expect(choices).toHaveCount(2);
+  // Saved-view selections also discard a linked preview before returning to A.
+  await choices.nth(0).click();
+  await expect(pane.locator('.preview-content > h2')).toHaveText('first issue');
+  await pane
+    .getByRole('button', { name: 'Preview LINK-9: Linked issue', exact: true })
+    .click();
+  await expect(pane).toHaveAttribute('aria-label', 'Preview LINK-9');
+  await expect(pane.locator('.preview-content > h2')).toHaveText(
+    'Linked issue',
+  );
+  await choices.nth(1).click();
+  await expect(pane.locator('.preview-content > h2')).toHaveText(
+    'second issue',
+  );
+  await choices.nth(0).click();
+  await expect(pane).toHaveAttribute('aria-label', 'Preview TEST-1');
+  await expect(pane.locator('.preview-content > h2')).toHaveText('first issue');
+  await choices.nth(1).click();
+  await expect(pane.locator('.preview-content > h2')).toHaveText(
+    'second issue',
+  );
+  await expect(resize).toHaveAttribute('aria-valuenow', '440');
+  await page.keyboard.press('Escape');
+  await expect(choices.nth(1)).toBeFocused();
+  await expect(pane).toHaveCount(0);
+  await page.getByRole('tab').nth(1).click();
+  await expect(pane).toHaveCount(0);
+  await open();
+  await page
+    .getByRole('button', { name: 'Saved view: All issues', exact: true })
+    .click();
+  await expect(pane.getByRole('status')).toHaveText(
+    'Select an issue to preview.',
+  );
+  await page.keyboard.press('Escape');
+  await expect(
+    page.getByRole('button', { name: 'Saved view: All issues', exact: true }),
+  ).toBeFocused();
+  await expect(pane).toHaveCount(0);
+  await page.getByRole('tab').nth(1).click();
   await mode('permission');
   await open();
   await expect(pane.getByRole('alert')).toContainText(
@@ -335,7 +421,9 @@ export async function auditPreview(app, page, restart) {
   await expect(pane).not.toContainText('No description.');
   await mode('comments-permission');
   await pane.getByRole('button', { name: 'Retry', exact: true }).click();
-  await expect(pane.locator('h2')).toHaveText('second issue');
+  await expect(pane.locator('.preview-content > h2')).toHaveText(
+    'second issue',
+  );
   await expect(pane.getByRole('alert')).toContainText('Cannot load comments');
   await expect(pane).toContainText(
     '<img src=x onerror="window.previewExecuted=true">',
