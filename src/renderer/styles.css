@@ -3169,3 +3169,14 @@ kbd {
   color: var(--muted);
   margin-top: 3px;
 }
+
+/* Viewport gaps carry layout only; logical membership stays in the row model. */
+[data-row-window] {
+  overflow-anchor: none;
+}
+[data-window-row] {
+  display: flow-root;
+}
+.saved-view-list [data-window-row] {
+  padding-bottom: 5px;
+}
