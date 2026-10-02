@@ -77,6 +77,33 @@
     "Linux_AT_SPI_Orca": "pending",
     "poll_feedback_follow_on_GUI": "pending fresh independent review and exclusive lead GUI token",
     "limits": "No native speech/events qualification, native preferences or exhaustive provider/dialog/long-label/clipping acceptance; Chromium trees and formula ratios are separate evidence categories.",
-    "saved_view_destination_follow_on_GUI": "pending fresh independent delta review, then focused/full Mac acceptance under an exclusive lead GUI token"
+    "saved_view_destination_follow_on_GUI": "pending fresh independent delta review, then focused/full Mac acceptance under an exclusive lead GUI token",
+    "consecutive_delivery_editor_follow_on_GUI": "pending fresh independent delta review, then focused/full Mac acceptance under an exclusive lead GUI token; actual App ReactDOM/jsdom commit and reachable editor-event probes passed headlessly"
+  },
+  "headless_saved_feedback": {
+    "reviewed_parent": "baecd0a11bf42dde2547db4503f34db3da242e23",
+    "production_source_sha256": {
+      "src/renderer/refresh.ts": "34ebe59962f98bccbca12dd52f905a219881548b68b58086f003c5b66f181134",
+      "src/renderer/App.tsx": "704b1d4ad50ca1560d6400819c3e90019b1b87775a526d32c0c9612c7885b03e"
+    },
+    "runtime": {
+      "React": "19.3.0",
+      "ReactDOM": "19.3.0",
+      "jsdom": "27.0.1"
+    },
+    "observations": {
+      "reviewed_same_count_consecutive_change": "FAIL: second different summary delivered visibly, zero status mutations",
+      "corrected_same_count_consecutive_change": "PASS: both different summaries delivered visibly, distinct committed status text on the persistent node",
+      "timestamp_only_poll": "PASS: zero status mutations",
+      "editor_refresh": "PASS: focused real select receives global Refresh; scheduled sample read held until Escape, then manual progress and completion",
+      "navigation": "PASS: real select blur cancels editor; queued outgoing tree feedback suppressed through view and same-tree return; explicit saved-view reads start"
+    },
+    "proof_sha256": {
+      "old-polls.log": "3ea61c347760f6afb1da502e69ea4a0dafa32552060ce15862789560d2756e2b",
+      "new-polls.log": "94d7a8e8099b1930825270146890c4a44d88ebe5edf17293859b62a61fd75c05",
+      "old-editor.log": "9f0984ef6611b843cd0971b23f1c55d925ecb48bb399a2af6bc02a574a540ad7",
+      "new-editor.log": "dd11a62aafd4e6a3368ef654ddb7512ac94b7d7d132db9d4ecb5ff63f2a43606"
+    },
+    "limits": "Headless actual App/ReactDOM with controlled read-only sample IPC and scheduled ticks; no Chromium layout/accessibility events, native APIs or speech qualification. Fresh focused/full Mac GUI remains pending."
   }
 }

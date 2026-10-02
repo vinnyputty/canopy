@@ -221,36 +221,62 @@ export async function auditSavedFeedback({
   await expect(live).toHaveText('Accessibility A: refreshed 2 of 2 roots.');
   await checkLive('saved-view-offline-deferred-completion', null);
 
-  // Keep an actual picker editor open via keyboard navigation. Its queued view
-  // intent must retain the old destination scope when cancellation resumes it.
+  // Refresh's global shortcut is reachable without blurring the actual picker.
+  // The editor gate queues tree intent; navigation deliberately cancels the
+  // picker and invalidates that outgoing intent before its read resumes.
   await treeTab();
   await page
     .getByRole('button', { name: 'Edit priority for CAN-100', exact: true })
     .click();
-  await expect(page.getByLabel('Choose value')).toBeVisible();
+  const picker = page.getByLabel('Choose value');
+  await expect(picker).toBeFocused();
+  await fixture('hold', 'a11y-editor-deferred', 'tree', 'CAN-100');
+  const refreshShortcut = await page.evaluate(() =>
+    /mac/i.test(navigator.platform) ? 'Meta+r' : 'Control+r',
+  );
+  await picker.press(refreshShortcut);
+  await expect(picker).toBeFocused();
+  await page.clock.runFor(2000);
+  expect(await fixture('started', 'a11y-editor-deferred')).toBe(false);
+  await expect(live).not.toContainText('Checking CAN-100');
+  await picker.press('Escape');
+  await expect(picker).toHaveCount(0);
+  await page.clock.runFor(2000);
+  await started('a11y-editor-deferred');
+  await expect(live).toHaveText('Checking CAN-100 for changes');
+  await fixture('release', 'a11y-editor-deferred');
+  await completed('a11y-editor-deferred');
+  await expect(live).toContainText('CAN-100:');
+  await checkLive(
+    'editor-shortcut-deferred-cancel-completion',
+    await latestTree('CAN-100'),
+  );
+
+  await page
+    .getByRole('button', { name: 'Edit priority for CAN-100', exact: true })
+    .click();
+  await expect(picker).toBeFocused();
+  await fixture('hold', 'a11y-editor-navigation', 'tree', 'CAN-100');
+  await picker.press(refreshShortcut);
+  await expect(picker).toBeFocused();
+  expect(await fixture('started', 'a11y-editor-navigation')).toBe(false);
   const viewButton = page.getByRole('button', {
     name: 'Saved view: Accessibility A',
     exact: true,
   });
-  await viewButton.focus();
+  await viewButton.focus(); // Actual onBlur cancels the picker.
+  await expect(picker).toHaveCount(0);
   await viewButton.press('Enter');
-  await fixture('hold', 'a11y-view-editor-deferred', 'tree', 'CAN-100');
-  await refresh('Accessibility A');
-  await expect(live).toContainText('2 waiting to start');
-  expect(await fixture('started', 'a11y-view-editor-deferred')).toBe(false);
-  const rootButton = page.getByRole('tab', { name: /CAN-100/ });
-  await rootButton.focus();
-  await rootButton.press('Enter');
-  await expect(live).not.toContainText('Waiting to refresh Accessibility A');
-  await page.getByLabel('Choose value').press('Escape');
   await page.clock.runFor(2000);
-  await started('a11y-view-editor-deferred');
+  await started('a11y-editor-navigation');
   await expect(live).not.toContainText('Checking CAN-100');
-  await fixture('release', 'a11y-view-editor-deferred');
-  await completed('a11y-view-editor-deferred');
-  await expect(live).not.toContainText('Accessibility A');
+  await fixture('release', 'a11y-editor-navigation');
+  await completed('a11y-editor-navigation');
+  await expect(live).not.toContainText('Checking CAN-100');
+  await treeTab();
+  await expect(live).toHaveText('');
   await checkLive(
-    'saved-view-editor-cancel-scope',
+    'editor-navigation-cancels-outgoing-intent',
     await latestTree('CAN-100'),
   );
 
@@ -376,6 +402,38 @@ export async function auditSavedFeedback({
     await latestTree('CAN-100'),
     await latestTree('CAN-200'),
   ]);
+  // Two different same-count deliveries must each commit status text, without
+  // an intervening manual refresh/failure/navigation resetting the message.
+  for (const [index, summary] of [
+    'Sample first consecutive automatic change',
+    'Sample second consecutive automatic change',
+  ].entries()) {
+    const beforeText = await live.textContent();
+    const beforeMutations = await page.evaluate(
+      () => globalThis.canopySavedViewChanges.length,
+    );
+    await fixture('update', 'CAN-100', { summary });
+    const id = `a11y-view-consecutive-${index}`;
+    await fixture('hold', id, 'tree', 'CAN-100');
+    await page.clock.runFor(31_000);
+    await started(id);
+    await fixture('release', id);
+    await completed(id);
+    await expect(
+      region('Accessibility A').getByText(summary, { exact: true }),
+    ).toBeVisible();
+    await expect(live).toContainText(
+      'Changes found across 1 roots. Last updated at',
+    );
+    await expect(live).not.toHaveText(beforeText);
+    await expect
+      .poll(() => page.evaluate(() => globalThis.canopySavedViewChanges.length))
+      .toBeGreaterThan(beforeMutations);
+    await checkLive(
+      `saved-view-consecutive-automatic-${index}`,
+      await latestTree('CAN-100'),
+    );
+  }
   await fixture('update', 'CAN-100', { summary: automaticSummary });
   await refresh('Accessibility A');
   await expect(live).toHaveText('Accessibility A: refreshed 2 of 2 roots.');

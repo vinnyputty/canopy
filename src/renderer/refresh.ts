@@ -217,6 +217,7 @@ export class RefreshAnnouncements {
   private outcomes = new Map<string, ViewOutcome>();
   private affected = new Set<string>();
   private changed = false;
+  private changedAt = 0;
   private recovered = false;
   private running = new Map<string, AnnouncementRequest>();
   private failures = new Set<string>();
@@ -236,6 +237,7 @@ export class RefreshAnnouncements {
       this.outcomes.clear();
       this.affected.clear();
       this.changed = this.recovered = false;
+      this.changedAt = 0;
     }
     this.view = view;
   }
@@ -298,6 +300,7 @@ export class RefreshAnnouncements {
       else if (changed || recovered || !request.previous) {
         this.affected.add(root.id);
         this.changed ||= changed;
+        if (changed) this.changedAt = Math.max(this.changedAt, next.fetchedAt);
         this.recovered ||= recovered;
       }
     } else if (
@@ -414,6 +417,7 @@ export class RefreshAnnouncements {
         this.batch = undefined;
         this.affected.clear();
         this.changed = this.recovered = false;
+        this.changedAt = 0;
       }
     } else {
       if (
@@ -436,12 +440,27 @@ export class RefreshAnnouncements {
             ? 'Refresh failed'
             : 'Roots updated';
       text = `${this.view.name}: ${reason} across ${this.affected.size} roots.`;
+      if (this.changed) {
+        text += ` Last updated at ${new Date(this.changedAt).toLocaleString(
+          undefined,
+          {
+            fractionalSecondDigits: 3,
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            second: '2-digit',
+          },
+        )}.`;
+      }
       if (errors.length)
         text += ` ${errors.length} roots failed. ${errors.join('; ')}`;
       if (partial.length)
         text += ` ${partial.length} roots returned partial results. ${partial.join('; ')}`;
       this.affected.clear();
       this.changed = this.recovered = false;
+      this.changedAt = 0;
     }
     if (this.viewText === text) return;
     this.viewText = text;

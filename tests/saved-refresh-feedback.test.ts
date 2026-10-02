@@ -199,6 +199,49 @@ it('batches meaningful automatic changes/failure/recovery and keeps unchanged, u
   assert.equal(messages.length, count);
 });
 
+it('distinguishes consecutive meaningful same-count deliveries while deduplicating unchanged polls and identical failures', () => {
+  const { feedback: f, messages } = setup();
+  const snapshot = (fetchedAt: number, summary: string): TreeSnapshot => ({
+    ...tree(fetchedAt),
+    issues: [
+      {
+        id: '100',
+        key: 'CAN-100',
+        summary,
+        type: 'Epic',
+        priority: null,
+        assignee: null,
+        status: { id: 'open', name: 'Open', category: 'new' },
+        links: [],
+      },
+    ],
+  });
+  const first = snapshot(1000, 'One');
+  const second = snapshot(1001, 'Two');
+  const third = snapshot(1002, 'Three');
+  for (const [previous, next] of [
+    [first, second],
+    [second, third],
+  ]) {
+    const request = f.begin('a', 'CAN-100', previous);
+    f.complete(request, next);
+  }
+  assert.equal(messages.length, 2);
+  assert.match(
+    messages[0].text,
+    /Changes found across 1 roots.*Last updated at/,
+  );
+  assert.notEqual(messages[0].text, messages[1].text);
+  const unchanged = f.begin('a', 'CAN-100', third);
+  f.complete(unchanged, { ...third, fetchedAt: 4000 });
+  assert.equal(messages.length, 2);
+  for (let i = 0; i < 2; i++) {
+    const request = f.begin('a', 'CAN-100', third);
+    f.fail(request, 'CAN-100', 'Same retained failure');
+  }
+  assert.equal(messages.length, 3);
+});
+
 it('separates view A and B ownership even when they share a root and ignores late background completion/error', () => {
   const { feedback: f, messages, owner } = setup();
   f.requestView();
