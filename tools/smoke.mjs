@@ -246,7 +246,7 @@ async function auditSettingsKeyboard() {
   };
   await open();
   const controls = settings.locator(
-    'button:not(:disabled), select:not(:disabled)',
+    'button:not(:disabled), select:not(:disabled), input:not(:disabled)',
   );
   const count = await controls.count();
   await page.keyboard.press('Shift+Tab');
