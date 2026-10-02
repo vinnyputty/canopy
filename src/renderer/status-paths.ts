@@ -22,6 +22,7 @@ export function statusPaths(
   const maxRoutes = 80;
   const maxPerDestinationAndLength = 4;
   const found = new Map<string, Map<number, StatusPath[]>>();
+  const discovered: StatusPath[] = [];
   const seen = new Set<string>();
   let truncated = false;
   let consideredEdges = 0;
@@ -56,7 +57,9 @@ export function statusPaths(
         }
         const routes = lengths.get(next.length) ?? [];
         if (routes.length < maxPerDestinationAndLength) {
-          routes.push({ destination: choice.to, steps: next });
+          const route = { destination: choice.to, steps: next };
+          routes.push(route);
+          discovered.push(route);
           lengths.set(next.length, routes);
         } else truncated = true;
       }
@@ -73,6 +76,17 @@ export function statusPaths(
   }
   const routes = [...found.values()].flatMap((lengths) =>
     [...lengths.values()].flat(),
+  );
+  // There is no default-path metadata. Prefer the longest retained routes;
+  // stable ties follow transition discovery order. Rank each status once, at
+  // its first encounter, while preserving alternate routes within a destination.
+  const rank = new Map<string, number>();
+  discovered.sort((a, b) => b.steps.length - a.steps.length);
+  for (const route of discovered)
+    for (const step of route.steps)
+      if (!rank.has(step.to.id)) rank.set(step.to.id, rank.size);
+  routes.sort(
+    (a, b) => rank.get(a.destination.id)! - rank.get(b.destination.id)!,
   );
   if (routes.length > maxRoutes) truncated = true;
   return { routes: routes.slice(0, maxRoutes), truncated };
