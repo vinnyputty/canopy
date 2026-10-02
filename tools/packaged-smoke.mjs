@@ -13,7 +13,7 @@ import {
   assertManagedLaunchChild,
   recordCanopyPolicy,
 } from './appimage-observer.mjs';
-import { validateTrust } from './macos-release.mjs';
+import { containedAppRoot, validateTrust } from './macos-release.mjs';
 import { checkDesktopEntry } from './linux-package-check.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
@@ -85,7 +85,7 @@ async function extract(artifact, format, directory) {
       artifact,
     ]);
     try {
-      await cp(join(mount, 'Canopy.app'), join(payload, 'Canopy.app'), {
+      await cp(await containedAppRoot(mount), join(payload, 'Canopy.app'), {
         recursive: true,
         verbatimSymlinks: true,
       });
@@ -94,6 +94,7 @@ async function extract(artifact, format, directory) {
     }
   } else if (format === 'zip') {
     run('ditto', ['-x', '-k', artifact, payload]);
+    await containedAppRoot(payload);
   } else if (format === 'exe') {
     // Inspect the NSIS payload without claiming a native installation check.
     run('7z', ['x', '-y', `-o${payload}`, artifact]);

@@ -699,3 +699,77 @@ test('unsigned drafts retain the original matrix and cannot qualify as signed', 
     await writeFile(path, JSON.stringify(qualification(manifest)));
     await assert.rejects(qualify(manifest, path), /Unsigned/);
   }));
+
+test('mixed macOS publishers cannot verify, qualify or reach a public edit with matching native evidence', async (t) => {
+  for (const [label, select, patch] of [
+    [
+      'different CPUs',
+      (name) => name.includes('-mac-x64.'),
+      {
+        teamId: 'ZZZZZZZZZZ',
+        identity: 'Developer ID Application: Other (ZZZZZZZZZZ)',
+        certificateSha1: 'e'.repeat(40),
+      },
+    ],
+    [
+      'same CPU formats',
+      (name) => name.endsWith('-mac-arm64.zip'),
+      {
+        teamId: 'ZZZZZZZZZZ',
+        identity: 'Developer ID Application: Other (ZZZZZZZZZZ)',
+        certificateSha1: 'e'.repeat(40),
+      },
+    ],
+    [
+      'different certificate',
+      (name) => name.endsWith('-mac-x64.zip'),
+      { certificateSha1: 'e'.repeat(40) },
+    ],
+    [
+      'different identity',
+      (name) => name.endsWith('-mac-arm64.dmg'),
+      { identity: 'Developer ID Application: Other (ABCDEFGHIJ)' },
+    ],
+  ])
+    await t.test(label, async () =>
+      publicationFixture(async ({ output, evidence, notes }) => {
+        const path = join(output, 'release-manifest.json');
+        const manifest = JSON.parse(await readFile(path, 'utf8'));
+        for (const asset of manifest.assets.filter((item) => select(item.name)))
+          Object.assign(asset.macosTrust, patch);
+        await writeFile(path, JSON.stringify(manifest));
+        await writeFile(evidence, JSON.stringify(qualification(manifest)));
+        const calls = [];
+        let failure;
+        try {
+          await publish(
+            output,
+            tag,
+            version,
+            commit,
+            evidence,
+            notes,
+            (args) => {
+              calls.push(args);
+              return args[0] === 'api'
+                ? JSON.stringify(remoteRef('commit', commit))
+                : '';
+            },
+          );
+        } catch (error) {
+          failure = error;
+        }
+        assert.equal(
+          calls.length,
+          0,
+          `mixed publishers reached remote calls: ${JSON.stringify(calls)}`,
+        );
+        assert.match(failure?.message ?? '', /publisher differs/);
+        await assert.rejects(
+          verifyDownloads(output, tag, version, commit),
+          /publisher differs/,
+        );
+        await assert.rejects(qualify(manifest, evidence), /publisher differs/);
+      }),
+    );
+});
