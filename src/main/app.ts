@@ -395,6 +395,8 @@ async function start(
   };
   let demoLaunch: symbol | null = null;
   let savingWorkspace: Promise<void> = Promise.resolve();
+  let receivedWorkspace: Workspace | undefined;
+  let retryUnavailableWorkspace = false;
   const handlers: Record<string, (...args: any[]) => unknown> = {
     demoMode: () => demoMode,
     demoTimeScale: () => {
@@ -664,6 +666,8 @@ async function start(
         demoWorkspaceState = structuredClone(valid);
         return;
       }
+      receivedWorkspace = valid;
+      retryUnavailableWorkspace = false;
       savingWorkspace = storage.write('workspace', valid);
       return savingWorkspace;
     },
@@ -753,7 +757,7 @@ async function start(
       rendererUnavailable =
         created.webContents.getURL() !== pathToFileURL(html).href;
     });
-    const flushRenderer = async () => {
+    const flushRenderer = async (signal: AbortSignal) => {
       if (!rendererUnavailable && !created.webContents.isCrashed()) {
         let unavailable: () => void;
         const failedLoad = (
@@ -770,6 +774,15 @@ async function start(
           created.webContents.once('render-process-gone', unavailable);
           created.webContents.on('did-fail-load', failedLoad);
         });
+        const unsubscribe = () => {
+          created.webContents.removeListener(
+            'render-process-gone',
+            unavailable!,
+          );
+          created.webContents.removeListener('did-fail-load', failedLoad);
+          signal.removeEventListener('abort', unsubscribe);
+        };
+        signal.addEventListener('abort', unsubscribe, { once: true });
         try {
           const lost = await Promise.race([
             lostRenderer,
@@ -786,18 +799,21 @@ async function start(
           if (!rendererUnavailable && !created.webContents.isCrashed())
             throw error;
         } finally {
-          created.webContents.removeListener(
-            'render-process-gone',
-            unavailable!,
-          );
-          created.webContents.removeListener('did-fail-load', failedLoad);
+          unsubscribe();
         }
       }
       // Preserve writes already received when an unavailable renderer cannot
       // supply newer state. The overall close deadline also bounds this drain.
-      await savingWorkspace.catch((error) =>
-        console.error('Could not finish workspace save:', error),
-      );
+      if (retryUnavailableWorkspace && receivedWorkspace) {
+        retryUnavailableWorkspace = false;
+        savingWorkspace = storage.write('workspace', receivedWorkspace);
+      }
+      try {
+        await savingWorkspace;
+      } catch (error) {
+        retryUnavailableWorkspace = true;
+        throw error;
+      }
       return true;
     };
     const flushBeforeClose = async () => {
@@ -805,21 +821,36 @@ async function start(
         'Workspace save did not finish before the close deadline.',
       );
       let deadline: ReturnType<typeof setTimeout> | undefined;
+      const attempt = new AbortController();
       try {
         const [, forceClose] = await Promise.race([
-          Promise.all([savingWindow.catch(() => {}), flushRenderer()]),
+          Promise.all([
+            savingWindow.catch(() => {}),
+            flushRenderer(attempt.signal),
+          ]),
           new Promise<never>((_, reject) => {
             deadline = setTimeout(() => reject(timedOut), 15_000);
           }),
         ]);
         return forceClose;
       } catch (error) {
-        if (error !== timedOut) throw error;
+        attempt.abort();
+        if (
+          error !== timedOut &&
+          !rendererUnavailable &&
+          !created.webContents.isCrashed()
+        )
+          throw error;
         const { response } = await dialog.showMessageBox(created, {
           type: 'warning',
-          message: 'The workspace save has not finished.',
+          message:
+            error === timedOut
+              ? 'The workspace save has not finished.'
+              : 'The workspace could not be saved.',
           detail:
-            'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.',
+            error === timedOut
+              ? 'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.'
+              : `${error instanceof Error ? error.message : String(error)}\n\nThe renderer is unavailable. Keep Canopy open to repair storage and retry closing; only workspace changes already received can be retried. Closing anyway abandons those changes.`,
           buttons: ['Keep open', 'Close anyway'],
           defaultId: 0,
           cancelId: 0,
@@ -827,6 +858,7 @@ async function start(
         if (response !== 1) throw error;
         return true;
       } finally {
+        attempt.abort();
         clearTimeout(deadline);
       }
     };
