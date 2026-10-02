@@ -24,7 +24,7 @@ js_run_binary(
 js_test(
     name = "test",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources"],
+    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs"],
 )
 
 js_test(

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import { nextTasks } from '../src/renderer/next-tasks';
 import { JiraProvider } from '../src/main/jira';
 import { GithubProvider } from '../src/main/github';
 import { relationshipBlockers } from '../src/renderer/relationships';
@@ -347,4 +350,123 @@ test('a visible typed empty graph exports visible results rather than unknown or
   });
   assert.match(otherIssue, /Uninspected/);
   assert.doesNotMatch(otherIssue, /No visible blockers returned/);
+});
+
+for (const [name, parent] of [
+  ['omitted', undefined],
+  ['id-only', { id: '10001' }],
+  ['invalid key', { key: 'invalid' }],
+  ['explicit null', null],
+] as const) {
+  test(`fresh Jira ${name} parent overrides the stale snapshot in an uninspected brief`, async () => {
+    const preview = await jira({ parent, issuelinks: [] }).preview('A-1');
+    const brief = issueWorkBrief({
+      preview,
+      provider: 'jira',
+      knownIssues: [{ ...issue('A-1'), parentKey: 'OLD-1' }, issue('OLD-1')],
+    });
+    assert.match(
+      brief,
+      parent === null ? /- Parent path: None/ : /- Parent path: Unknown/,
+    );
+    assert.doesNotMatch(brief, /OLD-1|→ invalid/);
+  });
+}
+
+test('a usable fresh Jira parent keeps snapshot ancestors, while snapshot-only export retains its parent', async () => {
+  const knownIssues = [
+    { ...issue('A-1'), parentKey: 'OLD-1' },
+    issue('OLD-1'),
+    { ...issue('NEW-1'), parentKey: 'ROOT-1' },
+    issue('ROOT-1'),
+  ];
+  const preview = await jira({
+    parent: { key: 'NEW-1' },
+    issuelinks: [],
+  }).preview('A-1');
+  assert.match(
+    issueWorkBrief({ preview, provider: 'jira', knownIssues }),
+    /- Parent path: ROOT-1 → NEW-1/,
+  );
+  assert.match(
+    issueWorkBrief({ issueKey: 'A-1', provider: 'jira', knownIssues }),
+    /- Parent path: OLD-1/,
+  );
+});
+
+test('desktop missing-status fixture exercises the same-snapshot completed blocker fallback', async () => {
+  // Execute only the actual IPC fixture installer, without importing Playwright
+  // or starting the desktop audit. Keep the owning/account fixtures intact.
+  const source = readFileSync(
+    new URL('../tools/smoke-relationships.mjs', import.meta.url),
+    'utf8',
+  );
+  const start =
+    source.indexOf('await app.evaluate(') + 'await app.evaluate('.length;
+  const end = source.indexOf('\n  });\n  try', start) + '\n  }'.length;
+  assert.ok(start > 0 && end > start);
+  const handlers = new Map();
+  const context = {
+    ipcMain: {
+      _invokeHandlers: handlers,
+      removeHandler: (channel: string) => handlers.delete(channel),
+      handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
+        handlers.set(channel, handler),
+    },
+    relationshipAudit: undefined as unknown as {
+      includeCompletedBlocker: boolean;
+      mode: string;
+    },
+  };
+  runInNewContext(`(${source.slice(start, end)})({ ipcMain })`, context);
+  const tree = handlers.get('canopy:tree');
+  const original = tree(null, 'work', 'team/a#1');
+  assert.equal(original.issues.length, 1);
+  const workspace = handlers.get('canopy:loadWorkspace')();
+  assert.equal(
+    workspace.tabs.find((tab: { id: string }) => tab.id === 'owner')
+      .connectionId,
+    'work',
+  );
+  assert.equal(
+    workspace.tabs.find((tab: { id: string }) => tab.id === 'wrong')
+      .connectionId,
+    'other',
+  );
+  assert.equal(
+    tree(null, 'work', 'team/a#10').issues.find(
+      (row: Issue) => row.key === 'team/a#11',
+    ).status.category,
+    'done',
+  );
+  context.relationshipAudit.includeCompletedBlocker = true;
+  context.relationshipAudit.mode = 'missing-status';
+  const snapshot = tree(null, 'work', 'team/a#1');
+  assert.equal(snapshot.rootKey, 'team/a#1');
+  const staleTarget = snapshot.issues.find(
+    (row: Issue) => row.key === 'team/a#11',
+  );
+  assert.equal(staleTarget.parentKey, 'team/a#1');
+  assert.equal(staleTarget.status.category, 'done');
+  const graph = await handlers.get('canopy:relationships')(
+    null,
+    'work',
+    'team/a#1',
+    'audit-request',
+  );
+  const tasks = nextTasks(
+    snapshot,
+    'github',
+    'blocked',
+    undefined,
+    false,
+    undefined,
+    { 'team/a#1': graph },
+  );
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].issue.key, 'team/a#1');
+  assert.equal(tasks[0].blocker, 'unknown');
+  assert.equal(tasks[0].incomplete, true);
+  assert.equal(tasks[0].blockerDetails[0].key, 'team/a#11');
+  assert.equal(tasks[0].blockerDetails[0].statusCategory, undefined);
 });

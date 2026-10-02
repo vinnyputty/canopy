@@ -29,7 +29,15 @@ export function issueWorkBrief({
   const byKey = new Map(knownIssues.map((item) => [item.key, item]));
   const parents: string[] = [];
   const visited = new Set([issue.key]);
-  let parentKey = issue.parentKey ?? byKey.get(issue.key)?.parentKey;
+  // Jira preview requests the immediate parent; its unavailable/absent result
+  // must take precedence over an older tree snapshot.
+  const freshJiraParent = preview !== undefined && provider === 'jira';
+  const parentUnavailable = issue.unavailableFields?.includes('parent');
+  let parentKey = freshJiraParent
+    ? parentUnavailable
+      ? undefined
+      : issue.parentKey
+    : (issue.parentKey ?? byKey.get(issue.key)?.parentKey);
   while (parentKey && !visited.has(parentKey)) {
     visited.add(parentKey);
     parents.unshift(parentKey);

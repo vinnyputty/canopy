@@ -48,6 +48,7 @@ export async function auditRelationships(app, page) {
       release: null,
       completed: 0,
       treeReads: 0,
+      includeCompletedBlocker: false,
     };
     globalThis.relationshipAudit = controls;
     const handlers = {
@@ -81,7 +82,10 @@ export async function auditRelationships(app, page) {
         controls.treeReads++;
         return {
           rootKey: key,
-          issues: trees[key],
+          issues:
+            key === 'team/a#1' && controls.includeCompletedBlocker
+              ? [...trees[key], issue('team/a#11', key, true)]
+              : trees[key],
           fetchedAt: Date.now() + controls.treeReads,
           warnings: [],
         };
@@ -346,19 +350,46 @@ export async function auditRelationships(app, page) {
       });
       if (await inspect.count()) await inspect.click();
     };
+    const expectOwner = async (selectedKey) => {
+      await expect(page.getByRole('tab').nth(2)).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      await expect
+        .poll(() =>
+          app.evaluate(() => {
+            const workspace = globalThis.relationshipAudit.saved;
+            const active = workspace?.tabs.find(
+              (tab) => tab.id === workspace.activeTabId,
+            );
+            return {
+              id: active?.id,
+              connection: active?.connectionId,
+              selectedKey: active?.selectedKey,
+            };
+          }),
+        )
+        .toEqual({ id: 'owner', connection: 'work', selectedKey });
+      await expect(
+        page.locator(`[data-tree-key="${selectedKey}"]`),
+      ).toBeVisible();
+      await expect(
+        page.locator(`[data-tree-key="${selectedKey}"]`),
+      ).toBeFocused();
+    };
     await ensureSourcePreview();
     await pane
       .getByRole('region', { name: 'Parent path', exact: true })
       .getByRole('button', { name: 'Show team/a#10 in tree', exact: true })
       .click();
-    await expect(page.locator('[data-tree-key="team/a#10"]')).toBeFocused();
+    await expectOwner('team/a#10');
     await page.getByRole('tab').first().click();
     await ensureSourcePreview();
     await pane
       .getByRole('region', { name: 'Child paths', exact: true })
       .getByRole('button', { name: 'Show team/a#12 in tree', exact: true })
       .click();
-    await expect(page.locator('[data-tree-key="team/a#12"]')).toBeFocused();
+    await expectOwner('team/a#12');
     await expect(page.getByRole('tab')).toHaveCount(5);
     await page.getByRole('tab').first().click();
     await page.getByRole('button', { name: 'Next tasks', exact: true }).click();
@@ -370,6 +401,11 @@ export async function auditRelationships(app, page) {
       reads: globalThis.relationshipAudit.treeReads,
       relationships: globalThis.relationshipAudit.calls.length,
     }));
+    // Add the stale completed target to the current root only after account-scoped
+    // owning-tree navigation, so Next tasks actually encounters the old fallback.
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.includeCompletedBlocker = true;
+    });
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
     await expect
       .poll(() => app.evaluate(() => globalThis.relationshipAudit.treeReads))
@@ -382,7 +418,13 @@ export async function auditRelationships(app, page) {
       globalThis.relationshipAudit.mode = 'missing-status';
     });
     await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
-    await expect(tasks).toContainText('Status unknown');
+    await expect(tasks.locator('.next-task')).toHaveCount(1);
+    await expect(tasks.locator('.next-task-title')).toContainText(
+      'team/a#1 Sample team/a#1',
+    );
+    await expect(tasks.locator('.next-task-relationships')).toContainText(
+      'GitHub · work account · team/a#1 blocked by team/a#11 · Sample team/a#11 · Status unknown',
+    );
     await expect(tasks).toContainText('Blocker state unknown');
     await expect(tasks).not.toContainText('No active visible blockers found');
     await app.evaluate(() => {
@@ -404,12 +446,33 @@ export async function auditRelationships(app, page) {
     await expect(
       tasks.getByRole('button', { name: 'Loading relationships…' }),
     ).toBeVisible();
+    await expect
+      .poll(() =>
+        app.evaluate(() => typeof globalThis.relationshipAudit.release),
+      )
+      .toBe('function');
+    const held = await app.evaluate(() => ({
+      call: globalThis.relationshipAudit.calls.at(-1),
+      cancelledBefore: globalThis.relationshipAudit.cancelled.length,
+    }));
+    expect(held.call).toMatchObject({ connection: 'work', key: 'team/a#1' });
+    expect(held.call.requestId).toEqual(expect.any(String));
     await page.getByRole('tab').nth(1).click();
     await expect
       .poll(() =>
-        app.evaluate(() => globalThis.relationshipAudit.cancelled.length),
+        app.evaluate(
+          ({ call, cancelledBefore }) =>
+            globalThis.relationshipAudit.cancelled
+              .slice(cancelledBefore)
+              .some(
+                (cancelled) =>
+                  cancelled.connection === call.connection &&
+                  cancelled.requestId === call.requestId,
+              ),
+          held,
+        ),
       )
-      .toBeGreaterThan(0);
+      .toBe(true);
     const completedBeforeRelease = await app.evaluate(
       () => globalThis.relationshipAudit.completed,
     );
