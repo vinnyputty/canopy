@@ -136,5 +136,5 @@ js_binary(
 js_test(
     name = "release_checks",
     entry_point = "tools/release.test.mjs",
-    data = ["tools/release.mjs"],
+    data = ["tools/release.mjs", ".github/workflows/publish.yml"],
 )

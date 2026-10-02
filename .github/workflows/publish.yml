@@ -36,5 +36,4 @@ jobs:
           source_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
           test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
           gh release download "$RELEASE_TAG" --dir downloaded
-          node tools/release.mjs qualify downloaded "$RELEASE_TAG" "$version" "$source_sha" "release-qualification/$RELEASE_TAG.json"
-          gh release edit "$RELEASE_TAG" --notes-file "release-qualification/$RELEASE_TAG.md" --draft=false --verify-tag
+          node tools/release.mjs publish downloaded "$RELEASE_TAG" "$version" "$source_sha" "release-qualification/$RELEASE_TAG.json" "release-qualification/$RELEASE_TAG.md"
