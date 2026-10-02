@@ -22,6 +22,15 @@ await Promise.all([
     outfile: 'dist/smoke-main.cjs',
   }),
   build({
+    entryPoints: ['tests/fixtures/update-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    external: ['electron'],
+    outfile: 'dist/update-audit-main.cjs',
+  }),
+  build({
     entryPoints: ['src/main/preload.ts'],
     bundle: true,
     platform: 'node',

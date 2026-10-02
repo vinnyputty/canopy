@@ -1,6 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
 const api: CanopyAPI = {
+  updateState: () => ipcRenderer.invoke('canopy:updateState'),
+  updatePreferences: (value) =>
+    ipcRenderer.invoke('canopy:updatePreferences', value),
+  checkUpdates: (background) =>
+    ipcRenderer.invoke('canopy:checkUpdates', background),
+  cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
+  dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
+  openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),

@@ -33,6 +33,7 @@ import {
   githubRootUrl,
 } from './github';
 import { Storage } from './storage';
+import { Updates } from './updates';
 import { restoreWindow, type WindowState } from './window-state';
 import { configureLinuxCredentialStore } from './credentials';
 import { demoWorkspace } from './demo';
@@ -294,6 +295,7 @@ function workspace(value: Workspace) {
   return value;
 }
 type Fixture = {
+  updates?: Updates;
   syncStatus?(): { retryAt: number | null };
   disconnect(): Promise<void>;
   openIssue(): never;
@@ -331,6 +333,15 @@ async function start(
     }
   }
   let fixture = await createFixture?.(storage);
+  const updates =
+    fixture?.updates ??
+    new Updates(
+      storage,
+      app.getVersion(),
+      process.platform,
+      process.arch,
+      app.isPackaged && !demoMode,
+    );
   let demoWorkspaceState: Workspace = structuredClone(demoWorkspace);
   const connections = () => [
     ...(fixture ? [fixture.connection] : []),
@@ -395,6 +406,17 @@ async function start(
   };
   let demoLaunch: symbol | null = null;
   const handlers: Record<string, (...args: any[]) => unknown> = {
+    updateState: () => updates.snapshot(),
+    updatePreferences: (value: unknown) => updates.preferences(value),
+    checkUpdates: (background: unknown) => {
+      if (background !== undefined && typeof background !== 'boolean')
+        throw new Error('Invalid update check.');
+      return updates.check(background === true);
+    },
+    cancelUpdateCheck: () => updates.cancel(),
+    dismissUpdateNotice: () => updates.dismiss(),
+    openRelease: (tag: unknown) =>
+      updates.open(tag, (url) => shell.openExternal(url)),
     demoMode: () => demoMode,
     demoTimeScale: () => {
       const scale = Number(process.env.CANOPY_DEMO_TIME_SCALE ?? 1);
@@ -702,6 +724,7 @@ async function start(
   let quitting = false;
   app.on('before-quit', () => {
     quitting = true;
+    updates.cancel();
   });
   const createWindow = async () => {
     const saved = demoMode
@@ -729,6 +752,7 @@ async function start(
     });
     const created = window;
     created.webContents.on('destroyed', () => {
+      updates.cancel();
       for (const controller of searches.values()) controller.abort();
       searches.clear();
     });
