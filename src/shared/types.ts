@@ -50,6 +50,7 @@ export type IssuePreview = {
     bodyDocument?: unknown;
   }[];
   totalComments: number;
+  commentPage?: { start: number; end: number; olderPage?: number };
   commentsError?: string;
   linksError?: string;
 };
@@ -66,7 +67,18 @@ export type DevelopmentLinks = {
   otherLinks?: DevelopmentLink[];
 };
 export type SearchIssue = Issue & { updated?: string };
+export type CommentPage = {
+  comments: IssuePreview['comments'];
+  start: number;
+  end: number;
+  olderPage?: number;
+};
+export type SearchBoundary = {
+  repository: string;
+  reason: 'limit' | 'incomplete';
+};
 export type SearchPage = {
+  boundaries?: SearchBoundary[];
   issues: SearchIssue[];
   nextPageToken?: string;
   nextPageKind?: 'issues' | 'repositories';
@@ -225,6 +237,11 @@ export interface CanopyAPI {
   syncStatus(connectionId: string): Promise<{ retryAt: number | null }>;
   tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
   preview(connectionId: string, key: string): Promise<IssuePreview>;
+  olderComments(
+    connectionId: string,
+    key: string,
+    page: number,
+  ): Promise<CommentPage>;
   issueUrl(connectionId: string, key: string): Promise<string>;
   development(connectionId: string, key: string): Promise<DevelopmentLinks>;
   openDevelopmentLink(connectionId: string, url: string): Promise<void>;

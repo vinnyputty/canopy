@@ -527,6 +527,12 @@ async function start(
     },
     preview: (id: string, issue: string) =>
       provider(id).preview(normalized(id, issue)),
+    olderComments: (id: string, issue: string, page: number) => {
+      const client = provider(id);
+      if (!(client instanceof GithubProvider))
+        throw new Error('Older comment pages are available only for GitHub.');
+      return client.olderComments(normalized(id, issue), page);
+    },
     issueUrl: (id: string, issue: string) => issueUrl(id, issue),
     development: (id: string, issue: string) =>
       provider(id).development(normalized(id, issue)),

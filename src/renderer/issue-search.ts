@@ -1,4 +1,4 @@
-import type { CanopyAPI, SearchIssue } from '../shared/types';
+import type { CanopyAPI, SearchBoundary, SearchIssue } from '../shared/types';
 
 export function rankSearchIssues(
   issues: SearchIssue[],
@@ -33,6 +33,7 @@ export function rankSearchIssues(
 }
 
 export type SearchState = {
+  boundaries: SearchBoundary[];
   issues: SearchIssue[];
   loading: boolean;
   searched: boolean;
@@ -41,6 +42,7 @@ export type SearchState = {
   nextPageKind?: 'issues' | 'repositories';
 };
 const empty = (): SearchState => ({
+  boundaries: [],
   issues: [],
   loading: false,
   searched: false,
@@ -109,6 +111,16 @@ export class IssueSearch {
           query,
           project,
         ),
+        boundaries: [
+          ...new Map(
+            [...this.state.boundaries, ...(page.boundaries ?? [])].map(
+              (boundary) => [
+                `${boundary.repository}:${boundary.reason}`,
+                boundary,
+              ],
+            ),
+          ).values(),
+        ],
         nextPageToken: page.nextPageToken,
         nextPageKind: page.nextPageKind,
         searched: true,

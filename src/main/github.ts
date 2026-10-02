@@ -1,6 +1,7 @@
 import type {
   AssigneePage,
   Choice,
+  CommentPage,
   Connection,
   DevelopmentLinks,
   EditOptions,
@@ -328,16 +329,35 @@ export class GithubProvider {
       },
     };
   }
+  async olderComments(key: string, page: number): Promise<CommentPage> {
+    if (!Number.isSafeInteger(page) || page < 1)
+      throw new Error('Invalid GitHub comment page.');
+    const items = await this.request(
+      `${this.path(key, '/comments')}?per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(items) || items.length > 100)
+      throw new Error('GitHub returned an invalid comment page.');
+    return {
+      comments: items.map((item: any) => ({
+        id: String(item.id),
+        author: item.user?.login ?? 'Unknown',
+        created: item.created_at,
+        body: String(item.body ?? ''),
+      })),
+      start: items.length ? (page - 1) * 100 + 1 : 0,
+      end: items.length ? (page - 1) * 100 + items.length : 0,
+      olderPage: page > 1 ? page - 1 : undefined,
+    };
+  }
   async preview(key: string): Promise<IssuePreview> {
     const raw = await this.request(this.path(key));
     const issue = parseIssue(raw);
+    const latestPage = Math.max(1, Math.ceil((issue.commentCount ?? 0) / 100));
     const [commentsResult, blockedByResult, blockingResult] = await Promise.all(
       [
-        this.request(
-          `${this.path(key, '/comments')}?per_page=100&page=${Math.max(1, Math.ceil((issue.commentCount ?? 0) / 100))}`,
-        ).then(
+        this.olderComments(key, latestPage).then(
           (value) => ({ value, error: '' }),
-          (error: unknown) => ({ value: [], error: String(error) }),
+          (error: unknown) => ({ value: undefined, error: String(error) }),
         ),
         this.all(this.path(key, '/dependencies/blocked_by')).then(
           (value) => ({ value, error: '' }),
@@ -372,13 +392,13 @@ export class GithubProvider {
       },
       description: String(raw.body ?? ''),
       descriptionMarkdown: String(raw.body ?? ''),
-      comments: commentsResult.value.map((item: any) => ({
-        id: String(item.id),
-        author: item.user?.login ?? 'Unknown',
-        created: item.created_at,
-        body: String(item.body ?? ''),
-      })),
-      totalComments: raw.comments ?? commentsResult.value.length,
+      comments: commentsResult.value?.comments ?? [],
+      commentPage: commentsResult.value && {
+        start: commentsResult.value.start,
+        end: commentsResult.value.end,
+        olderPage: commentsResult.value.olderPage,
+      },
+      totalComments: raw.comments ?? commentsResult.value?.comments.length ?? 0,
       commentsError: commentsResult.error || undefined,
       linksError: blockedByResult.error || blockingResult.error || undefined,
     };
@@ -461,6 +481,7 @@ export class GithubProvider {
       .map((term) => `"${term.replace(/["\\]/g, '')}"`)
       .join(' ');
     const issues: SearchPage['issues'] = [];
+    const boundaries: NonNullable<SearchPage['boundaries']> = [];
     let searched = 0;
     while (repo < repos.length && searched < 10) {
       const q = encodeURIComponent(
@@ -471,6 +492,10 @@ export class GithubProvider {
         { signal },
       );
       searched++;
+      if (result.total_count > 1000)
+        boundaries.push({ repository: repos[repo], reason: 'limit' });
+      if (result.incomplete_results === true)
+        boundaries.push({ repository: repos[repo], reason: 'incomplete' });
       issues.push(
         ...(result.items ?? [])
           .filter((item: any) => !item.pull_request)
@@ -482,6 +507,7 @@ export class GithubProvider {
       if (result.total_count > page * 100 && page < 10) {
         return {
           issues,
+          boundaries,
           nextPageToken: Buffer.from(
             JSON.stringify({ repo, page: page + 1 }),
           ).toString('base64url'),
@@ -494,12 +520,13 @@ export class GithubProvider {
     return repo < repos.length
       ? {
           issues,
+          boundaries,
           nextPageToken: Buffer.from(JSON.stringify({ repo, page })).toString(
             'base64url',
           ),
           nextPageKind: 'repositories',
         }
-      : { issues };
+      : { issues, boundaries };
   }
   async priorities(): Promise<Choice[]> {
     return [];

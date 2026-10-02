@@ -10,6 +10,11 @@ import type {
   SeenValue,
 } from '../shared/types';
 import { unseenChanges } from './seen';
+import {
+  OlderComments,
+  mergeComments,
+  type OlderCommentsState,
+} from './older-comments';
 
 function displayValue(value: SeenValue) {
   return Array.isArray(value) ? value.join(', ') || 'None' : (value ?? 'None');
@@ -61,8 +66,27 @@ export function IssuePreview({
 }) {
   const [data, setData] = useState<Preview>();
   const [error, setError] = useState('');
+  const [olderState, setOlderState] = useState<OlderCommentsState>({
+    comments: [],
+    start: 0,
+    end: 0,
+    loading: false,
+    error: '',
+  });
+  const [olderComments] = useState(
+    () => new OlderComments(window.canopy, setOlderState),
+  );
   const [attempt, setAttempt] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const previewGeneration = useRef(0);
+  useLayoutEffect(() => {
+    previewGeneration.current++;
+    olderComments.reset();
+    return () => {
+      previewGeneration.current++;
+      olderComments.reset();
+    };
+  }, [connectionId, issueKey, attempt, olderComments]);
   const [labels, setLabels] = useState<Choice[]>([]);
   const [editingLabels, setEditingLabels] = useState(false);
   const [savingLabels, setSavingLabels] = useState(false);
@@ -85,6 +109,7 @@ export function IssuePreview({
   );
   useEffect(() => {
     let live = true;
+    const generation = previewGeneration.current;
     const sameIssue = identity.current === `${connectionId}:${issueKey}`;
     identity.current = `${connectionId}:${issueKey}`;
     if (!sameIssue) setData(undefined);
@@ -92,13 +117,14 @@ export function IssuePreview({
     setError('');
     window.canopy.preview(connectionId, issueKey).then(
       (result) => {
-        if (live) {
+        if (live && generation === previewGeneration.current) {
           setData(result);
+          olderComments.reset(connectionId, issueKey, result.commentPage);
           setRetrying(false);
         }
       },
       (error: unknown) => {
-        if (live) {
+        if (live && generation === previewGeneration.current) {
           const message =
             error instanceof Error ? error.message : String(error);
           setRetrying(false);
@@ -231,6 +257,10 @@ export function IssuePreview({
           : observedIssue,
       )
     : { fields: [], comments: 0 };
+  const loadedComments =
+    provider === 'github'
+      ? mergeComments(olderState.comments, data?.comments ?? [])
+      : (data?.comments ?? []);
   const confirmedComments =
     baseline && unseen.comments > 0 && !data?.commentsError
       ? (data?.comments ?? []).filter(
@@ -566,7 +596,11 @@ export function IssuePreview({
               </div>
             </section>
             <section>
-              <h3>Recent comments</h3>
+              <h3>
+                {provider === 'github' && olderState.comments.length
+                  ? 'Comments'
+                  : 'Recent comments'}
+              </h3>
               {retrying && <p role="status">Retrying comments…</p>}
               {data.commentsError || error ? (
                 <div role="alert">
@@ -575,8 +609,8 @@ export function IssuePreview({
                 </div>
               ) : (
                 <>
-                  {data.comments.length === 0 && <p>No comments.</p>}
-                  {data.comments.map((comment) => (
+                  {loadedComments.length === 0 && <p>No comments.</p>}
+                  {loadedComments.map((comment) => (
                     <article className="preview-comment" key={comment.id}>
                       <strong>{comment.author}</strong>
                       {Number.isFinite(Date.parse(comment.created)) && (
@@ -593,9 +627,35 @@ export function IssuePreview({
                       </div>
                     </article>
                   ))}
-                  {data.totalComments > data.comments.length && (
+                  {provider === 'github' && data.commentPage && (
+                    <>
+                      <p role="status">
+                        {olderState.end || data.commentPage.end
+                          ? `Loaded comments ${olderState.start || data.commentPage.start}–${olderState.end || data.commentPage.end} of ${data.totalComments}.`
+                          : `Loaded 0 of ${data.totalComments} comments.`}
+                      </p>
+                      {olderState.error && (
+                        <p role="alert">{olderState.error}</p>
+                      )}
+                      {olderState.loading && (
+                        <p role="status">Loading older comments…</p>
+                      )}
+                      {olderState.olderPage && (
+                        <button
+                          className="tool-button"
+                          disabled={olderState.loading || retrying}
+                          onClick={() => void olderComments.load()}
+                        >
+                          {olderState.error
+                            ? 'Retry older comments'
+                            : 'Load older comments'}
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {data.totalComments > loadedComments.length && (
                     <p>
-                      Showing {data.comments.length} of {data.totalComments}{' '}
+                      Showing {loadedComments.length} of {data.totalComments}{' '}
                       comments.{' '}
                       <button
                         className="text-button"

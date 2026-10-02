@@ -20,7 +20,7 @@ export async function auditGithub(app, page) {
       ...extra,
     });
     globalThis.githubSmokeIssues = {
-      'team/a#1': issue('team/a', 1),
+      'team/a#1': issue('team/a', 1, { comments: 205 }),
       'team/a#3': issue('team/a', 3, { state: 'closed' }),
       'team/a#4': issue('team/a', 4),
       'team/b#2': issue('team/b', 2),
@@ -109,7 +109,24 @@ export async function auditGithub(app, page) {
         }
         return Response.json(globalThis.githubSmokeIssues['team/a#1']);
       }
-      if (path === '/repos/team/a/issues/1/comments') return Response.json([]);
+      if (path === '/repos/team/a/issues/1/comments') {
+        const page = Number(parsed.searchParams.get('page'));
+        if (page === 2 && globalThis.githubSmokeOlderFailure) {
+          globalThis.githubSmokeOlderFailure = false;
+          return Response.json(
+            { message: 'Older comments temporarily unavailable' },
+            { status: 500 },
+          );
+        }
+        return Response.json(
+          Array.from({ length: page === 3 ? 5 : 100 }, (_, index) => ({
+            id: (page - 1) * 100 + index + 1,
+            user: { login: 'tester' },
+            created_at: '2026-01-01T00:00:00Z',
+            body: `Fixture comment ${(page - 1) * 100 + index + 1}`,
+          })),
+        );
+      }
       if (path === '/repos/team/b/issues/2')
         return Response.json(globalThis.githubSmokeIssues['team/b#2']);
       if (path === '/repos/team/b/issues/2/comments') return Response.json([]);
@@ -137,7 +154,9 @@ export async function auditGithub(app, page) {
           ? 'team/b'
           : 'team/a';
         return Response.json({
-          total_count: 1,
+          total_count: parsed.searchParams.get('q')?.includes('limited')
+            ? 1001
+            : 1,
           items: [
             globalThis.githubSmokeIssues[
               repo === 'team/a' ? 'team/a#1' : 'team/b#2'
@@ -429,6 +448,42 @@ export async function auditGithub(app, page) {
       .toBe('team/a#1 Updated GitHub title');
     await expect(preview.getByText('No labels.')).toBeVisible();
     await expect(preview.getByText('team/b#2')).toBeVisible();
+    await expect(
+      preview.getByText('Loaded comments 201–205 of 205.'),
+    ).toBeVisible();
+    const unreadBeforeOlder = await preview
+      .locator('.preview-changes')
+      .innerText();
+    await app.evaluate(() => {
+      globalThis.githubSmokeOlderFailure = true;
+    });
+    await preview.getByRole('button', { name: 'Load older comments' }).click();
+    await expect(
+      preview.getByRole('button', { name: 'Retry older comments' }),
+    ).toBeVisible();
+    await expect(
+      preview.getByText('Fixture comment 205', { exact: true }),
+    ).toBeVisible();
+    await preview.getByRole('button', { name: 'Retry older comments' }).click();
+    await expect(
+      preview.getByText('Loaded comments 101–205 of 205.'),
+    ).toBeVisible();
+    await preview.getByRole('button', { name: 'Load older comments' }).click();
+    await expect(
+      preview.getByText('Loaded comments 1–205 of 205.'),
+    ).toBeVisible();
+    await expect(
+      preview.getByRole('button', { name: 'Load older comments' }),
+    ).toHaveCount(0);
+    const commentBodies = await preview
+      .locator('.preview-comment .preview-text')
+      .allTextContents();
+    expect(commentBodies).toHaveLength(205);
+    expect(commentBodies[0]).toBe('Fixture comment 1');
+    expect(commentBodies[204]).toBe('Fixture comment 205');
+    await expect(preview.locator('.preview-changes')).toHaveText(
+      unreadBeforeOlder,
+    );
     await preview.getByRole('button', { name: 'Edit labels' }).click();
     await preview.getByRole('checkbox', { name: 'ready' }).click();
     await expect(
@@ -519,6 +574,30 @@ export async function auditGithub(app, page) {
     await expect(search.getByRole('button', { name: 'Load more' })).toHaveCount(
       0,
     );
+    const limitInput = search.getByRole('combobox');
+    await limitInput.fill('limited');
+    await expect(
+      search.getByText(/GitHub search results are truncated/),
+    ).toContainText('team/a: only the first 1,000');
+    await expect(
+      search.getByText(/GitHub search results are truncated/),
+    ).toContainText('owner/repo#number');
+    await search
+      .getByRole('button', { name: 'Load more', exact: true })
+      .click();
+    await expect(search.getByRole('option', { name: /team\/a#1/ })).toHaveCount(
+      1,
+    );
+    await expect(
+      search.getByText(/GitHub search results are truncated/),
+    ).toBeVisible();
+    await limitInput.fill('only-b');
+    await expect(
+      search.getByRole('option', { name: /team\/b#2/ }),
+    ).toBeVisible();
+    await expect(
+      search.getByText(/GitHub search results are truncated/),
+    ).toHaveCount(0);
     await search.getByRole('button', { name: 'Close dialog' }).click();
     await page
       .getByRole('button', { name: 'Open issue', exact: true })
