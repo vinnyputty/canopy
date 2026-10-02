@@ -461,7 +461,7 @@ export async function auditRelationships(app, page) {
     await expect
       .poll(() =>
         app.evaluate(
-          ({ call, cancelledBefore }) =>
+          (_electron, { call, cancelledBefore }) =>
             globalThis.relationshipAudit.cancelled
               .slice(cancelledBefore)
               .some(

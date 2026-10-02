@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import { nextTasks } from '../src/renderer/next-tasks';
 import { JiraProvider } from '../src/main/jira';
 import { GithubProvider } from '../src/main/github';
@@ -33,6 +34,71 @@ const depends = {
   outward: 'depends on',
   inward: 'is depended on by',
 };
+
+test('held cancellation evaluate passes Electron namespace first and held request second', async () => {
+  const source = readFileSync(
+    new URL('../tools/smoke-relationships.mjs', import.meta.url),
+    'utf8',
+  );
+  const parsed = ts.createSourceFile(
+    'audit.mjs',
+    source,
+    ts.ScriptTarget.Latest,
+  );
+  const calls: ts.CallExpression[] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.getText(parsed) === 'app.evaluate' &&
+      node.arguments[1]?.getText(parsed) === 'held'
+    )
+      calls.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.equal(calls.length, 1);
+  const held = {
+    call: { connection: 'work', key: 'team/a#1', requestId: 'held-request' },
+    cancelledBefore: 1,
+  };
+  const exact = { connection: 'work', requestId: 'held-request' };
+  const context = {
+    held,
+    relationshipAudit: { cancelled: [exact] },
+    app: {
+      // ElectronApplication.evaluate invokes the callback with the Electron
+      // namespace first, followed by the supplied argument. Execute the actual
+      // call expression so both callback parameters and payload wiring matter.
+      evaluate: async (
+        callback: (electron: object, arg: typeof held) => boolean,
+        arg: typeof held,
+      ) => callback({ ipcMain: {} }, structuredClone(arg)),
+    },
+  };
+  const evaluate = () => runInNewContext(calls[0].getText(parsed), context);
+  assert.equal(await evaluate(), false, 'earlier exact cancel is excluded');
+  context.relationshipAudit.cancelled.push({ ...exact, connection: 'other' });
+  assert.equal(
+    await evaluate(),
+    false,
+    'new cancel on another account is excluded',
+  );
+  context.relationshipAudit.cancelled.push({
+    ...exact,
+    requestId: 'other-request',
+  });
+  assert.equal(
+    await evaluate(),
+    false,
+    'new cancel for another request is excluded',
+  );
+  context.relationshipAudit.cancelled.push(exact);
+  assert.equal(
+    await evaluate(),
+    true,
+    'new exact held-request cancel is accepted',
+  );
+});
 
 test('documented Jira Depends end directions populate blockers and blocked issues', async () => {
   const graph = await jira({
