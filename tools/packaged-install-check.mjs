@@ -31,6 +31,8 @@ export async function checkPackagedInstallCleanup() {
       env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'self-hosted' },
       blocked: true,
     },
+    { name: 'dependency index failure', failure: 'dependencies-update' },
+    { name: 'partial dependency preparation', failure: 'dependencies-install' },
     { name: 'partial install', failure: 'install' },
     { name: 'desktop read', failure: 'read' },
     { name: 'desktop mismatch', failure: 'desktop' },
@@ -39,7 +41,7 @@ export async function checkPackagedInstallCleanup() {
     { name: 'cleanup', cleanupFailure: true },
     { name: 'success' },
   ].flatMap((scenario) =>
-    scenario.failure
+    scenario.failure && !scenario.failure.startsWith('dependencies-')
       ? [
           scenario,
           {
@@ -55,6 +57,7 @@ export async function checkPackagedInstallCleanup() {
     const primary = new Error(scenario.name);
     const cleanup = new Error('cleanup failure');
     let desktopError;
+    let partialDependencies = false;
     const fail = (stage) => {
       if (scenario.failure === stage) throw primary;
     };
@@ -85,6 +88,28 @@ export async function checkPackagedInstallCleanup() {
       },
       run: (command, args) => {
         assert.equal(command, 'sudo');
+        if (args[1] === 'apt-get') {
+          const stage = `dependencies-${args[2]}`;
+          assert.deepEqual(
+            args,
+            args[2] === 'update'
+              ? ['-n', 'apt-get', 'update']
+              : [
+                  '-n',
+                  'apt-get',
+                  'install',
+                  '--yes',
+                  '--no-install-recommends',
+                  'libnotify4',
+                  'libsecret-1-0',
+                ],
+          );
+          calls.push(stage);
+          if (stage === 'dependencies-install' && scenario.failure === stage)
+            partialDependencies = true;
+          fail(stage);
+          return;
+        }
         assert.deepEqual(args.slice(0, 2), ['-n', 'dpkg']);
         const stage = args[2] === '--install' ? 'install' : 'remove';
         assert.deepEqual(
@@ -130,8 +155,22 @@ export async function checkPackagedInstallCleanup() {
         /requires a disposable GitHub-hosted runner/,
       );
       assert.deepEqual(calls, [], scenario.name);
+    } else if (scenario.failure?.startsWith('dependencies-')) {
+      assert.deepEqual(
+        calls,
+        scenario.failure === 'dependencies-update'
+          ? ['dependencies-update']
+          : ['dependencies-update', 'dependencies-install'],
+      );
+      assert.equal(error, primary);
+      assert.equal(
+        partialDependencies,
+        scenario.failure === 'dependencies-install',
+      );
+      assert.deepEqual(logs, []);
+      assert.equal(result, undefined);
     } else {
-      assert.equal(calls[0], 'install', scenario.name);
+      assert.equal(calls[0], 'dependencies-update', scenario.name);
       assert.equal(calls.at(-1), 'remove', scenario.name);
       assert.equal(calls.filter((call) => call === 'remove').length, 1);
       const expected = {
@@ -143,7 +182,11 @@ export async function checkPackagedInstallCleanup() {
       };
       assert.deepEqual(
         calls,
-        expected[scenario.failure] ?? expected.smoke,
+        [
+          'dependencies-update',
+          'dependencies-install',
+          ...(expected[scenario.failure] ?? expected.smoke),
+        ],
         scenario.name,
       );
       if (scenario.failure)
