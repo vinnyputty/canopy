@@ -2,7 +2,12 @@ import { expect } from '@playwright/test';
 
 // Called only by the token-controlled Electron smoke harness, with disposable
 // fixture data. Never reads real provider connections or uses the clipboard.
-export async function auditSidebar(page, waitForSavedWorkspace) {
+export async function auditSidebar(app, page, waitForSavedWorkspace) {
+  const fixture = (method, ...args) =>
+    app.evaluate(
+      (_electron, { method, args }) => globalThis.canopySmoke[method](...args),
+      { method, args },
+    );
   const sidebar = page.getByRole('complementary', { name: 'Canopy sidebar' });
   const active = sidebar.getByRole('navigation', {
     name: 'Active tabs',
@@ -28,7 +33,12 @@ export async function auditSidebar(page, waitForSavedWorkspace) {
   await waitForSavedWorkspace((workspace) =>
     workspace.tabs.every((tab) => Boolean(tab.summary)),
   );
-  const baseline = await page.evaluate(() => window.canopy.loadWorkspace());
+  let baseline = await page.evaluate(() => window.canopy.loadWorkspace());
+  expect(baseline.rootViews['["demo","CAN-100"]']).toMatchObject({
+    columns: ['issue', 'status'],
+    hideDone: false,
+    sort: { column: 'key', direction: 'asc' },
+  });
   const controls = sidebar.locator('.sidebar-work button:not(:disabled)');
   await controls.first().focus();
   for (let index = 0; index < (await controls.count()); index++) {
@@ -70,9 +80,50 @@ export async function auditSidebar(page, waitForSavedWorkspace) {
   expect(
     retained(await page.evaluate(() => window.canopy.loadWorkspace())),
   ).toEqual(retained(baseline));
+  // Change real live tree state after organizing, before Undo. The override is
+  // intentionally customized, so retaining undefined/default state cannot pass.
+  await page.getByRole('button', { name: 'Expand', exact: true }).click();
+  const newerSelection = page.locator('[data-tree-key="CAN-111"]');
+  await newerSelection
+    .locator(':scope > .issue-row')
+    .getByTitle('Double-click to edit')
+    .click();
+  const treeScroll = page.locator('.tree-scroll');
+  await treeScroll.evaluate((element) => {
+    element.style.maxHeight = '160px';
+    element.scrollTop = 100;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  const newerScroll = await treeScroll.evaluate((element) => element.scrollTop);
+  expect(newerScroll).toBeGreaterThan(0);
+  await waitForSavedWorkspace(
+    (workspace) =>
+      workspace.tabs.find((tab) => tab.rootKey === 'CAN-100').selectedKey ===
+        'CAN-111' &&
+      workspace.tabs.find((tab) => tab.rootKey === 'CAN-100').scrollTop ===
+        newerScroll,
+  );
+  const newer = await page.evaluate(() => window.canopy.loadWorkspace());
+  expect(newer.rootViews).toEqual(baseline.rootViews);
+  expect(
+    newer.tabs.find((tab) => tab.rootKey === 'CAN-100').selectedKey,
+  ).not.toBe(
+    baseline.tabs.find((tab) => tab.rootKey === 'CAN-100').selectedKey,
+  );
+  baseline = newer;
   await sidebar.getByRole('button', { name: /^Undo move/ }).focus();
   await page.keyboard.press('Space');
   await expect(pinned.locator('li').first()).toContainText('CAN-100');
+  await waitForSavedWorkspace(
+    (workspace) => workspace.pinnedRoots?.[0].rootKey === 'CAN-100',
+  );
+  expect(
+    retained(await page.evaluate(() => window.canopy.loadWorkspace())),
+  ).toEqual(retained(baseline));
+  await expect(newerSelection).toHaveAttribute('aria-selected', 'true');
+  expect(await treeScroll.evaluate((element) => element.scrollTop)).toBe(
+    newerScroll,
+  );
   const unpin = pinned.getByRole('button', { name: /^Unpin CAN-100/ });
   await unpin.focus();
   await page.keyboard.press('Enter');
@@ -113,6 +164,12 @@ export async function auditSidebar(page, waitForSavedWorkspace) {
   await sidebar.getByRole('button', { name: /^Undo park/ }).click();
   await expect(parked.locator('li')).toHaveCount(0);
   const selectedRoot = active.getByRole('button', { name: /^Open CAN-100/ });
+  const changedSummary = 'Sidebar completed refresh sample';
+  await expect(
+    page.getByRole('button', { name: 'Refresh', exact: true }),
+  ).toBeEnabled();
+  await fixture('remoteUpdate', 'CAN-100', { summary: changedSummary });
+  await fixture('hold', 'sidebar-refresh', 'tree', 'CAN-100');
   await selectedRoot.focus();
   const refreshOffset = await page
     .locator('.sidebar-body')
@@ -120,16 +177,51 @@ export async function auditSidebar(page, waitForSavedWorkspace) {
   await page
     .getByRole('button', { name: 'Refresh', exact: true })
     .evaluate((button) => button.click());
+  await expect.poll(() => fixture('started', 'sidebar-refresh')).toBe(true);
+  await expect(page.getByText('Checking for changes')).toBeVisible();
+  expect(await fixture('completed', 'sidebar-refresh')).toBe(false);
+  await expect(selectedRoot.locator('small:not(.root-context)')).not.toHaveText(
+    changedSummary,
+  );
+  await fixture('release', 'sidebar-refresh');
+  await expect.poll(() => fixture('completed', 'sidebar-refresh')).toBe(true);
+  await expect(selectedRoot.locator('small:not(.root-context)')).toHaveText(
+    changedSummary,
+  );
+  await expect(
+    page
+      .locator('[data-tree-key="CAN-100"] > .issue-row')
+      .getByTitle('Double-click to edit'),
+  ).toHaveText(changedSummary);
+  await expect(page.getByText('Checking for changes')).toBeHidden();
   await expect(selectedRoot).toBeFocused();
   expect(
     await page.locator('.sidebar-body').evaluate((body) => body.scrollTop),
   ).toBe(refreshOffset);
+  await expect(newerSelection).toHaveAttribute('aria-selected', 'true');
+  expect(await treeScroll.evaluate((element) => element.scrollTop)).toBe(
+    newerScroll,
+  );
   await expect(active.locator('li')).toHaveCount(2);
   await waitForSavedWorkspace(
-    (workspace) => workspace.pinnedRoots?.[0].rootKey === 'CAN-100',
+    (workspace) =>
+      workspace.tabs.find((tab) => tab.rootKey === 'CAN-100').summary ===
+      changedSummary,
   );
+  const refreshed = await page.evaluate(() => window.canopy.loadWorkspace());
   expect(
-    retained(await page.evaluate(() => window.canopy.loadWorkspace())),
+    retained({
+      ...refreshed,
+      tabs: refreshed.tabs.map((tab) =>
+        tab.rootKey === 'CAN-100'
+          ? {
+              ...tab,
+              summary: baseline.tabs.find((item) => item.rootKey === 'CAN-100')
+                .summary,
+            }
+          : tab,
+      ),
+    }),
   ).toEqual(retained(baseline));
   // A renderer restart clears session parking while durable favorites survive.
   await active

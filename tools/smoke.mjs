@@ -1362,6 +1362,16 @@ async function auditSidebarSample() {
     JSON.stringify({
       tabs: sidebarTabs,
       activeTabId: 'CAN-100',
+      rootViews: {
+        '["demo","CAN-100"]': {
+          columns: ['issue', 'status'],
+          widths: { issue: 520, priority: 104, assignee: 165, status: 148 },
+          sort: { column: 'key', direction: 'asc' },
+          hideDone: false,
+          assumeMatchingStatusTransitions: true,
+          filters: {},
+        },
+      },
       pinnedRoots: sidebarRoots,
       recentRoots: sidebarRoots,
       savedViews: [
@@ -1385,7 +1395,7 @@ async function auditSidebarSample() {
     }),
   );
   await launch();
-  await auditSidebar(page, waitForSavedWorkspace);
+  await auditSidebar(app, page, waitForSavedWorkspace);
 }
 
 try {
@@ -1490,9 +1500,14 @@ try {
   const rootSidebar = page
     .getByRole('navigation', { name: 'Active tabs', exact: true })
     .locator(`.side-tab[title="${rootTitle}"]`);
+  await expect(rootSidebar).toHaveCount(1);
+  await expect(rootSidebar.locator('small.root-context')).toHaveText(
+    'Jira · Canopy demo',
+  );
   for (const label of [rootTab, rootSidebar]) {
     await expect(label).toHaveAttribute('title', rootTitle);
-    const subtitle = label.locator('small');
+    const subtitle = label.locator('small:not(.root-context)');
+    await expect(subtitle).toHaveCount(1);
     await expect(subtitle).toHaveText(rootSummary);
     await expect(subtitle).toHaveCSS('text-overflow', 'ellipsis');
     await expect(subtitle).toHaveCSS('overflow-x', 'hidden');

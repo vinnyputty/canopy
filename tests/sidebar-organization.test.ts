@@ -302,6 +302,32 @@ it('renders named navigation, compact counts, connection context, current state,
   assert.match(html, /role="status"/);
   assert.match(html, /Parking lasts until restart/);
   assert.doesNotMatch(html, /tabindex="-1"/);
+  // The active destination contains both a summary and connection context.
+  // Smoke must select the summary, rather than treating all small text as one.
+  const activeSection = html.match(
+    /<nav aria-label="Active tabs">([\s\S]*?)<\/nav>/,
+  )![1];
+  const destinations = [
+    ...activeSection.matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g),
+  ].filter(([markup]) =>
+    markup.includes('aria-label="Open A-1 · Jira · Team One: Summary A-1"'),
+  );
+  assert.equal(destinations.length, 1);
+  const details = [
+    ...destinations[0][0].matchAll(/<small([^>]*)>([^<]*)<\/small>/g),
+  ];
+  assert.deepEqual(
+    details
+      .filter(([, attributes]) => !attributes.includes('root-context'))
+      .map(([, , text]) => text),
+    ['Summary A-1'],
+  );
+  assert.deepEqual(
+    details
+      .filter(([, attributes]) => attributes.includes('root-context'))
+      .map(([, , text]) => text),
+    ['Jira · Team One'],
+  );
 });
 
 it('disconnecting clears Undo and only that connection’s parked roots', () => {
