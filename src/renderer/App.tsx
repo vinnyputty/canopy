@@ -105,6 +105,8 @@ import {
   visit,
   type Navigation,
 } from './workspace';
+import { Settings } from './Settings';
+import { DEFAULT_READING } from '../shared/views';
 import { TableHeader, ViewSettings } from './TableView';
 import {
   canRank,
@@ -117,6 +119,7 @@ import {
   setRootView,
   sortIssueTree,
   tableStyle,
+  readingStyle,
 } from './table-view';
 import { Mutations } from './mutations';
 import { RefreshSchedule, RootRefreshGate } from './refresh';
@@ -228,8 +231,22 @@ export function App() {
   const tourProgressRef = useRef<HTMLProgressElement>(null);
   const tourEditor = useRef(false);
   const [dialog, setDialog] = useState<
-    'open' | 'commands' | 'shortcuts' | 'appearance' | 'connect' | null
+    | 'open'
+    | 'commands'
+    | 'shortcuts'
+    | 'appearance'
+    | 'settings'
+    | 'connect'
+    | null
   >(null);
+  const settingsTrigger = useRef<HTMLButtonElement>(null);
+  const settingsFlow = useRef(false);
+  useLayoutEffect(() => {
+    if (dialog === null && settingsFlow.current) {
+      settingsFlow.current = false;
+      settingsTrigger.current?.focus();
+    }
+  }, [dialog]);
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
     palette: NonNullable<Workspace['palette']>;
@@ -2863,6 +2880,7 @@ export function App() {
     <div
       style={
         {
+          ...readingStyle(workspace.reading),
           '--sidebar-width': `${workspace.sidebarWidth ?? 220}px`,
         } as React.CSSProperties
       }
@@ -3065,17 +3083,14 @@ export function App() {
         </div>
         <button
           className="sidebar-settings"
-          onClick={() => setDialog('appearance')}
+          ref={settingsTrigger}
+          onClick={() => {
+            settingsFlow.current = true;
+            setDialog('settings');
+          }}
         >
           <Settings2 size={16} />
-          <span>Appearance</span>
-        </button>
-        <button
-          className="sidebar-settings"
-          onClick={() => setDialog('shortcuts')}
-        >
-          <Keyboard size={16} />
-          <span>Keyboard shortcuts</span>
+          <span>Settings</span>
         </button>
         {!demoMode && (
           <button className="sidebar-settings" onClick={launchDemo}>
@@ -4622,6 +4637,7 @@ export function App() {
       )}
       {dialog === 'connect' && (
         <ConnectDialog
+          initialFocus={settingsFlow.current}
           onClose={() => setDialog(null)}
           onConnected={(value) => {
             for (const tab of allRefreshTabs)
@@ -4667,12 +4683,31 @@ export function App() {
       )}
       {dialog === 'shortcuts' && (
         <ShortcutsDialog
+          initialFocus={settingsFlow.current}
           shortcuts={workspace.shortcuts}
           onChange={(shortcuts) =>
             setWorkspace((value) => ({ ...value, shortcuts }))
           }
           onClose={() => setDialog(null)}
         />
+      )}
+      {dialog === 'settings' && (
+        <Dialog title="Settings" onClose={() => setDialog(null)} initialFocus>
+          <Settings
+            reading={workspace.reading ?? DEFAULT_READING}
+            onReading={(reading) =>
+              setWorkspace((value) => ({ ...value, reading }))
+            }
+            onAppearance={() => setDialog('appearance')}
+            onShortcuts={() => setDialog('shortcuts')}
+            onConnect={() => setDialog('connect')}
+          />
+          <div className="dialog-footer">
+            <button className="primary" onClick={() => setDialog(null)}>
+              Done
+            </button>
+          </div>
+        </Dialog>
       )}
       {dialog === 'appearance' && (
         <AppearanceDialog
@@ -5894,11 +5929,13 @@ function LinkedIssues({
 }
 
 function ConnectDialog({
+  initialFocus,
   onClose,
   onConnected,
 }: {
   onClose: () => void;
   onConnected: (connections: Connection[]) => void;
+  initialFocus?: boolean;
 }) {
   const [siteUrl, setSiteUrl] = useState('');
   const [provider, setProvider] = useState<'jira' | 'github'>('jira');
@@ -5961,6 +5998,7 @@ function ConnectDialog({
   return (
     <Dialog
       title={`Connect ${provider === 'github' ? 'GitHub' : 'Jira'}`}
+      initialFocus={initialFocus}
       onClose={onClose}
       wide
     >
@@ -6703,6 +6741,13 @@ function AppearanceDialog({
         <button className="secondary" onClick={onShortcuts} disabled={isSaving}>
           Keyboard shortcuts
         </button>
+        <button
+          className="secondary"
+          disabled={isSaving}
+          onClick={() => preview('system', 'default')}
+        >
+          Reset appearance
+        </button>
         <span className="footer-spacer" />
         <button className="secondary" onClick={onClose} disabled={isSaving}>
           Cancel
@@ -6720,10 +6765,12 @@ function AppearanceDialog({
 }
 
 function ShortcutsDialog({
+  initialFocus,
   shortcuts,
   onChange,
   onClose,
 }: {
+  initialFocus?: boolean;
   shortcuts: Record<string, string>;
   onChange: (value: Record<string, string>) => void;
   onClose: () => void;
@@ -6751,7 +6798,12 @@ function ShortcutsDialog({
     return () => window.removeEventListener('keydown', capture, true);
   }, [recording]);
   return (
-    <Dialog title="Keyboard shortcuts" onClose={onClose} wide>
+    <Dialog
+      title="Keyboard shortcuts"
+      onClose={onClose}
+      wide
+      initialFocus={initialFocus}
+    >
       <div className="shortcut-intro">
         Click a shortcut, then press the new key combination. Conflicting
         shortcuts must be resolved before saving.
@@ -6973,7 +7025,12 @@ function Dialog({
     <div
       className="dialog-backdrop"
       role="presentation"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
     >
       <div
         ref={panelRef}

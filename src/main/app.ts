@@ -41,6 +41,7 @@ import {
   validSavedViews,
   validViewMap,
   validRootView,
+  validReading,
 } from '../shared/views';
 
 app.setName('Canopy');
@@ -166,6 +167,8 @@ function workspace(value: Workspace) {
     (value.viewDefaults !== undefined && !validViewMap(value.viewDefaults))
   )
     throw new Error('Invalid table view.');
+  if (value.reading !== undefined && !validReading(value.reading))
+    throw new Error('Invalid reading settings.');
   if (value.savedViews !== undefined && !validSavedViews(value.savedViews))
     throw new Error('Invalid saved issue view.');
   for (const [name, minimum, maximum] of [

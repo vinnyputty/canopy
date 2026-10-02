@@ -8,7 +8,11 @@ import type {
   Workspace,
 } from '../shared/types';
 import type { IssueNode } from './tree';
-import { COLUMN_BOUNDS } from '../shared/views';
+import {
+  COLUMN_BOUNDS,
+  DEFAULT_READING,
+  recoverWorkspaceViews,
+} from '../shared/views';
 
 export const COLUMN_LABELS: Record<TableColumn, string> = {
   issue: 'Issue',
@@ -20,8 +24,6 @@ export const DEFAULT_VIEW: RootView = {
   columns: ['issue', 'priority', 'assignee', 'status'],
   widths: { issue: 480, priority: 104, assignee: 165, status: 128 },
   sort: { column: 'rank', direction: 'asc' },
-  textSize: 'medium',
-  spacing: 'compact',
   hideDone: true,
   assumeMatchingStatusTransitions: true,
   filters: {},
@@ -84,6 +86,7 @@ export function defaultRootView(
   });
 }
 export function migrateViews(workspace: Workspace): Workspace {
+  workspace = recoverWorkspaceViews(workspace);
   if (workspace.rootViews) return syncViews(workspace);
   const rootViews: Record<string, RootView> = {};
   const latest = new Map(
@@ -101,6 +104,12 @@ export function migrateViews(workspace: Workspace): Workspace {
   }
   return syncViews({ ...workspace, rootViews });
 }
+export function readingStyle(reading = DEFAULT_READING) {
+  return {
+    '--tree-font-size': `${{ small: 11, medium: 13, large: 15 }[reading.textSize]}px`,
+    '--row-height': `${reading.spacing === 'compact' ? 30 : 40}px`,
+  };
+}
 export function tableStyle(view: RootView) {
   return {
     '--table-columns': [
@@ -112,8 +121,6 @@ export function tableStyle(view: RootView) {
       '62px',
     ].join(' '),
     '--table-width': `${view.columns.reduce((sum, column) => sum + view.widths[column], 62)}px`,
-    '--tree-font-size': `${{ small: 11, medium: 13, large: 15 }[view.textSize]}px`,
-    '--row-height': `${view.spacing === 'compact' ? 30 : 40}px`,
   };
 }
 const collator = new Intl.Collator(undefined, {

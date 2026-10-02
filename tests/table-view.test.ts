@@ -223,39 +223,30 @@ describe('persisted table views', () => {
     let saved = migrateViews(workspace(a, b, other));
     saved = setRootView(saved, a, {
       columns: ['issue', 'status'],
-      textSize: 'large',
       hideDone: false,
       filters: { priority: 'p9' },
       widths: { ...DEFAULT_VIEW.widths, status: 96 },
     });
     saved = defaultRootView(saved, a);
-    assert.equal(rootView(saved, b).textSize, 'large');
     assert.equal(rootView(saved, b).widths.status, 96);
     assert.equal(saved.tabs[1].hideDone, false);
     assert.deepEqual(saved.tabs[1].filters, { priority: 'p9' });
-    assert.equal(rootView(saved, other).textSize, 'medium');
     assert.equal(rootView(saved, other).widths.status, 128);
     saved = setRootView(saved, b, {
-      textSize: 'small',
       widths: { ...DEFAULT_VIEW.widths, issue: 650, status: 142 },
       sort: { column: 'status', direction: 'desc' },
-      spacing: 'comfortable',
     });
-    saved = setRootView(saved, a, { textSize: 'medium' });
+    saved = setRootView(saved, a, { columns: ['issue', 'status'] });
     saved = defaultRootView(saved, a);
-    assert.equal(rootView(saved, b).textSize, 'small');
     saved = { ...saved, tabs: saved.tabs.filter((t) => t.id !== b.id) };
     saved = JSON.parse(JSON.stringify(saved));
-    assert.equal(rootView(saved, b).textSize, 'small');
     assert.equal(rootView(saved, b).widths.issue, 650);
     assert.equal(rootView(saved, b).widths.status, 142);
     assert.deepEqual(rootView(saved, b).sort, {
       column: 'status',
       direction: 'desc',
     });
-    assert.equal(rootView(saved, b).spacing, 'comfortable');
     saved = resetRootView(saved, b);
-    assert.equal(rootView(saved, b).textSize, 'medium');
     assert.equal(rootView(saved, b).widths.status, 96);
     assert.deepEqual(rootView(saved, b).filters, { priority: 'p9' });
   });
@@ -273,7 +264,7 @@ describe('persisted table views', () => {
 });
 
 describe('table view persistence validation', () => {
-  it('rejects malformed columns, widths, sorting, density and filters', () => {
+  it('rejects malformed columns, widths, sorting and filters', () => {
     assert.equal(validViewMap({ root: DEFAULT_VIEW }), true);
     const invalid: unknown[] = [
       null,
@@ -287,8 +278,6 @@ describe('table view persistence validation', () => {
       { ...DEFAULT_VIEW, widths: { ...DEFAULT_VIEW.widths, status: 481 } },
       { ...DEFAULT_VIEW, sort: { column: 'updated', direction: 'asc' } },
       { ...DEFAULT_VIEW, sort: { column: 'rank', direction: 'sideways' } },
-      { ...DEFAULT_VIEW, textSize: 'huge' },
-      { ...DEFAULT_VIEW, spacing: 'huge' },
       { ...DEFAULT_VIEW, assumeMatchingStatusTransitions: 'yes' },
       { ...DEFAULT_VIEW, filters: { assignee: 'someone' } },
       { ...DEFAULT_VIEW, filters: { status: 5 } },
@@ -341,28 +330,25 @@ describe('table views and navigation snapshots', () => {
     current = setRootView(current, a, {
       filters: { status: 'progress', priority: '2', assignee: 'me' },
       hideDone: false,
-      textSize: 'large',
       columns: ['issue', 'status'],
       widths: { ...DEFAULT_VIEW.widths, issue: 700 },
       sort: { column: 'status', direction: 'desc' },
-      spacing: 'comfortable',
     });
     const saved = current.tabs[0];
     const history = visit({ back: [], forward: [] }, saved, b);
     current = setRootView(current, a, {
       filters: {},
       hideDone: true,
-      textSize: 'small',
     });
     const restored = travel(history, b, 'back').tab!;
     current = activateTab(current, restored);
     assert.deepEqual(rootView(current, a), saved.view);
-    current = setRootView(current, b, { spacing: 'comfortable' });
+    current = setRootView(current, b, { columns: ['issue', 'assignee'] });
     current = migrateViews(JSON.parse(JSON.stringify(current)));
     assert.deepEqual(current.tabs[0].filters, saved.filters);
     assert.deepEqual(rootView(current, a), saved.view);
     current = closeTabs(current, [a.id]);
-    current = setRootView(current, a, { textSize: 'small', filters: {} });
+    current = setRootView(current, a, { columns: ['issue'], filters: {} });
     current = reopenTab(current);
     assert.deepEqual(rootView(current, a), saved.view);
   });
@@ -375,7 +361,9 @@ describe('table views and navigation snapshots', () => {
     let current = migrateViews({ ...workspace(), closedTabs: [closed] });
     assert.deepEqual(rootView(current, closed).filters, closed.filters);
     current = reopenTab(current);
-    current = setRootView(current, current.tabs[0], { textSize: 'large' });
+    current = setRootView(current, current.tabs[0], {
+      columns: ['issue', 'status'],
+    });
     assert.deepEqual(
       migrateViews(JSON.parse(JSON.stringify(current))).tabs[0].filters,
       closed.filters,
@@ -394,15 +382,13 @@ describe('table views and navigation snapshots', () => {
     let current = migrateViews(workspace(a, b));
     current = activateTab(current, a, false);
     assert.deepEqual(current.rootViews, {});
-    current = setRootView(current, a, { textSize: 'large' });
+    current = setRootView(current, a, { columns: ['issue', 'status'] });
     current = defaultRootView(current, a);
-    current = setRootView(current, b, { textSize: 'small' });
+    current = setRootView(current, b, { columns: ['issue', 'status'] });
     current = defaultRootView(current, b);
     current = removeConnection(current, 'one');
     assert.equal(current.viewDefaults?.one, undefined);
     assert.equal(Object.keys(current.rootViews!).length, 1);
-    assert.equal(rootView(current, b).textSize, 'small');
-    assert.equal(rootView(current, a).textSize, 'medium');
   });
   it('rejects malformed saved tab containers with a workspace error', () => {
     for (const value of [

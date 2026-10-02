@@ -89,12 +89,14 @@ export type TableSort = {
   column: TableColumn | 'rank';
   direction: 'asc' | 'desc';
 };
+export type ReadingSettings = {
+  textSize: 'small' | 'medium' | 'large';
+  spacing: 'compact' | 'comfortable';
+};
 export type RootView = {
   columns: TableColumn[];
   widths: Record<TableColumn, number>;
   sort: TableSort;
-  textSize: 'small' | 'medium' | 'large';
-  spacing: 'compact' | 'comfortable';
   hideDone: boolean;
   assumeMatchingStatusTransitions: boolean;
   filters: TreeFilters;
@@ -177,6 +179,7 @@ export type TabState = {
   scrollTop: number;
 };
 export type Workspace = {
+  reading?: ReadingSettings;
   tabs: TabState[];
   activeTabId: string | null;
   shortcuts: Record<string, string>;

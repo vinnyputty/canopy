@@ -506,7 +506,7 @@ select:focus-visible,
 .saved-view-choice {
   min-width: 0;
   text-align: left;
-  padding: 10px 12px;
+  padding: calc((var(--row-height) - 22px) / 2) 12px;
   display: grid;
   grid-template-columns: 115px minmax(0, 1fr);
   gap: 4px 12px;
@@ -2973,4 +2973,33 @@ kbd {
   margin-top: 10px;
   border-top: 1px solid var(--border-soft);
   padding-top: 8px;
+}
+
+.settings-content {
+  display: grid;
+  gap: 12px;
+}
+.settings-content fieldset {
+  display: grid;
+  gap: 12px;
+}
+.settings-content label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.settings-content p {
+  color: var(--muted);
+}
+.saved-view-result {
+  font-size: var(--tree-font-size);
+  min-height: var(--row-height);
+}
+.saved-view-result button,
+.saved-view-result span {
+  font-size: inherit;
+}
+.saved-view-choice {
+  min-height: var(--row-height);
 }

@@ -219,10 +219,319 @@ async function scrollGeometry() {
   });
 }
 
+async function changeReading(label, value) {
+  const viewWasOpen = await page.locator('.view-settings[open]').count();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByLabel(label, { exact: true }).selectOption(value);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  if (viewWasOpen) await page.locator('.view-settings > summary').click();
+}
+async function expectReading(label, value) {
+  const viewWasOpen = await page.locator('.view-settings[open]').count();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByLabel(label, { exact: true })).toHaveValue(value);
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  if (viewWasOpen) await page.locator('.view-settings > summary').click();
+}
+async function auditSettingsKeyboard() {
+  const trigger = page.getByRole('button', { name: 'Settings', exact: true });
+  const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const open = async () => {
+    await trigger.focus();
+    await trigger.press('Enter');
+    await expect(
+      settings.getByRole('button', { name: 'Close dialog' }),
+    ).toBeFocused();
+  };
+  await open();
+  const controls = settings.locator(
+    'button:not(:disabled), select:not(:disabled)',
+  );
+  const count = await controls.count();
+  await page.keyboard.press('Shift+Tab');
+  await expect(
+    settings.getByRole('button', { name: 'Done', exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(controls.first()).toBeFocused();
+  for (let index = 1; index <= count; index++) {
+    await page.keyboard.press('Tab');
+    await expect(controls.nth(index % count)).toBeFocused();
+  }
+  await page.keyboard.press('Escape');
+  await expect(settings).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await open();
+  await settings.getByRole('button', { name: 'Close dialog' }).press('Enter');
+  await expect(trigger).toBeFocused();
+  await open();
+  await settings.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(trigger).toBeFocused();
+  await open();
+  await page.locator('.dialog-backdrop').click({ position: { x: 3, y: 3 } });
+  await expect(trigger).toBeFocused();
+  for (const [link, title] of [
+    ['Appearance', 'Appearance'],
+    ['Keyboard shortcuts', 'Keyboard shortcuts'],
+    ['Connection setup', 'Connect Jira'],
+  ]) {
+    await open();
+    await settings.getByRole('button', { name: link, exact: true }).click();
+    const destination = page.getByRole('dialog', { name: title, exact: true });
+    await expect(destination).toBeVisible();
+    await expect
+      .poll(() =>
+        destination.evaluate((panel) => panel.contains(document.activeElement)),
+      )
+      .toBe(true);
+    await expect(trigger).not.toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(destination).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  }
+  console.log(
+    'Settings keyboard checks passed: initial focus, Tab/Shift+Tab containment, close restoration, and destination focus.',
+  );
+}
+async function auditReadingMigration() {
+  const rootView = {
+    columns: ['issue', 'priority', 'assignee', 'status'],
+    widths: { issue: 480, priority: 104, assignee: 165, status: 128 },
+    sort: { column: 'rank', direction: 'asc' },
+    hideDone: true,
+    filters: {},
+    assumeMatchingStatusTransitions: true,
+    textSize: 'small',
+    spacing: 'compact',
+  };
+  const tabs = ['CAN-100', 'CAN-200'].map((rootKey) => ({
+    id: rootKey,
+    connectionId: 'demo',
+    rootKey,
+    expanded: [rootKey],
+    hideDone: true,
+    scrollTop: 0,
+    view: rootView,
+  }));
+  await writeFile(
+    join(userData, 'workspace.json'),
+    JSON.stringify({
+      tabs,
+      activeTabId: 'CAN-200',
+      closedTabs: [{ ...tabs[0], id: 'closed' }],
+      theme: 'dark',
+      sidebarCollapsed: false,
+      shortcuts: {},
+      rootViews: {
+        '["demo","CAN-100"]': rootView,
+        '["demo","CAN-200"]': {
+          ...rootView,
+          textSize: 'large',
+          spacing: 'comfortable',
+          columns: ['issue', 'status'],
+          hideDone: false,
+        },
+      },
+      viewDefaults: { demo: { ...rootView, textSize: 'medium' } },
+    }),
+  );
+  await launch();
+  await auditSettingsKeyboard();
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '40px',
+  );
+  await expectReading('Text size', 'large');
+  await expectReading('Row spacing', 'comfortable');
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '40px',
+  );
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  // Changing reading updates the tree behind the open dialog without Save.
+  await page.getByLabel('Text size', { exact: true }).selectOption('small');
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+  await page.getByLabel('Row spacing', { exact: true }).selectOption('compact');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '30px',
+  );
+  await page.getByRole('button', { name: 'Appearance', exact: true }).click();
+  const appearance = page.getByRole('dialog', { name: 'Appearance' });
+  await appearance.getByRole('radio', { name: 'Ocean' }).check();
+  await appearance.getByRole('button', { name: 'Reset appearance' }).click();
+  await expect(appearance.getByRole('radio', { name: 'System' })).toBeChecked();
+  await expect(
+    appearance.getByRole('radio', { name: 'Default', exact: true }),
+  ).toBeChecked();
+  await appearance.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expectReading('Text size', 'small');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Keyboard shortcuts', exact: true })
+    .click();
+  const keyboard = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
+  await expect(keyboard).toBeVisible();
+  await keyboard.getByRole('button', { name: 'Restore defaults' }).click();
+  await keyboard.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Connection setup', exact: true })
+    .click();
+  await expect(
+    page.getByRole('dialog', { name: 'Connect Jira' }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+  await page.locator('.view-settings > summary').click();
+  await page
+    .getByRole('button', { name: 'Reset this root to default' })
+    .click();
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+  await expect(
+    page.getByRole('checkbox', { name: 'Hide done', exact: true }),
+  ).toBeChecked();
+  await page.locator('.view-settings > summary').click();
+  await waitForSavedWorkspace(
+    (saved) =>
+      saved.reading?.textSize === 'small' &&
+      saved.reading.spacing === 'compact' &&
+      !Object.hasOwn(saved.rootViews, JSON.stringify(['demo', 'CAN-200'])) &&
+      saved.tabs.some(
+        (tab) =>
+          tab.id === saved.activeTabId &&
+          tab.rootKey === 'CAN-200' &&
+          tab.hideDone,
+      ),
+  );
+  const persisted = JSON.parse(
+    await readFile(join(userData, 'workspace.json'), 'utf8'),
+  );
+  expect(persisted.reading).toEqual({ textSize: 'small', spacing: 'compact' });
+  for (const view of [
+    ...persisted.tabs.map((tab) => tab.view),
+    ...persisted.closedTabs.map((tab) => tab.view),
+    ...Object.values(persisted.rootViews),
+    ...Object.values(persisted.viewDefaults),
+  ]) {
+    expect(view).not.toHaveProperty('textSize');
+    expect(view).not.toHaveProperty('spacing');
+  }
+  // The save IPC rejects malformed enums and retains the last valid workspace.
+  for (const reading of [
+    { textSize: ['small'], spacing: 'compact' },
+    { textSize: 'large', spacing: ['compact'] },
+    { textSize: { toString: null }, spacing: 'compact' },
+    { textSize: 'small', spacing: { toString: null } },
+  ]) {
+    const error = await page.evaluate(
+      async ({ saved, reading }) => {
+        try {
+          await window.canopy.saveWorkspace({ ...saved, reading });
+          return null;
+        } catch (error) {
+          return String(error);
+        }
+      },
+      { saved: persisted, reading },
+    );
+    expect(error).toContain('Invalid reading settings.');
+    expect(
+      JSON.parse(await readFile(join(userData, 'workspace.json'), 'utf8')),
+    ).toEqual(persisted);
+  }
+  await close();
+  await launch();
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '30px',
+  );
+  await expectReading('Text size', 'small');
+  await close();
+  await rm(join(userData, 'workspace.json'));
+  console.log(
+    'Reading migration/Settings check passed: active preference, immediate updates, scoped resets, destinations, legacy-copy removal, and relaunch.',
+  );
+}
+async function auditGlobalReading() {
+  await page.getByRole('button', { name: 'Create saved view' }).click();
+  const saved = page.getByRole('region', { name: 'New view saved view' });
+  await saved.locator('.saved-view-settings > summary').click();
+  await saved
+    .getByRole('checkbox', { name: /All configured roots on/ })
+    .check();
+  const result = saved.locator('.saved-view-choice').first();
+  await expect(result).toBeVisible();
+  await changeReading('Text size', 'small');
+  await changeReading('Row spacing', 'compact');
+  await expect(result).toHaveCSS('font-size', '11px');
+  await expect(result).toHaveCSS('padding-top', '4px');
+  await changeReading('Row spacing', 'comfortable');
+  await expect(result).toHaveCSS('padding-top', '9px');
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  await page.getByLabel('Filter assignee').selectOption('');
+  await page.getByLabel('Filter status').selectOption('');
+  await page.getByLabel('Filter priority').selectOption('');
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '40px',
+  );
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('button', {
+      name: 'Reset reading to Medium / Compact',
+      exact: true,
+    })
+    .click();
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '13px');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '30px',
+  );
+  await page
+    .getByRole('button', { name: 'Saved view: New view', exact: true })
+    .click();
+  await expect(result).toHaveCSS('font-size', '13px');
+  await expect(result).toHaveCSS('padding-top', '4px');
+  await waitForSavedWorkspace(
+    (saved) =>
+      saved.reading?.textSize === 'medium' &&
+      saved.reading.spacing === 'compact' &&
+      saved.savedViews.some(
+        (view) =>
+          view.id === saved.activeSavedViewId &&
+          view.name === 'New view' &&
+          view.connectionIds.includes('demo'),
+      ),
+  );
+  await close();
+  await launch();
+  await expect(page.locator('.saved-view-choice').first()).toHaveCSS(
+    'font-size',
+    '13px',
+  );
+  await expectReading('Text size', 'medium');
+  await expectReading('Row spacing', 'compact');
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await changeReading('Text size', 'large');
+  await changeReading('Row spacing', 'comfortable');
+  console.log(
+    'Global reading check passed: saved-view font/spacing, tab propagation, reading reset, and relaunch.',
+  );
+}
 async function auditAppearance() {
   const root = page.locator('html');
   await expect(root).toHaveAttribute('data-palette', 'default');
-  await page.getByRole('button', { name: 'Appearance' }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Appearance', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Appearance' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('radio', { name: 'Dark' })).toBeFocused();
@@ -236,7 +545,8 @@ async function auditAppearance() {
     .getByRole('dialog', { name: 'Keyboard shortcuts' })
     .getByRole('button', { name: 'Cancel' })
     .click();
-  await page.getByRole('button', { name: 'Appearance' }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Appearance', exact: true }).click();
   for (const palette of ['Default', 'Ocean', 'Forest']) {
     await dialog.getByRole('radio', { name: palette }).check();
     for (const mode of ['Light', 'Dark']) {
@@ -334,7 +644,8 @@ async function auditAppearance() {
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(root).toHaveAttribute('data-palette', 'default');
   await expect(root).toHaveAttribute('data-theme', 'dark');
-  await page.getByRole('button', { name: 'Appearance' }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Appearance', exact: true }).click();
   await dialog.getByRole('radio', { name: 'Forest' }).check();
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(dialog).toHaveCount(0);
@@ -370,7 +681,8 @@ async function auditAppearanceSaveFailure() {
     });
   }, targetPalette.toLowerCase());
   try {
-    await page.getByRole('button', { name: 'Appearance' }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Appearance' });
     await dialog.getByRole('radio', { name: targetPalette }).check();
     await dialog.getByRole('button', { name: 'Save' }).click();
@@ -435,7 +747,8 @@ async function auditAppearanceSaveOrdering() {
         app.evaluate(() => globalThis.appearanceSaveRace.calls.length),
       )
       .toBe(1);
-    await page.getByRole('button', { name: 'Appearance' }).click();
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'Appearance' });
     await dialog.getByRole('radio', { name: 'Ocean' }).check();
     await dialog.getByRole('button', { name: 'Save' }).click();
@@ -1031,6 +1344,7 @@ try {
     recursive: true,
     force: true,
   });
+  await auditReadingMigration();
   await launch();
   if (process.env.CANOPY_SMOKE_TEST_DIAGNOSTICS === '1') {
     await page.evaluate(() => {
@@ -1987,7 +2301,10 @@ try {
     'https://example.invalid/browse/CAN-200',
   );
 
-  await page.getByRole('button', { name: 'Keyboard shortcuts' }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'Keyboard shortcuts', exact: true })
+    .click();
   const shortcuts = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
   const paletteRow = shortcuts.locator('.shortcut-row').filter({
     hasText: 'Show command palette',
@@ -2593,12 +2910,10 @@ try {
       .toBe(true);
     expect(await statusFits()).toBe(true);
     await resizeWindow(600);
-    // Table presentation is stored per root and survives closing and reopening.
+    // Root columns and filters persist independently of app-wide reading.
     await page.locator('.view-settings > summary').click();
-    await page.getByLabel('Text size', { exact: true }).selectOption('large');
-    await page
-      .getByLabel('Row spacing', { exact: true })
-      .selectOption('comfortable');
+    await changeReading('Text size', 'large');
+    await changeReading('Row spacing', 'comfortable');
     await page.getByLabel('Show Priority column').uncheck();
     await page.getByLabel('Move Status column left').click();
     await page.getByLabel('Sort by', { exact: true }).selectOption('status');
@@ -2670,6 +2985,8 @@ try {
       return (
         view?.widths.status === 138 &&
         view.columns[1] === 'status' &&
+        saved.reading?.textSize === 'large' &&
+        saved.reading.spacing === 'comfortable' &&
         saved.tabs.some((tab) => tab.rootKey === 'CAN-100') &&
         saved.tabs.some(
           (tab) => tab.rootKey === 'CAN-200' && tab.id === saved.activeTabId,
@@ -2702,41 +3019,34 @@ try {
     await expect(
       page.getByRole('checkbox', { name: 'Hide done', exact: true }),
     ).not.toBeChecked();
-    await expect(page.getByLabel('Row spacing', { exact: true })).toHaveValue(
-      'comfortable',
-    );
+    await expectReading('Row spacing', 'comfortable');
     await expect(page.getByLabel('Show Priority column')).not.toBeChecked();
     // Text size and row spacing remain independent in every combination used here.
-    await page.getByLabel('Text size', { exact: true }).selectOption('small');
+    await changeReading('Text size', 'small');
     await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
     await expect(page.locator('.issue-row').first()).toHaveCSS(
       'min-height',
       '40px',
     );
-    await page
-      .getByLabel('Row spacing', { exact: true })
-      .selectOption('compact');
+    await changeReading('Row spacing', 'compact');
     await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
     await expect(page.locator('.issue-row').first()).toHaveCSS(
       'min-height',
       '30px',
     );
-    await page.getByLabel('Text size', { exact: true }).selectOption('large');
-    await page
-      .getByLabel('Row spacing', { exact: true })
-      .selectOption('comfortable');
+    await changeReading('Text size', 'large');
+    await changeReading('Row spacing', 'comfortable');
     await page
       .getByRole('button', { name: 'Use as connection default' })
       .click();
-    await page.getByLabel('Text size', { exact: true }).selectOption('small');
+    await changeReading('Text size', 'small');
     await page
       .getByRole('button', { name: 'Reset this root to default' })
       .click();
-    await expect(page.getByLabel('Text size', { exact: true })).toHaveValue(
-      'large',
-    );
+    await expectReading('Text size', 'small');
     await page.locator('.view-settings > summary').click();
 
+    await changeReading('Text size', 'large');
     // An uncustomized root inherits the saved connection view, including Hide done.
     await openIssue('CAN-201');
     await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
@@ -2754,7 +3064,7 @@ try {
     await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();
     await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
     await expectIssueBefore('CAN-112', 'CAN-111');
-    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '13px');
+    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
     await expect(
       issue('CAN-100').locator(':scope > .issue-row .grab'),
     ).toHaveCount(0);
@@ -2850,7 +3160,7 @@ try {
     await page.getByLabel('Filter status').selectOption('todo');
     await page.getByLabel('Filter assignee').selectOption('');
     await page.locator('.view-settings > summary').click();
-    await page.getByLabel('Text size', { exact: true }).selectOption('medium');
+    await changeReading('Text size', 'medium');
     await page.locator('.view-settings > summary').click();
     await page.getByRole('tab', { name: /CAN-100/ }).click();
     await page.getByLabel('Filter assignee').selectOption('me');
@@ -2860,7 +3170,7 @@ try {
       .getByRole('checkbox', { name: 'Hide done', exact: true })
       .check();
     await page.locator('.view-settings > summary').click();
-    await page.getByLabel('Text size', { exact: true }).selectOption('small');
+    await changeReading('Text size', 'small');
     await page
       .getByRole('button', { name: 'Use as connection default' })
       .click();
@@ -2901,29 +3211,29 @@ try {
       .getByRole('checkbox', { name: 'Hide done', exact: true })
       .uncheck();
     await page.locator('.view-settings > summary').click();
-    await page.getByLabel('Text size', { exact: true }).selectOption('large');
+    await changeReading('Text size', 'large');
     await page.locator('.view-settings > summary').click();
     await page.getByRole('button', { name: 'Back', exact: true }).click();
     await page.getByRole('button', { name: 'Back', exact: true }).click();
     await expect(page.getByLabel('Filter priority')).toHaveValue('3');
-    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
     await expect(
       page.getByRole('checkbox', { name: 'Hide done', exact: true }),
     ).toBeChecked();
     // An unrelated root change must not replace the restored override.
     await page.getByRole('tab', { name: /CAN-200/ }).click();
     await page.locator('.view-settings > summary').click();
-    await page.getByLabel('Text size', { exact: true }).selectOption('large');
+    await changeReading('Text size', 'large');
     await page.locator('.view-settings > summary').click();
     await page.getByRole('tab', { name: /CAN-100/ }).click();
     await expect(page.getByLabel('Filter priority')).toHaveValue('3');
-    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
     await page
       .getByRole('tab', { name: /CAN-100/ })
       .click({ button: 'middle' });
     await page.keyboard.press(`${modifier}+Shift+t`);
     await expect(page.getByLabel('Filter priority')).toHaveValue('3');
-    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
     await waitForSavedWorkspace((saved) => {
       const view = saved.rootViews?.[JSON.stringify(['demo', 'CAN-100'])];
       return (
@@ -2931,17 +3241,21 @@ try {
           (tab) => tab.rootKey === 'CAN-100' && tab.id === saved.activeTabId,
         ) &&
         view?.filters.priority === '3' &&
-        view.textSize === 'small' &&
+        saved.reading?.textSize === 'large' &&
+        saved.reading.spacing === 'comfortable' &&
+        !Object.hasOwn(view, 'textSize') &&
+        !Object.hasOwn(view, 'spacing') &&
         view.hideDone
       );
     });
     await close();
     await launch();
     await expect(page.getByLabel('Filter priority')).toHaveValue('3');
-    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '11px');
+    await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '15px');
     await expect(
       page.getByRole('checkbox', { name: 'Hide done', exact: true }),
     ).toBeChecked();
+    await auditGlobalReading();
     await page.getByLabel('Filter priority').selectOption('');
     await page
       .getByRole('checkbox', { name: 'Hide done', exact: true })
