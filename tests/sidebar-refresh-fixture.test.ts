@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { validRootView } from '../src/shared/views';
+import { migrateViews, rootView } from '../src/renderer/table-view';
+import type { Workspace } from '../src/shared/types';
 import { ControlledDemoProvider } from './fixtures/controlled';
 
 it('holds changed refresh data until release and records completion only after the response is available', async () => {
@@ -30,4 +34,54 @@ it('holds changed refresh data until release and records completion only after t
     'Completed sidebar refresh',
   );
   assert.equal(provider.completed('sidebar-refresh'), true);
+});
+
+it('retains the actual sidebar smoke root override through workspace migration', async () => {
+  const view = JSON.parse(
+    await readFile(
+      new URL('./fixtures/sidebar-root-view.json', import.meta.url),
+      'utf8',
+    ),
+  );
+  assert.equal(
+    validRootView(view),
+    true,
+    'Smoke must seed a supported root sort column',
+  );
+  const tab = {
+    id: 'sample',
+    connectionId: 'demo',
+    rootKey: 'CAN-100',
+    expanded: ['CAN-100'],
+    hideDone: true,
+    scrollTop: 0,
+  };
+  const workspace: Workspace = {
+    tabs: [tab],
+    activeTabId: tab.id,
+    rootViews: { '["demo","CAN-100"]': view },
+    theme: 'system',
+    sidebarCollapsed: false,
+    shortcuts: {},
+  };
+  const migrated = migrateViews(JSON.parse(JSON.stringify(workspace)));
+  assert.deepEqual(migrated.rootViews?.['["demo","CAN-100"]'], view);
+  assert.deepEqual(rootView(migrated, tab), view);
+  assert.deepEqual(rootView(migrated, tab).columns, ['issue', 'status']);
+  assert.equal(rootView(migrated, tab).hideDone, false);
+  assert.equal(rootView(migrated, tab).widths.issue, 520);
+  const invalid = {
+    ...workspace,
+    rootViews: {
+      '["demo","CAN-100"]': {
+        ...view,
+        sort: { column: 'key', direction: 'asc' },
+      },
+    },
+  } as Workspace;
+  assert.deepEqual(
+    migrateViews(invalid).rootViews,
+    {},
+    'Unsupported key sort reproduces the observed dropped override',
+  );
 });

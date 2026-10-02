@@ -1363,14 +1363,15 @@ async function auditSidebarSample() {
       tabs: sidebarTabs,
       activeTabId: 'CAN-100',
       rootViews: {
-        '["demo","CAN-100"]': {
-          columns: ['issue', 'status'],
-          widths: { issue: 520, priority: 104, assignee: 165, status: 148 },
-          sort: { column: 'key', direction: 'asc' },
-          hideDone: false,
-          assumeMatchingStatusTransitions: true,
-          filters: {},
-        },
+        '["demo","CAN-100"]': JSON.parse(
+          await readFile(
+            new URL(
+              '../tests/fixtures/sidebar-root-view.json',
+              import.meta.url,
+            ),
+            'utf8',
+          ),
+        ),
       },
       pinnedRoots: sidebarRoots,
       recentRoots: sidebarRoots,

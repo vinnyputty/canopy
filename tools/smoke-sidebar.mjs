@@ -37,7 +37,7 @@ export async function auditSidebar(app, page, waitForSavedWorkspace) {
   expect(baseline.rootViews['["demo","CAN-100"]']).toMatchObject({
     columns: ['issue', 'status'],
     hideDone: false,
-    sort: { column: 'key', direction: 'asc' },
+    sort: { column: 'issue', direction: 'asc' },
   });
   const controls = sidebar.locator('.sidebar-work button:not(:disabled)');
   await controls.first().focus();

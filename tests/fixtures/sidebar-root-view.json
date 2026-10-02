@@ -1,0 +1,8 @@
+{
+  "columns": ["issue", "status"],
+  "widths": { "issue": 520, "priority": 104, "assignee": 165, "status": 148 },
+  "sort": { "column": "issue", "direction": "asc" },
+  "hideDone": false,
+  "assumeMatchingStatusTransitions": true,
+  "filters": {}
+}
