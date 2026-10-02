@@ -10,6 +10,8 @@ import {
   relationshipChangedKeys,
 } from '../src/renderer/relationships';
 import { DemoProvider } from '../src/main/demo-provider';
+import { RootRefreshGate, RefreshSchedule } from '../src/renderer/refresh';
+import { Mutations } from '../src/renderer/mutations';
 import {
   issueRelationships,
   relationshipFailure,
@@ -230,7 +232,7 @@ test('inspected immediate parent seeds known ancestors without inheriting the ol
 
 // Execute the actual App inspection, refresh callback, and dependency effects.
 // This harness models React state/effect delivery without DOM or Electron.
-function rendererRequests() {
+function rendererRequests(realRefresh = false) {
   const source = parsed('../src/renderer/App.tsx');
   const names = new Set([
     'relationshipGraphs',
@@ -296,6 +298,13 @@ function rendererRequests() {
   let effectIndex = 0;
   const mounted: { deps: unknown[]; cleanup?: () => void }[] = [];
   const setter = () => {};
+  let now = 1_000_000;
+  let tick = () => {};
+  class ClockDate extends Date {
+    static now() {
+      return now;
+    }
+  }
   const context: any = {
     relationshipChangedKeys,
     relationshipKinds,
@@ -409,7 +418,7 @@ function rendererRequests() {
   assert.ok(publish, 'production mutation snapshot callback');
   runInNewContext(
     js(
-      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab, publish: ${publish.getText(source)} };`,
+      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current] };`,
     ),
     context,
   );
@@ -424,11 +433,96 @@ function rendererRequests() {
     saving: new Set(),
     undoBusy: false,
   });
+  if (realRefresh) {
+    context.Date = ClockDate;
+    context.setSnapshots = (value: Record<string, TreeSnapshot>) => {
+      context.snapshots = value;
+      context.snapshotsRef.current = value;
+    };
+    context.window.canopy.update = async (_connection: string, key: string) =>
+      issue(key);
+    context.mutations = new Mutations(
+      context.window.canopy,
+      (view) => context.api.publish(view),
+      setter,
+    );
+    context.rootRefreshes.current = new RootRefreshGate(() => now);
+    context.refreshSchedule.current = new RefreshSchedule();
+    context.refreshSchedule.current.sync(
+      tabs.map((tab) => tab.id),
+      'a',
+      now,
+    );
+    context.editorRef = { current: null };
+    const gate = nodes(
+      source,
+      (n) =>
+        ts.isBinaryExpression(n) &&
+        n.left.getText(source) === 'refreshBlocked.current',
+    )[0];
+    assert.ok(gate, 'actual editor and pending-write gate');
+    runInNewContext(js(`${gate.getText(source)};`), context);
+    for (const tab of tabs)
+      context.mutations.receive(tab, snapshots[tab.id], 0);
+    Object.assign(context, {
+      ready: true,
+      activeIdRef: { current: 'a' },
+      activeViewSourceIdsRef: { current: [] },
+      workflowReturn: { current: null },
+      finishWorkflowReturn: () => false,
+      setSyncNow: setter,
+      setCooldownTimes: setter,
+      setForeground: setter,
+      setOnline: setter,
+      document: {
+        visibilityState: 'visible',
+        hasFocus: () => true,
+        addEventListener: setter,
+        removeEventListener: setter,
+      },
+    });
+    Object.assign(context.window, {
+      setInterval: (fn: () => void) => {
+        tick = fn;
+        return 1;
+      },
+      clearInterval: setter,
+      addEventListener: setter,
+      removeEventListener: setter,
+    });
+    const scheduler = nodes(
+      source,
+      (n) =>
+        ts.isCallExpression(n) &&
+        n.expression.getText(source) === 'useEffect' &&
+        n.getText(source).includes('refreshSchedule.current.due(Date.now())'),
+    )[0];
+    assert.ok(scheduler, 'actual scheduled/deferred delivery');
+    runInNewContext(js(`${scheduler.getText(source)};`), context);
+  }
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
   return {
     ...context.api,
     pending,
     cancelled,
     tabs,
+    context,
+    settle,
+    advance: async (milliseconds: number) => {
+      now += milliseconds;
+      tick();
+      await settle();
+    },
+    editor: (connectionId?: string) => {
+      context.editorRef.current = connectionId ? { connectionId } : null;
+    },
+    setTree: (
+      read: (connection: string, key: string) => Promise<TreeSnapshot>,
+    ) => {
+      context.window.canopy.tree = read;
+    },
     graphs: () => states[0] as Record<string, IssueRelationships>,
     loading: () => states[1],
     refresh: async (tab: TabState, userRequested = true, explicit = true) => {
@@ -987,6 +1081,200 @@ test('late target conflict preserves unaffected active blockers and outside-conn
   assert.equal(blockers.blocker, 'blocked');
   assert.equal(blockers.incomplete, true);
   assert.deepEqual(blockers.blockers, ['B-2']);
+});
+
+for (const gate of ['editor', 'pending write']) {
+  for (const manual of [true, false]) {
+    test(`real ${gate} opening during ${manual ? 'manual' : 'quiet'} delivery retains its exact refresh intent`, async () => {
+      const api = rendererRequests(true);
+      for (const [connection, key] of [
+        ['work', 'A-1'],
+        ['work', 'B-1'],
+        ['other', 'A-1'],
+      ]) {
+        const inspected = api.inspect(connection, key);
+        api.pending.at(-1)!.resolve(blockerGraph(key));
+        await inspected;
+      }
+      const index = api.pending.length;
+      const held = api.inspect('work', 'A-1');
+      let releaseTree!: () => void;
+      api.setTree(
+        async (_connection: string, key: string) =>
+          new Promise((resolve) => {
+            releaseTree = () => resolve(treeSnapshot(key, [issue(key)]));
+          }),
+      );
+      const delivery = api.refresh(api.tabs[0], manual, true);
+      assert.equal(
+        typeof releaseTree,
+        'function',
+        'gate opens after real root read starts',
+      );
+      let write: Promise<unknown> | undefined;
+      let releaseWrite!: () => void;
+      if (gate === 'editor') api.editor('work');
+      else {
+        api.context.window.canopy.update = async (
+          _connection: string,
+          key: string,
+        ) =>
+          new Promise((resolve) => {
+            releaseWrite = () =>
+              resolve({
+                ...issue(key),
+                priority: { id: 'high', name: 'High' },
+              });
+          });
+        write = api.context.mutations.update('work', 'A-1', {
+          priorityId: 'high',
+        });
+        await api.settle();
+        assert.equal(api.context.mutations.pending('work'), true);
+      }
+      releaseTree();
+      await delivery;
+      assert.ok(api.graphs()['["work","A-1"]']);
+      assert.equal(api.loading()['["work","A-1"]'], true);
+      assert.equal(api.cancelled.length, 0);
+      assert.equal(api.context.deferredRefreshes.current.has('a'), true);
+      if (gate === 'editor') api.editor();
+      else {
+        releaseWrite();
+        await write;
+      }
+      api.setTree(async (_connection: string, key: string) =>
+        treeSnapshot(key, [issue(key)]),
+      );
+      // Closing the gate can attempt a retry before the shared root cooldown.
+      await api.advance(1_500);
+      assert.equal(api.context.api.intent().length, manual ? 1 : 0);
+      assert.ok(api.graphs()['["work","A-1"]']);
+      assert.equal(api.cancelled.length, 0);
+      await api.advance(31_000);
+      assert.equal(api.context.deferredRefreshes.current.has('a'), false);
+      assert.equal(api.context.api.intent().length, 0);
+      assert.ok(api.graphs()['["work","B-1"]']);
+      assert.ok(api.graphs()['["other","A-1"]']);
+      if (manual) {
+        assert.equal(api.graphs()['["work","A-1"]'], undefined);
+        assert.deepEqual(api.cancelled, [`work:request-${index}`]);
+        const fresh = api.inspect('work', 'A-1');
+        api.pending[index].resolve(blockerGraph('A-1', 'B-2', 'done'));
+        await held;
+        assert.equal(api.graphs()['["work","A-1"]'], undefined);
+        assert.equal(api.loading()['["work","A-1"]'], true);
+        api.pending.at(-1)!.resolve(blockerGraph('A-1'));
+        await fresh;
+      } else {
+        assert.equal(api.cancelled.length, 0);
+        api.pending[index].resolve(blockerGraph('A-1'));
+        await held;
+        assert.ok(api.graphs()['["work","A-1"]']);
+      }
+    });
+  }
+}
+
+for (const replacement of [
+  'closed',
+  'root generation',
+  'refresh sequence',
+  'other account',
+]) {
+  test(`blocked delivery cannot restore manual intent after ${replacement} replacement`, async () => {
+    const api = rendererRequests(true);
+    const inspected = api.inspect('work', 'A-1');
+    api.pending[0].resolve(blockerGraph('A-1'));
+    await inspected;
+    let releaseTree!: () => void;
+    api.setTree(
+      async (_connection: string, key: string) =>
+        new Promise((resolve) => {
+          releaseTree = () => resolve(treeSnapshot(key, [issue(key)]));
+        }),
+    );
+    const delivery = api.refresh(api.tabs[0], true, true);
+    api.editor('work');
+    let newer: Promise<unknown> | undefined;
+    if (replacement === 'closed')
+      api.context.tabsRef.current = api.tabs.slice(1);
+    if (replacement === 'other account')
+      api.context.tabsRef.current = [
+        { ...api.tabs[0], connectionId: 'other' },
+        ...api.tabs.slice(1),
+      ];
+    if (replacement === 'root generation') {
+      const key = api.context.refreshRootKey(api.tabs[0]);
+      api.context.rootRefreshes.current.forget(key);
+      const load = api.context.rootRefreshes.current.load(
+        key,
+        true,
+        false,
+        async () => treeSnapshot('A-1', [issue('A-1')]),
+      );
+      assert.ok('promise' in load);
+      if ('promise' in load) await load.promise;
+    }
+    if (replacement === 'refresh sequence') {
+      api.editor();
+      api.context.refreshSchedule.current.forget('a');
+      api.context.refreshSchedule.current.sync(
+        api.tabs.map((tab: TabState) => tab.id),
+        'a',
+        api.context.Date.now(),
+      );
+      newer = api.refresh(api.tabs[0], false, true);
+      api.editor('work');
+    }
+    releaseTree();
+    await delivery;
+    await newer;
+    assert.equal(
+      api.context.api.intent().length,
+      0,
+      'outgoing ownership cannot enqueue manual invalidation',
+    );
+    assert.equal(api.cancelled.length, 0);
+    api.editor();
+    api.setTree(async (_connection: string, key: string) =>
+      treeSnapshot(key, [issue(key)]),
+    );
+    await api.advance(31_000);
+    assert.ok(api.graphs()['["work","A-1"]']);
+    assert.equal(api.cancelled.length, 0);
+  });
+}
+
+test('new manual intent queued during delivery belongs to the successful retry', async () => {
+  const api = rendererRequests(true);
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1'));
+  await inspected;
+  const held = api.inspect('work', 'A-1');
+  let releaseTree!: () => void;
+  api.setTree(
+    async (_connection: string, key: string) =>
+      new Promise((resolve) => {
+        releaseTree = () => resolve(treeSnapshot(key, [issue(key)]));
+      }),
+  );
+  const first = api.refresh(api.tabs[0], false, true);
+  api.editor('work');
+  await api.refresh(api.tabs[0], true, true);
+  releaseTree();
+  await first;
+  assert.equal(api.cancelled.length, 0);
+  api.editor();
+  api.setTree(async (_connection: string, key: string) =>
+    treeSnapshot(key, [issue(key)]),
+  );
+  await api.advance(31_000);
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  assert.deepEqual(api.cancelled, ['work:request-1']);
+  api.pending[1].resolve(blockerGraph('A-1'));
+  await held;
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
 });
 
 test('demo related-work step inspects the lazy graph before highlighting CAN-200', async () => {

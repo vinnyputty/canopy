@@ -53,6 +53,7 @@ export async function auditRelationships(app, page) {
       treeCalls: [],
       includeCompletedBlocker: false,
       heldTreeConnection: null,
+      heldSourceTree: false,
       treeRelease: null,
       backgroundMarker: null,
       pollTargetUnavailable: false,
@@ -108,7 +109,13 @@ export async function auditRelationships(app, page) {
           fetchedAt: Date.now() + controls.treeReads,
           warnings: [],
         });
-        if (key === 'team/a#10' && _connection === controls.heldTreeConnection)
+        if (
+          (key === 'team/a#10' &&
+            _connection === controls.heldTreeConnection) ||
+          (key === 'team/a#1' &&
+            _connection === 'work' &&
+            controls.heldSourceTree)
+        )
           return new Promise((resolve) => {
             controls.treeRelease = () => resolve(read());
           });
@@ -496,6 +503,87 @@ export async function auditRelationships(app, page) {
     await expect(tasks).toContainText('Background inspection retained');
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
     await expect(tasks).toContainText('Blocker state unknown');
+    await expect(tasks).not.toContainText('Background inspection retained');
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.mode = 'normal';
+    });
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await expect(tasks).toContainText('Blocked by team/a#11');
+    // Open the actual edit gate after the manual tree read starts. Its response
+    // is deferred, and the eventual unchanged retry must keep manual intent.
+    await app.evaluate(() => {
+      const state = globalThis.relationshipAudit;
+      state.mode = 'background-hold';
+      state.release = null;
+      state.heldSourceTree = true;
+      state.treeRelease = null;
+    });
+    await tasks.getByRole('button', { name: 'Inspect blockers' }).click();
+    await expect
+      .poll(() =>
+        app.evaluate(() => typeof globalThis.relationshipAudit.release),
+      )
+      .toBe('function');
+    const deferredHeld = await app.evaluate(() => ({
+      call: globalThis.relationshipAudit.calls.at(-1),
+      cancelledBefore: globalThis.relationshipAudit.cancelled.length,
+    }));
+    expect(deferredHeld.call).toMatchObject({
+      connection: 'work',
+      key: 'team/a#1',
+    });
+    expect(deferredHeld.call.requestId).toEqual(expect.any(String));
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await expect
+      .poll(() =>
+        app.evaluate(() => typeof globalThis.relationshipAudit.treeRelease),
+      )
+      .toBe('function');
+    await source
+      .getByRole('button', { name: 'Sample team/a#1', exact: true })
+      .dblclick();
+    const titleEditor = source.getByRole('textbox', {
+      name: 'Title for team/a#1',
+    });
+    await expect(titleEditor).toBeVisible();
+    await app.evaluate(() => globalThis.relationshipAudit.treeRelease());
+    await expect(page.locator('[role="tab"] .spin')).toHaveCount(0);
+    await expect(
+      tasks.getByRole('button', { name: 'Loading relationships…' }),
+    ).toBeVisible();
+    const deferredCancelled = () =>
+      app.evaluate(
+        (_electron, { call, cancelledBefore }) =>
+          globalThis.relationshipAudit.cancelled
+            .slice(cancelledBefore)
+            .some(
+              (cancelled) =>
+                cancelled.connection === call.connection &&
+                cancelled.requestId === call.requestId,
+            ),
+        deferredHeld,
+      );
+    expect(await deferredCancelled()).toBe(false);
+    await app.evaluate(() => {
+      globalThis.relationshipAudit.heldSourceTree = false;
+    });
+    await titleEditor.press('Escape');
+    // A retry inside the root cooldown must retain intent until a read succeeds.
+    await page.clock.runFor(1_500);
+    await expect(
+      tasks.getByRole('button', { name: 'Loading relationships…' }),
+    ).toBeVisible();
+    expect(await deferredCancelled()).toBe(false);
+    await poll(31_000);
+    await expect(tasks).toContainText('Blocker state unknown');
+    expect(await deferredCancelled()).toBe(true);
+    const deferredCompleted = await app.evaluate(
+      () => globalThis.relationshipAudit.completed,
+    );
+    await app.evaluate(() => globalThis.relationshipAudit.release());
+    await expect
+      .poll(() => app.evaluate(() => globalThis.relationshipAudit.completed))
+      .toBeGreaterThan(deferredCompleted);
     await expect(tasks).not.toContainText('Background inspection retained');
     await app.evaluate(() => {
       globalThis.relationshipAudit.mode = 'normal';

@@ -1206,9 +1206,6 @@ export function App() {
         return;
       }
       const rootKey = refreshRootKey(tab);
-      const manualRelationships = manualRelationshipRefreshes.current.delete(
-        tab.id,
-      );
       const load = rootRefreshes.current.load(
         rootKey,
         explicit,
@@ -1219,6 +1216,9 @@ export function App() {
         refreshSchedule.current.defer(tab.id, load.due);
         return;
       }
+      const manualRelationships = manualRelationshipRefreshes.current.delete(
+        tab.id,
+      );
       deferredRefreshes.current.delete(tab.id);
       forcedRefreshes.current.delete(tab.id);
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
@@ -1293,6 +1293,15 @@ export function App() {
             });
           }
         } else if (refreshSequences.current[tab.id] === sequence) {
+          if (
+            manualRelationships &&
+            rootRefreshes.current.isCurrent(rootKey, load.generation) &&
+            refreshBlocked.current(tab.connectionId) &&
+            tabsRef.current.some(
+              (item) => item.id === tab.id && refreshRootKey(item) === rootKey,
+            )
+          )
+            manualRelationshipRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
         }
         if (!delivered.size) return;
