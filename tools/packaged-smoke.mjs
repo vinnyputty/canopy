@@ -431,8 +431,8 @@ for (const format of platform.formats) {
             throw new Error(
               'Automatic DEB installation requires a disposable GitHub-hosted runner',
             );
-          // Install the emitted DEB's missing runner prerequisites before dpkg
-          // can leave Canopy unpacked but unconfigured. APT resolves their deps.
+          // Prepare DEB dependencies and the direct AppImage FUSE2 runtime on
+          // the disposable Ubuntu runner. APT resolves their dependencies.
           run('sudo', ['-n', 'apt-get', 'update']);
           run('sudo', [
             '-n',
@@ -442,6 +442,7 @@ for (const format of platform.formats) {
             '--no-install-recommends',
             'libnotify4',
             'libsecret-1-0',
+            'libfuse2t64',
           ]);
           // Exercise the shipped postinst/AppArmor semantics, never chown an
           // extracted test payload or relax host namespace restrictions.
