@@ -20,13 +20,17 @@ Run `bazel run //:smoke` for an automated Electron demo test covering editing, t
 
 Run `bazel run //:smoke_github` for a focused Electron test with mocked GitHub API responses covering connection, cross-repository sub-issues, edits, labels, and grouped search. It uses isolated app data and does not use your saved credentials.
 
+Each profile has one Canopy process. Launching it again restores and focuses its window; demo and smoke profiles run independently. Run `bazel run //:instance_check` on an active desktop to check rapid duplicate launches, window restoration, profile isolation, and native focus with temporary app data on the host OS. CI passes `--state-only` to verify instance and window state on macOS, Windows, and Linux; native focus acceptance remains pending until the default check passes on each target OS.
+
+On macOS, also close the window and click Canopy's Dock icon to verify native activation recreates and focuses it. The automated check exercises the application’s `activate` handler; a real Dock click remains a separate native acceptance check.
+
 Run the full CI sequence locally with:
 
 ```sh
 bazel run //:ci
 ```
 
-This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke and guided demo checks, and packages Canopy. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
+This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke, guided demo, and instance checks, and packages Canopy. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
 
 Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. Normal builds start with your saved Jira connections. The local sample provider powers both the guided demo and the smoke-test entry point; smoke-only failure controls stay in the test fixture.
 

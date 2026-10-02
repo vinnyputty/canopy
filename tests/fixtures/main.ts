@@ -3,6 +3,24 @@ import type { Issue } from '../../src/shared/types';
 import { ControlledDemoProvider } from './controlled';
 
 launch(async (storage) => {
+  if (process.env.CANOPY_SMOKE_HOLD_WINDOW_SAVE === '1') {
+    const write = storage.write.bind(storage);
+    storage.write = async (name, value) => {
+      if (
+        name === 'window' &&
+        (globalThis as { canopyHoldWindowSave?: boolean }).canopyHoldWindowSave
+      ) {
+        await new Promise<void>((resolve) => {
+          Object.assign(globalThis, { canopyReleaseWindowSave: resolve });
+        });
+      }
+      return write(name, value);
+    };
+  }
+  if (process.env.CANOPY_SMOKE_HOLD_STARTUP === '1')
+    await new Promise<void>((resolve) => {
+      Object.assign(globalThis, { canopyReleaseStartup: resolve });
+    });
   if (await storage.read<boolean>('demo-removed')) return undefined;
   const demo = new ControlledDemoProvider(
     (await storage.read<Issue[]>('demo')) ?? undefined,

@@ -56,17 +56,11 @@ configureLinuxCredentialStore((store) =>
 );
 if (process.env.CANOPY_USER_DATA)
   app.setPath('userData', process.env.CANOPY_USER_DATA);
-if (process.env.CANOPY_DEMO_TEMP === '1' && process.env.CANOPY_USER_DATA) {
-  const directory = process.env.CANOPY_USER_DATA;
-  process.on('exit', () => {
-    try {
-      rmSync(directory, { recursive: true, force: true });
-    } catch {
-      // The launching app also removes this directory after the demo exits.
-    }
-  });
-}
 let window: BrowserWindow | null = null;
+let focusRequested = false;
+let focusWindow = () => {
+  focusRequested = true;
+};
 const html = join(__dirname, 'renderer/index.html');
 function text(value: unknown, limit = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit)
@@ -775,6 +769,7 @@ async function start(
       return handler(...args);
     });
   let quitting = false;
+  let closingWindow: Promise<void> | undefined;
   app.on('before-quit', () => {
     quitting = true;
     updates.cancel();
@@ -841,6 +836,13 @@ async function start(
     created.on('close', (event) => {
       if (closeApproved) return;
       event.preventDefault();
+      if (closingWindow) return;
+      closingWindow = new Promise<void>((resolve) => {
+        created.once('closed', () => {
+          closingWindow = undefined;
+          resolve();
+        });
+      });
       saveBounds();
       void savingWindow
         .catch(() => {})
@@ -943,15 +945,61 @@ async function start(
       },
     ]),
   );
-  await createWindow();
-  app.on('activate', () => {
-    if (!window) void createWindow();
-  });
+  let creatingWindow: Promise<void> | undefined;
+  const showWindow = async () => {
+    if (closingWindow) await closingWindow;
+    if (quitting) return;
+    if (!window) {
+      creatingWindow ??= createWindow().finally(() => {
+        creatingWindow = undefined;
+      });
+      await creatingWindow;
+    }
+    if (window && !window.isDestroyed()) {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      if (process.platform === 'darwin') app.focus({ steal: true });
+      window.focus();
+    }
+  };
+  await showWindow();
+  let pendingFocusRequests = 0;
+  focusWindow = () => {
+    pendingFocusRequests += 1;
+    focusRequested = true;
+    void showWindow()
+      .catch((error) =>
+        dialog.showErrorBox('Canopy could not open', (error as Error).message),
+      )
+      .finally(() => {
+        pendingFocusRequests -= 1;
+        focusRequested = pendingFocusRequests > 0;
+      });
+  };
+  if (focusRequested) focusWindow();
+  app.on('activate', focusWindow);
 }
 export function launch(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
 ) {
+  // Electron scopes this lock to userData, including isolated demo/smoke profiles.
+  // Acquire it before readiness or reading any profile state.
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
+  if (process.env.CANOPY_DEMO_TEMP === '1' && process.env.CANOPY_USER_DATA) {
+    const directory = process.env.CANOPY_USER_DATA;
+    process.on('exit', () => {
+      try {
+        rmSync(directory, { recursive: true, force: true });
+      } catch {
+        // The launching app also removes this directory after the demo exits.
+      }
+    });
+  }
+  app.on('second-instance', () => focusWindow());
   app
     .whenReady()
     .then(() => start(createFixture, demoMode))
@@ -960,6 +1008,7 @@ export function launch(
       app.quit();
     });
   app.on('window-all-closed', () => {
-    if (demoMode || process.platform !== 'darwin') app.quit();
+    if (demoMode || (process.platform !== 'darwin' && !focusRequested))
+      app.quit();
   });
 }
