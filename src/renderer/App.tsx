@@ -851,6 +851,10 @@ export function App() {
     [activeSavedView, savedSources, viewSnapshots, currentUsers],
   );
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
+  const savingKeys =
+    snapshot?.issues
+      .filter((issue) => saving.has(`${activeTab?.connectionId}:${issue.key}`))
+      .map((issue) => issue.key) ?? [];
   const nextTaskOpen = activeTab ? Boolean(nextTaskViews[activeTab.id]) : false;
   const nextTaskCriterion = activeTab
     ? (nextTaskCriteria[activeTab.id] ?? 'rank')
@@ -4275,6 +4279,7 @@ export function App() {
                   </button>
                 )}
                 <button
+                  aria-label="Dismiss error"
                   onClick={() =>
                     setErrors((value) => {
                       const copy = { ...value };
@@ -4303,7 +4308,7 @@ export function App() {
               </div>
             )}
             {snapshot?.warnings.map((warning) => (
-              <div className="warning-banner" key={warning}>
+              <div className="warning-banner" key={warning} role="status">
                 <AlertCircle size={14} />
                 {warning}
               </div>
@@ -4696,6 +4701,7 @@ export function App() {
                   ) : shownTree ? (
                     <div
                       role="tree"
+                      data-tab-id={activeTab.id}
                       aria-label={`${activeTab.rootKey} issue tree`}
                       className="issue-tree"
                     >
@@ -4874,6 +4880,18 @@ export function App() {
                   )}
                 </div>
                 <footer className="statusbar">
+                  <span className="sr-only" role="status" aria-atomic="true">
+                    {refreshing.has(activeTab.id) || loading.has(activeTab.id)
+                      ? `Checking ${activeTab.rootKey} for changes`
+                      : snapshot
+                        ? `${activeTab.rootKey}: ${snapshot.issues.length} issues, last updated at ${new Date(snapshot.fetchedAt).toLocaleTimeString()}`
+                        : ''}
+                  </span>
+                  <span className="sr-only" role="status" aria-atomic="true">
+                    {savingKeys.length > 0
+                      ? `Saving ${savingKeys.join(', ')}`
+                      : ''}
+                  </span>
                   {snapshot ? (
                     <>
                       <span>
@@ -6066,6 +6084,24 @@ function SummaryEditor({
 }) {
   const [value, setValue] = useState(issue.summary);
   const committed = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    const container = input?.parentElement;
+    const tree = container?.closest('[role="tree"]');
+    const tabId = tree?.getAttribute('data-tab-id');
+    return () => {
+      if (document.activeElement !== input) return;
+      requestAnimationFrame(() => {
+        if (
+          container?.isConnected &&
+          tree?.getAttribute('data-tab-id') === tabId &&
+          document.activeElement === document.body
+        )
+          container.querySelector<HTMLButtonElement>('button.summary')?.focus();
+      });
+    };
+  }, []);
   const submit = () => {
     if (committed.current) return;
     committed.current = true;
@@ -6078,6 +6114,7 @@ function SummaryEditor({
   };
   return (
     <input
+      ref={inputRef}
       autoFocus
       className="summary-input"
       value={value}
@@ -7858,6 +7895,20 @@ function Dialog({
   initialFocus?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const returnFocus = useRef(
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
+  useLayoutEffect(() => {
+    const trigger = returnFocus.current;
+    return () => {
+      requestAnimationFrame(() => {
+        if (trigger?.isConnected && document.activeElement === document.body)
+          trigger.focus();
+      });
+    };
+  }, []);
   useEffect(() => {
     const panel = panelRef.current;
     const keydown = (event: KeyboardEvent) => {
@@ -7922,9 +7973,14 @@ function Dialog({
 
 function TreeSkeleton() {
   return (
-    <div className="skeleton" aria-label="Loading issue tree">
+    <div className="skeleton" role="status" aria-label="Loading issue tree">
+      <span className="sr-only">Loading issue tree</span>
       {[0, 1, 2, 3, 4, 5].map((item) => (
-        <div key={item} style={{ marginLeft: `${(item % 3) * 26}px` }}>
+        <div
+          key={item}
+          aria-hidden="true"
+          style={{ marginLeft: `${(item % 3) * 26}px` }}
+        >
           <span />
           <span />
           <span />
