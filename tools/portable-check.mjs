@@ -17,7 +17,12 @@ try {
     const result = spawnSync(
       process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
       [join(directory, script), ...args],
-      { cwd, stdio: 'inherit', timeout: 60_000 },
+      {
+        cwd,
+        stdio: 'inherit',
+        // Node lifecycle probes repeatedly start PowerShell/CIM on Windows.
+        timeout: process.platform === 'win32' ? 180_000 : 60_000,
+      },
     );
     if (result.error) throw result.error;
     if (result.status !== 0) {

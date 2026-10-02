@@ -26,21 +26,50 @@ async function processes(ms) {
   if (process.platform === 'win32') {
     // CreationDate distinguishes a retained tree member from a reused PID.
     const script =
-      'Get-CimInstance Win32_Process | ForEach-Object { @{ pid=$_.ProcessId; ppid=$_.ParentProcessId; start=$_.CreationDate.ToUniversalTime().ToString("o") } } | ConvertTo-Json -Compress';
-    const { stdout } = await execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      { timeout: ms, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
-    );
-    const result = JSON.parse(stdout || '[]');
-    return (Array.isArray(result) ? result : [result]).map((row) => ({
-      ...row,
-      pid: Number(row.pid),
-      ppid: Number(row.ppid),
-      pgid: 0,
-      zombie: false,
-    }));
+      '$ErrorActionPreference = "Stop"; Get-CimInstance Win32_Process | ForEach-Object { @{ pid=$_.ProcessId; ppid=$_.ParentProcessId; start=if ($null -ne $_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString("o") } else { $null } } } | ConvertTo-Json -Compress';
+    const started = Date.now();
+    let stdout;
+    try {
+      ({ stdout } = await execFile(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-EncodedCommand',
+          Buffer.from(script, 'utf16le').toString('base64'),
+        ],
+        { timeout: ms, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      ));
+    } catch (error) {
+      // TAP otherwise prints only the generic message, losing timeout evidence.
+      throw new Error(
+        `CIM process snapshot failed: ${JSON.stringify({
+          elapsedMs: Date.now() - started,
+          timeoutMs: ms,
+          code: error.code ?? null,
+          killed: error.killed ?? null,
+          signal: error.signal ?? null,
+          stdout: String(error.stdout ?? '').slice(0, 4096),
+          stderr: String(error.stderr ?? '').slice(0, 4096),
+        })}`,
+        { cause: error },
+      );
+    }
+    const result = JSON.parse(stdout);
+    return (Array.isArray(result) ? result : [result]).map((row) => {
+      if (
+        !row ||
+        !Number.isSafeInteger(row.pid) ||
+        row.pid < 0 ||
+        !Number.isSafeInteger(row.ppid) ||
+        row.ppid < 0
+      )
+        throw new Error('Invalid CIM process identity');
+      // Keep missing birth stamps visible; only owned identities authorize signals.
+      return { ...row, pgid: 0, zombie: false };
+    });
   }
+
   const { stdout } = await execFile(
     'ps',
     ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='],
@@ -93,6 +122,10 @@ class OwnedScope {
       );
     const rows = await processes(this.owner.operationMs);
     const root = rows.find((row) => row.pid === this.pid);
+    if (root && (typeof root.start !== 'string' || !root.start))
+      throw new Error(
+        `Unestablished process creation identity for PID ${root.pid}`,
+      );
     if (root && this.rootStart && root.start !== this.rootStart) {
       // A reused root PID must never become a kill target or seed a new tree.
       this.groupRetired = true;
@@ -102,7 +135,10 @@ class OwnedScope {
       this.rootStart ??= root.start;
       this.members.set(root.pid, root.start);
     }
-    const owned = rows.filter((row) => this.members.get(row.pid) === row.start);
+    const owned = rows.filter(
+      (row) =>
+        this.members.has(row.pid) && this.members.get(row.pid) === row.start,
+    );
     if (process.platform !== 'win32' && !this.groupRetired) {
       // Node detached:true creates this new group before exec; the recorded
       // successful spawn owns it even if the leader exits before the first ps.
@@ -125,6 +161,10 @@ class OwnedScope {
       }
     } while (added);
     for (const row of owned) {
+      if (typeof row.start !== 'string' || !row.start)
+        throw new Error(
+          `Unestablished process creation identity for PID ${row.pid}`,
+        );
       if (row.pid === process.pid)
         throw new Error(
           'Refusing to include the audit process in its child scope',
@@ -183,11 +223,7 @@ class OwnedScope {
       );
       if (!current) continue;
       if (process.platform === 'win32') {
-        await execFile(
-          'taskkill.exe',
-          ['/PID', String(member.pid), '/T', '/F'],
-          { timeout: remaining(), windowsHide: true },
-        );
+        await this.owner.killTree(member.pid, remaining());
       } else {
         try {
           process.kill(member.pid, 'SIGKILL');
@@ -208,6 +244,11 @@ export class AuditOwner {
     killMs = 5000,
     operationMs = 3000,
     signalGroup = process.kill.bind(process),
+    killTree = (pid, ms) =>
+      execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+        timeout: ms,
+        windowsHide: true,
+      }),
   }) {
     Object.assign(this, {
       profile,
@@ -216,6 +257,7 @@ export class AuditOwner {
       killMs,
       operationMs,
       signalGroup,
+      killTree,
     });
     this.scopes = [];
   }
@@ -231,14 +273,20 @@ export class AuditOwner {
     const owner = this;
     const capture = function (command, args, options) {
       const child = original.call(this, command, args, options);
-      if (
-        Number.isSafeInteger(child.pid) &&
-        options?.env?.CANOPY_USER_DATA === owner.profile &&
-        (command === owner.executable ||
-          (process.platform === 'win32' &&
-            command.startsWith(`"${owner.executable}" `)))
-      ) {
-        owner.scopes.push(new OwnedScope(child, options, owner));
+      if (options?.env?.CANOPY_USER_DATA === owner.profile) {
+        if (
+          Number.isSafeInteger(child.pid) &&
+          child.pid > 1 &&
+          child.pid !== process.pid &&
+          (command === owner.executable ||
+            (process.platform === 'win32' &&
+              command.startsWith(`"${owner.executable}" `)))
+        ) {
+          owner.scopes.push(new OwnedScope(child, options, owner));
+        } else {
+          // An unverified profile-bearing launch may still be writing to it.
+          owner.unknownLaunch = true;
+        }
       }
       return child;
     };

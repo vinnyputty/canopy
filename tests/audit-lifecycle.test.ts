@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import childProcess, { type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, rm, access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -11,6 +12,11 @@ import {
   finishAudit,
 } from '../tools/audit-lifecycle.mjs';
 
+// PowerShell/CIM startup is a subprocess operation, not a close-hang probe.
+const processBudgets =
+  process.platform === 'win32'
+    ? { operationMs: 3000, killMs: 5000 }
+    : { operationMs: 1000, killMs: 1500 };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number) => {
   try {
@@ -25,25 +31,47 @@ const alive = (pid: number) => {
 async function fixture(
   signalGroup?: ConstructorParameters<typeof AuditOwner>[0]['signalGroup'],
   escaped = false,
+  killTree?: ConstructorParameters<typeof AuditOwner>[0]['killTree'],
 ) {
   const profile = await mkdtemp(join(tmpdir(), 'canopy-lifecycle-node-'));
   const owner = new AuditOwner({
     profile,
     executable: process.execPath,
     graceMs: 120,
-    killMs: 1500,
-    operationMs: 1000,
+    ...processBudgets,
     signalGroup,
+    killTree,
   });
   let child!: ChildProcess;
   let descendant = 0;
-  // Same POSIX group as Playwright's detached launcher; Windows uses its tree.
-  await owner.launch(async () => {
-    child = childProcess.spawn(
-      process.execPath,
-      [
-        '-e',
-        `
+  const dispose = async () => {
+    // Only the subprocess handles/PIDs created and observed by this fixture.
+    owner.restore();
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const exit = once(child, 'exit');
+      if (process.platform !== 'win32') process.kill(-child.pid!, 'SIGKILL');
+      else child.kill('SIGKILL');
+      await deadline(() => exit, 5000, 'Fixture process exit');
+    }
+    if (descendant) {
+      try {
+        process.kill(descendant, 'SIGKILL');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+      for (let i = 0; i < 100 && alive(descendant); i++) await sleep(20);
+      assert.equal(alive(descendant), false);
+    }
+    await rm(profile, { recursive: true, force: true });
+  };
+  try {
+    // Same POSIX group as Playwright's detached launcher; Windows uses its tree.
+    await owner.launch(async () => {
+      child = childProcess.spawn(
+        process.execPath,
+        [
+          '-e',
+          `
       const {spawn}=require('node:child_process');
       const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'], {stdio:'ignore', detached: ${escaped && process.platform !== 'win32'}});
       console.log(child.pid);
@@ -55,19 +83,32 @@ async function fixture(
       });
       setInterval(()=>{},1000);
     `,
-      ],
-      {
-        detached: process.platform !== 'win32',
-        env: { ...process.env, CANOPY_USER_DATA: profile },
-        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      },
-    );
-    const [data] = await once(child.stdout!, 'data');
-    descendant = Number(String(data).trim());
-    assert.ok(descendant > 1 && alive(descendant));
-    return child;
-  });
-  owner.confirm(child);
+        ],
+        {
+          detached: process.platform !== 'win32',
+          env: { ...process.env, CANOPY_USER_DATA: profile },
+          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        },
+      );
+      const [data] = await once(child.stdout!, 'data');
+      descendant = Number(String(data).trim());
+      assert.ok(descendant > 1 && alive(descendant));
+      return child;
+    });
+    owner.confirm(child);
+  } catch (error) {
+    try {
+      await dispose();
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        'Fixture initialization and cleanup failed',
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+
   return {
     profile,
     owner,
@@ -83,21 +124,7 @@ async function fixture(
       );
       await rm(profile, { recursive: true, force: true });
     },
-    async dispose() {
-      // Test-only emergency cleanup of exactly the handles created by this fixture.
-      owner.restore();
-      if (child.exitCode === null && child.signalCode === null) {
-        if (process.platform !== 'win32') process.kill(-child.pid!, 'SIGKILL');
-        else child.kill('SIGKILL');
-      }
-      try {
-        process.kill(descendant, 'SIGKILL');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-      }
-      for (let i = 0; i < 100 && alive(descendant); i++) await sleep(20);
-      await rm(profile, { recursive: true, force: true });
-    },
+    dispose,
   };
 }
 
@@ -110,13 +137,13 @@ async function normalClose(child: ChildProcess) {
 
 // Sequential in this file: launch interception is deliberately scoped to one launch.
 test('normal shutdown reaps its real descendant before profile removal and leaves unrelated child alone', async () => {
+  const f = await fixture();
   const unrelated = childProcess.spawn(
     process.execPath,
     ['-e', 'setInterval(()=>{},1000)'],
     { stdio: 'ignore' },
   );
   await once(unrelated, 'spawn');
-  const f = await fixture();
   try {
     await finishAudit({
       owner: f.owner,
@@ -164,7 +191,9 @@ for (const mode of ['reject', 'hang'] as const) {
           return true;
         },
       );
-      assert.ok(Date.now() - start < 6000);
+      assert.ok(
+        Date.now() - start < (process.platform === 'win32' ? 30000 : 6000),
+      );
       assert.equal(alive(f.descendant), false);
       assert.equal(alive(unrelated.pid!), true);
       await assert.rejects(access(f.profile));
@@ -202,9 +231,10 @@ for (const mode of ['abnormal', 'orphan'] as const) {
 }
 
 test('failed scoped signaling retains profile, verifies failure, and preserves original assertion', async () => {
-  const f = await fixture(() => {
+  const denied = () => {
     throw Object.assign(new Error('signal denied'), { code: 'EPERM' });
-  });
+  };
+  const f = await fixture(denied, false, async () => denied());
   const primary = new Error('ORIGINAL ASSERTION');
   let removalAttempted = false;
   const secondary: string[] = [];
@@ -324,7 +354,7 @@ test('launch rejection after actual spawn retains original launch error while cl
     profile,
     executable: process.execPath,
     graceMs: 50,
-    killMs: 1500,
+    ...processBudgets,
   });
   const original = new Error('ORIGINAL LAUNCH');
   let child!: ChildProcess;
@@ -749,5 +779,235 @@ test('mismatched application handle is never closed and unrelated process stays 
     const exit = once(other, 'exit');
     other.kill('SIGKILL');
     await exit;
+  }
+});
+
+// These probes retain real subprocess handles outside capture so an unknown
+// launch can stay alive through finalization and still be cleaned by the test.
+async function captureProbe(
+  mode: 'command' | 'pid' | 'mixed' | 'exact' | 'irrelevant',
+  unverifiedPid?: number,
+) {
+  const profile = await mkdtemp(join(tmpdir(), 'canopy-lifecycle-capture-'));
+  const original = childProcess.spawn;
+  const children: ChildProcess[] = [];
+  const signals: number[] = [];
+  const owner = new AuditOwner({
+    profile,
+    executable: process.execPath,
+    graceMs: 100,
+    ...processBudgets,
+    signalGroup: (pid, signal) => {
+      signals.push(pid);
+      return process.kill(pid, signal as NodeJS.Signals);
+    },
+  });
+  const primary = new Error('fixture launch interrupted');
+  let removed = false;
+  let closed = false;
+  let known: ChildProcess | undefined;
+  let unknown: ChildProcess | undefined;
+  // Model a launcher command form or a returned handle without a usable PID.
+  // The actual spawned executable is always this probe's own Node runtime.
+  childProcess.spawn = ((command, args, options) => {
+    if (
+      command !== process.execPath &&
+      command !== `${process.execPath}.different-command-form`
+    )
+      return original(command, args ?? [], options ?? {});
+    const child = original(process.execPath, args ?? [], options ?? {});
+    children.push(child);
+    if (mode === 'pid' && options?.env?.CANOPY_USER_DATA === profile)
+      return { pid: unverifiedPid } as ChildProcess;
+    return child;
+  }) as typeof childProcess.spawn;
+  const spawn = async (command: string, bearingProfile = true) => {
+    const env = { ...process.env };
+    if (bearingProfile) env.CANOPY_USER_DATA = profile;
+    else delete env.CANOPY_USER_DATA;
+    const returned = childProcess.spawn(
+      command,
+      [
+        '-e',
+        "process.on('message',()=>process.exit(0)); setInterval(()=>{},1000)",
+      ],
+      {
+        detached: process.platform !== 'win32',
+        env,
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      },
+    );
+    const actual = children.at(-1)!;
+    await once(actual, 'spawn');
+    assert.equal(alive(actual.pid!), true);
+    return { actual, returned };
+  };
+  try {
+    const operation = async () => {
+      if (mode === 'mixed' || mode === 'exact' || mode === 'irrelevant')
+        known = (await spawn(process.execPath)).actual;
+      if (mode !== 'exact') {
+        const result = await spawn(
+          mode === 'command' || mode === 'mixed'
+            ? `${process.execPath}.different-command-form`
+            : process.execPath,
+          mode !== 'irrelevant',
+        );
+        unknown = result.actual;
+      }
+      if (mode === 'exact' || mode === 'irrelevant') return known!;
+      throw primary;
+    };
+    if (mode === 'exact' || mode === 'irrelevant') {
+      const app = await owner.launch(operation);
+      owner.confirm(app);
+      await finishAudit({
+        owner,
+        close: async () => {
+          closed = true;
+          const exit = once(known!, 'exit');
+          known!.send('normal');
+          await exit;
+        },
+        removeProfile: async () => {
+          assert.equal(known!.exitCode, 0);
+          removed = true;
+          await rm(profile, { recursive: true, force: true });
+        },
+        writeEvidence: noop,
+      });
+      assert.equal(closed, true);
+      assert.equal(removed, true);
+      assert.deepEqual(signals, []);
+      if (unknown) assert.equal(alive(unknown.pid!), true);
+    } else {
+      await assert.rejects(
+        owner.launch(operation),
+        (error) => error === primary,
+      );
+      await assert.rejects(
+        finishAudit({
+          owner,
+          primary,
+          close: async () => {
+            closed = true;
+          },
+          removeProfile: async () => {
+            removed = true;
+            await rm(profile, { recursive: true, force: true });
+          },
+          writeEvidence: noop,
+        }),
+        (error: AggregateError) => {
+          assert.equal(error.cause, primary);
+          assert.equal(error.errors[0], primary);
+          assert.ok(
+            error.errors.some((e: Error) =>
+              /Unestablished launch ownership/.test(e.message),
+            ),
+          );
+          return true;
+        },
+      );
+      assert.equal(
+        removed,
+        false,
+        'live unverified writer forbids profile removal',
+      );
+      assert.equal(
+        closed,
+        false,
+        'unverified application close must not be called',
+      );
+      assert.equal(
+        alive(unknown!.pid!),
+        true,
+        'unknown process must not be signaled',
+      );
+      await access(profile);
+      if (known) {
+        assert.ok(known.exitCode !== null || known.signalCode !== null);
+        if (process.platform !== 'win32')
+          assert.deepEqual(signals, [-known.pid!]);
+      } else assert.deepEqual(signals, []);
+    }
+  } finally {
+    owner.restore();
+    childProcess.spawn = original;
+    syncBuiltinESMExports();
+    for (const child of children) {
+      if (child.exitCode !== null || child.signalCode !== null) continue;
+      const exit = once(child, 'exit');
+      child.kill('SIGKILL');
+      await exit;
+    }
+    await rm(profile, { recursive: true, force: true });
+  }
+}
+
+test('profile-bearing unmatched command retains the live writer profile without signaling it', async () => {
+  await captureProbe('command');
+});
+
+test('profile-bearing handle with unestablished PID retains its live writer profile', async () => {
+  for (const pid of [undefined, Number.NaN, 0, process.pid])
+    await captureProbe('pid', pid);
+});
+
+test('mixed verified and unknown launches clean only the verified scope and retain the shared profile', async () => {
+  await captureProbe('mixed');
+});
+
+test('exact capture confirms its handle and permits profile removal after normal exit', async () => {
+  await captureProbe('exact');
+});
+
+test('spawn without the audit profile does not block normal owned cleanup or get signaled', async () => {
+  await captureProbe('irrelevant');
+});
+
+test('fixture initialization failure preserves its error and cleans observed real parent/descendant handles', async () => {
+  const originalLaunch = AuditOwner.prototype.launch;
+  const originalSpawn = childProcess.spawn;
+  const primary = new Error('INITIAL SNAPSHOT FAILURE');
+  let child: ChildProcess | undefined;
+  let descendant = 0;
+  let profile: string | undefined;
+  childProcess.spawn = ((command, args, options) => {
+    const created = originalSpawn(command, args ?? [], options ?? {});
+    if (options?.env?.CANOPY_USER_DATA?.includes('canopy-lifecycle-node-')) {
+      child = created;
+      profile = options.env.CANOPY_USER_DATA;
+      created.stdout!.once('data', (data) => {
+        descendant = Number(String(data).trim());
+      });
+    }
+    return created;
+  }) as typeof childProcess.spawn;
+  AuditOwner.prototype.launch = async function (operation) {
+    await originalLaunch.call(this, operation);
+    throw primary;
+  };
+  try {
+    await assert.rejects(fixture(), (error) => error === primary);
+    assert.ok(child && descendant && profile);
+    assert.ok(child.exitCode !== null || child.signalCode !== null);
+    assert.equal(alive(descendant), false);
+    await assert.rejects(access(profile));
+  } finally {
+    AuditOwner.prototype.launch = originalLaunch;
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const exit = once(child, 'exit');
+      if (process.platform !== 'win32') process.kill(-child.pid!, 'SIGKILL');
+      else child.kill('SIGKILL');
+      await exit;
+    }
+    if (descendant && alive(descendant)) {
+      process.kill(descendant, 'SIGKILL');
+      for (let i = 0; i < 100 && alive(descendant); i++) await sleep(20);
+    }
+    if (profile) await rm(profile, { recursive: true, force: true });
   }
 });
