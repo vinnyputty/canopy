@@ -16,7 +16,6 @@ import {
 } from 'electron';
 import { join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -988,16 +987,6 @@ export function launch(
   if (!app.requestSingleInstanceLock()) {
     app.quit();
     return;
-  }
-  if (process.env.CANOPY_DEMO_TEMP === '1' && process.env.CANOPY_USER_DATA) {
-    const directory = process.env.CANOPY_USER_DATA;
-    process.on('exit', () => {
-      try {
-        rmSync(directory, { recursive: true, force: true });
-      } catch {
-        // The launching app also removes this directory after the demo exits.
-      }
-    });
   }
   app.on('second-instance', () => focusWindow());
   app

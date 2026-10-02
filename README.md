@@ -22,6 +22,8 @@ Run `bazel run //:smoke_github` for a focused Electron test with mocked GitHub A
 
 Each profile has one Canopy process. Launching it again restores and focuses its window; demo and smoke profiles run independently. Run `bazel run //:instance_check` on an active desktop to check rapid duplicate launches, window restoration, profile isolation, and native focus with temporary app data on the host OS. CI passes `--state-only` to verify instance and window state on macOS, Windows, and Linux; native focus acceptance remains pending until the default check passes on each target OS.
 
+The demo launcher removes the temporary profile it creates after the child exits or fails to start. An inherited `CANOPY_USER_DATA` path is retained, including when `CANOPY_DEMO_TEMP=1` is set.
+
 On macOS, also close the window and click Canopy's Dock icon to verify native activation recreates and focuses it. The automated check exercises the application’s `activate` handler; a real Dock click remains a separate native acceptance check.
 
 Linux `--state-only` checks restoration of a hidden window so it can run on a virtual display without a window manager. Native minimized-window restoration remains part of the default check.
