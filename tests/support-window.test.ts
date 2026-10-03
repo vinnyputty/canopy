@@ -155,6 +155,12 @@ async function fixture() {
           },
         };
       if (name === './providers') return { Providers: class {} };
+      if (name === './updates')
+        return {
+          Updates: class {
+            cancel() {}
+          },
+        };
       if (name === './credentials')
         return { configureLinuxCredentialStore() {} };
       if (name === './window-state') return { restoreWindow: () => null };
