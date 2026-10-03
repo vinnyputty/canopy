@@ -4,12 +4,13 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-const directory = await mkdtemp(join(tmpdir(), 'canopy-branding-'));
 const packaged = process.env.CANOPY_PACKAGED_EXE;
 const appPath = process.env.CANOPY_APP_PATH;
+if (!appPath?.trim()) throw new Error('CANOPY_APP_PATH is required.');
 const manifest = JSON.parse(
   await readFile(join(appPath, 'package.json'), 'utf8'),
 );
+const directory = await mkdtemp(join(tmpdir(), 'canopy-branding-'));
 const env = { ...process.env, CANOPY_USER_DATA: directory };
 delete env.ELECTRON_RUN_AS_NODE;
 if (!packaged) env.CANOPY_SMOKE_BRANDING = '1';
