@@ -572,3 +572,136 @@ for (const mode of ['normal', 'reject', 'hang', 'failed-launch'] as const) {
     );
   });
 }
+
+// Execute the actual restart statements, launch closure and catch/finally. Only
+// Electron/page boundaries and fixture installation are controlled here; this
+// proves sequencing and failure propagation, not Chromium or native rendering.
+function restartReadiness() {
+  const source = readFileSync(
+    new URL('../tools/smoke-authoring.mjs', import.meta.url),
+    'utf8',
+  );
+  const ast = ts.createSourceFile(
+    'smoke-authoring.mjs',
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const declaration = ast.statements.find(
+    (node) =>
+      ts.isFunctionDeclaration(node) && node.name?.text === 'auditAuthoring',
+  ) as ts.FunctionDeclaration;
+  const statements = declaration.body!.statements;
+  const launch = statements.find(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some(
+        (item) => item.name.getText(ast) === 'launch',
+      ),
+  )!;
+  const attempt = statements.find(ts.isTryStatement)!;
+  const body = attempt.tryBlock.statements;
+  const first = body.findIndex(
+    (node) => node.getText(ast) === "await launch('restart');",
+  );
+  const last = body.findIndex((node) =>
+    node.getText(ast).includes("audit.run('restart:fixture-reload'"),
+  );
+  assert.ok(first >= 0 && last > first);
+  const fixture = protocol();
+  const calls: string[] = [];
+  let resolveLoad!: () => void;
+  let rejectLoad!: (error: unknown) => void;
+  const loaded = new Promise<void>((resolve, reject) => {
+    resolveLoad = resolve;
+    rejectLoad = reject;
+  });
+  let reachedLoad!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    reachedLoad = resolve;
+  });
+  const page = {
+    on: () => {},
+    waitForLoadState: (state: string, options: { timeout: number }) => {
+      assert.equal(state, 'load');
+      assert.equal(options.timeout, 30_000);
+      calls.push('load');
+      reachedLoad();
+      return loaded;
+    },
+    reload: async (options: { timeout: number }) => {
+      assert.equal(options.timeout, 30_000);
+      calls.push('reload');
+    },
+  };
+  const app = { ...fixture.app, firstWindow: async () => page };
+  const run = runInNewContext(
+    `(async () => {
+    let app, page, primary, primaryFailed = false;
+    const errors = [];
+    ${launch.getText(ast)}
+    try { ${body
+      .slice(first, last + 1)
+      .map((node) => node.getText(ast))
+      .join('\n')} }
+    catch ${attempt.catchClause!.getText(ast).replace(/^catch /, '')}
+    finally ${attempt.finallyBlock!.getText(ast)}
+  })`,
+    {
+      audit: fixture.audit,
+      electron: { launch: async () => app },
+      appPath: 'sample',
+      executablePath: 'fixture',
+      env: {},
+      installGithubHandlers: async () => {
+        calls.push('install');
+      },
+      userData: 'disposable',
+      rm: async () => {},
+    },
+  );
+  return { run, calls, waiting, resolveLoad, rejectLoad, fixture };
+}
+
+test('actual restart holds fixture installation and reload until initial full load completes', async () => {
+  const h = restartReadiness();
+  const result = h.run();
+  await h.waiting;
+  assert.deepEqual(h.calls, ['load']);
+  h.resolveLoad();
+  await result;
+  assert.deepEqual(h.calls, ['load', 'install', 'reload']);
+  assert.equal(h.fixture.cleanup().primaryFailed, false);
+  assert.equal(h.fixture.calls.filter((call) => call === 'confirm').length, 1);
+});
+
+test('actual restart proceeds when initial full load is already complete', async () => {
+  const h = restartReadiness();
+  h.resolveLoad();
+  await h.run();
+  assert.deepEqual(h.calls, ['load', 'install', 'reload']);
+});
+
+for (const primary of [
+  new Error('initial navigation failed'),
+  undefined,
+  null,
+  false,
+  0,
+  '',
+]) {
+  test(`actual restart retains initial-load rejection (${String(primary)}) without installing fixtures or reloading`, async () => {
+    const h = restartReadiness();
+    const result = h.run();
+    await h.waiting;
+    h.rejectLoad(primary);
+    await result;
+    assert.deepEqual(h.calls, ['load']);
+    assert.equal(h.fixture.cleanup().primary, primary);
+    assert.equal(h.fixture.cleanup().primaryFailed, true);
+    assert.equal(h.fixture.records.at(-1).status, 'primary');
+    assert.equal(h.fixture.records.at(-1).stage, 'restart:initial-load');
+    assert.equal(typeof h.fixture.cleanup().close, 'function');
+  });
+}

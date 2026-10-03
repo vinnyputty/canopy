@@ -373,8 +373,9 @@ export async function auditAuthoring(
     app = undefined;
     await launch('restart');
     page.on('pageerror', (error) => errors.push(error));
-    await audit.run('restart:dom-ready', () =>
-      page.waitForLoadState('domcontentloaded', { timeout: 30_000 }),
+    // Startup awaits loadFile; fixture reload must follow the completed load.
+    await audit.run('restart:initial-load', () =>
+      page.waitForLoadState('load', { timeout: 30_000 }),
     );
     await audit.run('restart:install-fixtures', installGithubHandlers);
     await audit.run('restart:fixture-reload', () =>
