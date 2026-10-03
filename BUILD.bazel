@@ -152,5 +152,5 @@ js_test(
 js_test(
     name = "windows_signing_checks",
     entry_point = "tools/windows-signing.test.mjs",
-    data = ["tools/windows-signing.mjs", "tools/release.mjs", "tools/windows-signing-fixture.mjs", "tools/windows-lifecycle.mjs", "tools/windows-lifecycle.test.mjs", "tools/windows-native.ps1", "tools/windows-native.cs"],
+    data = ["tools/windows-signing.mjs", "tools/release.mjs", "tools/windows-signing-fixture.mjs", "tools/windows-lifecycle.mjs", "tools/windows-lifecycle.test.mjs", "tools/windows-signing-scope.test.mjs", "tools/windows-native-deadline.test.mjs", "tools/desktop.mjs", "tools/windows-native.ps1", "tools/windows-native.cs"],
 )

@@ -180,7 +180,7 @@ export function verificationEnv(env) {
     Object.entries(env).filter(
       ([key]) =>
         !/^(AZURE_|CSC_|WIN_CSC_|CANOPY_WINDOWS_PFX|GH_TOKEN|GITHUB_TOKEN)/.test(
-          key,
+          key.toUpperCase(),
         ),
     ),
   );
@@ -322,15 +322,59 @@ export async function signWithService(
     );
     return record;
   } finally {
-    delete childEnv.AZURE_CLIENT_SECRET;
+    for (const key of Object.keys(childEnv))
+      if (/^AZURE_/i.test(key)) delete childEnv[key];
     await rm(owned, { recursive: true, force: true });
   }
 }
-export default async function sign(configuration) {
-  const manifest = JSON.parse(
-    await readFile(join(root, '..', 'package.json'), 'utf8'),
-  );
-  await signWithService(configuration.path, manifest.version);
+// Capture only signing inputs; builder/module loads and unrelated children see the scrubbed environment.
+export function prepareWindowsSigning(
+  env,
+  platform,
+  version,
+  dependencies = {},
+) {
+  const credentials = {};
+  let ambiguous = false;
+  for (const key of Object.keys(env)) {
+    if (/^AZURE_/i.test(key)) {
+      const canonical = key.toUpperCase();
+      if (Object.hasOwn(credentials, canonical)) ambiguous = true;
+      credentials[canonical] = env[key];
+      delete env[key];
+    } else if (
+      /^(?:WIN_)?CSC_(?:LINK|KEY_PASSWORD)$|^CANOPY_WINDOWS_PFX/i.test(key)
+    ) {
+      delete env[key];
+    }
+  }
+  const privateEnv = { ...verificationEnv(env), ...credentials };
+  for (const key of Object.keys(credentials)) delete credentials[key];
+  let closed = false;
+  const close = () => {
+    closed = true;
+    for (const key of Object.keys(privateEnv))
+      if (/^AZURE_/i.test(key)) delete privateEnv[key];
+  };
+  try {
+    if (ambiguous)
+      throw new Error('Ambiguous Windows signing environment aliases');
+    const hook = async (configuration) => {
+      if (closed) throw new Error('Windows signing scope closed');
+      return signWithService(configuration.path, version, {
+        ...dependencies,
+        env: privateEnv,
+        platform,
+      });
+    };
+    return {
+      config: signingConfig(privateEnv, platform, version, hook),
+      close,
+    };
+  } catch (error) {
+    close();
+    throw error;
+  }
 }
 function extractionTool(tool, args, env) {
   const result = nativeOperation(

@@ -29,25 +29,25 @@ export async function checkPackagingPermissions() {
   const launcher = await readFile(join(root, 'tools', 'AppRun'));
   const source = await readFile(join(root, 'tools', 'desktop.mjs'), 'utf8');
   const optionsStart = source.indexOf(
-    '    config: {',
-    source.indexOf('  await build({'),
+    '      config: {',
+    source.indexOf('    await build({'),
   );
-  const optionsEnd = source.indexOf('\n    publish:', optionsStart);
+  const optionsEnd = source.indexOf('\n      publish:', optionsStart);
   assert(optionsStart >= 0 && optionsEnd > optionsStart);
   const options = new Function(
     'version',
     'workspace',
     'join',
-    'signingConfig',
-    'process',
-    'manifest',
-    'sign',
+    'signing',
     `return ({${source.slice(optionsStart, optionsEnd)}}).config;`,
   );
   const stagingStart = source.lastIndexOf(
     "  if (process.platform === 'linux') {",
   );
-  const stagingEnd = source.indexOf('  const { default: sign', stagingStart);
+  const stagingEnd = source.indexOf(
+    '  const { prepareWindowsSigning }',
+    stagingStart,
+  );
   assert(stagingStart >= 0 && stagingEnd > stagingStart);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const stageLauncher = new AsyncFunction(
@@ -118,15 +118,9 @@ export async function checkPackagingPermissions() {
     const config = await getConfig(
       project,
       null,
-      options(
-        manifest.devDependencies.electron,
-        directory,
-        join,
-        signingConfig,
-        { platform: 'linux', env: {} },
-        manifest,
-        () => {},
-      ),
+      options(manifest.devDependencies.electron, directory, join, {
+        config: signingConfig({}, 'linux', manifest.version, () => {}),
+      }),
     );
     await checkWindowsBuilderSigning(builderRequire, lib, directory, manifest);
     const appDir = join(directory, 'app');

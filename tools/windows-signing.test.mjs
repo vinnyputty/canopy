@@ -1,3 +1,5 @@
+import './windows-signing-scope.test.mjs';
+import './windows-native-deadline.test.mjs';
 import { spawnSync } from 'node:child_process';
 import './windows-lifecycle.test.mjs';
 import * as requireFs from 'node:fs';
