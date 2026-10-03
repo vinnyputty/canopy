@@ -1,3 +1,11 @@
+const diagnosticString = (error) => {
+  try {
+    return String(error?.message ?? error).slice(0, 500);
+  } catch {
+    return 'Diagnostic value could not be formatted';
+  }
+};
+
 /** Adapter only: ownership, deadlines and reaping belong to the shared helper. */
 export function authoringAuditLifecycle(lifecycle) {
   if (
@@ -36,7 +44,7 @@ export function authoringAuditLifecycle(lifecycle) {
         stage = label;
         record('failed', {
           elapsedMs: Date.now() - started,
-          message: String(error.message ?? error).slice(0, 500),
+          message: diagnosticString(error),
         });
         throw error;
       }
@@ -68,18 +76,24 @@ export function authoringAuditLifecycle(lifecycle) {
       },
       failure(error) {
         record('primary', {
-          message: String(error.message ?? error).slice(0, 500),
+          message: diagnosticString(error),
           exitCode: owner?.child?.exitCode ?? null,
           signalCode: owner?.child?.signalCode ?? null,
         });
       },
-      async finish({ app, primary, removeProfile }) {
+      async finish({
+        app,
+        primary,
+        primaryFailed = primary !== undefined,
+        removeProfile,
+      }) {
         // Failed launch ownership is still owned by the shared helper. A timed
         // out close is not repeated; shutdown establishes absence or retains data.
         await lifecycle.finishAudit({
           owner,
           close: app && !closeAttempted ? () => app.close() : undefined,
           primary,
+          primaryFailed,
           removeProfile,
           diagnostics: reportErrors.map((error) => ({
             label: 'Progress reporting',
@@ -89,7 +103,7 @@ export function authoringAuditLifecycle(lifecycle) {
           })),
           secondary: (error) =>
             record('cleanup-failed', {
-              message: String(error.message ?? error).slice(0, 500),
+              message: diagnosticString(error),
             }),
           writeEvidence: async () =>
             report(

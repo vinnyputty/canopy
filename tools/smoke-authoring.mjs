@@ -22,6 +22,7 @@ export async function auditAuthoring(
   const errors = [];
   const audit = createAudit({ profile: userData, executable: executablePath });
   let primary;
+  let primaryFailed = false;
   const launch = async (phase) => {
     app = await audit.launch(phase, () =>
       electron.launch({
@@ -662,6 +663,7 @@ export async function auditAuthoring(
     );
     expect(errors, errors.map(String).join('\n')).toEqual([]);
   } catch (error) {
+    primaryFailed = true;
     primary = error;
     // Surface the assertion before cleanup, including a blocked close.
     audit.failure(error);
@@ -669,6 +671,7 @@ export async function auditAuthoring(
     await audit.finish({
       app,
       primary,
+      primaryFailed,
       removeProfile: () => rm(userData, { recursive: true, force: true }),
     });
   }
