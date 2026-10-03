@@ -250,16 +250,14 @@ export async function publish(
   }
   if (object?.type !== 'commit' || object.sha !== manifest.commit)
     throw new Error('Remote tag commit differs from verified manifest');
-  // Annotated objects are immutable, but their ref may change during peeling.
-  if (ref.object.type === 'tag') {
-    const current = JSON.parse(gh(['api', endpoint]));
-    if (
-      current.ref !== ref.ref ||
-      current.object?.type !== ref.object.type ||
-      current.object?.sha !== ref.object.sha
-    )
-      throw new Error('Remote tag changed during verification');
-  }
+  // Require the live ref's identity immediately before editing either tag form.
+  const current = JSON.parse(gh(['api', endpoint]));
+  if (
+    current.ref !== ref.ref ||
+    current.object?.type !== ref.object.type ||
+    current.object?.sha !== ref.object.sha
+  )
+    throw new Error('Remote tag changed during verification');
   gh([
     'release',
     'edit',
