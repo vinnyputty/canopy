@@ -2283,7 +2283,12 @@ try {
   await page
     .getByRole('menuitem', { name: 'In Progress', exact: true })
     .click();
-  await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
+  await expect(
+    issue('CAN-111').getByRole('button', {
+      name: 'Edit status for CAN-111',
+      exact: true,
+    }),
+  ).toHaveText('In Progress');
 
   // Enter edits a focused summary; Escape cancels without saving on blur.
   await issue('CAN-111')
@@ -3203,11 +3208,11 @@ try {
       await expectIssueBefore(first, second);
       await header.click();
       await expectIssueBefore(second, first);
-      await expect(
-        issue('CAN-110').locator(
-          ':scope > [role="group"] > [data-tree-key="CAN-111"]',
-        ),
-      ).toBeVisible();
+      await expect(issue('CAN-111')).toHaveAttribute(
+        'data-tree-parent',
+        'CAN-110',
+      );
+      await expect(issue('CAN-111')).toBeVisible();
     }
     await page.locator('.view-settings > summary').click();
     await page.getByLabel('Sort by', { exact: true }).selectOption('rank');
@@ -3415,11 +3420,11 @@ try {
       page.getByText('Priority order could not be loaded:', { exact: false }),
     ).toHaveCount(0);
     await expectIssueBefore('CAN-111', 'CAN-112');
-    await expect(
-      issue('CAN-110').locator(
-        ':scope > [role="group"] > [data-tree-key="CAN-111"]',
-      ),
-    ).toBeVisible();
+    await expect(issue('CAN-111')).toHaveAttribute(
+      'data-tree-parent',
+      'CAN-110',
+    );
+    await expect(issue('CAN-111')).toBeVisible();
     expect(
       JSON.parse(await readFile(join(userData, 'rank-attempts.json'), 'utf8')),
     ).toBe(0);

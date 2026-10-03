@@ -92,6 +92,7 @@ function mainRequests() {
   const source = parsed('../src/main/app.ts');
   const names = new Set([
     'searches',
+    'trees',
     'relationshipRequests',
     'cancelRelationships',
     'clearRelationshipRequests',
@@ -270,6 +271,7 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
     'inspectRelationships',
     'invalidateRelationships',
     'refreshTab',
+    'cancelTree',
   ]);
   const declarations = nodes(
     source,
@@ -380,6 +382,11 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
     workspaceRef: { current: { tabs } },
     demoMode: false,
     navigator: { onLine: true },
+    cancelledTrees: { current: new Set() },
+    treeRequests: { current: new Map() },
+    treeMounted: { current: true },
+    displayedTrees: { current: new Map() },
+    setSnapshotEvictions: setter,
     forcedRefreshes: { current: new Set() },
     deferredRefreshes: { current: new Set() },
     runningExplicitRefreshes: { current: new Map() },
@@ -398,6 +405,9 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
           read: () => Promise<TreeSnapshot>,
         ) => ({ promise: read(), started: true, generation: 1 }),
         isCurrent: () => true,
+        replaceSnapshot: setter,
+        releaseSnapshot: setter,
+        invalidateQueued: setter,
       },
     },
     connectionsRef: {
@@ -418,6 +428,7 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
     mutations: {
       beginRefresh: () => 1,
       endRefresh: setter,
+      isEvicted: () => false,
       confirmedSnapshot: (id: string) => context.snapshotsRef.current[id],
       receive: (tab: TabState, snapshot: TreeSnapshot) => {
         context.snapshots = { ...context.snapshots, [tab.id]: snapshot };
@@ -426,6 +437,7 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
           snapshots: context.snapshots,
           confirmedSnapshots: context.snapshots,
           saving: new Set(),
+          evicted: new Set(),
           undoBusy: false,
         });
       },
@@ -437,6 +449,7 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
           new Promise<IssueRelationships>((resolve, reject) =>
             pending.push({ key, resolve, reject }),
           ),
+        cancelTree: async () => {},
         cancelRelationships: (id: string, request: string) => {
           cancelled.push(`${id}:${request}`);
           return Promise.resolve();
@@ -473,6 +486,7 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
     snapshots,
     confirmedSnapshots: snapshots,
     saving: new Set(),
+    evicted: new Set(),
     undoBusy: false,
   });
   if (realRefresh) {
@@ -547,6 +561,36 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
   };
   return {
     ...context.api,
+    cancelTree: (tab: TabState) => {
+      const declaration = nodes(
+        source,
+        (n) =>
+          ts.isVariableDeclaration(n) &&
+          n.name.getText(source) === 'cancelTree',
+      )[0] as ts.VariableDeclaration;
+      runInNewContext(
+        js(
+          `(${(declaration.initializer as ts.CallExpression).arguments[0].getText(source)})`,
+        ),
+        context,
+      )(tab);
+    },
+    userActions: nodes(
+      source,
+      (n) =>
+        ts.isCallExpression(n) &&
+        n.expression.getText(source) === 'refreshTab' &&
+        n.arguments[3]?.getText(source) === 'true',
+    ).map((n) => {
+      const call = n as ts.CallExpression;
+      return () =>
+        runInNewContext(js(call.getText(source)), {
+          ...context,
+          refreshTab: context.api.refresh,
+          tab: tabs[0],
+          activeTab: tabs[0],
+        });
+    }),
     pending,
     cancelled,
     tabs,
@@ -569,7 +613,13 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
     graphs: () => states[0] as Record<string, IssueRelationships>,
     loading: () => states[states[1] instanceof InboxInspection ? 2 : 1],
     refresh: async (tab: TabState, userRequested = true, explicit = true) => {
-      await context.api.refresh(tab, true, explicit, userRequested);
+      await context.api.refresh(
+        tab,
+        true,
+        explicit,
+        userRequested,
+        userRequested,
+      );
       renderEffects();
     },
     seed: (tab: TabState, issues: Issue[]) => {
@@ -583,6 +633,7 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
         snapshots: context.snapshotsRef.current,
         confirmedSnapshots: context.snapshotsRef.current,
         saving: new Set(),
+        evicted: new Set(),
         undoBusy: false,
       });
     },
@@ -600,6 +651,7 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
         snapshots: context.snapshots,
         confirmedSnapshots: context.snapshotsRef.current,
         saving: new Set(),
+        evicted: new Set(),
         undoBusy: false,
       });
       renderEffects();
@@ -2467,3 +2519,166 @@ for (const change of ['source content', 'tree coverage']) {
     assert.equal(api.graphRef()['["work","A-1"]'], undefined);
   });
 }
+
+// These calls come from the production command, toolbar, saved-view and retry
+// actions; their argument wiring must satisfy both independent permissions.
+for (let action = 0; action < 8; action++) {
+  test(`actual user refresh action ${action + 1} restarts cancellation and invalidates delivered manual relationships`, async () => {
+    const api = rendererRequests(true);
+    assert.equal(api.userActions.length, 8);
+    let calls = 0;
+    api.setTree(async (_connection: string, key: string) => {
+      calls++;
+      return treeSnapshot(key, [issue(key)]);
+    });
+    const inspected = api.inspect('work', 'A-1');
+    api.pending[0].resolve(blockerGraph('A-1'));
+    await inspected;
+    const held = api.inspect('work', 'A-1');
+    api.cancelTree(api.tabs[0]);
+    await api.refresh(api.tabs[0], false, true);
+    assert.equal(
+      calls,
+      0,
+      'automatic explicit scheduling cannot restart cancellation',
+    );
+    assert.ok(api.graphs()['["work","A-1"]']);
+    await api.userActions[action]();
+    assert.equal(calls, 1, 'user action permits a new provider read');
+    assert.equal(api.graphs()['["work","A-1"]'], undefined);
+    assert.equal(api.cancelled.length, 1);
+    api.pending[1].resolve(blockerGraph('A-1'));
+    await held;
+    assert.equal(
+      api.graphs()['["work","A-1"]'],
+      undefined,
+      'held graph cannot repopulate after manual delivery',
+    );
+  });
+}
+
+test('relationship intent and cancellation permission remain independent during real gated refreshes', async () => {
+  const api = rendererRequests(true);
+  let calls = 0;
+  api.setTree(async (_connection: string, key: string) => {
+    if (_connection === 'work' && key === 'A-1') calls++;
+    return treeSnapshot(key, [issue(key)]);
+  });
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1'));
+  await inspected;
+  api.cancelTree(api.tabs[0]);
+  await api.context.api.refresh(api.tabs[0], true, true, false, true);
+  assert.equal(calls, 1);
+  assert.ok(
+    api.graphs()['["work","A-1"]'],
+    'cancel restart permission alone preserves unchanged inspections',
+  );
+  api.cancelTree(api.tabs[0]);
+  await api.context.api.refresh(api.tabs[0], true, true, true, false);
+  assert.equal(
+    calls,
+    1,
+    'manual relationship intent alone cannot restart cancellation',
+  );
+  api.editor('work');
+  await api.userActions[0]();
+  assert.equal(calls, 1, 'user retry still respects an open editor');
+  assert.ok(api.graphs()['["work","A-1"]']);
+  api.editor();
+  await api.advance(31_000);
+  assert.equal(calls, 2);
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+});
+
+test('actual short cooldown tick refreshes unchanged trees while preserving inspected and held graphs', async () => {
+  const api = rendererRequests(true);
+  let calls = 0;
+  api.setTree(async (_connection: string, key: string) => {
+    if (_connection === 'work' && key === 'A-1') calls++;
+    return treeSnapshot(key, [issue(key)]);
+  });
+  await api.refresh(api.tabs[0], false, true);
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1'));
+  await inspected;
+  const held = api.inspect('work', 'A-1');
+  api.context.cooldowns.current.work = api.context.Date.now() + 10_000;
+  await api.advance(10_000);
+  assert.equal(calls, 2, 'deadline bypasses the shared thirty-second interval');
+  assert.ok(api.graphs()['["work","A-1"]']);
+  assert.equal(api.cancelled.length, 0);
+  api.pending[1].resolve(blockerGraph('A-1'));
+  await held;
+  assert.ok(api.graphs()['["work","A-1"]']);
+});
+
+test('cancelled incomplete saved-root delivery keeps descendants and rejects stale inspected completion', async () => {
+  const api = rendererRequests(true);
+  const tab = api.tabs[0];
+  tab.id = 'saved-view:large';
+  api.context.activeIdRef.current = tab.id;
+  api.context.refreshSchedule.current.sync(
+    api.tabs.map((tab: TabState) => tab.id),
+    tab.id,
+    api.context.Date.now(),
+  );
+  api.context.mutations.receive(
+    tab,
+    treeSnapshot('A-1', [issue('A-1'), issue('B-2', 'A-1')]),
+    0,
+  );
+  const inspected = api.inspect('work', 'A-1');
+  api.pending[0].resolve(blockerGraph('A-1', 'B-2', 'done'));
+  await inspected;
+  const held = api.inspect('work', 'A-1');
+  let release!: (value: TreeSnapshot) => void;
+  let reads = 0;
+  api.setTree(async () => {
+    reads++;
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  const delivery = api.refresh(tab, false, true);
+  api.cancelTree(tab);
+  release({
+    ...treeSnapshot('A-1', [
+      { ...issue('A-1'), linksAvailable: false, unavailableFields: ['links'] },
+    ]),
+    incomplete: { reason: 'cancelled', calls: 1 },
+  });
+  await delivery;
+  const confirmed = api.context.mutations.confirmedSnapshot(
+    tab.id,
+  ) as TreeSnapshot;
+  assert.ok(confirmed.incomplete);
+  assert.equal(
+    confirmed.issues.length,
+    2,
+    'partial absence preserves known descendants',
+  );
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  api.pending[1].resolve(blockerGraph('A-1', 'B-2', 'done'));
+  await held;
+  assert.equal(
+    api.graphs()['["work","A-1"]'],
+    undefined,
+    'stale inspected completion cannot repopulate the saved root',
+  );
+  assert.equal(relationshipBlockers(confirmed.issues[0]).blocker, 'unknown');
+  await api.refresh(tab, false, true);
+  assert.equal(
+    reads,
+    1,
+    'automatic explicit retry retains the saved-root cancellation',
+  );
+  api.setTree(async (_connection: string, key: string) =>
+    treeSnapshot(key, [issue(key), issue('B-2', key)]),
+  );
+  await api.userActions[0]();
+  assert.equal(
+    api.context.mutations.confirmedSnapshot(tab.id).incomplete,
+    undefined,
+  );
+});

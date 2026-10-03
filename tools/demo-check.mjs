@@ -51,14 +51,17 @@ await first.page.addInitScript(() => {
   const observer = new MutationObserver(() => {
     const target = sessionStorage.getItem('canopy-check-hold');
     const ready =
-      target === 'editor'
-        ? document.querySelector(
-            '[data-tree-key="CAN-111"] .priority-editor select',
-          )
-        : target === 'edited' &&
-          document
-            .querySelector('[aria-label="Edit priority for CAN-111"]')
-            ?.textContent?.includes('Highest');
+      target === 'start'
+        ? document.querySelector('.demo-tour-progress')?.textContent?.trim() ===
+          'Starting tour'
+        : target === 'editor'
+          ? document.querySelector(
+              '[data-tree-key="CAN-111"] .priority-editor select',
+            )
+          : target === 'edited' &&
+            document
+              .querySelector('[aria-label="Edit priority for CAN-111"]')
+              ?.textContent?.includes('Highest');
     const pause = [...document.querySelectorAll('button')].find(
       (button) => button.textContent === 'Pause demo',
     );
@@ -88,6 +91,8 @@ async function resetAndHold(page, target) {
 
 try {
   const { page } = first;
+  // Hold step zero before sequential UI checks can outlast its 600ms lifetime.
+  await resetAndHold(page, 'start');
   expect(await page.evaluate(() => window.canopy.demoTimeScale())).toBe(
     timeScale,
   );
@@ -100,7 +105,7 @@ try {
   await expect(
     page.getByRole('tree', { name: 'CAN-100 issue tree' }),
   ).toHaveClass(/demo-target-highlight/);
-  await page.getByRole('button', { name: 'Pause demo' }).click();
+  await expect(page.getByText('Starting tour · Paused')).toBeVisible();
   const pausedProgress = await progress.evaluate((bar) => bar.value);
   // Observe long enough for multiple progress ticks, even at test speed.
   await page.waitForTimeout(timingWindow(800));

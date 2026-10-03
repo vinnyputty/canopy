@@ -17,7 +17,16 @@ try {
     const result = spawnSync(
       process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
       [join(directory, script), ...args],
-      { cwd, stdio: 'inherit', timeout: 60_000 },
+      {
+        cwd,
+        stdio: 'inherit',
+        // The aggregate source suite shares the Windows allowance; individual
+        // probes retain their own deadlines. Other checks keep their limits.
+        timeout:
+          script === 'test.mjs' || process.platform === 'win32'
+            ? 600_000
+            : 60_000,
+      },
     );
     if (result.error) throw result.error;
     if (result.status !== 0) {
