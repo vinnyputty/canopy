@@ -1543,6 +1543,36 @@ export function validManagedResponse(response, request, onRefusal = () => {}) {
     refuse('mounted-payload')
   );
 }
+// This is a bounded observation of the trusted fixed bootstrap, not an
+// authenticated helper response. Arbitrary secret recognition is not possible.
+export function managedBootstrapObservation(stderr, paths = []) {
+  if (typeof stderr !== 'string' || Buffer.byteLength(stderr) > 65536)
+    return '';
+  let text = stderr
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+      character === '\n' ? '\n' : ' ',
+    );
+  for (const path of paths)
+    if (typeof path === 'string' && path.length)
+      text = text.split(path).join('<path>');
+  text = text
+    .replace(/authorization\s*[:=][^\n]*/gi, 'authorization=<redacted>')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"<>]+/gi, '<url>')
+    .replace(/\b[\w.-]+\s*=[^\n]*/g, '<assignment>')
+    .replace(
+      /\b(?:password|passwd|token|secret|credential|api[_-]?key)\s*:[^\n]*/gi,
+      '<sensitive-field>',
+    )
+    .replace(/(?:[a-z]:[\\/]|\/)[^\s'"<>),;]*/gi, '<path>');
+  let bounded = '';
+  for (const character of text) {
+    if (Buffer.byteLength(bounded) + Buffer.byteLength(character) > 1024) break;
+    bounded += character;
+  }
+  return bounded;
+}
 export async function recordManagedProtocol(
   path,
   error,
@@ -1628,6 +1658,14 @@ export async function recordManagedProtocol(
       (async () => {
         await effects.mkdir(dirname(path), { recursive: true });
         await effects.writeFile(path, JSON.stringify(safe, null, 2));
+        const observation = managedBootstrapObservation(
+          error?.managedBootstrap,
+        );
+        if (observation)
+          await effects.writeFile(
+            join(dirname(path), 'managed-bootstrap.txt'),
+            observation,
+          );
       })(),
       new Promise((_, reject) => {
         timer = setTimeout(
@@ -1733,7 +1771,7 @@ async function rootInvoke(request) {
       )
         reason = 'sudo-environment';
     }
-    throw Object.assign(new Error('Managed helper response unknown'), {
+    const error = Object.assign(new Error('Managed helper response unknown'), {
       managedUncertain: true,
       managedProtocol: {
         operation: ['prepare', 'check', 'launch', 'cleanup'].includes(
@@ -1748,6 +1786,25 @@ async function rootInvoke(request) {
         signal: proof.signal === null ? null : 'present',
       },
     });
+    try {
+      error.managedBootstrap = managedBootstrapObservation(proof.stderr, [
+        process.env.GITHUB_WORKSPACE,
+        process.execPath,
+        dirname(process.execPath),
+        ownFile,
+        dirname(ownFile),
+        process.env.TMPDIR,
+        process.env.TMP,
+        process.env.TEMP,
+        request.source,
+        request.artifact,
+        request.workspace,
+        request.token,
+      ]);
+    } catch {
+      // Observation formatting cannot replace the unknown-response primary.
+    }
+    throw error;
   }
   if (!response.ok)
     throw Object.assign(new Error(response.error), {

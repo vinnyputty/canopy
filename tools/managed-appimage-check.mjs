@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import {
   managedGuard,
   managedOperation,
@@ -20,6 +20,7 @@ import {
   boundedManagedClose,
   validManagedResponse,
   recordManagedProtocol,
+  managedBootstrapObservation,
 } from './managed-appimage.mjs';
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const ctx = {
@@ -1111,6 +1112,7 @@ export async function checkManagedAppImage() {
     assert(caught);
     assert.equal(received, primary);
   }
+  await checkBootstrapDiagnostics();
   await checkManagedLifecycle();
   await checkManagedTransport(source);
   await checkManagedSuccessTransport(source, proof, launch);
@@ -1355,6 +1357,124 @@ async function checkManagedLifecycle() {
   }
 }
 
+async function checkBootstrapDiagnostics() {
+  const observation = managedBootstrapObservation(
+    '\x1b[31mError: EACCES /workspace with spaces/node\x1b[0m\n' +
+      'authorization: Bearer SECRET\nurl=https://user:SECRET@example.test/path?token=SECRET\n' +
+      'password: SECRET\ntoken="SECRET with spaces"\nkey=\'SECRET unfinished\n' +
+      'at /tmp/SECRET/module.mjs:1:2\ncontrol\x00\x1b[2J\rtest\u202e\x1b]0;SECRET\x07',
+    ['/workspace with spaces/node'],
+  );
+  assert.match(observation, /Error: EACCES <path>/);
+  assert.doesNotMatch(observation, /SECRET|workspace|\x1b|\x00|\r|\u202e/);
+  assert.equal(managedBootstrapObservation('x'.repeat(65537)), '');
+  for (const text of ['é'.repeat(32000), '😀'.repeat(16000)]) {
+    const result = managedBootstrapObservation(text);
+    assert(Buffer.byteLength(result) <= 1024);
+    assert(!result.includes('\ufffd'));
+  }
+  for (const raw of [
+    undefined,
+    null,
+    false,
+    0,
+    '',
+    {},
+    {
+      toString() {
+        throw false;
+      },
+    },
+  ])
+    assert.equal(managedBootstrapObservation(raw), '');
+  const protocol = {
+    operation: 'prepare',
+    reason: 'empty-response',
+    outputBytes: 0,
+    stderrBytes: 20,
+    code: 1,
+    signal: null,
+  };
+  for (const raw of [
+    undefined,
+    null,
+    false,
+    0,
+    '',
+    {
+      toString() {
+        throw false;
+      },
+    },
+  ]) {
+    const writes = [];
+    await recordManagedProtocol(
+      '/owned/managed-protocol.json',
+      { managedProtocol: protocol, managedBootstrap: raw },
+      {
+        mkdir: async () => {},
+        writeFile: async (path, text) => writes.push([path, text]),
+      },
+    );
+    assert.equal(writes.length, 1);
+    assert.equal(Object.keys(JSON.parse(writes[0][1])).length, 6);
+  }
+  for (const effects of [
+    {
+      mkdir: async () => {
+        throw false;
+      },
+      writeFile: async () => assert.fail('no write'),
+    },
+    {
+      mkdir: async () => {},
+      writeFile: async (path) => {
+        if (path.endsWith('.txt')) throw null;
+      },
+    },
+  ])
+    await recordManagedProtocol(
+      '/owned/managed-protocol.json',
+      { managedProtocol: protocol, managedBootstrap: 'Error: EACCES' },
+      effects,
+    );
+  const sensitive = { managedProtocol: protocol };
+  Object.defineProperty(sensitive, 'managedBootstrap', {
+    get() {
+      throw false;
+    },
+  });
+  await recordManagedProtocol('/owned/managed-protocol.json', sensitive, {
+    mkdir: async () => {},
+    writeFile: async () => {},
+  });
+  // A timed-out ordinary writer is explicitly released and settled before teardown.
+  let release, settled;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const done = new Promise((resolve) => {
+    settled = resolve;
+  });
+  const started = performance.now();
+  await recordManagedProtocol(
+    '/owned/managed-protocol.json',
+    { managedProtocol: protocol, managedBootstrap: 'Error: EACCES' },
+    {
+      mkdir: async () => {},
+      writeFile: async (path) => {
+        if (path.endsWith('.txt')) {
+          await held;
+          settled();
+        }
+      },
+    },
+  );
+  assert(performance.now() - started >= 450);
+  release();
+  await done;
+}
+
 // Exact private transport body with sudo/proc replaced by owned Node/model IO.
 // No parser/root entry is executed. Both transport and real wrapper participate.
 async function checkManagedTransport(source) {
@@ -1373,17 +1493,19 @@ async function checkManagedTransport(source) {
   await writeFile(bootstrap, source);
   const signatures = {
     'empty-response': 'unknown fixture stderr /secret/path request=SECRET',
-    'node-module-error': 'Error [ERR_MODULE_NOT_FOUND]: /secret/path SECRET',
+    'node-module-error':
+      'Error [ERR_MODULE_NOT_FOUND]: /secret/path token=SECRET',
     'sudo-authentication': 'sudo: a password is required\n',
     'sudo-environment':
       'sudo: sorry, you are not allowed to preserve the environment\n',
-    'nonempty-json': 'Error [ERR_MODULE_NOT_FOUND]: /secret/path SECRET',
+    'nonempty-json': 'Error [ERR_MODULE_NOT_FOUND]: /secret/path token=SECRET',
     'coherent-failure-stderr':
-      'Error [ERR_MODULE_NOT_FOUND]: /secret/path SECRET',
+      'Error [ERR_MODULE_NOT_FOUND]: /secret/path token=SECRET',
   };
   try {
     for (const [name, envelope, expectedUncertain] of [
       ['actual-bootstrap-module', '', true],
+      ['actual-bootstrap-system', '', true],
       ['empty-response', '', true],
       ['node-module-error', '', true],
       ['sudo-authentication', '', true],
@@ -1436,8 +1558,10 @@ async function checkManagedTransport(source) {
       let current;
       const invoke = new Function(
         'd',
-        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse}=d; ${source.slice(begin, end)};return rootInvoke;`,
+        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse,managedBootstrapObservation,dirname}=d; ${source.slice(begin, end)};return rootInvoke;`,
       )({
+        managedBootstrapObservation,
+        dirname: posix.dirname,
         managedHostedContext: async () => ctx,
         process,
         preserved: [],
@@ -1446,7 +1570,20 @@ async function checkManagedTransport(source) {
         processIdentity: () => ({ birth: '1' }),
         validManagedResponse,
         waitManagedChild,
-        spawn: () => {
+        spawn: (command, args, options) => {
+          assert.equal(command, '/usr/bin/sudo');
+          assert.deepEqual(args, [
+            '-n',
+            '--preserve-env=',
+            '--',
+            process.execPath,
+            '/unused',
+            '--managed-appimage-private',
+          ]);
+          assert.deepEqual(options.env, {
+            PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+            LANG: 'C',
+          });
           let reply,
             code = 0;
           if (current.operation === 'cleanup')
@@ -1467,8 +1604,13 @@ async function checkManagedTransport(source) {
                 : JSON.stringify(reply);
           const child = spawn(
             node,
-            name === 'actual-bootstrap-module'
-              ? [bootstrap, '--managed-appimage-private']
+            name.startsWith('actual-bootstrap-')
+              ? name === 'actual-bootstrap-module'
+                ? [bootstrap, '--managed-appimage-private']
+                : [
+                    '-e',
+                    `try { require('node:fs').openSync(${JSON.stringify(join(directory, 'absent'))}, 'r'); } catch(error) { console.error(error); process.exitCode=1; }`,
+                  ]
               : [
                   '-e',
                   `const timer=setTimeout(()=>process.exit(0),500);process.stdin.resume();process.stdin.on('end',()=>{clearTimeout(timer);process.stdout.write(${JSON.stringify(text)});process.stderr.write(${JSON.stringify(signatures[name] ?? '')});process.exitCode=${code};});`,
@@ -1544,26 +1686,49 @@ async function checkManagedTransport(source) {
         );
       }
       if (expectedUncertain) {
-        const writes = [];
+        const writes = [],
+          observations = [];
         await recordManagedProtocol('/owned/protocol.json', failure, {
           mkdir: async () => {},
-          writeFile: async (path, text) => writes.push(JSON.parse(text)),
+          writeFile: async (path, text) => {
+            if (path.endsWith('.json')) writes.push(JSON.parse(text));
+            else {
+              observations.push(text);
+              assert(path.endsWith('managed-bootstrap.txt'));
+              assert(Buffer.byteLength(text) <= 1024);
+              assert.doesNotMatch(
+                text,
+                /SECRET|secret|canopy-transport-bootstrap/,
+              );
+            }
+          },
         });
         assert.equal(writes.length, 1, name);
+        if (name.startsWith('actual-bootstrap-')) {
+          assert.equal(observations.length, 1, name);
+          assert.match(
+            observations[0],
+            name === 'actual-bootstrap-system'
+              ? /ENOENT/
+              : /ERR_MODULE_NOT_FOUND/,
+          );
+        }
         assert(['prepare'].includes(writes[0].operation));
         assert(!JSON.stringify(writes[0]).includes('fixture known failure'));
         assert.equal(Object.keys(writes[0]).length, 6);
         if (
           Object.hasOwn(signatures, name) ||
-          name === 'actual-bootstrap-module'
+          name.startsWith('actual-bootstrap-')
         ) {
           assert.equal(
             writes[0].reason,
-            name === 'actual-bootstrap-module'
-              ? 'node-module-error'
-              : name === 'nonempty-json'
-                ? 'json'
-                : name,
+            name === 'actual-bootstrap-system'
+              ? 'empty-response'
+              : name === 'actual-bootstrap-module'
+                ? 'node-module-error'
+                : name === 'nonempty-json'
+                  ? 'json'
+                  : name,
           );
           assert.doesNotMatch(
             JSON.stringify(writes[0]),
@@ -1842,8 +2007,10 @@ async function checkManagedSuccessTransport(source, launchProof, launchInput) {
         );
       const invoke = new Function(
         'd',
-        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse}=d;${body};return rootInvoke;`,
+        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse,managedBootstrapObservation,dirname}=d;${body};return rootInvoke;`,
       )({
+        managedBootstrapObservation,
+        dirname: posix.dirname,
         managedHostedContext: async () => ctx,
         process,
         preserved: [],
