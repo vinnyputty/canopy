@@ -11,6 +11,20 @@ for (const key of Object.keys(env)) {
     delete env[key];
   }
 }
+// Preserve a configured Windows cache override across Bazel's test environment.
+// Match Node's first sorted case-insensitive key; pass only its name in argv.
+const testEnvironment = [];
+if (process.platform === 'win32') {
+  const cacheKeys = Object.keys(env)
+    .sort()
+    .filter((key) => key.toUpperCase() === 'PSMODULEANALYSISCACHEPATH');
+  const cache = cacheKeys.length ? env[cacheKeys[0]] : undefined;
+  if (typeof cache === 'string' && cache.length > 0) {
+    for (const key of cacheKeys) delete env[key];
+    env.PSModuleAnalysisCachePath = cache;
+    testEnvironment.push('--test_env=PSModuleAnalysisCachePath');
+  }
+}
 function run(command, args) {
   const result = spawnSync(command, args, { cwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
@@ -38,6 +52,7 @@ bazel(
   // Unit and portability targets each launch the complete process-heavy suite.
   '--local_test_jobs=1',
   '--test_output=errors',
+  ...testEnvironment,
 );
 if (process.platform === 'linux' && !env.DISPLAY) {
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke']);
