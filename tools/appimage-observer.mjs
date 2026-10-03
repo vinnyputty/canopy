@@ -1117,9 +1117,9 @@ export async function observeAppImageLaunch(
   let finish;
   let acquired;
   let binding;
-  const log = (...args) => {
+  const log = (label, error) => {
     try {
-      console.error(...args);
+      console.error(label, message(error));
     } catch {
       /* Diagnostics are secondary. */
     }
@@ -1134,7 +1134,7 @@ export async function observeAppImageLaunch(
       throw error;
     }
   } catch (error) {
-    log('AppImage observer unavailable:', message(error));
+    log('AppImage observer unavailable:', error);
   }
   try {
     const app = await launch();
@@ -1167,7 +1167,7 @@ export async function observeAppImageLaunch(
         } else await waitWithin(Promise.resolve().then(finish), 750);
       }
     } catch (error) {
-      log('AppImage observer completion unavailable:', message(error));
+      log('AppImage observer completion unavailable:', error);
     }
   }
 }

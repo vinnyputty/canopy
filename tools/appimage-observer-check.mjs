@@ -1,5 +1,6 @@
 import { fork, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdtemp, open, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, win32 } from 'node:path';
@@ -39,6 +40,7 @@ const missing = Object.assign(new Error('gone'), { code: 'ENOENT' });
 
 export async function checkAppImageObserver() {
   await checkManagedCompletion();
+  await checkSecondaryDiagnostics();
   assert.deepEqual(processIdentity(processStat()), identity);
   assert.throws(() => processIdentity('invalid'));
   assert.deepEqual(childPids('70 71\n'), [70, 71]);
@@ -815,5 +817,158 @@ async function checkManagedCompletion() {
         product.kill('SIGKILL');
       });
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+// Exercise the exported wrapper and the complete production consumer. Only the
+// application/IO dependencies are fixtures; close owns an actual Node child.
+async function checkSecondaryDiagnostics() {
+  const source = await readFile(
+    new URL('./packaged-smoke.mjs', import.meta.url),
+    'utf8',
+  );
+  const begin = source.indexOf('async function smoke(');
+  const end = source.indexOf('\nfor (const format', begin);
+  assert(begin >= 0 && end > begin);
+  const consume = new Function(
+    'dependencies',
+    `const {process, electron, mkdir, join, workspace, writeFile, console, observeAppImageLaunch, managedChild} = dependencies;
+     ${source.slice(begin, end)}
+     return smoke('/fixture', '/owned', 'fixture', {appImage: '/fixture/Canopy.AppImage'}, dependencies.managed);`,
+  );
+  const logger = console.error;
+  const secondary = new Error('secondary diagnostic fault');
+  const fail = () => {
+    throw secondary;
+  };
+  const faults = [
+    { toString: fail },
+    {
+      get code() {
+        return fail();
+      },
+    },
+    {
+      get message() {
+        return fail();
+      },
+    },
+    { [Symbol.toPrimitive]: fail },
+    new Error('observer fault'),
+  ];
+  try {
+    console.error = fail;
+    for (const fault of faults) {
+      for (const stage of ['startup', 'completion']) {
+        const start = async () => {
+          if (stage === 'startup') throw fault;
+          const finish = async () => {
+            throw fault;
+          };
+          finish.matches = () => true;
+          return finish;
+        };
+        const observe = (config, launch) =>
+          observeAppImageLaunch(config, launch, {
+            platform: 'linux',
+            env: {
+              GITHUB_ACTIONS: 'true',
+              RUNNER_ENVIRONMENT: 'github-hosted',
+            },
+            start,
+          });
+        for (const primary of [
+          undefined,
+          null,
+          false,
+          0,
+          '',
+          new Error('primary'),
+        ]) {
+          let launched = 0;
+          let rejected = false;
+          try {
+            await observe({ managedReceipt: 'receipt' }, async () => {
+              launched++;
+              throw primary;
+            });
+          } catch (error) {
+            rejected = true;
+            assert.equal(error, primary);
+          }
+          assert(rejected);
+          assert.equal(launched, 1);
+        }
+        const child = spawn(
+          process.execPath,
+          ['-e', 'setInterval(() => {}, 1000)'],
+          {
+            stdio: 'ignore',
+          },
+        );
+        const closed = once(child, 'close');
+        await once(child, 'spawn');
+        let closes = 0;
+        const app = {
+          process: () => child,
+          close: async () => {
+            closes++;
+            child.kill('SIGTERM');
+            await closed;
+          },
+        };
+        try {
+          assert.equal(
+            await observe({ managedReceipt: 'receipt' }, async () => app),
+            app,
+          );
+          assert.equal(child.exitCode, null);
+          assert.equal(child.signalCode, null);
+          const refusal = (acquired) => {
+            assert.equal(acquired, app);
+            for (const kind of ['retained-spawn', 'native-original'])
+              assert.throws(
+                () => assertManagedLaunchChild(acquired, kind),
+                /does not match retained authority/,
+              );
+            throw secondary;
+          };
+          assert.throws(
+            () => refusal(app),
+            (error) => error === secondary,
+          );
+          await assert.rejects(
+            consume({
+              process: { platform: 'linux', env: {} },
+              electron: { launch: async () => app },
+              mkdir: async () => {},
+              join,
+              workspace: '/owned',
+              writeFile: async () => {},
+              console: { error: fail },
+              observeAppImageLaunch: observe,
+              managedChild: refusal,
+              managed: {
+                check: async () => {},
+                request: { token: 'receipt' },
+                close: async (acquired) => {
+                  assert.equal(acquired, app);
+                  await acquired.close();
+                },
+              },
+            }),
+            (error) => error === secondary,
+          );
+          assert.equal(closes, 1);
+          assert.equal(child.signalCode, 'SIGTERM');
+        } finally {
+          if (child.exitCode === null && child.signalCode === null)
+            child.kill('SIGKILL');
+          await closed;
+        }
+      }
+    }
+  } finally {
+    console.error = logger;
   }
 }
