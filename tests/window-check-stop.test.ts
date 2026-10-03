@@ -78,6 +78,11 @@ try {
   };
   context = {
     running: owner,
+    settleWindowScope: async app => {
+      assert.equal(app, owner);
+      assert.equal(child.exitCode, 0);
+      assert.equal(child.signalCode, null);
+    },
     setTimeout: (callback, ms) => {
       assert.equal(ms, 15000);
       fireDeadline = callback;
