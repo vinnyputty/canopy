@@ -9,8 +9,8 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, win32 } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve, posix, win32 } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
@@ -44,9 +44,9 @@ const run = (text: string, context: object) =>
     }).outputText,
     context,
   );
-for (const windows of [false, true])
+for (const mode of ['native', 'POSIX', 'Windows'] as const)
   for (const override of [false, true])
-    test(`actual benchmark resolves Unicode/spaces and retains source override with ${windows ? 'Windows' : 'native'} paths, override=${override}`, () => {
+    test(`actual benchmark resolves Unicode/spaces and retains source override with ${mode} paths, override=${override}`, () => {
       const ast = source('benchmark-large-trees.mjs');
       const initializer = (
         find(
@@ -55,18 +55,38 @@ for (const windows of [false, true])
             ts.isVariableDeclaration(n) && n.name.getText(ast) === 'production',
         ) as ts.VariableDeclaration
       ).initializer!;
-      const moduleURL = windows
-        ? 'file:///D:/canopy%20%E7%95%8C/tools/benchmark-large-trees.mjs'
-        : 'file:///tmp/canopy%20%E7%95%8C/tools/benchmark-large-trees.mjs';
-      const path = windows ? win32 : { join, resolve };
-      const decode = windows
-        ? (url: URL) => fileURLToPath(url, { windows: true })
-        : fileURLToPath;
+      // Native uses this host's real URL/path rules; explicit other-OS
+      // controls keep their URL decoder and path implementation paired.
+      const moduleURL =
+        mode === 'native'
+          ? pathToFileURL(
+              resolve(
+                tmpdir(),
+                'canopy 界',
+                'tools',
+                'benchmark-large-trees.mjs',
+              ),
+            ).href
+          : mode === 'Windows'
+            ? 'file:///D:/canopy%20%E7%95%8C/tools/benchmark-large-trees.mjs'
+            : 'file:///tmp/canopy%20%E7%95%8C/tools/benchmark-large-trees.mjs';
+      const path =
+        mode === 'Windows'
+          ? win32
+          : mode === 'POSIX'
+            ? posix
+            : { join, resolve };
+      const decode =
+        mode === 'native'
+          ? fileURLToPath
+          : (url: URL) => fileURLToPath(url, { windows: mode === 'Windows' });
       const repo = decode(new URL('..', moduleURL));
       const selected = override
-        ? windows
-          ? 'D:\\override 界'
-          : '/tmp/override 界'
+        ? mode === 'native'
+          ? resolve(tmpdir(), 'override 界')
+          : mode === 'Windows'
+            ? 'D:\\override 界'
+            : '/tmp/override 界'
         : repo;
       const fn = run(`(${initializer.getText(ast)})`, {
         moduleURL,
