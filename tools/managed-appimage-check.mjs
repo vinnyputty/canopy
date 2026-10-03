@@ -4,7 +4,9 @@ import { createHash } from 'node:crypto';
 import { spawnSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   managedGuard,
   managedOperation,
@@ -1361,8 +1363,37 @@ async function checkManagedTransport(source) {
   assert(begin >= 0 && end > begin);
   const node = process.env.JS_BINARY__NODE_BINARY ?? process.execPath;
   const children = [];
+  const closures = [];
+  const directory = await mkdtemp(
+    join(tmpdir(), 'canopy-transport-bootstrap-'),
+  );
+  const bootstrap = join(directory, 'managed-appimage.mjs');
+  // Actual private source fails during import, before any native entry/effect.
+  // Omit its observer dependency deliberately; this is not the hosted cause.
+  await writeFile(bootstrap, source);
+  const signatures = {
+    'empty-response': 'unknown fixture stderr /secret/path request=SECRET',
+    'node-module-error': 'Error [ERR_MODULE_NOT_FOUND]: /secret/path SECRET',
+    'sudo-authentication': 'sudo: a password is required\n',
+    'sudo-environment':
+      'sudo: sorry, you are not allowed to preserve the environment\n',
+    'nonempty-json': 'Error [ERR_MODULE_NOT_FOUND]: /secret/path SECRET',
+    'coherent-failure-stderr':
+      'Error [ERR_MODULE_NOT_FOUND]: /secret/path SECRET',
+  };
   try {
     for (const [name, envelope, expectedUncertain] of [
+      ['actual-bootstrap-module', '', true],
+      ['empty-response', '', true],
+      ['node-module-error', '', true],
+      ['sudo-authentication', '', true],
+      ['sudo-environment', '', true],
+      ['nonempty-json', '', true],
+      [
+        'coherent-failure-stderr',
+        { ok: false, error: 'fixture failure', uncertain: false },
+        false,
+      ],
       ['invalid-json', '{', true],
       ['null', null, true],
       ['array', [], true],
@@ -1427,16 +1458,25 @@ async function checkManagedTransport(source) {
             code =
               typeof envelope === 'object' && envelope?.ok === true ? 0 : 1;
           }
-          const text = name === 'invalid-json' ? '{' : JSON.stringify(reply);
+          const text =
+            name === 'invalid-json' || name === 'nonempty-json'
+              ? '{'
+              : Object.hasOwn(signatures, name) &&
+                  name !== 'coherent-failure-stderr'
+                ? ''
+                : JSON.stringify(reply);
           const child = spawn(
             node,
-            [
-              '-e',
-              `const timer=setTimeout(()=>process.exit(0),500);process.stdin.resume();process.stdin.on('end',()=>{clearTimeout(timer);process.stdout.write(${JSON.stringify(text)});process.exitCode=${code};});`,
-            ],
+            name === 'actual-bootstrap-module'
+              ? [bootstrap, '--managed-appimage-private']
+              : [
+                  '-e',
+                  `const timer=setTimeout(()=>process.exit(0),500);process.stdin.resume();process.stdin.on('end',()=>{clearTimeout(timer);process.stdout.write(${JSON.stringify(text)});process.stderr.write(${JSON.stringify(signatures[name] ?? '')});process.exitCode=${code};});`,
+                ],
             { stdio: ['pipe', 'pipe', 'pipe'] },
           );
           children.push(child);
+          closures.push(new Promise((resolve) => child.once('close', resolve)));
           if (current.operation === 'prepare' && name === 'stdin-error') {
             const end = child.stdin.end;
             child.stdin.end = function (...args) {
@@ -1513,6 +1553,24 @@ async function checkManagedTransport(source) {
         assert(['prepare'].includes(writes[0].operation));
         assert(!JSON.stringify(writes[0]).includes('fixture known failure'));
         assert.equal(Object.keys(writes[0]).length, 6);
+        if (
+          Object.hasOwn(signatures, name) ||
+          name === 'actual-bootstrap-module'
+        ) {
+          assert.equal(
+            writes[0].reason,
+            name === 'actual-bootstrap-module'
+              ? 'node-module-error'
+              : name === 'nonempty-json'
+                ? 'json'
+                : name,
+          );
+          assert.doesNotMatch(
+            JSON.stringify(writes[0]),
+            /SECRET|secret|Canopy|managed-appimage\.mjs/,
+          );
+          assert.deepEqual(operations, ['prepare']);
+        }
         // Reporting failure never replaces the exact transport exception.
         await recordManagedProtocol('/owned/protocol.json', failure, {
           mkdir: async () => {
@@ -1522,6 +1580,8 @@ async function checkManagedTransport(source) {
         });
       }
       assert.equal(operations.includes('cleanup'), !expectedUncertain, name);
+      if (name === 'coherent-failure-stderr')
+        assert.equal(failure.managedProtocol.reason, 'helper-failure');
     }
     // Successful reply shape is operation-specific; malformed cleanup/launch
     // cannot borrow a valid preparation state as a terminal success.
@@ -1571,6 +1631,8 @@ async function checkManagedTransport(source) {
         await ended;
       }
     }
+    await Promise.all(closures);
+    await rm(directory, { recursive: true, force: true });
   }
 }
 

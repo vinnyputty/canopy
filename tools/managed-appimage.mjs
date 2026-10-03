@@ -1553,6 +1553,10 @@ export async function recordManagedProtocol(
     const value = error?.managedProtocol;
     const reasons = [
       'json',
+      'empty-response',
+      'node-module-error',
+      'sudo-authentication',
+      'sudo-environment',
       'schema',
       'terminal',
       'deadline',
@@ -1711,6 +1715,24 @@ async function rootInvoke(request) {
     if (performance.now() >= expires)
       throw new Error('Elapsed response deadline');
   } catch {
+    // Classify only bounded, empty-response transport diagnostics. A signature
+    // is neither a validated helper envelope nor proof of writer termination.
+    if (reason === 'json' && proof.output === '') {
+      reason = 'empty-response';
+      if (
+        /^Error \[ERR_MODULE_NOT_FOUND\]: /m.test(proof.stderr) ||
+        /^Error: Cannot find module /m.test(proof.stderr)
+      )
+        reason = 'node-module-error';
+      else if (/^sudo: a password is required$/m.test(proof.stderr))
+        reason = 'sudo-authentication';
+      else if (
+        /^sudo: sorry, you are not allowed to preserve the environment$/m.test(
+          proof.stderr,
+        )
+      )
+        reason = 'sudo-environment';
+    }
     throw Object.assign(new Error('Managed helper response unknown'), {
       managedUncertain: true,
       managedProtocol: {

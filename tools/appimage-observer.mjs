@@ -896,7 +896,7 @@ async function worker(config) {
   }
 }
 
-// Managed completion owns no new grace period: all IPC, persistence and exit
+// Managed completion owns no new grace period: all IPC, persistence and close
 // must finish within the deadline established before observer startup.
 function managedCompletion(child, capture, nonce, deadline) {
   let sampled = false;
@@ -904,6 +904,10 @@ function managedCompletion(child, capture, nonce, deadline) {
   let failed = false;
   let finishing = false;
   let stopSent = false;
+  let stopWritten = false;
+  let exited = false;
+  let exitCode;
+  let exitSignal;
   let settled = false;
   let resolve;
   const completion = new Promise((done) => {
@@ -926,6 +930,7 @@ function managedCompletion(child, capture, nonce, deadline) {
     }
     try {
       child.send('stop', (error) => {
+        stopWritten = !error;
         if (error) {
           failed = true;
           capture.close();
@@ -949,17 +954,35 @@ function managedCompletion(child, capture, nonce, deadline) {
     failed = true;
     capture.close();
   });
-  child.once('disconnect', () => {
-    if (!finalized) failed = true;
+  child.once('disconnect', () => capture.close());
+  child.once('exit', (code, signal) => {
+    exited = true;
+    exitCode = code;
+    exitSignal = signal;
+    if (!finishing) failed = true;
     capture.close();
   });
-  child.once('exit', (code, signal) =>
+  // Exit can precede unread IPC. Keep the message/error listeners until the
+  // owned child closes, with its actual status and drained channel/pipes.
+  child.once('close', (code, signal) =>
     settle(
       !failed &&
+        finishing &&
         sampled &&
+        stopWritten &&
         finalized &&
-        code === 0 &&
-        signal === null &&
+        exited &&
+        exitCode === 0 &&
+        exitSignal === null &&
+        code === exitCode &&
+        signal === exitSignal &&
+        child.exitCode === exitCode &&
+        child.signalCode === exitSignal &&
+        child.connected === false &&
+        child.channel === null &&
+        [child.stdin, child.stdout, child.stderr].every(
+          (stream) => !stream || stream.closed,
+        ) &&
         Date.now() < deadline,
     ),
   );

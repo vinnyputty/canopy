@@ -614,6 +614,7 @@ async function checkManagedCompletion() {
   const product = spawn(node, ['-e', 'setInterval(() => {}, 1000)'], {
     stdio: 'ignore',
   });
+  const productClosed = once(product, 'close');
   const logs = [];
   const logger = console.error;
   console.error = (...args) => logs.push(args);
@@ -683,6 +684,12 @@ async function checkManagedCompletion() {
       'late-finalized',
       'unclosed-worker',
       'worker-error',
+      'fake-close',
+      'closed-before-finish',
+      'pending-stop-write',
+      'post-ack-error',
+      'late-close',
+      'exit-before-final',
     ]) {
       const output = join(directory, mode + '.json');
       const child = fork(fixture, [mode, output], {
@@ -690,6 +697,44 @@ async function checkManagedCompletion() {
         execArgv: [],
         stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
       });
+      const workerClosed = new Promise((resolve) => {
+        const closed = () => {
+          if (
+            (child.exitCode !== null || child.signalCode !== null) &&
+            child.channel === null &&
+            (!child.stderr || child.stderr.closed)
+          )
+            resolve();
+        };
+        child.on('close', closed);
+        child.on('exit', closed);
+        child.on('disconnect', closed);
+        child.stderr?.on('close', closed);
+      });
+      let sawFinal = false;
+      let sawExit = false;
+      let sawClose = false;
+      let ipc;
+      child.once('exit', () => {
+        sawExit = true;
+        if (mode === 'exit-before-final') {
+          assert.equal(sawFinal, false, 'final IPC remains unread at exit');
+          setImmediate(() => ipc.readStart());
+        }
+      });
+      child.on('close', () => {
+        if (child._closesGot !== child._closesNeeded) return;
+        sawClose = true;
+        if (mode === 'late-close') {
+          const until = Date.now() + 2700;
+          while (Date.now() < until) {}
+        }
+      });
+      if (mode === 'pending-stop-write') {
+        const send = child.send.bind(child);
+        child.send = (value, callback) =>
+          send(value, value === 'stop' ? () => {} : callback);
+      }
       let stderr = '';
       child.stderr.on('data', (chunk) => {
         stderr += chunk;
@@ -697,7 +742,26 @@ async function checkManagedCompletion() {
       let closed = false;
       let sampling = false;
       child.on('message', (value) => {
+        if (
+          value?.type === 'sample-persisted' &&
+          mode === 'exit-before-final'
+        ) {
+          // Pause the actual owned Node pipe, not message event forwarding.
+          const key = Object.getOwnPropertySymbols(child).find(
+            (symbol) => symbol.description === 'kChannelHandle',
+          );
+          ipc = child[key];
+          assert(ipc && typeof ipc.readStop === 'function');
+          assert.equal(ipc.readStop(), 0);
+        }
+        if (value?.type === 'finalized') {
+          sawFinal = true;
+          if (mode === 'exit-before-final') assert(sawExit);
+          if (mode === 'post-ack-error')
+            child.emit('error', new Error('post-ack owned worker fault'));
+        }
         if (value?.type !== 'sampling') return;
+        if (mode === 'fake-close') child.emit('close', 0, null);
         sampling = true;
         if (mode === 'stop-during-sampling') child.send('stop');
         if (mode === 'ipc-disconnect') child.disconnect();
@@ -721,11 +785,13 @@ async function checkManagedCompletion() {
         await observeAppImageLaunch(
           { managedReceipt: 'receipt' },
           async () => {
-            assert.equal(
-              sampling,
-              false,
-              'launch resolves before the first sample',
-            );
+            if (mode === 'closed-before-finish') await workerClosed;
+            else
+              assert.equal(
+                sampling,
+                false,
+                'launch resolves before the first sample',
+              );
             return app;
           },
           {
@@ -744,8 +810,10 @@ async function checkManagedCompletion() {
         'early-launch',
         'stop-during-sampling',
         'slow-finalization',
+        'exit-before-final',
       ].includes(mode);
       if (success) {
+        assert(sawClose, 'acceptance follows actual owned worker close');
         assertManagedLaunchChild(app, 'retained-spawn');
         const report = JSON.parse(await readFile(output, 'utf8'));
         assert.equal(report.completed, true);
@@ -765,7 +833,67 @@ async function checkManagedCompletion() {
           child.once('exit', resolve);
           child.kill('SIGKILL');
         });
+      await workerClosed;
       assert.doesNotMatch(stderr, /Unhandled/);
+      if (mode === 'exit-before-final') {
+        const source = await readFile(
+          new URL('./packaged-smoke.mjs', import.meta.url),
+          'utf8',
+        );
+        const begin = source.indexOf('async function smoke(');
+        const end = source.indexOf('\nfor (const format', begin);
+        assert(begin >= 0 && end > begin);
+        const consume = new Function(
+          'd',
+          `const {process,electron,mkdir,join,workspace,writeFile,console,observeAppImageLaunch,managedChild}=d; ${source.slice(begin, end)}; return smoke('/fixture','/owned','fixture',{appImage:'/fixture/Canopy.AppImage'},d.managed);`,
+        );
+        const primary = new Error('fixture stops after consumer association');
+        let closes = 0;
+        const acquired = {
+          process: () => product,
+          firstWindow: async () => {
+            throw primary;
+          },
+          close: async () => {
+            closes++;
+            product.kill('SIGTERM');
+            await productClosed;
+          },
+        };
+        await assert.rejects(
+          consume({
+            process: { platform: 'linux', env: {} },
+            electron: { launch: async () => acquired },
+            mkdir: async () => {},
+            join,
+            workspace: '/owned',
+            writeFile: async () => {},
+            console,
+            observeAppImageLaunch: (config, launch) =>
+              observeAppImageLaunch(config, launch, {
+                platform: 'linux',
+                env: {
+                  GITHUB_ACTIONS: 'true',
+                  RUNNER_ENVIRONMENT: 'github-hosted',
+                },
+                start: async () => finish,
+              }),
+            managedChild: (app) => {
+              assert.equal(app, acquired);
+              assertManagedLaunchChild(app, 'retained-spawn');
+              return product;
+            },
+            managed: {
+              check: async () => {},
+              request: { token: 'receipt' },
+              close: (app) => app.close(),
+            },
+          }),
+          (error) => error === primary,
+        );
+        assert.equal(closes, 1);
+        assert.equal(product.signalCode, 'SIGTERM');
+      }
     }
     for (const primary of [
       undefined,
@@ -816,6 +944,7 @@ async function checkManagedCompletion() {
         product.once('exit', resolve);
         product.kill('SIGKILL');
       });
+    await productClosed;
     await rm(directory, { recursive: true, force: true });
   }
 }
