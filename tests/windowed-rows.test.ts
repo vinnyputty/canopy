@@ -984,3 +984,129 @@ test('queued uniform reading-height estimates commit before explicit alignment s
     }
   }
 });
+
+test('changing geometry respects eight measurements during and after synchronous acquisition and resumes on real inputs', async () => {
+  for (const strict of [false, true])
+    for (const align of ['nearest', 'center'] as const)
+      for (const timing of ['acquisition', 'after'])
+        for (const signature of [false, true]) {
+          const state = await dom(),
+            api = { current: null as RowWindow | null },
+            ids = Array.from({ length: 1000 }, (_, i) => `v${i}`);
+          const computed = globalThis.getComputedStyle;
+          let changing = false,
+            measurements = 0;
+          globalThis.getComputedStyle = (element) => {
+            const style = computed(element);
+            if (!changing) return style;
+            measurements++;
+            for (const id of ids)
+              state.custom.set(id, measurements % 2 ? 150 : 30);
+            if (!signature) return style;
+            return new Proxy(style, {
+              get: (target, key) => {
+                if (key === 'fontSize')
+                  return measurements % 2 ? '15px' : '16px';
+                const value = Reflect.get(target, key, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+            });
+          };
+          const make = (members: readonly string[], key = 'scope') => {
+            const rows = React.createElement(WindowedRows, {
+              key,
+              ids: members,
+              api,
+              scrollSelector: '.tree-scroll',
+              renderRow: (i) => React.createElement('button', null, members[i]),
+            });
+            return strict
+              ? React.createElement(React.StrictMode, null, rows)
+              : rows;
+          };
+          try {
+            await state.render(make(ids));
+            if (timing === 'acquisition') changing = true;
+            await act(async () => {
+              const row = api.current!.ensure('v500', align);
+              assert.ok(
+                row,
+                'changing measurements must still return the actual destination synchronously',
+              );
+              assert.ok(row instanceof state.window.HTMLElement);
+              assert.ok(
+                measurements <= 8,
+                'synchronous acquisition enforces existing bound',
+              );
+              row
+                .querySelector<HTMLElement>('button')!
+                .focus({ preventScroll: true });
+            });
+            if (timing === 'after') changing = true;
+            await state.flush();
+            assert.ok(
+              measurements <= 8,
+              'internal acquisition/settlement/passive chain stays bounded',
+            );
+            assert.equal(
+              state.window.document.activeElement?.textContent,
+              'v500',
+            );
+            assert.equal(model(state.host).length, 1000);
+            const observed = measurements;
+            await state.flush();
+            assert.equal(
+              measurements,
+              observed,
+              'no unsolicited measurement or pending-layout RAF polling',
+            );
+            await act(async () =>
+              state.host.dispatchEvent(new state.window.Event('scroll')),
+            );
+            await state.flush();
+            assert.equal(
+              measurements,
+              observed,
+              'delivery of our own unchanged scroll correction cannot restart exhausted work',
+            );
+            // A real observer input starts new bounded work after the geometry settles.
+            changing = false;
+            state.custom.clear();
+            await state.resize(30, 701, 300);
+            await act(async () => {
+              api
+                .current!.ensure('v600', align)!
+                .querySelector<HTMLElement>('button')!
+                .focus({ preventScroll: true });
+            });
+            await state.flush();
+            let rect = state.host
+              .querySelector('[data-window-row="v600"]')!
+              .getBoundingClientRect();
+            assert.ok(
+              rect.top >= -1 && rect.bottom <= 301,
+              'settled geometry restores visible navigation',
+            );
+            await act(async () => {
+              api.current!.ensure('v700');
+              api.current!.ensure('v900');
+              state.window.document.activeElement?.blur();
+            });
+            await state.flush();
+            await state.scroll(0);
+            assert.ok(
+              !state.host.querySelector('[data-window-row="v900"]'),
+              'bounded owner still releases',
+            );
+            await state.render(make(ids.filter((id) => id !== 'v900')));
+            assert.equal(api.current!.ensure('v900'), null);
+            await state.render(make(ids, 'new-scope'));
+            await state.scroll(0);
+            assert.ok(!state.host.querySelector('[data-window-row="v900"]'));
+          } finally {
+            globalThis.getComputedStyle = computed;
+            await state.cleanup();
+            assert.equal(api.current, null);
+          }
+        }
+});

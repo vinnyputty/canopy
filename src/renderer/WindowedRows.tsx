@@ -34,6 +34,9 @@ export function WindowedRows({
   const layout = useRef('');
   const pendingAnchor = useRef<{ id: string; inside: number } | null>(null);
   const pendingLayout = useRef(false);
+  const measurementPasses = useRef(0);
+  const writtenScroll = useRef<number | null>(null);
+  const resumeMeasurement = useRef<(() => void) | null>(null);
   const [revision, setRevision] = useState(0);
   const [estimate, setEstimate] = useState(38);
   const [viewport, setViewport] = useState({ top: 0, height: 600 });
@@ -107,6 +110,7 @@ export function WindowedRows({
       row?.scrollIntoView({ block: align });
       return row;
     }
+    measurementPasses.current = 0;
     alignment.current = {
       id,
       align,
@@ -127,6 +131,7 @@ export function WindowedRows({
       top = end - container.clientHeight;
     container.scrollTop = Math.max(0, top);
     alignment.current!.scrollTop = container.scrollTop;
+    writtenScroll.current = container.scrollTop;
     // Keyboard/edit destinations must exist before their caller focuses them.
     const request = alignment.current;
     try {
@@ -137,6 +142,7 @@ export function WindowedRows({
       return elements.current.get(id) ?? null;
     } finally {
       request.acquiring = false;
+      resumeMeasurement.current?.();
     }
   };
   const navigation = useRef(ensure);
@@ -166,6 +172,7 @@ export function WindowedRows({
     if (Math.abs(delta) > 1) {
       container.scrollTop = Math.max(0, container.scrollTop + delta);
       request.scrollTop = container.scrollTop;
+      writtenScroll.current = container.scrollTop;
       request.stable = 0;
       readViewport();
       return false;
@@ -173,6 +180,7 @@ export function WindowedRows({
     return rect.bottom > top && rect.top < bottom;
   };
   useLayoutEffect(() => {
+    measurementPasses.current = 0;
     if (alignment.current?.owner !== ids) {
       alignment.current = null;
       setRequested(null);
@@ -199,6 +207,12 @@ export function WindowedRows({
     if (alignment.current) {
       pendingAnchor.current = null;
       alignRequested();
+      if (
+        alignment.current &&
+        alignment.current.passes >= 8 &&
+        !alignment.current.acquiring
+      )
+        resumeMeasurement.current?.();
       return;
     }
     if (!anchor || !container) return;
@@ -206,6 +220,7 @@ export function WindowedRows({
     const i = index.get(anchor.id);
     if (i !== undefined) {
       container.scrollTop = origin(container) + offsets[i] + anchor.inside;
+      writtenScroll.current = container.scrollTop;
       readViewport();
     }
   }, [offsets]);
@@ -235,18 +250,21 @@ export function WindowedRows({
     let frame = 0;
     const measure = () => {
       const finalRequest = alignment.current;
-      if (finalRequest && finalRequest.passes >= 8 && !finalRequest.acquiring) {
+      if (finalRequest && finalRequest.passes >= 8) {
         // Finish the last queued layout before the bounded final correction;
         // do not queue another measurement/estimate cycle at the work limit.
-        if (pendingLayout.current) {
-          schedule();
-          return;
-        }
+        // Preserve the synchronous destination but stop additional measuring.
+        // Return/commit explicitly resumes finalization; no pending-layout poll.
+        if (finalRequest.acquiring || pendingLayout.current) return;
         alignRequested();
         alignment.current = null;
         setRequested(null);
         return;
       }
+      // Internal layout-effect rerenders share the existing eight-pass bound,
+      // including passive work after the explicit owner has been released.
+      if (measurementPasses.current >= 8) return;
+      measurementPasses.current++;
       const style = getComputedStyle(container);
       const signature = [
         container.clientWidth,
@@ -325,10 +343,15 @@ export function WindowedRows({
           measure();
         });
     };
-    const observer = new ResizeObserver(schedule);
+    resumeMeasurement.current = schedule;
+    const externalMeasurement = () => {
+      measurementPasses.current = 0;
+      schedule();
+    };
+    const observer = new ResizeObserver(externalMeasurement);
     observer.observe(container);
     for (const row of elements.current.values()) observer.observe(row);
-    const styles = new MutationObserver(schedule);
+    const styles = new MutationObserver(externalMeasurement);
     for (
       let target: HTMLElement | null = container;
       target;
@@ -348,23 +371,30 @@ export function WindowedRows({
         Math.abs(container.scrollTop - alignment.current.scrollTop) > 1
       )
         cancelAlignment();
-      schedule();
+      if (
+        writtenScroll.current === null ||
+        Math.abs(container.scrollTop - writtenScroll.current) > 1
+      )
+        externalMeasurement();
+      else schedule();
     };
     container.addEventListener('scroll', scroll, { passive: true });
     container.addEventListener('wheel', cancelAlignment, { passive: true });
     container.addEventListener('touchstart', cancelAlignment, {
       passive: true,
     });
-    document.fonts?.addEventListener('loadingdone', schedule);
+    document.fonts?.addEventListener('loadingdone', externalMeasurement);
     measure();
     return () => {
+      if (resumeMeasurement.current === schedule)
+        resumeMeasurement.current = null;
       cancelAnimationFrame(frame);
       observer.disconnect();
       styles.disconnect();
       container.removeEventListener('scroll', scroll);
       container.removeEventListener('wheel', cancelAlignment);
       container.removeEventListener('touchstart', cancelAlignment);
-      document.fonts?.removeEventListener('loadingdone', schedule);
+      document.fonts?.removeEventListener('loadingdone', externalMeasurement);
     };
   }, [ids, mounted.join(','), windowed, requested]);
 
