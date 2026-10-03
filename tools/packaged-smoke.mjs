@@ -348,12 +348,16 @@ async function smoke(executablePath, directory, artifact, identity) {
           .getByRole('button', { name: 'Save', exact: true })
           .click();
         await expect
-          .poll(
-            async () =>
-              JSON.parse(
+          .poll(async () => {
+            try {
+              return JSON.parse(
                 await readFile(join(userData, 'workspace.json'), 'utf8'),
-              ).palette,
-          )
+              ).palette;
+            } catch (error) {
+              if (error?.code !== 'ENOENT') throw error;
+              return undefined;
+            }
+          })
           .toBe('forest');
       }
       await expect(page.locator('html')).toHaveAttribute(
