@@ -113,7 +113,7 @@ js_binary(
 js_binary(
     name = "ci",
     entry_point = "tools/ci.mjs",
-    data = ["tools/windows-cim-control.mjs", "tools/audit-lifecycle.mjs"],
+    data = ["tools/windows-cim-control.mjs", "tools/windows-cim-input-control.mjs", "tools/audit-lifecycle.mjs"],
     patch_node_fs = False,
     tags = ["manual"],
 )
