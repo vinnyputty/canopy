@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { before, test } from 'node:test';
 import { promisify } from 'node:util';
@@ -303,3 +304,271 @@ test('actual authoring GitHub IPC installer resets fixture requests after restar
   );
   assert.equal(context.authoringSmoke.parent, 'team/a#10');
 });
+
+async function sharedLifecycle() {
+  return import(new URL('../tools/audit-lifecycle.mjs', import.meta.url).href);
+}
+
+function authoringFunction() {
+  const source = readFileSync(
+    new URL('../tools/smoke-authoring.mjs', import.meta.url),
+    'utf8',
+  );
+  const ast = ts.createSourceFile(
+    'smoke-authoring.mjs',
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const declaration = ast.statements.find(
+    (node) =>
+      ts.isFunctionDeclaration(node) && node.name?.text === 'auditAuthoring',
+  )!;
+  return declaration.getText(ast).replace(/^export /, '');
+}
+
+test('actual authoring caller preserves every raw primary through shared cleanup and reporting faults', async () => {
+  const shared = await sharedLifecycle();
+  for (const value of [
+    undefined,
+    null,
+    0,
+    false,
+    '',
+    new Error('raw primary'),
+  ]) {
+    for (const secondaryFault of [false, true]) {
+      const effects: string[] = [];
+      const child = { exitCode: 0, signalCode: null };
+      class ControlledOwner {
+        child = child;
+        async launch(operation: () => Promise<unknown>) {
+          return operation();
+        }
+        confirm(actual: unknown) {
+          assert.equal(actual, child);
+        }
+        async shutdown(close?: () => Promise<void>) {
+          await close?.();
+          return {
+            terminated: true,
+            errors: secondaryFault ? [new Error('close fault')] : [],
+          };
+        }
+      }
+      const page = {
+        on: () => {},
+        getByRole: () => ({
+          waitFor: async () => {
+            throw value;
+          },
+        }),
+      };
+      const app = {
+        process: () => child,
+        firstWindow: async () => page,
+        close: async () => {
+          effects.push('close');
+        },
+      };
+      const actual = runInNewContext(`(${authoringFunction()})`, {
+        authoringAuditLifecycle,
+        mkdtemp: async () => 'controlled-profile',
+        join: (...parts: string[]) => parts.join('/'),
+        tmpdir: () => 'controlled-temp',
+        electron: { launch: async () => app },
+        rm: async () => {
+          effects.push('remove');
+          if (secondaryFault) throw new Error('filesystem fault');
+        },
+        console: { log: (message: string) => effects.push(message) },
+      });
+      // The extracted function is the actual tracked smoke, with controlled
+      // effects and the exact shared deadline/finishAudit exports.
+      const lifecycle = {
+        ...shared,
+        AuditOwner: ControlledOwner,
+      };
+      let rejected = false;
+      try {
+        await actual('unused', 'unused', {}, lifecycle);
+      } catch (error) {
+        rejected = true;
+        if (secondaryFault) {
+          assert.equal((error as AggregateError).cause, value);
+          assert.equal((error as AggregateError).errors[0], value);
+        } else assert.equal(error, value);
+      }
+      assert.equal(rejected, true, `caught ${String(value)} must reject`);
+      assert.ok(effects.includes('close') && effects.includes('remove'));
+      assert.ok(
+        !effects.some((message) =>
+          message.startsWith('Rich authoring acceptance passed'),
+        ),
+      );
+    }
+  }
+});
+
+test('shared adapter treats healthy omitted or undefined primary as success and logging faults as secondary', async () => {
+  const shared = await sharedLifecycle();
+  for (const explicit of [false, true]) {
+    const fixture = protocol();
+    const audit = authoringAuditLifecycle({
+      ...shared,
+      AuditOwner: class {
+        child = fixture.app.process();
+        async launch(operation: () => Promise<unknown>) {
+          return operation();
+        }
+        confirm(actual: unknown) {
+          assert.equal(actual, this.child);
+        }
+        async shutdown(close?: () => Promise<void>) {
+          await close?.();
+          return { terminated: true, errors: [] };
+        }
+      },
+    })({ profile: 'controlled', executable: 'unused', report: () => {} });
+    const app = await audit.launch('initial', async () => fixture.app);
+    let removed = false;
+    await audit.finish({
+      app,
+      ...(explicit ? { primary: undefined } : {}),
+      removeProfile: async () => {
+        removed = true;
+      },
+    });
+    assert.equal(removed, true);
+  }
+  const value = undefined;
+  const fixture = protocol();
+  const audit = authoringAuditLifecycle({
+    ...shared,
+    AuditOwner: class {
+      child = fixture.app.process();
+      async launch(operation: () => Promise<unknown>) {
+        return operation();
+      }
+      confirm() {}
+      async shutdown() {
+        return { terminated: true, errors: [] };
+      }
+    },
+  })({
+    profile: 'controlled',
+    executable: 'unused',
+    report: () => {
+      throw new Error('logging fault');
+    },
+  });
+  const app = await audit.launch('initial', async () => fixture.app);
+  let caught = false;
+  try {
+    await audit.run('nullsafe', () => {
+      throw value;
+    });
+  } catch (error) {
+    caught = true;
+    assert.equal(error, value);
+  }
+  assert.equal(caught, true);
+  audit.failure(value);
+  await assert.rejects(
+    audit.finish({
+      app,
+      primary: value,
+      primaryFailed: true,
+      removeProfile: async () => {},
+    }),
+    (error: any) =>
+      error.cause === value &&
+      error.errors[0] === value &&
+      error.errors.length > 1,
+  );
+});
+
+for (const mode of ['normal', 'reject', 'hang', 'failed-launch'] as const) {
+  test(`actual authoring adapter and shared owner control a real Node ${mode} scope`, async () => {
+    const shared = await sharedLifecycle();
+    const { default: childProcess } = await import('node:child_process');
+    const { mkdtemp, rm, access } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { disposeProcess, withCleanup } =
+      await import('./fixtures/owned-process.js');
+    const profile = await mkdtemp(join(tmpdir(), 'canopy-authoring-node-'));
+    let child: import('node:child_process').ChildProcess | undefined;
+    const primary = new Error('controlled launch rejection');
+    const audit = authoringAuditLifecycle({
+      ...shared,
+      AuditOwner: class extends shared.AuditOwner {
+        constructor(options: any) {
+          super({
+            ...options,
+            graceMs: 100,
+            killMs: process.platform === 'win32' ? 60000 : 5000,
+          });
+        }
+      },
+    })({ profile, executable: process.execPath, report: () => {} });
+    const app = {
+      process: () => child,
+      close: async () => {
+        if (mode === 'reject') throw new Error('controlled close rejection');
+        if (mode === 'hang') return new Promise<void>(() => {});
+        const closed = once(child!, 'close');
+        child!.send('close');
+        await closed;
+      },
+    };
+    await withCleanup(
+      async () => {
+        const launch = audit.launch('initial', async () => {
+          child = childProcess.spawn(
+            process.execPath,
+            [
+              '-e',
+              "process.on('message', () => process.exit(0)); process.send('ready'); setTimeout(() => process.exit(72), 15000).unref();",
+            ],
+            {
+              detached: process.platform !== 'win32',
+              env: { ...process.env, CANOPY_USER_DATA: profile },
+              stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+            },
+          );
+          await shared.deadline(
+            () => once(child!, 'message'),
+            3000,
+            'Node controller readiness',
+          );
+          if (mode === 'failed-launch') throw primary;
+          return app;
+        });
+        if (mode === 'failed-launch')
+          await assert.rejects(launch, (error) => error === primary);
+        else assert.equal(await launch, app);
+        const finish = audit.finish({
+          app,
+          primary,
+          primaryFailed: mode === 'failed-launch',
+          removeProfile: async () => {
+            assert.ok(child!.exitCode !== null || child!.signalCode !== null);
+            await rm(profile, { recursive: true, force: true });
+          },
+        });
+        if (mode === 'normal') await finish;
+        else
+          await assert.rejects(finish, (error: any) =>
+            mode === 'failed-launch'
+              ? error === primary
+              : error instanceof AggregateError,
+          );
+        await assert.rejects(access(profile));
+      },
+      () => disposeProcess(child),
+      () => rm(profile, { recursive: true, force: true }),
+    );
+  });
+}

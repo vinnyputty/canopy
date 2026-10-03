@@ -1,3 +1,4 @@
+import * as authoringLifecycle from './audit-lifecycle.mjs';
 import { auditInbox } from './smoke-inbox.mjs';
 import { auditAuthoring } from './smoke-authoring.mjs';
 import { _electron as electron, expect } from '@playwright/test';
@@ -3545,7 +3546,7 @@ try {
   await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
-  await auditAuthoring(appPath, executablePath, env);
+  await auditAuthoring(appPath, executablePath, env, authoringLifecycle);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(
