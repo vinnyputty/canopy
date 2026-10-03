@@ -3133,3 +3133,31 @@ kbd {
   gap: 6px;
   margin: 6px 12px 6px 0;
 }
+
+.command-list button[aria-selected='true'] {
+  background: var(--selected);
+}
+.command-list button:has(.palette-detail) {
+  height: auto;
+  min-height: 54px;
+  padding: 8px 9px;
+}
+.command-list button .palette-type {
+  flex: 0 0 80px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.palette-detail {
+  min-width: 0;
+}
+.palette-detail b,
+.palette-detail small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-detail small {
+  color: var(--muted);
+  margin-top: 3px;
+}

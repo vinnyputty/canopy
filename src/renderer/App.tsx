@@ -6,6 +6,15 @@ import {
   relationshipDestination,
 } from './relationships';
 import { relationshipKinds } from '../shared/relationships';
+import { paletteReturn } from './palette-return';
+import {
+  paletteIndex,
+  paletteIssueTab,
+  searchPalette,
+  paletteSelection,
+  movePaletteSelection,
+  type PaletteEntry,
+} from './navigation-palette';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -293,6 +302,7 @@ export function App() {
   const workspaceRef = useRef(workspace);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
+  const demoResetting = useRef(false);
   const appearanceSaving = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
@@ -1276,9 +1286,12 @@ export function App() {
   }, [workspace.theme, workspace.palette, appearancePreview]);
 
   const saveWorkspace = useCallback((value: Workspace) => {
+    if (demoResetting.current) return Promise.resolve();
     const save = pendingWorkspaceSave.current
       .catch(() => {})
-      .then(() => window.canopy.saveWorkspace(value));
+      .then(() => {
+        if (!demoResetting.current) return window.canopy.saveWorkspace(value);
+      });
     pendingWorkspaceSave.current = save;
     return save;
   }, []);
@@ -2888,16 +2901,38 @@ export function App() {
     const seek = async (step: number, keepPaused = paused) => {
       if (navigating || step < 0 || step > 7) return;
       navigating = true;
+      demoResetting.current = true;
+      if (workspaceSaveTimer.current !== null) {
+        window.clearTimeout(workspaceSaveTimer.current);
+        workspaceSaveTimer.current = null;
+      }
       try {
         stop();
         if (restoreWork) await restoreWork;
+        // Finish any dispatched old-document save before installing reset data.
+        // Later autosaves remain blocked until the new document takes over.
+        await pendingWorkspaceSave.current.catch(() => {});
         sessionStorage.setItem('canopy-demo-step', String(step));
         sessionStorage.setItem('canopy-demo-paused', String(keepPaused));
         await window.canopy.resetDemo();
       } catch (error) {
-        navigating = false;
+        demoResetting.current = false;
+        if (workspaceSaveTimer.current !== null) {
+          window.clearTimeout(workspaceSaveTimer.current);
+          workspaceSaveTimer.current = null;
+        }
         sessionStorage.removeItem('canopy-demo-step');
         sessionStorage.removeItem('canopy-demo-paused');
+        try {
+          await saveWorkspace(workspaceRef.current);
+        } catch (saveError) {
+          setErrors((value) => ({
+            ...value,
+            workspace: `Couldn’t save workspace: ${saveError instanceof Error ? saveError.message : String(saveError)}`,
+          }));
+        } finally {
+          navigating = false;
+        }
         throw error;
       }
     };
@@ -5240,13 +5275,52 @@ export function App() {
       {dialog === 'commands' && (
         <CommandDialog
           commands={commands}
+          workspace={workspace}
+          connections={connections}
+          snapshots={{ ...snapshots, ...viewSnapshots }}
+          sources={sourceTabs}
+          scrollElement={scrollRef.current}
+          activeRoot={activeTab ?? undefined}
+          onOpen={openTab}
+          onNavigate={(entry) => {
+            const target = entry.target;
+            if (target.type === 'Open root' || target.type === 'Recent root') {
+              openTab(target.root.connectionId, target.root.rootKey);
+            } else if (target.type === 'Saved view') {
+              setInboxOpen(false);
+              setSelectedViewIssue(null);
+              setWorkspace((current) => ({
+                ...current,
+                activeSavedViewId: target.viewId,
+              }));
+              setDialog(null);
+            } else if (target.type === 'Loaded issue') {
+              const source = target.tab;
+              const existing = workspaceRef.current.tabs.find((item) =>
+                sameRoot(item, source),
+              );
+              const tab = paletteIssueTab(
+                existing ?? {
+                  ...source,
+                  id: source.id.startsWith('saved-view:')
+                    ? crypto.randomUUID()
+                    : source.id,
+                },
+                target.key,
+                snapshots[target.tab.id] ?? viewSnapshots[target.tab.id],
+              );
+              navigate(tab);
+              navigationReveal.current = { tabId: tab.id, key: target.key };
+              setReveal({ tabId: tab.id, key: target.key });
+              setDialog(null);
+            }
+          }}
           shortcuts={workspace.shortcuts}
           onClose={() => setDialog(null)}
         />
       )}
       {dialog === 'shortcuts' && (
         <ShortcutsDialog
-          initialFocus={settingsFlow.current}
           shortcuts={workspace.shortcuts}
           onChange={(shortcuts) =>
             setWorkspace((value) => ({ ...value, shortcuts }))
@@ -6776,12 +6850,18 @@ function ConnectDialog({
 }
 
 function OpenIssueDialog({
+  initialQuery = '',
+  initialConnectionId,
+  deliberate = false,
   connections,
   recentRoots,
   activeRoot,
   onClose,
   onOpen,
 }: {
+  initialQuery?: string;
+  initialConnectionId?: string;
+  deliberate?: boolean;
   connections: Connection[];
   recentRoots: RootReference[];
   activeRoot?: RootReference;
@@ -6789,11 +6869,13 @@ function OpenIssueDialog({
   onOpen: (connectionId: string, key: string) => void;
 }) {
   const [connectionId, setConnectionId] = useState(
-    activeRoot && connections.some(({ id }) => id === activeRoot.connectionId)
-      ? activeRoot.connectionId
-      : (connections[0]?.id ?? ''),
+    initialConnectionId ??
+      (activeRoot &&
+      connections.some(({ id }) => id === activeRoot.connectionId)
+        ? activeRoot.connectionId
+        : (connections[0]?.id ?? '')),
   );
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery);
   const [groupRepositories, setGroupRepositories] = useState(false);
   const [searchState, setSearchState] = useState<SearchState>({
     boundaries: [],
@@ -6889,6 +6971,7 @@ function OpenIssueDialog({
       query.trim(),
       project,
       Boolean(
+        !deliberate &&
         connectionId &&
         query.trim().length >= 2 &&
         (selectedConnection?.provider === 'github'
@@ -6897,7 +6980,7 @@ function OpenIssueDialog({
       ),
     );
     return () => search.cancel();
-  }, [connectionId, query, project, directKey, search]);
+  }, [connectionId, query, project, directKey, search, deliberate]);
   useEffect(() => {
     if (selected)
       document
@@ -6994,6 +7077,24 @@ function OpenIssueDialog({
           />
           {busy && <Loader2 className="spin" size={14} />}
         </div>
+        {deliberate && (
+          <>
+            <p className="dialog-note">
+              Remote search runs only when you choose Search issues. Select a
+              connection; known keys and URLs can be opened directly.
+            </p>
+            <button
+              className="secondary"
+              disabled={busy || !connectionId || query.trim().length < 2}
+              onClick={() => {
+                search.start(connectionId, query.trim(), project, false);
+                void search.load().finally(() => inputRef.current?.focus());
+              }}
+            >
+              Search issues
+            </button>
+          </>
+        )}
         {connections.length === 0 && (
           <p className="dialog-note">
             <AlertCircle size={14} />
@@ -7151,9 +7252,17 @@ function OpenIssueDialog({
   );
 }
 
-function CommandDialog({
+export function CommandDialog({
   commands,
   shortcuts,
+  workspace,
+  connections,
+  snapshots,
+  sources,
+  scrollElement,
+  activeRoot,
+  onOpen,
+  onNavigate,
   onClose,
 }: {
   commands: Array<{
@@ -7163,39 +7272,168 @@ function CommandDialog({
     run: () => void;
   }>;
   shortcuts: Record<string, string>;
+  workspace: Workspace;
+  connections: Connection[];
+  snapshots: Record<string, TreeSnapshot>;
+  sources: TabState[];
+  scrollElement: HTMLElement | null;
+  activeRoot?: RootReference;
+  onOpen: (connectionId: string, key: string) => void;
+  onNavigate: (entry: PaletteEntry) => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState('');
-  const shown = commands.filter((command) =>
-    command.label.toLowerCase().includes(query.toLowerCase()),
+  const [selectedId, setSelectedId] = useState<string>();
+  const [remote, setRemote] = useState<{ connectionId?: string }>();
+  // Capture before the palette input receives focus, and restore only on dismissal.
+  const [returnToPrevious] = useState(() =>
+    paletteReturn(document.activeElement as HTMLElement | null, scrollElement),
   );
-  const run = (command: (typeof commands)[number]) => {
-    command.run();
-    if (command.id !== 'shortcuts' && command.id !== 'quickOpen') onClose();
+  const restore = useRef(true);
+  useLayoutEffect(
+    () => () => {
+      if (!restore.current) return;
+      returnToPrevious();
+    },
+    [returnToPrevious],
+  );
+  const index = useMemo(
+    () => paletteIndex(workspace, connections, snapshots, commands, sources),
+    [workspace, connections, snapshots, commands, sources],
+  );
+  const shown = useMemo(() => searchPalette(index, query), [index, query]);
+  const selected = paletteSelection(shown, selectedId);
+  useEffect(() => {
+    if (!remote && selected)
+      document
+        .getElementById(`palette-${selected.id}`)
+        ?.scrollIntoView({ block: 'nearest' });
+  }, [selected?.id, remote]);
+  const run = (entry: PaletteEntry) => {
+    if (entry.target.type === 'Connection') {
+      setRemote({ connectionId: entry.target.connectionId });
+      return;
+    }
+    if (entry.target.type === 'Action') {
+      const actionId = entry.target.actionId;
+      const command = commands.find((item) => item.id === actionId);
+      if (command?.id === 'quickOpen') {
+        setRemote({});
+        return;
+      }
+      restore.current = false;
+      returnToPrevious();
+      if (command?.id !== 'shortcuts') onClose();
+      command?.run();
+      return;
+    }
+    restore.current = false;
+    onNavigate(entry);
   };
+  if (remote)
+    return (
+      <OpenIssueDialog
+        connections={connections}
+        recentRoots={workspace.recentRoots ?? []}
+        activeRoot={activeRoot}
+        initialConnectionId={remote.connectionId}
+        initialQuery={query}
+        deliberate
+        onClose={() => setRemote(undefined)}
+        onOpen={(connectionId, key) => {
+          restore.current = false;
+          onOpen(connectionId, key);
+        }}
+      />
+    );
   return (
-    <Dialog title="Command palette" onClose={onClose} compact>
+    <Dialog title="Command palette" onClose={onClose}>
       <div className="command-search">
-        <ChevronRight size={16} />
+        <Search size={16} />
         <input
           autoFocus
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && shown[0]) run(shown[0]);
+            if (event.nativeEvent.isComposing) return;
+            if (event.key === 'Enter' && selected) {
+              event.preventDefault();
+              run(selected);
+            }
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              setSelectedId(
+                movePaletteSelection(
+                  shown,
+                  selected?.id,
+                  event.key === 'ArrowDown' ? 1 : -1,
+                ),
+              );
+            }
+            if (event.key === 'Home' || event.key === 'End') {
+              event.preventDefault();
+              setSelectedId(
+                event.key === 'Home' ? shown[0]?.id : shown.at(-1)?.id,
+              );
+            }
           }}
-          placeholder="Type a command"
-          aria-label="Type a command"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={shown.length > 0}
+          aria-controls="palette-results"
+          aria-activedescendant={
+            selected ? `palette-${selected.id}` : undefined
+          }
+          placeholder="Search roots, views, connections, loaded issues, actions"
+          aria-label="Search workspace"
         />
       </div>
-      <div className="command-list">
-        {shown.map((command) => (
-          <button key={command.id} onClick={() => run(command)}>
-            <command.icon size={15} />
-            <span>{command.label}</span>
-            <kbd>{shortcutDisplay(shortcuts[command.id])}</kbd>
+      <p className="dialog-note">
+        Local workspace results. Loaded issues may be stale or incomplete;
+        remote search is a separate explicit step.
+      </p>
+      <div
+        className="command-list"
+        id="palette-results"
+        role="listbox"
+        aria-label="Workspace results"
+      >
+        {shown.map((entry) => (
+          <button
+            key={entry.id}
+            id={`palette-${entry.id}`}
+            title={`${entry.label} · ${entry.context}`}
+            role="option"
+            aria-selected={selected?.id === entry.id}
+            tabIndex={-1}
+            onMouseMove={() => setSelectedId(entry.id)}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => run(entry)}
+          >
+            <span className="palette-type">{entry.target.type}</span>
+            <span className="palette-detail">
+              <b>{entry.label}</b>
+              <small>{entry.context}</small>
+            </span>
+            {entry.target.type === 'Action' && (
+              <kbd>{shortcutDisplay(shortcuts[entry.target.actionId])}</kbd>
+            )}
           </button>
         ))}
+      </div>
+      <div className="dialog-footer">
+        <span role="status">
+          {shown.length
+            ? `${shown.length} results${shown.length === 80 ? ' · refine to see more' : ''}`
+            : 'No local matches'}
+        </span>
+        <button
+          className="secondary"
+          disabled={!connections.length}
+          onClick={() => setRemote({})}
+        >
+          Search remote issues…
+        </button>
       </div>
     </Dialog>
   );
@@ -7359,16 +7597,18 @@ function AppearanceDialog({
 }
 
 function ShortcutsDialog({
-  initialFocus,
   shortcuts,
   onChange,
   onClose,
 }: {
-  initialFocus?: boolean;
   shortcuts: Record<string, string>;
   onChange: (value: Record<string, string>) => void;
   onClose: () => void;
 }) {
+  const [returnToPrevious] = useState(() =>
+    paletteReturn(document.activeElement as HTMLElement | null, null),
+  );
+  useLayoutEffect(() => returnToPrevious, [returnToPrevious]);
   const [draft, setDraft] = useState(shortcuts);
   const [recording, setRecording] = useState<string | null>(null);
   const collisions = shortcutCollisions(draft);
@@ -7392,12 +7632,7 @@ function ShortcutsDialog({
     return () => window.removeEventListener('keydown', capture, true);
   }, [recording]);
   return (
-    <Dialog
-      title="Keyboard shortcuts"
-      onClose={onClose}
-      wide
-      initialFocus={initialFocus}
-    >
+    <Dialog title="Keyboard shortcuts" onClose={onClose} wide initialFocus>
       <div className="shortcut-intro">
         Click a shortcut, then press the new key combination. Conflicting
         shortcuts must be resolved before saving.

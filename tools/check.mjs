@@ -47,7 +47,7 @@ const paths = [
 ];
 let failed = false;
 for (const path of paths) {
-  if (!/\.(?:[cm]?js|tsx?|css|json|md|ya?ml)$/.test(path)) continue;
+  if (!/\.(?:[cm]?js|[cm]?ts|tsx|css|json|md|ya?ml)$/.test(path)) continue;
   const workspacePath = relative(root, path);
   if (
     !(await prettier.check(await readFile(path, 'utf8'), {

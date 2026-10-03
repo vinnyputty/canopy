@@ -47,22 +47,51 @@ async function closeDemo(session) {
 const first = await openDemo();
 // Pause synchronously when a target state renders, before its presentation timer
 // can expire. The script is reinstalled after every Reset and replay reload.
-await first.page.addInitScript(() => {
+function installDemoHold() {
+  const trace = [];
+  globalThis.canopyDemoCheckTrace = trace;
+  const record = (event, state = {}) => {
+    trace.push({ ms: performance.now(), event, ...state });
+    if (trace.length > 64) trace.shift();
+  };
+  record('script-entry', { hold: sessionStorage.getItem('canopy-check-hold') });
+  let previous = '';
   const observer = new MutationObserver(() => {
     const target = sessionStorage.getItem('canopy-check-hold');
     const ready =
-      target === 'editor'
-        ? document.querySelector(
-            '[data-tree-key="CAN-111"] .priority-editor select',
-          )
-        : target === 'edited' &&
-          document
-            .querySelector('[aria-label="Edit priority for CAN-111"]')
-            ?.textContent?.includes('Highest');
+      target === 'start'
+        ? document.querySelector('.demo-tour-progress')?.textContent?.trim() ===
+          'Starting tour'
+        : target === 'editor'
+          ? document.querySelector(
+              '[data-tree-key="CAN-111"] .priority-editor select',
+            )
+          : target === 'edited' &&
+            document
+              .querySelector('[aria-label="Edit priority for CAN-111"]')
+              ?.textContent?.includes('Highest');
     const pause = [...document.querySelectorAll('button')].find(
       (button) => button.textContent === 'Pause demo',
     );
+    const state = {
+      target,
+      ready: Boolean(ready),
+      pause: Boolean(pause),
+      rootAction: document
+        .querySelector(
+          '[aria-label="Expand CAN-100"], [aria-label="Collapse CAN-100"]',
+        )
+        ?.getAttribute('aria-label'),
+      caption: document.querySelector('.demo-tour [role="status"]')
+        ?.textContent,
+    };
+    const signature = JSON.stringify(state);
+    if (signature !== previous) {
+      record('render', state);
+      previous = signature;
+    }
     if (!ready || !pause) return;
+    record('pause-click', state);
     pause.click();
     sessionStorage.removeItem('canopy-check-hold');
     observer.disconnect();
@@ -72,22 +101,92 @@ await first.page.addInitScript(() => {
     subtree: true,
     characterData: true,
   });
-});
+}
+
+async function demoFailureState() {
+  return {
+    readyState: document.readyState,
+    hold: sessionStorage.getItem('canopy-check-hold'),
+    requestedStep: sessionStorage.getItem('canopy-demo-step'),
+    requestedPaused: sessionStorage.getItem('canopy-demo-paused'),
+    beforeReset: sessionStorage.getItem('canopy-check-before-reset'),
+    navigation: performance.getEntriesByType('navigation').map((entry) => ({
+      startTime: entry.startTime,
+      duration: entry.duration,
+      type: entry.type,
+    })),
+    trace: globalThis.canopyDemoCheckTrace,
+    tour: document.querySelector('.demo-tour')?.textContent,
+    tree: [...document.querySelectorAll('[data-tree-key]')].map((row) => ({
+      key: row.getAttribute('data-tree-key'),
+      expanded: row.getAttribute('aria-expanded'),
+    })),
+    focus: document.activeElement?.getAttribute('aria-label'),
+    workspace: await window.canopy.loadWorkspace(),
+  };
+}
+
+async function reportDemoFailure(page, target, primary) {
+  let timer;
+  try {
+    const state = await Promise.race([
+      page.evaluate(demoFailureState),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Demo diagnostic timed out')),
+          2000,
+        );
+      }),
+    ]);
+    console.error(
+      'Demo hold failure:',
+      JSON.stringify({ target, error: String(primary), state }),
+    );
+  } catch (error) {
+    console.error('Demo hold diagnostic failed:', String(error));
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function resetAndHold(page, target) {
-  await page.evaluate(
-    (target) => sessionStorage.setItem('canopy-check-hold', target),
-    target,
-  );
+  await page.evaluate((target) => {
+    sessionStorage.setItem('canopy-check-hold', target);
+    sessionStorage.setItem(
+      'canopy-check-before-reset',
+      JSON.stringify({
+        target,
+        tour: document.querySelector('.demo-tour')?.textContent,
+        ms: performance.now(),
+        tree: [...document.querySelectorAll('[data-tree-key]')].map((row) => ({
+          key: row.getAttribute('data-tree-key'),
+          expanded: row.getAttribute('aria-expanded'),
+        })),
+      }),
+    );
+  }, target);
   await page.getByRole('button', { name: 'Reset and replay' }).click();
-  await expect(page.getByRole('button', { name: 'Resume demo' })).toBeVisible({
-    timeout: 30000,
-  });
+  try {
+    await expect(page.getByRole('button', { name: 'Resume demo' })).toBeVisible(
+      {
+        timeout: 30000,
+      },
+    );
+    if (target === 'start')
+      await expect(page.getByText('Starting tour · Paused')).toBeVisible();
+  } catch (error) {
+    await reportDemoFailure(page, target, error);
+    throw error;
+  }
   // Hold beyond either transient state's unpaused lifetime before testing Stop.
   await page.waitForTimeout(timingWindow(4000));
 }
 
 try {
   const { page } = first;
+  // Install before the reset reload renders. Freeze step zero synchronously,
+  // so UI assertion time cannot advance the initial Pause/Next test to step one.
+  await page.addInitScript(installDemoHold);
+  await resetAndHold(page, 'start');
   expect(await page.evaluate(() => window.canopy.demoTimeScale())).toBe(
     timeScale,
   );
@@ -100,7 +199,7 @@ try {
   await expect(
     page.getByRole('tree', { name: 'CAN-100 issue tree' }),
   ).toHaveClass(/demo-target-highlight/);
-  await page.getByRole('button', { name: 'Pause demo' }).click();
+  await expect(page.getByText('Starting tour · Paused')).toBeVisible();
   const pausedProgress = await progress.evaluate((bar) => bar.value);
   // Observe long enough for multiple progress ticks, even at test speed.
   await page.waitForTimeout(timingWindow(800));
@@ -321,6 +420,11 @@ try {
   console.log(
     'Demo checks passed: pause and progress, highlighted targets, step navigation, Stop, Reset, complete tour, manual takeover.',
   );
+} catch (error) {
+  // Initial Pause/Next and later tour assertions need the same bounded evidence
+  // as a failed transient-state hold, without replacing the original assertion.
+  await reportDemoFailure(first.page, 'tour-assertion', error);
+  throw error;
 } finally {
   await closeDemo(first);
 }

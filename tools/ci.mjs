@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { runCimModuleControls } from './windows-cim-control.mjs';
+import { runCimContextControls } from './windows-cim-input-control.mjs';
 
 const cwd = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 const startupOptions = process.argv.slice(2);
@@ -7,6 +9,20 @@ const env = { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' };
 for (const key of Object.keys(env)) {
   if (key.startsWith('JS_BINARY__') || key.startsWith('RUNFILES')) {
     delete env[key];
+  }
+}
+// Preserve a configured Windows cache override across Bazel's test environment.
+// Match Node's first sorted case-insensitive key; pass only its name in argv.
+const testEnvironment = [];
+if (process.platform === 'win32') {
+  const cacheKeys = Object.keys(env)
+    .sort()
+    .filter((key) => key.toUpperCase() === 'PSMODULEANALYSISCACHEPATH');
+  const cache = cacheKeys.length ? env[cacheKeys[0]] : undefined;
+  if (typeof cache === 'string' && cache.length > 0) {
+    for (const key of cacheKeys) delete env[key];
+    env.PSModuleAnalysisCachePath = cache;
+    testEnvironment.push('--test_env=PSModuleAnalysisCachePath');
   }
 }
 function run(command, args) {
@@ -22,6 +38,10 @@ function run(command, args) {
 function bazel(...args) {
   run('bazel', [...startupOptions, ...args]);
 }
+if (process.platform === 'win32') {
+  runCimModuleControls();
+  await runCimContextControls();
+}
 bazel('build', '//:build');
 bazel(
   'test',
@@ -29,7 +49,10 @@ bazel(
   '//:typecheck',
   '//:format_check',
   '//:portable_checks',
-  '--test_output=errors',
+  // Unit and portability targets each launch the complete process-heavy suite.
+  '--local_test_jobs=1',
+  process.platform === 'win32' ? '--test_output=all' : '--test_output=errors',
+  ...testEnvironment,
 );
 if (process.platform === 'linux' && !env.DISPLAY) {
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke']);
