@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const LIMIT = 10_000;
 const MAX_TEXT = 64 * 1024;
+const MAX_HASH = 256 * 1024 * 1024;
 const ownFile = fileURLToPath(import.meta.url);
 const hosted = (env) =>
   env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted';
@@ -70,11 +71,17 @@ export async function boundedRead(path) {
     await handle.close();
   }
 }
-async function boundedHash(path) {
+export async function boundedHash(path) {
   const handle = await open(path, 'r');
   try {
     const metadata = await handle.stat();
-    if (metadata.size > 64 * 1024 * 1024)
+    if (!metadata.isFile())
+      throw new Error('Diagnostic payload is not a regular file');
+    if (
+      !Number.isSafeInteger(metadata.size) ||
+      metadata.size < 0 ||
+      metadata.size > MAX_HASH
+    )
       throw new Error('Payload exceeds diagnostic hash limit');
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(64 * 1024);
@@ -82,13 +89,20 @@ async function boundedHash(path) {
       const { bytesRead } = await handle.read(
         buffer,
         0,
-        buffer.length,
+        Math.min(buffer.length, metadata.size - position),
         position,
       );
       if (!bytesRead) throw new Error('Payload disappeared during hash');
       hash.update(buffer.subarray(0, bytesRead));
       position += bytesRead;
     }
+    const after = await handle.stat();
+    if (
+      after.size !== metadata.size ||
+      after.mtimeMs !== metadata.mtimeMs ||
+      after.ctimeMs !== metadata.ctimeMs
+    )
+      throw new Error('Payload changed during diagnostic hash');
     return hash.digest('hex');
   } finally {
     await handle.close();
