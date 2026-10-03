@@ -2,22 +2,47 @@ import { _electron as electron, expect } from '@playwright/test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { authoringAuditLifecycle } from './authoring-audit.mjs';
 
 /** Real renderer/preload interactions with disposable, credential-free provider outcomes. */
-export async function auditAuthoring(appPath, executablePath, baseEnv) {
+export async function auditAuthoring(
+  appPath,
+  executablePath,
+  baseEnv,
+  lifecycle,
+) {
+  // Integration must supply the reviewed, platform-qualified shared primitives.
+  // No native launch or profile creation is allowed through the legacy cleanup.
+  const createAudit = authoringAuditLifecycle(lifecycle);
   const userData = await mkdtemp(join(tmpdir(), 'canopy-authoring-smoke-'));
   const env = { ...baseEnv, CANOPY_USER_DATA: userData };
   delete env.ELECTRON_RUN_AS_NODE;
   let app;
   let page;
   const errors = [];
+  const audit = createAudit({ profile: userData, executable: executablePath });
+  let primary;
+  const launch = async (phase) => {
+    app = await audit.launch(phase, () =>
+      electron.launch({
+        executablePath,
+        args: [appPath],
+        env,
+        timeout: 30_000,
+      }),
+    );
+    page = await audit.run(`${phase}:first-window`, () =>
+      app.firstWindow({ timeout: 30_000 }),
+    );
+  };
+  const evaluate = (callback, arg) =>
+    audit.run('main:evaluate', () => app.evaluate(callback, arg));
   try {
-    app = await electron.launch({ executablePath, args: [appPath], env });
-    page = await app.firstWindow();
+    await launch('initial');
     page.on('pageerror', (error) => errors.push(error));
     await page.getByRole('heading', { name: 'See the whole tree.' }).waitFor();
     const installGithubHandlers = async () => {
-      await app.evaluate(({ ipcMain }) => {
+      await evaluate(({ ipcMain }) => {
         const state = {
           mode: 'saved',
           release: null,
@@ -205,7 +230,9 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
       });
     };
     await installGithubHandlers();
-    await page.reload();
+    await audit.run('initial:fixture-reload', () =>
+      page.reload({ timeout: 30_000 }),
+    );
     const open = async (key = 'team/a#1') => {
       const pane = page.locator('.issue-preview');
       if (!(await pane.isVisible())) {
@@ -241,7 +268,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(
       editor.getByLabel('Comment draft', { exact: true }),
     ).toHaveValue('Recovered comment');
-    await page.reload();
+    await audit.run('fixture:reload', () => page.reload({ timeout: 30_000 }));
     editor = await open();
     await expect(
       editor.getByLabel('Draft description', { exact: true }),
@@ -262,10 +289,10 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(
       editor.getByLabel('Comment draft', { exact: true }),
     ).toHaveValue('Recovered comment');
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.authoringSmoke.mode = 'deferred';
     });
-    const deferredCount = await app.evaluate(
+    const deferredCount = await evaluate(
       () => globalThis.authoringSmoke.requests.length,
     );
     // Two native click attempts in one renderer turn dispatch only one write.
@@ -276,9 +303,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
         button.click();
       });
     await expect
-      .poll(() =>
-        app.evaluate(() => Boolean(globalThis.authoringSmoke.release)),
-      )
+      .poll(() => evaluate(() => Boolean(globalThis.authoringSmoke.release)))
       .toBe(true);
     await page
       .locator('.issue-preview')
@@ -297,7 +322,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(
       editor.getByRole('button', { name: 'Post comment', exact: true }),
     ).toBeDisabled();
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.authoringSmoke.mode = 'saved';
       globalThis.authoringSmoke.release();
     });
@@ -308,7 +333,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
       editor.getByLabel('Comment draft', { exact: true }),
     ).toHaveValue('New unsent draft while old request settles');
     expect(
-      await app.evaluate(() => globalThis.authoringSmoke.requests.length),
+      await evaluate(() => globalThis.authoringSmoke.requests.length),
     ).toBe(deferredCount + 1);
     await page
       .locator('.issue-preview')
@@ -321,7 +346,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await editor
       .getByLabel('Comment draft', { exact: true })
       .fill('Recovered comment');
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.authoringSmoke.mode = 'rejected';
     });
     await editor
@@ -334,7 +359,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(
       editor.getByRole('button', { name: 'Post comment', exact: true }),
     ).toBeEnabled();
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.authoringSmoke.mode = 'unknown';
     });
     await editor
@@ -343,20 +368,23 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(
       editor.getByRole('button', { name: 'Post comment', exact: true }),
     ).toBeDisabled();
-    await app.close();
+    await audit.closeForRestart(app);
     app = undefined;
-    app = await electron.launch({ executablePath, args: [appPath], env });
-    page = await app.firstWindow();
+    await launch('restart');
     page.on('pageerror', (error) => errors.push(error));
-    await page.waitForLoadState('domcontentloaded');
-    await installGithubHandlers();
-    await page.reload();
-    editor = await open();
+    await audit.run('restart:dom-ready', () =>
+      page.waitForLoadState('domcontentloaded', { timeout: 30_000 }),
+    );
+    await audit.run('restart:install-fixtures', installGithubHandlers);
+    await audit.run('restart:fixture-reload', () =>
+      page.reload({ timeout: 30_000 }),
+    );
+    editor = await audit.run('restart:open-recovered-draft', open);
     await expect(
       editor.getByRole('button', { name: 'Post comment', exact: true }),
     ).toBeDisabled();
     expect(
-      await app.evaluate(() => globalThis.authoringSmoke.requests.length),
+      await evaluate(() => globalThis.authoringSmoke.requests.length),
     ).toBe(0);
     await expect(
       editor.getByLabel('Comment draft', { exact: true }),
@@ -370,7 +398,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await editor
       .getByRole('button', { name: 'Allow a new write after review' })
       .click();
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.authoringSmoke.mode = 'saved';
     });
     await editor
@@ -415,7 +443,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(editor.getByRole('status')).toContainText(
       'Saved and verified',
     );
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.authoringSmoke.mode = 'partial';
     });
     await editor
@@ -436,7 +464,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect(
       editor.getByRole('button', { name: 'Create sub-issue', exact: true }),
     ).toBeDisabled();
-    const state = await app.evaluate(() => globalThis.authoringSmoke);
+    const state = await evaluate(() => globalThis.authoringSmoke);
     expect(state.creates).toBe(1);
     expect(state.browser).toEqual([['first', 'team/a#1']]);
     expect(state.attachments).toEqual([['first', 'team/a#1', 'file']]);
@@ -449,7 +477,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
       .getByRole('button', { name: 'Preview team/a#4', exact: true })
       .click();
     editor = await open('team/a#4');
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.authoringSmoke.mode = 'saved';
       globalThis.authoringSmoke.parent = null;
     });
@@ -465,12 +493,12 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await expect
       .poll(() => app.evaluate(() => globalThis.authoringSmoke.parent))
       .toBe('team/a#1');
-    expect(await app.evaluate(() => globalThis.authoringSmoke.creates)).toBe(1);
+    expect(await evaluate(() => globalThis.authoringSmoke.creates)).toBe(1);
     expect(
-      await app.evaluate(() => globalThis.authoringSmoke.requests.at(-1).key),
+      await evaluate(() => globalThis.authoringSmoke.requests.at(-1).key),
     ).toBe('team/a#4');
     // Jira's rich text runs preserve document structure and capability-denied actions hand off.
-    await app.evaluate(({ ipcMain }) => {
+    await evaluate(({ ipcMain }) => {
       const doc = {
         type: 'doc',
         version: 1,
@@ -591,7 +619,7 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
         ipcMain.handle(`canopy:${name}`, handler);
       }
     });
-    await page.reload();
+    await audit.run('fixture:reload', () => page.reload({ timeout: 30_000 }));
     editor = await open('ABC-1');
     await expect(
       editor.getByRole('button', { name: 'Post comment', exact: true }),
@@ -609,12 +637,12 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
       'Edited rich heading',
     );
     expect(
-      await app.evaluate(
+      await evaluate(
         () =>
           globalThis.jiraAuthoringSmoke.document.content[0].content[0].marks,
       ),
     ).toEqual([{ type: 'strong' }]);
-    await app.evaluate(() => {
+    await evaluate(() => {
       globalThis.jiraAuthoringSmoke.denied = true;
     });
     await editor
@@ -629,15 +657,22 @@ export async function auditAuthoring(appPath, executablePath, baseEnv) {
     await editor
       .getByRole('button', { name: 'Continue in Jira', exact: true })
       .click();
-    expect(await app.evaluate(() => globalThis.jiraAuthoringSmoke.opened)).toBe(
+    expect(await evaluate(() => globalThis.jiraAuthoringSmoke.opened)).toBe(
       true,
     );
     expect(errors, errors.map(String).join('\n')).toEqual([]);
-    console.log(
-      'Rich authoring acceptance passed: drafts, boundaries, rejection/retry, uncertain writes, hierarchy preview, partial creation, and handoffs.',
-    );
+  } catch (error) {
+    primary = error;
+    // Surface the assertion before cleanup, including a blocked close.
+    audit.failure(error);
   } finally {
-    await app?.close();
-    await rm(userData, { recursive: true, force: true });
+    await audit.finish({
+      app,
+      primary,
+      removeProfile: () => rm(userData, { recursive: true, force: true }),
+    });
   }
+  console.log(
+    'Rich authoring acceptance passed: drafts, boundaries, rejection/retry, uncertain writes, hierarchy preview, partial creation, and handoffs.',
+  );
 }
