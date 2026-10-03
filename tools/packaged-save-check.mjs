@@ -74,14 +74,41 @@ export async function checkPackagedFirstSave() {
     );
     assert.equal(reads, 2);
 
-    for (const contents of ['{malformed', 'null']) {
+    for (const contents of [
+      '{malformed',
+      'null',
+      '[]',
+      'false',
+      'true',
+      '"forest"',
+      '0',
+      '42',
+    ]) {
       await writeFile(workspace, contents);
+      reads = 0;
       await assert.rejects(
-        execute(expect, readFile, join, directory),
+        execute(
+          expect,
+          async (path, encoding) => {
+            reads++;
+            const contents = await readFile(path, encoding);
+            // A later healthy save must never hide a malformed first read.
+            if (reads === 1) await atomicSave({ palette: 'forest' });
+            return contents;
+          },
+          join,
+          directory,
+        ),
         (error) =>
-          contents === 'null'
-            ? error instanceof TypeError
-            : error instanceof SyntaxError,
+          contents === '{malformed'
+            ? error instanceof SyntaxError
+            : error instanceof TypeError &&
+              error.message === 'Workspace state must be a plain object',
+      );
+      assert.equal(reads, 1);
+      assert.equal(
+        JSON.parse(await readFile(workspace, 'utf8')).palette,
+        'forest',
       );
     }
     // Permission and other unexpected failures must remain the original error,

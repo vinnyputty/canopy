@@ -99,13 +99,51 @@ try {
       checkDesktopEntry(`[Desktop Entry]\nExec=AppRun ${flag} %U\n`, 'AppRun'),
     );
   }
+  const smokeSource = await readFile(
+    join(directory, 'packaged-smoke.mjs'),
+    'utf8',
+  );
+  const predicate = smokeSource.match(
+    /launch\.args\.filter\(\(arg\) =>([\s\S]*?)\n        \),/,
+  );
+  assert(predicate);
+  const unsafeArgument = new Function(
+    'arg',
+    `return ${predicate[1].trim().replace(/,$/, '')}`,
+  );
+  const safeArguments = [
+    'argument with spaces',
+    '',
+    '--enable-sandbox',
+    '-enable-sandbox',
+    '--no-sandbox-extra',
+    'prefix--no-sandbox',
+    'canopy://workspace/example',
+  ];
+  const unsafeArguments = ['-', '--'].flatMap((prefix) =>
+    [
+      'no-sandbox',
+      'disable-setuid-sandbox',
+      'disable-seccomp-filter-sandbox',
+      'disable-namespace-sandbox',
+      'disable-gpu-sandbox',
+    ].flatMap((name) =>
+      ['', '=', '=0', '=false', '=value'].map(
+        (suffix) => `${prefix}${name}${suffix}`,
+      ),
+    ),
+  );
+  for (const arg of safeArguments)
+    assert.equal(unsafeArgument(arg), false, arg);
+  for (const arg of unsafeArguments)
+    assert.equal(unsafeArgument(arg), true, arg);
   if (process.platform !== 'win32') {
     // Test only the shipped shell launcher's argument handling, never Electron.
     const argumentsPath = join(cwd, 'launcher-arguments');
     await writeFile(
       join(cwd, 'canopy'),
       `#!/usr/bin/env bash
-printf '%s\\n' "$@" > "$CANOPY_LAUNCHER_ARGUMENTS"
+printf '%s\\0' "$@" > "$CANOPY_LAUNCHER_ARGUMENTS"
 `,
       { mode: 0o755 },
     );
@@ -119,22 +157,18 @@ printf '%s\\n' "$@" > "$CANOPY_LAUNCHER_ARGUMENTS"
         env,
         encoding: 'utf8',
       });
-    assert.equal(launch(['argument with spaces']).status, 0);
+    assert.equal(launch(safeArguments).status, 0);
     assert.equal(
       await readFile(argumentsPath, 'utf8'),
-      'argument with spaces\n',
+      `${safeArguments.join('\0')}\0`,
     );
     await rm(argumentsPath);
-    for (const flag of [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-seccomp-filter-sandbox',
-    ]) {
-      const result = launch([flag]);
-      assert.equal(result.status, 1);
+    for (const flag of unsafeArguments) {
+      const result = launch(['safe before', flag, 'safe after']);
+      assert.equal(result.status, 1, flag);
       assert.match(result.stderr, /requires the Chromium sandbox/);
+      await assert.rejects(readFile(argumentsPath), { code: 'ENOENT' });
     }
-    await assert.rejects(readFile(argumentsPath), { code: 'ENOENT' });
   }
   // A launcher that exits before Playwright returns an application must retain
   // native stderr and fail; this fixture starts only Node, never Electron.

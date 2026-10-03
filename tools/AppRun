@@ -3,7 +3,7 @@ set -euo pipefail
 # Keep Chromium's sandbox enabled. Unsupported hosts fail at startup.
 for arg in "$@"; do
   case "$arg" in
-    --no-sandbox|--no-sandbox=*|--disable-*-sandbox|--disable-*-sandbox=*)
+    -no-sandbox|-no-sandbox=*|--no-sandbox|--no-sandbox=*|-disable-*-sandbox|-disable-*-sandbox=*|--disable-*-sandbox|--disable-*-sandbox=*)
       echo 'Canopy requires the Chromium sandbox.' >&2
       exit 1
       ;;

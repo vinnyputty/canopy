@@ -4,6 +4,8 @@ import {
   mkdir,
   open,
   lstat,
+  stat,
+  readlink,
   realpath,
   readdir,
   unlink,
@@ -1680,9 +1682,83 @@ export async function recordManagedProtocol(
     clearTimeout(timer);
   }
 }
+// /proc identifies the executing binary even when rules_js patches execPath.
+// This corroborates our trusted reviewed Node/toolchain, not hostile same-UID
+// immutability between observation and sudo exec. No environment path is authority.
+export async function managedNodeExecutable(
+  expires,
+  io = { link: readlink, canonical: realpath, lstat, stat, hash: boundedHash },
+) {
+  let timer;
+  const checkTime = () => {
+    if (!Number.isFinite(expires) || performance.now() >= expires)
+      fail('Managed helper setup deadline');
+  };
+  try {
+    checkTime();
+    return await Promise.race([
+      (async () => {
+        const proc = '/proc/self/exe';
+        const path = await io.link(proc);
+        if (
+          typeof path !== 'string' ||
+          !path.startsWith('/') ||
+          path.length > 4096 ||
+          /[\p{Cc}\p{Cf}]/u.test(path) ||
+          path.endsWith(' (deleted)') ||
+          (await io.canonical(path)) !== path
+        )
+          fail('Executing Node canonical path unavailable');
+        const before = await io.lstat(path);
+        if (
+          !before.isFile() ||
+          before.isSymbolicLink() ||
+          !(before.mode & 0o111) ||
+          before.mode & 0o6022 ||
+          ![0, process.getuid?.()].includes(before.uid) ||
+          before.nlink !== 1 ||
+          !Number.isSafeInteger(before.size) ||
+          before.size <= 0 ||
+          before.size > 256 * 1024 * 1024
+        )
+          fail('Executing Node file provenance unavailable');
+        const pin = identity(before);
+        if (!same(pin, identity(await io.stat(proc))))
+          fail('Executing Node inode mismatch');
+        const hash = await io.hash(proc);
+        checkTime();
+        if (!hex(hash) || hash !== (await io.hash(path)))
+          fail('Executing Node content mismatch');
+        if (
+          (await io.link(proc)) !== path ||
+          (await io.canonical(path)) !== path ||
+          !same(pin, identity(await io.lstat(path))) ||
+          !same(pin, identity(await io.stat(proc)))
+        )
+          fail('Executing Node identity changed');
+        checkTime();
+        return path;
+      })(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Managed helper setup deadline')),
+          Math.max(0, expires - performance.now()),
+        );
+      }),
+    ]);
+  } catch (error) {
+    throw Object.assign(
+      error instanceof Error ? error : new Error('Executing Node unproved'),
+      { managedUncertain: true },
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function rootInvoke(request) {
   const expires = performance.now() + 12000;
   await managedHostedContext();
+  const node = await managedNodeExecutable(expires);
   if (performance.now() >= expires)
     throw Object.assign(new Error('Managed helper setup deadline'), {
       managedUncertain: true,
@@ -1693,7 +1769,7 @@ async function rootInvoke(request) {
       '-n',
       `--preserve-env=${preserved.join(',')}`,
       '--',
-      process.execPath,
+      node,
       ownFile,
       '--managed-appimage-private',
     ],

@@ -4,10 +4,21 @@ import { createHash } from 'node:crypto';
 import { spawnSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import {
+  readFile,
+  mkdtemp,
+  writeFile,
+  rm,
+  realpath,
+  lstat,
+  stat,
+  readlink,
+} from 'node:fs/promises';
+import { boundedHash } from './appimage-observer.mjs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import {
+  managedNodeExecutable,
   managedGuard,
   managedOperation,
   managedPaths as paths,
@@ -1114,6 +1125,7 @@ export async function checkManagedAppImage() {
   }
   await checkBootstrapDiagnostics();
   await checkManagedLifecycle();
+  await checkManagedNodeExecutable(source);
   await checkManagedTransport(source);
   await checkManagedSuccessTransport(source, proof, launch);
   const refused = spawnSync(
@@ -1475,6 +1487,284 @@ async function checkBootstrapDiagnostics() {
   await done;
 }
 
+// Non-Linux proc link/stat are explicit Linux models; Windows also models
+// POSIX path/mode. File hashing and harmless Node execution are real. Never invoke sudo or
+// the private entry. Linux additionally exercises the actual kernel resolver.
+async function checkManagedNodeExecutable(source) {
+  const node = await realpath(
+    process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
+  );
+  const proc = '/proc/self/exe';
+  const windows = process.platform === 'win32';
+  const path = windows ? '/toolchain/node' : node;
+  const metadata = await lstat(node);
+  const linuxMetadata = (value) =>
+    windows
+      ? {
+          ...value,
+          mode: 0o100755,
+          isFile: () => value.isFile(),
+          isSymbolicLink: () => value.isSymbolicLink(),
+        }
+      : value;
+  const io = {
+    link: async () => path,
+    canonical: windows ? async () => path : realpath,
+    lstat: async () => linuxMetadata(await lstat(node)),
+    stat: async () => linuxMetadata(await stat(node)),
+    hash: (value) =>
+      boundedHash(value === proc || value === path ? node : value),
+  };
+  const selected = await managedNodeExecutable(performance.now() + 12000, io);
+  assert.equal(selected, path);
+  const clean = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C' };
+  const version = spawnSync(windows ? node : selected, ['--version'], {
+    env: clean,
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  assert.equal(version.status, 0, version.stderr);
+  assert.equal(version.stdout.trim(), process.version);
+  if (process.platform === 'linux') {
+    assert.equal(
+      await managedNodeExecutable(performance.now() + 12000),
+      await realpath(proc),
+    );
+    console.log('Actual Linux kernel executing-Node resolver PASS');
+  } else
+    console.log(
+      'Linux proc identity modeled; actual toolchain hash/version PASS',
+    );
+  if (process.env.JS_BINARY__NODE_WRAPPER && process.platform !== 'win32') {
+    assert.equal(process.execPath, process.env.JS_BINARY__NODE_WRAPPER);
+    const old = spawnSync(process.execPath, ['--version'], {
+      env: clean,
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    assert.equal(old.status, 1);
+    assert.match(old.stderr, /JS_BINARY__NODE_BINARY.*unbound variable/);
+    console.log(
+      'Actual Bazel wrapper clean-env FAIL; verified native Node clean-env PASS',
+    );
+  }
+  const begin = source.indexOf('async function rootInvoke(');
+  const end = source.indexOf('function nativeEffects(', begin);
+  const preserved = new Function(
+    `return ${source.match(/const preserved = (\[[\s\S]*?\]);/)[1]}`,
+  )();
+  let captured = false;
+  const positive = new Function(
+    'd',
+    `const {managedNodeExecutable,managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse}=d;${source.slice(begin, end)};return rootInvoke;`,
+  )({
+    managedNodeExecutable: (expires) => managedNodeExecutable(expires, io),
+    managedHostedContext: async () => ctx,
+    process,
+    preserved,
+    ownFile: '/reviewed/managed-appimage.mjs',
+    waitManagedChild,
+    boundedRead: async () => '',
+    processIdentity: () => ({ birth: '1' }),
+    validManagedResponse,
+    spawn: (command, args, options) => {
+      captured = true;
+      assert.equal(command, '/usr/bin/sudo');
+      assert.deepEqual(args, [
+        '-n',
+        `--preserve-env=${preserved.join(',')}`,
+        '--',
+        path,
+        '/reviewed/managed-appimage.mjs',
+        '--managed-appimage-private',
+      ]);
+      assert.deepEqual(options.env, {
+        ...clean,
+        ...Object.fromEntries(preserved.map((key) => [key, process.env[key]])),
+      });
+      assert.equal(options.env.NODE_OPTIONS, undefined);
+      assert.equal(options.env.JS_BINARY__NODE_BINARY, undefined);
+      return spawn(
+        node,
+        [
+          '-e',
+          `process.stdin.resume();process.stdin.on('end',()=>{process.stdout.write(JSON.stringify({ok:false,error:'harmless owned refusal',uncertain:true}));process.exitCode=1;});`,
+        ],
+        { stdio: options.stdio, env: clean },
+      );
+    },
+  });
+  await assert.rejects(
+    positive({ operation: 'prepare' }),
+    (error) =>
+      error.message === 'harmless owned refusal' &&
+      error.managedUncertain === true,
+  );
+  assert.equal(captured, true);
+  console.log(
+    'Actual resolver + production sudo argv/clean env + owned child transport PASS',
+  );
+  let spawned = 0;
+  const invoke = (resolver) =>
+    new Function(
+      'd',
+      `const {managedNodeExecutable,managedHostedContext,process,spawn}=d;${source.slice(begin, end)};return rootInvoke;`,
+    )({
+      managedNodeExecutable: resolver,
+      managedHostedContext: async () => ctx,
+      process,
+      spawn: () => {
+        spawned++;
+        throw new Error('Unexpected privileged spawn');
+      },
+    });
+  const pinnedMetadata = linuxMetadata(metadata);
+  for (const [name, change] of [
+    ['relative', { link: async () => 'node' }],
+    ['deleted', { link: async () => path + ' (deleted)' }],
+    ['control-character', { link: async () => path + '\n' }],
+    [
+      'unreadable',
+      {
+        link: async () => {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        },
+      },
+    ],
+    ['noncanonical', { canonical: async () => '/different' }],
+    [
+      'symlink',
+      {
+        lstat: async () => ({
+          ...pinnedMetadata,
+          isFile: () => true,
+          isSymbolicLink: () => true,
+        }),
+      },
+    ],
+    [
+      'nonexecutable',
+      {
+        lstat: async () => ({
+          ...pinnedMetadata,
+          mode: pinnedMetadata.mode & ~0o111,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        }),
+      },
+    ],
+    [
+      'writable',
+      {
+        lstat: async () => ({
+          ...pinnedMetadata,
+          mode: pinnedMetadata.mode | 0o002,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        }),
+      },
+    ],
+    [
+      'foreign-owner',
+      {
+        lstat: async () => ({
+          ...pinnedMetadata,
+          uid: 987654,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        }),
+      },
+    ],
+    [
+      'inode-mismatch',
+      {
+        stat: async () => ({ ...pinnedMetadata, ino: pinnedMetadata.ino + 1 }),
+      },
+    ],
+    ['content-mismatch', { hash: async (path) => hash(path) }],
+    ['invalid-hash', { hash: async () => 'bad' }],
+    [
+      'changed-link',
+      {
+        link: (() => {
+          let reads = 0;
+          return async () => (++reads === 1 ? path : '/changed');
+        })(),
+      },
+    ],
+    [
+      'changed-file',
+      {
+        lstat: (() => {
+          let reads = 0;
+          return async () =>
+            ++reads === 1
+              ? pinnedMetadata
+              : { ...pinnedMetadata, ino: pinnedMetadata.ino + 1 };
+        })(),
+      },
+    ],
+  ]) {
+    await assert.rejects(
+      invoke((expires) => managedNodeExecutable(expires, { ...io, ...change }))(
+        { operation: 'prepare' },
+      ),
+      (error) => error.managedUncertain === true,
+      name,
+    );
+    assert.equal(spawned, 0, name);
+  }
+  await assert.rejects(
+    managedNodeExecutable(performance.now() - 1, io),
+    (e) => e.managedUncertain === true,
+  );
+  // The original transport expiration includes resolution. Use a short model
+  // budget and settle the outstanding read-only work before leaving the test.
+  let release, done;
+  const reading = new Promise((resolve) => {
+    release = resolve;
+  });
+  const finished = new Promise((resolve) => {
+    done = resolve;
+  });
+  const delayed = {
+    ...io,
+    hash: async () => {
+      await reading;
+      done();
+      return hash('node');
+    },
+  };
+  const shortBody = source
+    .slice(begin, end)
+    .replace('performance.now() + 12000', 'performance.now() + 30');
+  const shortInvoke = new Function(
+    'd',
+    `const {managedNodeExecutable,managedHostedContext,process,spawn}=d;${shortBody};return rootInvoke;`,
+  )({
+    managedNodeExecutable: (expires) => managedNodeExecutable(expires, delayed),
+    managedHostedContext: async () => ctx,
+    process,
+    spawn: () => {
+      spawned++;
+      throw new Error('Unexpected privileged spawn');
+    },
+  });
+  try {
+    await assert.rejects(
+      shortInvoke({ operation: 'prepare' }),
+      (e) => e.managedUncertain === true && /deadline/.test(e.message),
+    );
+    assert.equal(spawned, 0);
+  } finally {
+    release();
+    await finished;
+  }
+  console.log(
+    'Executing Node provenance refusals and shared setup deadline PASS',
+  );
+}
+
 // Exact private transport body with sudo/proc replaced by owned Node/model IO.
 // No parser/root entry is executed. Both transport and real wrapper participate.
 async function checkManagedTransport(source) {
@@ -1558,8 +1848,9 @@ async function checkManagedTransport(source) {
       let current;
       const invoke = new Function(
         'd',
-        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse,managedBootstrapObservation,dirname}=d; ${source.slice(begin, end)};return rootInvoke;`,
+        `const {managedNodeExecutable,managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse,managedBootstrapObservation,dirname}=d; ${source.slice(begin, end)};return rootInvoke;`,
       )({
+        managedNodeExecutable: async () => node,
         managedBootstrapObservation,
         dirname: posix.dirname,
         managedHostedContext: async () => ctx,
@@ -1576,7 +1867,7 @@ async function checkManagedTransport(source) {
             '-n',
             '--preserve-env=',
             '--',
-            process.execPath,
+            node,
             '/unused',
             '--managed-appimage-private',
           ]);
@@ -2007,8 +2298,9 @@ async function checkManagedSuccessTransport(source, launchProof, launchInput) {
         );
       const invoke = new Function(
         'd',
-        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse,managedBootstrapObservation,dirname}=d;${body};return rootInvoke;`,
+        `const {managedNodeExecutable,managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse,managedBootstrapObservation,dirname}=d;${body};return rootInvoke;`,
       )({
+        managedNodeExecutable: async () => node,
         managedBootstrapObservation,
         dirname: posix.dirname,
         managedHostedContext: async () => ctx,

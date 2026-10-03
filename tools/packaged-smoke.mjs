@@ -386,7 +386,7 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
       expect(launch.sandboxControls).toEqual([]);
       expect(
         launch.args.filter((arg) =>
-          /^--(?:no-sandbox|disable-setuid-sandbox|disable-seccomp-filter-sandbox|disable-namespace-sandbox|disable-gpu-sandbox)(?:=|$)/.test(
+          /^-{1,2}(?:no-sandbox|disable-setuid-sandbox|disable-seccomp-filter-sandbox|disable-namespace-sandbox|disable-gpu-sandbox)(?:=|$)/.test(
             arg,
           ),
         ),
@@ -418,9 +418,16 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
         await expect
           .poll(async () => {
             try {
-              return JSON.parse(
+              const workspace = JSON.parse(
                 await readFile(join(userData, 'workspace.json'), 'utf8'),
-              ).palette;
+              );
+              if (
+                workspace === null ||
+                typeof workspace !== 'object' ||
+                Object.getPrototypeOf(workspace) !== Object.prototype
+              )
+                throw new TypeError('Workspace state must be a plain object');
+              return workspace.palette;
             } catch (error) {
               if (error?.code !== 'ENOENT') throw error;
               return undefined;
