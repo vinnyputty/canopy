@@ -248,7 +248,16 @@ export function WindowedRows({
       element = root.current;
     if (!container || !element || !windowed) return;
     let frame = 0;
-    const measure = () => {
+    const geometry = () =>
+      [
+        container.clientWidth,
+        container.clientHeight,
+        ...[...elements.current.values()].map(
+          (row) => row.getBoundingClientRect().height,
+        ),
+      ].join('|');
+    let observedGeometry = '';
+    const measureRows = () => {
       const finalRequest = alignment.current;
       if (finalRequest && finalRequest.passes >= 8) {
         // Finish the last queued layout before the bounded final correction;
@@ -336,6 +345,12 @@ export function WindowedRows({
         } else schedule();
       }
     };
+    const measure = () => {
+      measureRows();
+      // Record geometry after our own measurement/offset work. Initial delivery
+      // from an internally recreated observer is not a new external input.
+      observedGeometry = geometry();
+    };
     const schedule = () => {
       if (!frame)
         frame = requestAnimationFrame(() => {
@@ -348,7 +363,10 @@ export function WindowedRows({
       measurementPasses.current = 0;
       schedule();
     };
-    const observer = new ResizeObserver(externalMeasurement);
+    const observer = new ResizeObserver(() => {
+      if (geometry() !== observedGeometry) externalMeasurement();
+      else schedule();
+    });
     observer.observe(container);
     for (const row of elements.current.values()) observer.observe(row);
     const styles = new MutationObserver(externalMeasurement);

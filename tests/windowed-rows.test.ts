@@ -40,7 +40,7 @@ const issue = (i: number, parentKey = 'R-0'): Issue => ({
 
 // ReactDOM/events/focus are real; only geometry and ResizeObserver delivery are
 // synthetic. This is a portable source control, never native paint/AT evidence.
-async function dom() {
+async function dom(initialNotifications = false) {
   const value = new JSDOM(
     '<!doctype html><html><body><div class="tree-scroll" id="host"></div></body></html>',
     { pretendToBeVisual: true },
@@ -52,6 +52,7 @@ async function dom() {
     viewport = 300;
   const custom = new Map<string, number>();
   const observers = new Set<() => void>();
+  const pendingObservers = new Set<() => void>();
   const frames = new Map<number, FrameRequestCallback>();
   let frameId = 0;
   const prior = new Map<string, PropertyDescriptor | undefined>();
@@ -70,9 +71,16 @@ async function dom() {
         this.callback = callback;
         observers.add(callback);
       }
-      observe() {}
+      queued = false;
+      observe() {
+        if (initialNotifications && !this.queued) {
+          this.queued = true;
+          pendingObservers.add(this.callback);
+        }
+      }
       disconnect() {
         observers.delete(this.callback);
+        pendingObservers.delete(this.callback);
       }
     },
     requestAnimationFrame: (callback: FrameRequestCallback) => {
@@ -135,6 +143,27 @@ async function dom() {
   const { createRoot } = await import('react-dom/client');
   const root = createRoot(host);
   const flush = async () => {
+    if (initialNotifications) {
+      // Commit each frame separately so internal observer replacement delivers
+      // its own asynchronous initial notification, as in the browser.
+      for (let i = 0; (frames.size || pendingObservers.size) && i < 20; i++) {
+        await act(async () => {
+          const deliveries = [...pendingObservers];
+          pendingObservers.clear();
+          deliveries.forEach((callback) => callback());
+          const current = [...frames.values()];
+          frames.clear();
+          current.forEach((callback) => callback(performance.now()));
+        });
+      }
+      assert.equal(
+        pendingObservers.size,
+        0,
+        'finite initial observer deliveries',
+      );
+      assert.equal(frames.size, 0, 'finite observer/frame work');
+      return;
+    }
     await act(async () => {
       for (let i = 0; frames.size && i < 20; i++) {
         const current = [...frames.values()];
@@ -187,6 +216,7 @@ async function dom() {
     cleanup: async () => {
       await act(async () => root.unmount());
       assert.equal(observers.size, 0);
+      assert.equal(pendingObservers.size, 0);
       assert.equal(frames.size, 0);
       window.close();
       for (const [name, descriptor] of prior) {
@@ -985,19 +1015,21 @@ test('queued uniform reading-height estimates commit before explicit alignment s
   }
 });
 
-test('changing geometry respects eight measurements during and after synchronous acquisition and resumes on real inputs', async () => {
+async function changingGeometry(initialNotifications: boolean) {
   for (const strict of [false, true])
     for (const align of ['nearest', 'center'] as const)
       for (const timing of ['acquisition', 'after'])
         for (const signature of [false, true]) {
-          const state = await dom(),
+          const state = await dom(initialNotifications),
             api = { current: null as RowWindow | null },
             ids = Array.from({ length: 1000 }, (_, i) => `v${i}`);
           const computed = globalThis.getComputedStyle;
           let changing = false,
-            measurements = 0;
+            measurements = 0,
+            totalMeasurements = 0;
           globalThis.getComputedStyle = (element) => {
             const style = computed(element);
+            totalMeasurements++;
             if (!changing) return style;
             measurements++;
             for (const id of ids)
@@ -1072,6 +1104,12 @@ test('changing geometry respects eight measurements during and after synchronous
             // A real observer input starts new bounded work after the geometry settles.
             changing = false;
             state.custom.clear();
+            const beforeResize = totalMeasurements;
+            await state.resize(45);
+            assert.ok(
+              totalMeasurements > beforeResize,
+              'real row-only observer resize restarts exhausted work before navigation',
+            );
             await state.resize(30, 701, 300);
             await act(async () => {
               api
@@ -1109,4 +1147,9 @@ test('changing geometry respects eight measurements during and after synchronous
             assert.equal(api.current, null);
           }
         }
-});
+}
+
+test('changing geometry respects eight measurements during and after synchronous acquisition and resumes on real inputs', () =>
+  changingGeometry(false));
+test('initial observer deliveries preserve bounded measurement work and external recovery', () =>
+  changingGeometry(true));
