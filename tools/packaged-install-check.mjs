@@ -21,6 +21,7 @@ export async function checkPackagedInstallCleanup() {
     `const { process, executable, artifact, format, directory, name, root,
       createHash, dirname, join, readFile, run, checkDesktopEntry,
       linuxStartupEvidence, smoke, console, workspace, recordCanopyPolicy } = dependencies;
+    let managedAttempted = false; // This exact-source fixture exercises the DEB route.
     ${source.slice(start, end)}
     return launches;`,
   );

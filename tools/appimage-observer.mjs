@@ -10,7 +10,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LIMIT = 10_000;
@@ -43,7 +43,7 @@ export function mountedPath(executable, mountinfo) {
     executable,
   );
   if (!match) throw new Error('Executable is outside the owned Canopy mount');
-  const mount = dirname(executable);
+  const mount = posix.dirname(executable);
   const lines = mountinfo
     .split('\n')
     .filter((line) => line.split(' ')[4] === mount);
@@ -165,12 +165,12 @@ export async function mountedEvidence(pid, identity, config, effects = io) {
     executable,
     await effects.read(proc(pid, 'mountinfo')),
   );
-  const helper = join(mount.path, 'chrome-sandbox');
+  const helper = posix.join(mount.path, 'chrome-sandbox');
   if ((await effects.canonical(helper)) !== helper)
     throw new Error('Sandbox helper escapes mounted payload');
   if (
     (await effects.hash(executable)) !== config.executableSha256 ||
-    (await effects.hash(join(mount.path, 'resources', 'app.asar'))) !==
+    (await effects.hash(posix.join(mount.path, 'resources', 'app.asar'))) !==
       config.appAsarSha256
   )
     throw new Error('Mounted payload identity mismatch');
@@ -609,7 +609,10 @@ async function worker(config) {
   };
   // IPC failures are secondary diagnostics, including parent-disconnect races.
   process.on('error', (error) => {
-    if (!closed) note(error);
+    if (!closed) {
+      note(error);
+      if (config.managedReceipt) revoked = true;
+    }
   });
   process.on('message', (value) => {
     if (closed) return;
@@ -773,7 +776,11 @@ async function worker(config) {
               config,
             );
             await retained(root, identity, io);
-            if (revoked || !process.connected || stopped)
+            if (
+              revoked ||
+              !process.connected ||
+              (stopped && !config.managedReceipt)
+            )
               throw new Error('Retained launch ended during observation');
             // Async payload reads may finish after the sampling cutoff.
             if (Date.now() >= deadline - 750) break;
@@ -781,6 +788,16 @@ async function worker(config) {
             seen.add(key);
             evidence.status = 'observed';
             await save();
+            if (config.managedReceipt && evidence.authority?.managed === true)
+              process.send(
+                { type: 'sample-persisted', nonce: config.nonce },
+                (error) => {
+                  if (error) {
+                    note(error);
+                    revoked = true;
+                  }
+                },
+              );
           }
         }
       } catch (error) {
@@ -853,6 +870,21 @@ async function worker(config) {
     evidence.completed = true;
     evidence.elapsedMs = Date.now() - started;
     await save();
+    if (config.managedReceipt && Date.now() >= deadline)
+      throw new Error('Observer persistence deadline');
+    if (
+      config.managedReceipt &&
+      evidence.status === 'observed' &&
+      !revoked &&
+      evidence.authority?.managed === true &&
+      evidence.samples.length &&
+      process.connected
+    )
+      await new Promise((resolve, reject) =>
+        process.send({ type: 'finalized', nonce: config.nonce }, (error) =>
+          error ? reject(error) : resolve(),
+        ),
+      );
   } catch (error) {
     evidence.completed = false;
     invalidate(error);
@@ -862,6 +894,101 @@ async function worker(config) {
     clearTimeout(hardStop);
     if (process.connected) process.disconnect();
   }
+}
+
+// Managed completion owns no new grace period: all IPC, persistence and exit
+// must finish within the deadline established before observer startup.
+function managedCompletion(child, capture, nonce, deadline) {
+  let sampled = false;
+  let finalized = false;
+  let failed = false;
+  let finishing = false;
+  let stopSent = false;
+  let settled = false;
+  let resolve;
+  const completion = new Promise((done) => {
+    resolve = done;
+  });
+  const settle = (accepted) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    capture.close();
+    child.removeListener('message', onMessage);
+    resolve(accepted);
+  };
+  const stop = () => {
+    if (stopSent || !finishing || !sampled || failed || settled) return;
+    stopSent = true;
+    if (!child.connected) {
+      failed = true;
+      return;
+    }
+    try {
+      child.send('stop', (error) => {
+        if (error) {
+          failed = true;
+          capture.close();
+        }
+      });
+    } catch {
+      failed = true;
+      capture.close();
+    }
+  };
+  const onMessage = (value) => {
+    if (value?.nonce !== nonce) return;
+    if (value.type === 'sample-persisted') {
+      sampled = true;
+      stop();
+    }
+    if (value.type === 'finalized' && stopSent) finalized = true;
+  };
+  child.on('message', onMessage);
+  child.on('error', () => {
+    failed = true;
+    capture.close();
+  });
+  child.once('disconnect', () => {
+    if (!finalized) failed = true;
+    capture.close();
+  });
+  child.once('exit', (code, signal) =>
+    settle(
+      !failed &&
+        sampled &&
+        finalized &&
+        code === 0 &&
+        signal === null &&
+        Date.now() < deadline,
+    ),
+  );
+  const timer = setTimeout(
+    () => {
+      failed = true;
+      child.kill('SIGKILL');
+      settle(false);
+    },
+    Math.max(1, deadline - Date.now()),
+  );
+  const finish = (acquired = true) => {
+    finishing = true;
+    if (!acquired) {
+      failed = true;
+      capture.close();
+      if (child.connected) {
+        try {
+          child.send('stop', () => {});
+        } catch {
+          /* Deadline bounds exit. */
+        }
+      }
+    } else stop();
+    if (child.exitCode !== null || child.signalCode !== null) settle(false);
+    return completion;
+  };
+  finish.matches = (actual) => capture.matches(actual);
+  return finish;
 }
 
 async function startObserver(config) {
@@ -936,6 +1063,8 @@ async function startObserver(config) {
   child.on('message', onMessage);
   child.once('exit', () => capture.close());
   child.once('disconnect', () => capture.close());
+  if (config.managedReceipt)
+    return managedCompletion(child, capture, nonce, deadline);
   const finish = () =>
     new Promise((resolve) => {
       capture.close();
@@ -962,6 +1091,7 @@ export function assertManagedLaunchChild(app, kind) {
   const child = app.process();
   if (
     !binding ||
+    !binding.completed ||
     child !== binding.child ||
     !(child instanceof ChildProcess) ||
     child.exitCode !== null ||
@@ -985,29 +1115,41 @@ export async function observeAppImageLaunch(
 ) {
   if (platform !== 'linux' || !hosted(env)) return launch();
   let finish;
+  let acquired;
+  let binding;
+  const log = (...args) => {
+    try {
+      console.error(...args);
+    } catch {
+      /* Diagnostics are secondary. */
+    }
+  };
   try {
     const startup = Promise.resolve().then(() => start(config));
     try {
       finish = await waitWithin(startup, 1000);
     } catch (error) {
       // A late setup must be stopped instead of following an unrelated launch.
-      startup.then((stop) => stop?.()).catch(() => {});
+      startup.then((stop) => stop?.(false)).catch(() => {});
       throw error;
     }
   } catch (error) {
-    console.error('AppImage observer unavailable:', message(error));
+    log('AppImage observer unavailable:', message(error));
   }
   try {
     const app = await launch();
+    acquired = app;
     if (config.managedReceipt) {
       // Return the acquired app even if binding fails, so its caller owns
       // closure. The managed consumer refuses a missing association.
       try {
         const child = app.process();
-        managedLaunches.set(app, {
+        binding = {
           child,
           matched: finish?.matches?.(child) === true,
-        });
+          completed: false,
+        };
+        managedLaunches.set(app, binding);
       } catch {
         /* Acceptance remains unavailable. */
       }
@@ -1015,12 +1157,17 @@ export async function observeAppImageLaunch(
     return app;
   } finally {
     try {
-      if (finish) await waitWithin(Promise.resolve().then(finish), 750);
+      if (finish) {
+        if (config.managedReceipt) {
+          const completed = await finish(acquired !== undefined);
+          if (binding) {
+            binding.matched = finish.matches?.(binding.child) === true;
+            binding.completed = completed === true;
+          }
+        } else await waitWithin(Promise.resolve().then(finish), 750);
+      }
     } catch (error) {
-      console.error(
-        'AppImage observer completion unavailable:',
-        message(error),
-      );
+      log('AppImage observer completion unavailable:', message(error));
     }
   }
 }

@@ -8,9 +8,11 @@ import {
   readdir,
   unlink,
   rmdir,
+  writeFile,
 } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { dirname, join, basename } from 'node:path';
+import { basename as hostBasename, posix } from 'node:path';
+const { dirname, join, basename } = posix;
 import { fileURLToPath } from 'node:url';
 import {
   boundedRead,
@@ -1202,7 +1204,11 @@ export function waitManagedChild(
     }
   });
 }
-export function validManagedResponse(response, request) {
+export function validManagedResponse(response, request, onRefusal = () => {}) {
+  const refuse = (reason) => {
+    onRefusal(reason);
+    return false;
+  };
   const object = (value) =>
     value !== null && typeof value === 'object' && !Array.isArray(value);
   const keys = (value, expected) =>
@@ -1212,18 +1218,25 @@ export function validManagedResponse(response, request) {
   const birth = (value) => typeof value === 'string' && /^\d+$/.test(value);
   const pid = (value) => Number.isSafeInteger(value) && value > 0;
   const hash = (value) => typeof value === 'string' && hex(value);
-  const fileIdentity = (value, fields, type, uid, mode) =>
-    keys(value, fields) &&
-    fields.every(
-      (key) => typeof value[key] === 'number' && Number.isFinite(value[key]),
-    ) &&
-    fields
-      .filter((key) => !['mtimeMs', 'ctimeMs'].includes(key))
-      .every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0) &&
-    value.ino > 0 &&
-    (value.mode & 0o170000) === type &&
-    value.uid === uid &&
-    (mode === undefined || (value.mode & 0o7777) === mode);
+  const fileIdentity = (value, fields, type, uid, mode) => {
+    if (!keys(value, fields)) return refuse('file-identity.keys');
+    for (const key of fields) {
+      if (typeof value[key] !== 'number' || !Number.isFinite(value[key]))
+        return refuse(`file-identity.${key}.finite`);
+      if (
+        !['mtimeMs', 'ctimeMs'].includes(key) &&
+        (!Number.isSafeInteger(value[key]) || value[key] < 0)
+      )
+        return refuse(`file-identity.${key}.integer`);
+    }
+    if (value.ino <= 0) return refuse('file-identity.ino.positive');
+    if ((value.mode & 0o170000) !== type)
+      return refuse('file-identity.mode.type');
+    if (value.uid !== uid) return refuse('file-identity.uid');
+    if (mode !== undefined && (value.mode & 0o7777) !== mode)
+      return refuse('file-identity.mode.permissions');
+    return true;
+  };
   const stable = ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink'];
   const directory = stable.filter((key) => key !== 'nlink');
   const full = [...stable, 'size', 'mtimeMs', 'ctimeMs'];
@@ -1241,27 +1254,31 @@ export function validManagedResponse(response, request) {
     pid(value.pid) &&
     birth(value.birth) &&
     value.uid === 0;
-  if (!object(response) || typeof response.ok !== 'boolean') return false;
+  if (!object(response) || typeof response.ok !== 'boolean')
+    return refuse('envelope');
   if (!response.ok)
     return (
-      keys(response, ['ok', 'error', 'uncertain']) &&
-      typeof response.error === 'string' &&
-      response.error.length <= 4096 &&
-      typeof response.uncertain === 'boolean'
+      (keys(response, ['ok', 'error', 'uncertain']) &&
+        typeof response.error === 'string' &&
+        response.error.length <= 4096 &&
+        typeof response.uncertain === 'boolean') ||
+      refuse('failure-envelope')
     );
-  if (!keys(response, ['ok', 'value']) || !object(response.value)) return false;
+  if (!keys(response, ['ok', 'value']) || !object(response.value))
+    return refuse('success-envelope');
   const value = response.value;
   if (request.operation === 'cleanup')
     return (
       (keys(value, ['removed']) && value.removed === true) ||
-      (keys(value, ['empty']) && value.empty === true)
+      (keys(value, ['empty']) && value.empty === true) ||
+      refuse('cleanup-envelope')
     );
   if (
     !['prepare', 'check', 'launch'].includes(request.operation) ||
     !hash(value.receiptSha256) ||
     !object(value.receipt)
   )
-    return false;
+    return refuse('receipt-envelope');
   const r = value.receipt;
   if (
     !keys(r, [
@@ -1345,7 +1362,7 @@ export function validManagedResponse(response, request) {
     r.loadAttempted !== true ||
     !writer(r.writer)
   )
-    return false;
+    return refuse('receipt-header');
   const [dir, original, policy] = r.resources;
   if (
     !keys(dir, ['path', 'kind', 'identity']) ||
@@ -1367,7 +1384,7 @@ export function validManagedResponse(response, request) {
         item.sha256 === sha,
     )
   )
-    return false;
+    return refuse('resources');
   const o = r.original;
   if (
     !keys(o, ['managed', 'hash', 'parents', 'metadata']) ||
@@ -1390,7 +1407,7 @@ export function validManagedResponse(response, request) {
       );
     })
   )
-    return false;
+    return refuse('original');
   const loaded = r.loaded;
   if (
     !keys(loaded, ['path', 'attach', 'mode', 'sha256', 'identity']) ||
@@ -1405,7 +1422,7 @@ export function validManagedResponse(response, request) {
     loaded.identity.gid !== 0 ||
     loaded.identity.nlink < 1
   )
-    return false;
+    return refuse('loaded-profile');
   const m = r.mutation,
     child = m?.child,
     proof = m?.proof;
@@ -1441,11 +1458,15 @@ export function validManagedResponse(response, request) {
     proof.code !== 0 ||
     proof.signal !== null
   )
-    return false;
+    return refuse('parser-mutation');
   // The helper writes and hashes JSON.stringify(receipt), without a newline.
-  if (value.receiptSha256 !== digest(JSON.stringify(r))) return false;
+  if (value.receiptSha256 !== digest(JSON.stringify(r)))
+    return refuse('receipt-hash');
   if (request.operation !== 'launch')
-    return keys(value, ['receipt', 'receiptSha256']);
+    return (
+      keys(value, ['receipt', 'receiptSha256']) ||
+      refuse('installation-envelope')
+    );
   const launch = value.launch,
     expected = request.launch,
     sample = launch?.sample;
@@ -1495,31 +1516,127 @@ export function validManagedResponse(response, request) {
     sample.appAsarSha256 !== request.appAsarSha256 ||
     sample.apparmorContext !== `${managedProfile} (unconfined)`
   )
-    return false;
+    return refuse('launch');
   const mount = sample.mount,
     helper = sample.sandboxHelper;
   return (
-    keys(mount, ['path', 'options', 'filesystem', 'source', 'superOptions']) &&
-    typeof mount.path === 'string' &&
-    /^\/tmp\/\.mount_Canopy[a-zA-Z0-9]+$/.test(mount.path) &&
-    mount.source === managedPaths.original &&
-    typeof mount.filesystem === 'string' &&
-    /^fuse(?:\.|$)/.test(mount.filesystem) &&
-    typeof mount.options === 'string' &&
-    mount.options.length > 0 &&
-    mount.options.length <= 4096 &&
-    typeof mount.superOptions === 'string' &&
-    mount.superOptions.length > 0 &&
-    mount.superOptions.length <= 4096 &&
-    sample.executable === join(mount.path, 'canopy') &&
-    keys(helper, ['sha256', 'path', 'uid', 'gid', 'mode']) &&
-    helper.sha256 === request.helperSha256 &&
-    helper.path === join(mount.path, 'chrome-sandbox') &&
-    helper.uid === 0 &&
-    helper.gid === 0 &&
-    typeof helper.mode === 'string' &&
-    helper.mode === request.helperMode
+    (keys(mount, ['path', 'options', 'filesystem', 'source', 'superOptions']) &&
+      typeof mount.path === 'string' &&
+      /^\/tmp\/\.mount_Canopy[a-zA-Z0-9]+$/.test(mount.path) &&
+      mount.source === managedPaths.original &&
+      typeof mount.filesystem === 'string' &&
+      /^fuse(?:\.|$)/.test(mount.filesystem) &&
+      typeof mount.options === 'string' &&
+      mount.options.length > 0 &&
+      mount.options.length <= 4096 &&
+      typeof mount.superOptions === 'string' &&
+      mount.superOptions.length > 0 &&
+      mount.superOptions.length <= 4096 &&
+      sample.executable === join(mount.path, 'canopy') &&
+      keys(helper, ['sha256', 'path', 'uid', 'gid', 'mode']) &&
+      helper.sha256 === request.helperSha256 &&
+      helper.path === join(mount.path, 'chrome-sandbox') &&
+      helper.uid === 0 &&
+      helper.gid === 0 &&
+      typeof helper.mode === 'string' &&
+      helper.mode === request.helperMode) ||
+    refuse('mounted-payload')
   );
+}
+export async function recordManagedProtocol(
+  path,
+  error,
+  effects = { mkdir, writeFile },
+) {
+  let timer;
+  try {
+    const value = error?.managedProtocol;
+    const reasons = [
+      'json',
+      'schema',
+      'terminal',
+      'deadline',
+      'transport',
+      'helper-failure',
+      'envelope',
+      'success-envelope',
+      'failure-envelope',
+      'cleanup-envelope',
+      'receipt-envelope',
+      'receipt-header',
+      'resources',
+      'original',
+      'loaded-profile',
+      'parser-mutation',
+      'receipt-hash',
+      'launch',
+      'installation-envelope',
+      'mounted-payload',
+      'file-identity.keys',
+      'file-identity.ino.positive',
+      'file-identity.mode.type',
+      'file-identity.uid',
+      'file-identity.mode.permissions',
+      ...[
+        'dev',
+        'ino',
+        'uid',
+        'gid',
+        'mode',
+        'nlink',
+        'size',
+        'mtimeMs',
+        'ctimeMs',
+      ].flatMap((key) => [
+        `file-identity.${key}.finite`,
+        `file-identity.${key}.integer`,
+      ]),
+    ];
+    if (
+      !value ||
+      !['prepare', 'check', 'launch', 'cleanup', 'unknown'].includes(
+        value.operation,
+      ) ||
+      !reasons.includes(value.reason)
+    )
+      return;
+    const bytes = (count) =>
+      count === null ||
+      (Number.isSafeInteger(count) && count >= 0 && count <= 65536);
+    if (
+      !bytes(value.outputBytes) ||
+      !bytes(value.stderrBytes) ||
+      !(value.code === null || Number.isInteger(value.code)) ||
+      ![null, 'present'].includes(value.signal)
+    )
+      return;
+    const safe = Object.fromEntries(
+      [
+        'operation',
+        'reason',
+        'outputBytes',
+        'stderrBytes',
+        'code',
+        'signal',
+      ].map((key) => [key, value[key]]),
+    );
+    await Promise.race([
+      (async () => {
+        await effects.mkdir(dirname(path), { recursive: true });
+        await effects.writeFile(path, JSON.stringify(safe, null, 2));
+      })(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Managed diagnostics deadline')),
+          500,
+        );
+      }),
+    ]);
+  } catch {
+    // Diagnostics cannot replace the primary or change uncertain cleanup state.
+  } finally {
+    clearTimeout(timer);
+  }
 }
 async function rootInvoke(request) {
   const expires = performance.now() + 12000;
@@ -1556,28 +1673,71 @@ async function rootInvoke(request) {
         .birth,
     }),
   });
-  const proof = await pending;
-  let response;
+  let proof;
+  try {
+    proof = await pending;
+  } catch (error) {
+    if (error instanceof Error)
+      error.managedProtocol = {
+        operation: request.operation,
+        reason: 'transport',
+        outputBytes: null,
+        stderrBytes: null,
+        code: null,
+        signal: null,
+      };
+    throw error;
+  }
+  let response,
+    reason = 'json';
   try {
     response = JSON.parse(proof.output);
+    reason = 'schema';
     if (
-      !validManagedResponse(response, request) ||
+      !validManagedResponse(response, request, (value) => {
+        if (reason === 'schema') reason = value;
+      })
+    )
+      throw new Error('Incomplete response');
+    reason = 'terminal';
+    if (
       proof.signal ||
       ![0, 1].includes(proof.code) ||
       response.ok !== (proof.code === 0)
     )
-      throw new Error('Incomplete or incoherent response');
+      throw new Error('Incoherent response');
+    reason = 'deadline';
     // Validation and terminal classification consume the same original budget.
     if (performance.now() >= expires)
       throw new Error('Elapsed response deadline');
   } catch {
     throw Object.assign(new Error('Managed helper response unknown'), {
       managedUncertain: true,
+      managedProtocol: {
+        operation: ['prepare', 'check', 'launch', 'cleanup'].includes(
+          request.operation,
+        )
+          ? request.operation
+          : 'unknown',
+        reason,
+        outputBytes: Buffer.byteLength(proof.output),
+        stderrBytes: Buffer.byteLength(proof.stderr),
+        code: Number.isInteger(proof.code) ? proof.code : null,
+        signal: proof.signal === null ? null : 'present',
+      },
     });
   }
   if (!response.ok)
     throw Object.assign(new Error(response.error), {
       managedUncertain: response.uncertain === true,
+      managedProtocol: {
+        operation: request.operation,
+        reason: 'helper-failure',
+        outputBytes: Buffer.byteLength(proof.output),
+        stderrBytes: Buffer.byteLength(proof.stderr),
+        code: proof.code,
+        signal: null,
+      },
     });
   return response.value;
 }
@@ -1745,7 +1905,7 @@ function nativeEffects() {
   };
 }
 if (
-  basename(process.argv[1] ?? '') === 'managed-appimage.mjs' &&
+  hostBasename(process.argv[1] ?? '') === 'managed-appimage.mjs' &&
   process.argv[2] === '--managed-appimage-private'
 ) {
   const expires = performance.now() + 10000;

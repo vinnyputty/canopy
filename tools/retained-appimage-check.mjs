@@ -739,7 +739,7 @@ async function checkManagedChildBinding() {
     for (const matched of [true, false]) {
       let current = child;
       const app = { process: () => current };
-      const finish = async () => {};
+      const finish = async () => true;
       finish.matches = (actual) => matched && actual === child;
       await observeAppImageLaunch(
         { managedReceipt: 'fixture' },

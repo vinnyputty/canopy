@@ -1,5 +1,6 @@
 import {
   withManagedAppImage,
+  recordManagedProtocol,
   managedChild,
   acceptManagedObservation,
   managedHostedContext,
@@ -643,6 +644,17 @@ for (const format of platform.formats) {
         launches = await smoke(launchExecutable, directory, name, identity);
     } catch (error) {
       primaryFailed = true;
+      if (managedAttempted)
+        await recordManagedProtocol(
+          join(
+            workspace,
+            '.cache',
+            'smoke-failure',
+            name,
+            'managed-protocol.json',
+          ),
+          error,
+        );
       throw error;
     } finally {
       if (installAttempted) {

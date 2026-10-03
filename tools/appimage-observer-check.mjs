@@ -1,4 +1,4 @@
-import { fork } from 'node:child_process';
+import { fork, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, open, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,6 +6,7 @@ import { dirname, join, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import {
+  assertManagedLaunchChild,
   boundedHash,
   boundedRead,
   canopyPolicyEvidence,
@@ -37,6 +38,7 @@ const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
 const missing = Object.assign(new Error('gone'), { code: 'ENOENT' });
 
 export async function checkAppImageObserver() {
+  await checkManagedCompletion();
   assert.deepEqual(processIdentity(processStat()), identity);
   assert.throws(() => processIdentity('invalid'));
   assert.deepEqual(childPids('70 71\n'), [70, 71]);
@@ -584,5 +586,234 @@ export async function checkAppImageObserver() {
     assert(logs.length > 0);
   } finally {
     console.error = consoleError;
+  }
+}
+
+// Real owned Node IPC and exact source worker/completion; proc/payload reads are
+// injected models, with no AppImage, native launch or policy mutation.
+async function checkManagedCompletion() {
+  const source = await readFile(
+    new URL('./appimage-observer.mjs', import.meta.url),
+    'utf8',
+  );
+  const worker = source.slice(
+    source.indexOf('async function worker(config) {'),
+    source.indexOf('// Managed completion owns'),
+  );
+  const completion = source.slice(
+    source.indexOf('function managedCompletion('),
+    source.indexOf('async function startObserver('),
+  );
+  const makeCompletion = new Function(
+    `${completion}; return managedCompletion;`,
+  )();
+  const directory = await mkdtemp(join(tmpdir(), 'canopy-managed-observer-'));
+  const node = process.env.JS_BINARY__NODE_BINARY ?? process.execPath;
+  const product = spawn(node, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+  });
+  const logs = [];
+  const logger = console.error;
+  console.error = (...args) => logs.push(args);
+  try {
+    await new Promise((resolve, reject) => {
+      product.once('spawn', resolve);
+      product.once('error', reject);
+    });
+    const fixture = join(directory, 'worker.mjs');
+    await writeFile(
+      fixture,
+      `
+      import {mkdir, writeFile as persist} from 'node:fs/promises';
+      import {dirname} from 'node:path';
+      const [mode, output] = process.argv.slice(2);
+      const LIMIT = 10000;
+      const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const message = error => ({error: error?.message ?? String(error)});
+      const proc = (pid, file) => '/proc/' + pid + '/' + file;
+      const processIdentity = text => JSON.parse(text);
+      const childPids = text => JSON.parse(text);
+      const io = {
+        read: async path => path.endsWith('/children') ?
+          JSON.stringify(path.includes('/50/') ? [70] : []) :
+          JSON.stringify({parent: 50, birth: path.includes('/50/') ? 'parent' : 'root'}),
+        stat: async () => ({uid: 1001}),
+        link: async () => '/tmp/.mount_CanopyABC/canopy',
+      };
+      const originalArtifact = async () => ({managed: mode !== 'unproven-authority', hash: 'modeled-original', metadata: {uid: 0}});
+      const runtimeIdentity = async () => ({parent: 50, birth: 'root'});
+      const retained = async () => {};
+      const diagnosticCommand = async () => ({unavailable: 'injected; no native command'});
+      const mountedEvidence = async () => {
+        process.send({type: 'sampling'});
+        await delay(100);
+        if (mode === 'invalid-sample') throw new Error('Invalid mounted sample');
+        if (mode === 'worker-error') process.emit('error', new Error('worker fault'));
+        return {pid: 70, birth: 'root', mount: {path: '/tmp/.mount_CanopyABC'}};
+      };
+      const writeFile = async (path, text) => {
+        const report = JSON.parse(text);
+        if (report.completed) {
+          if (mode === 'persistence-error') throw new Error('Persistence fault');
+          if (mode === 'slow-finalization') await delay(900);
+          if (mode === 'late-finalized') await delay(2800);
+        }
+        return persist(path, text);
+      };
+      ${worker}
+      await worker({artifact: '/fixture/Canopy.AppImage', output, parent: 50,
+        parentBirth: 'parent', baseline: [], uid: 1001, nonce: 'fixture',
+        managedReceipt: mode === 'missing-receipt' ? undefined : 'receipt', deadline: Date.now() + 2400});
+      if (mode === 'unclosed-worker') setInterval(() => {}, 1000);
+    `,
+    );
+    for (const mode of [
+      'early-launch',
+      'stop-during-sampling',
+      'slow-finalization',
+      'missing-association',
+      'missing-receipt',
+      'unproven-authority',
+      'invalid-sample',
+      'persistence-error',
+      'ipc-disconnect',
+      'deadline-expired',
+      'late-finalized',
+      'unclosed-worker',
+      'worker-error',
+    ]) {
+      const output = join(directory, mode + '.json');
+      const child = fork(fixture, [mode, output], {
+        execPath: node,
+        execArgv: [],
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      let closed = false;
+      let sampling = false;
+      child.on('message', (value) => {
+        if (value?.type !== 'sampling') return;
+        sampling = true;
+        if (mode === 'stop-during-sampling') child.send('stop');
+        if (mode === 'ipc-disconnect') child.disconnect();
+      });
+      const deadline = Date.now() + (mode === 'deadline-expired' ? 50 : 2500);
+      const finish = makeCompletion(
+        child,
+        {
+          close: () => {
+            closed = true;
+          },
+          matches: (actual) =>
+            actual === product && mode !== 'missing-association',
+        },
+        'fixture',
+        deadline,
+      );
+      const app = { process: () => product };
+      const started = Date.now();
+      assert.equal(
+        await observeAppImageLaunch(
+          { managedReceipt: 'receipt' },
+          async () => {
+            assert.equal(
+              sampling,
+              false,
+              'launch resolves before the first sample',
+            );
+            return app;
+          },
+          {
+            platform: 'linux',
+            env: {
+              GITHUB_ACTIONS: 'true',
+              RUNNER_ENVIRONMENT: 'github-hosted',
+            },
+            start: async () => finish,
+          },
+        ),
+        app,
+      );
+      assert(closed);
+      const success = [
+        'early-launch',
+        'stop-during-sampling',
+        'slow-finalization',
+      ].includes(mode);
+      if (success) {
+        assertManagedLaunchChild(app, 'retained-spawn');
+        const report = JSON.parse(await readFile(output, 'utf8'));
+        assert.equal(report.completed, true);
+        assert.equal(report.status, 'observed');
+        assert.equal(report.authority.managed, true);
+        assert.equal(report.samples[0].birth, 'root');
+        assert.equal(child.exitCode, 0);
+        assert.equal(child.signalCode, null);
+        if (mode === 'slow-finalization') assert(Date.now() - started > 800);
+      } else {
+        assert.throws(() => assertManagedLaunchChild(app, 'retained-spawn'));
+        if (mode !== 'missing-association')
+          assert.throws(() => assertManagedLaunchChild(app, 'native-original'));
+      }
+      if (child.exitCode === null && child.signalCode === null)
+        await new Promise((resolve) => {
+          child.once('exit', resolve);
+          child.kill('SIGKILL');
+        });
+      assert.doesNotMatch(stderr, /Unhandled/);
+    }
+    for (const primary of [
+      undefined,
+      null,
+      false,
+      0,
+      '',
+      new Error('primary'),
+    ]) {
+      console.error = () => {
+        throw new Error('logger fault');
+      };
+      for (const start of [
+        async () => {
+          throw new Error('observer fault');
+        },
+        async () => async () => {
+          throw new Error('completion fault');
+        },
+      ]) {
+        let rejected = false;
+        try {
+          await observeAppImageLaunch(
+            { managedReceipt: 'receipt' },
+            async () => {
+              throw primary;
+            },
+            {
+              platform: 'linux',
+              env: {
+                GITHUB_ACTIONS: 'true',
+                RUNNER_ENVIRONMENT: 'github-hosted',
+              },
+              start,
+            },
+          );
+        } catch (error) {
+          rejected = true;
+          assert.equal(error, primary);
+        }
+        assert(rejected);
+      }
+    }
+  } finally {
+    console.error = logger;
+    if (product.exitCode === null && product.signalCode === null)
+      await new Promise((resolve) => {
+        product.once('exit', resolve);
+        product.kill('SIGKILL');
+      });
+    await rm(directory, { recursive: true, force: true });
   }
 }

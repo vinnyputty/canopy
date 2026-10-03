@@ -17,6 +17,7 @@ import {
   waitManagedChild,
   boundedManagedClose,
   validManagedResponse,
+  recordManagedProtocol,
 } from './managed-appimage.mjs';
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const ctx = {
@@ -275,6 +276,24 @@ export async function checkManagedAppImage() {
       managedGuard({ ...ctx, env: { ...ctx.env, [key]: value } }),
     );
   assert.throws(() => managedGuard({ ...ctx, env: {} }));
+  // Linux semantics remain POSIX on every host; canonical/source boundaries
+  // still reject foreign or escaped paths before any mutation.
+  for (const source of [
+    '/workspace/other/Canopy-1.0.0-linux-x86_64.AppImage',
+    '/workspace/release/../Canopy-1.0.0-linux-x86_64.AppImage',
+    'C:\\workspace\\release\\Canopy-1.0.0-linux-x86_64.AppImage',
+  ]) {
+    const rejected = model();
+    await assert.rejects(
+      managedOperation(
+        { ...base, source, operation: 'prepare' },
+        rejected.io,
+        ctx,
+      ),
+      /Source outside/,
+    );
+    assert.deepEqual(rejected.calls, []);
+  }
   const m = model();
   const installed = await managedOperation(
     { ...base, operation: 'prepare' },
@@ -618,7 +637,23 @@ export async function checkManagedAppImage() {
   await assert.rejects(noManagedOccupants(unknown.io));
 
   // Exercise exact wrapper decisions, including falsy/undefined primary values.
-  for (const primary of [undefined, null, false, 0, '', new Error('primary')]) {
+  for (const primary of [
+    undefined,
+    null,
+    false,
+    0,
+    '',
+    Object.assign(new Error('primary'), {
+      managedProtocol: {
+        operation: 'prepare',
+        reason: 'schema',
+        outputBytes: 1,
+        stderrBytes: 0,
+        code: 0,
+        signal: null,
+      },
+    }),
+  ]) {
     let caught = false,
       value,
       cleaned = false;
@@ -995,6 +1030,85 @@ export async function checkManagedAppImage() {
   );
   await assert.rejects(native.parser('replace', async () => {}));
   assert.equal(commands.length, 2);
+  let diagnosticWrites = 0;
+  for (const managedProtocol of [
+    {
+      operation: 'prepare',
+      reason: 'SECRET',
+      outputBytes: 0,
+      stderrBytes: 0,
+      code: 0,
+      signal: null,
+    },
+    {
+      operation: 'prepare',
+      reason: 'schema',
+      outputBytes: 65537,
+      stderrBytes: 0,
+      code: 0,
+      signal: null,
+    },
+  ])
+    await recordManagedProtocol(
+      '/owned/rejected.json',
+      { managedProtocol },
+      {
+        mkdir: async () => assert.fail('no mkdir'),
+        writeFile: async () => {
+          diagnosticWrites++;
+        },
+      },
+    );
+  assert.equal(diagnosticWrites, 0);
+  const packagedSource = await readFile(
+    new URL('./packaged-smoke.mjs', import.meta.url),
+    'utf8',
+  );
+  const catchStart = packagedSource.indexOf(
+      '    } catch (error) {\n      primaryFailed = true;',
+    ),
+    catchEnd = packagedSource.indexOf('    } finally {', catchStart);
+  assert(catchStart >= 0 && catchEnd > catchStart);
+  const failureConsumer = new Function(
+    'primary',
+    'recordManagedProtocol',
+    `return (async()=>{let primaryFailed=false;const managedAttempted=true,workspace='/owned',name='fixture';const join=(...parts)=>parts.join('/');try{throw primary;${packagedSource.slice(catchStart, catchEnd)}}})();`,
+  );
+  for (const primary of [
+    undefined,
+    null,
+    false,
+    0,
+    '',
+    Object.assign(new Error('primary'), {
+      managedProtocol: {
+        operation: 'prepare',
+        reason: 'schema',
+        outputBytes: 1,
+        stderrBytes: 0,
+        code: 0,
+        signal: null,
+      },
+    }),
+  ]) {
+    let caught = false,
+      received;
+    try {
+      await failureConsumer(primary, (path, error) =>
+        recordManagedProtocol(path, error, {
+          mkdir: async () => {
+            throw new Error('secondary');
+          },
+          writeFile: async () => assert.fail('no write'),
+        }),
+      );
+    } catch (error) {
+      caught = true;
+      received = error;
+    }
+    assert(caught);
+    assert.equal(received, primary);
+  }
   await checkManagedLifecycle();
   await checkManagedTransport(source);
   await checkManagedSuccessTransport(source, proof, launch);
@@ -1389,6 +1503,24 @@ async function checkManagedTransport(source) {
           name,
         );
       }
+      if (expectedUncertain) {
+        const writes = [];
+        await recordManagedProtocol('/owned/protocol.json', failure, {
+          mkdir: async () => {},
+          writeFile: async (path, text) => writes.push(JSON.parse(text)),
+        });
+        assert.equal(writes.length, 1, name);
+        assert(['prepare'].includes(writes[0].operation));
+        assert(!JSON.stringify(writes[0]).includes('fixture known failure'));
+        assert.equal(Object.keys(writes[0]).length, 6);
+        // Reporting failure never replaces the exact transport exception.
+        await recordManagedProtocol('/owned/protocol.json', failure, {
+          mkdir: async () => {
+            throw false;
+          },
+          writeFile: async () => assert.fail('no write'),
+        });
+      }
       assert.equal(operations.includes('cleanup'), !expectedUncertain, name);
     }
     // Successful reply shape is operation-specific; malformed cleanup/launch
@@ -1657,8 +1789,8 @@ async function checkManagedSuccessTransport(source, launchProof, launchInput) {
         waitManagedChild,
         boundedRead: async () => '',
         processIdentity: () => ({ birth: '1' }),
-        validManagedResponse: (response, request) => {
-          const result = validManagedResponse(response, request);
+        validManagedResponse: (response, request, refused) => {
+          const result = validManagedResponse(response, request, refused);
           if (late && request.operation === phase) {
             const until = performance.now() + 180;
             while (performance.now() < until) {}
