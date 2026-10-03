@@ -61,6 +61,14 @@ export function mountedPath(executable, mountinfo) {
     superOptions: fields[2],
   };
 }
+// Exact kernel metadata observed for the fixed managed runtime. This label
+// supplies no original-file or retained-launch authority; preserve it verbatim.
+export function managedMountLabel(mount) {
+  return (
+    mount?.source === 'Canopy.AppImage' &&
+    mount.filesystem === 'fuse.Canopy.AppImage'
+  );
+}
 export async function boundedRead(path) {
   const handle = await open(path, 'r');
   try {

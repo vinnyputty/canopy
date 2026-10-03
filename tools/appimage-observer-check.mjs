@@ -25,7 +25,7 @@ const processStat = (parent = 50, birth = '123') =>
   `70 (name with ) parentheses) S ${parent} ${Array(17).fill('0').join(' ')} ${birth}`;
 const artifact = '/release/Canopy.AppImage';
 const mount = '/tmp/.mount_CanopyABC123';
-const mountinfo = `25 1 0:100 / ${mount} ro,nosuid,nodev - fuse.Canopy ${artifact} ro,user_id=1001`;
+const mountinfo = `25 1 0:100 / ${mount} ro,nosuid,nodev - fuse.Canopy.AppImage Canopy.AppImage ro,user_id=1001`;
 const config = {
   parent: 50,
   uid: 1001,
@@ -54,7 +54,7 @@ export async function checkAppImageObserver() {
     ['/tmp/.mount_OtherABC/canopy', mountinfo],
     [`${mount}/other`, mountinfo],
     [`${mount}/canopy`, ''],
-    [`${mount}/canopy`, mountinfo.replace('fuse.Canopy', 'ext4')],
+    [`${mount}/canopy`, mountinfo.replace('fuse.Canopy.AppImage', 'ext4')],
   ])
     assert.throws(() => mountedPath(path, mounts));
 
@@ -115,7 +115,7 @@ export async function checkAppImageObserver() {
   const sample = await mountedEvidence(70, identity, config, mounted);
   assert.equal(sample.apparmorContext, 'unconfined');
   assert.equal(sample.sandboxHelper.mode, '755');
-  assert.equal(sample.mount.filesystem, 'fuse.Canopy');
+  assert.equal(sample.mount.filesystem, 'fuse.Canopy.AppImage');
   assert.equal(sample.mount.path, mount);
   assert(!calls.some((path) => /environ|cmdline/.test(path)));
   for (const effects of [

@@ -19,6 +19,7 @@ import {
   managedProfile,
   validManagedResponse,
   managedInstallationSha256,
+  acceptManagedObservation,
 } from './managed-appimage.mjs';
 const hash = (v) => createHash('sha256').update(v).digest('hex');
 const status =
@@ -69,7 +70,7 @@ export async function checkMountedReader({ model, ctx, base, text }) {
       fileHash = m.io.hash;
     m.io.read = async (p) =>
       p.endsWith('/mountinfo')
-        ? `25 1 0:100 / ${mount} ro,nosuid,nodev - fuse.Canopy ${managedPaths.original} ro,user_id=1001,group_id=1002`
+        ? `25 1 0:100 / ${mount} ro,nosuid,nodev - fuse.Canopy.AppImage Canopy.AppImage ro,user_id=1001,group_id=1002`
         : p.endsWith('/attr/current')
           ? `${managedProfile} (unconfined)`
           : p === '/proc/80/status'
@@ -134,6 +135,86 @@ export async function checkMountedReader({ model, ctx, base, text }) {
   assert.equal(value.receipt.mutation.writer.pid, 90);
   assert.equal(value.receipt.reader.child.pid, 92);
   const qualified = structuredClone(value.receipt.reader);
+  assert.equal(qualified.scope.mount.source, 'Canopy.AppImage');
+  assert.equal(qualified.scope.mount.filesystem, 'fuse.Canopy.AppImage');
+  assert.deepEqual(qualified.scope.mount, value.launch.sample.mount);
+  const report = {
+    completed: true,
+    status: 'observed',
+    finalizedAt: Date.now(),
+    artifact: managedPaths.original,
+    parent: base.parent.pid,
+    parentBirth: base.parent.birth,
+    managedReceipt: value.receipt.token,
+    original: value.receipt.original,
+    authority: {
+      kind: 'retained-spawn',
+      pid: launch.rootPid,
+      birth: launch.rootBirth,
+      originalSha256: base.sha256,
+      managed: true,
+    },
+    samples: [value.launch.sample],
+  };
+  assert(acceptManagedObservation(report, value, launch, base.parent));
+  // A plausible basename label never substitutes for retained original authority.
+  for (const change of [
+    (v) => {
+      delete v.authority;
+    },
+    (v) => {
+      v.artifact = '/tmp/Canopy.AppImage';
+    },
+    (v) => {
+      v.authority.originalSha256 = 'f'.repeat(64);
+    },
+    (v) => {
+      v.authority.birth = '999';
+    },
+    (v) => {
+      v.authority.pid = 999;
+    },
+  ]) {
+    const bad = structuredClone(report);
+    change(bad);
+    assert.throws(() =>
+      acceptManagedObservation(bad, value, launch, base.parent),
+    );
+  }
+  // Rehash and consistently forge every consumer association: foreign metadata
+  // must still refuse, including the durable reader state used by cleanup.
+  for (const [source, filesystem] of [
+    [managedPaths.original, 'fuse.Canopy.AppImage'],
+    ['/tmp/Canopy.AppImage', 'fuse.Canopy.AppImage'],
+    ['Foreign.AppImage', 'fuse.Canopy.AppImage'],
+    ['Canopy.AppImage.extra', 'fuse.Canopy.AppImage'],
+    ['Canopy.AppImage', 'fuse.Foreign.AppImage'],
+    ['Canopy.AppImage', 'fuse.Canopy'],
+  ]) {
+    const bad = structuredClone(value);
+    for (const m of [bad.launch.sample.mount, bad.receipt.reader.scope.mount]) {
+      m.source = source;
+      m.filesystem = filesystem;
+    }
+    bad.receiptSha256 = hash(JSON.stringify(bad.receipt));
+    assert(!validReaderState(bad.receipt.reader, true));
+    assert(!validManagedResponse({ ok: true, value: bad }, request));
+    const observation = { ...report, samples: [bad.launch.sample] };
+    assert.throws(() =>
+      acceptManagedObservation(observation, bad, launch, base.parent),
+    );
+    const kernel = await fixture();
+    kernel.files.get(managedPaths.receipt).content = JSON.stringify(
+      bad.receipt,
+    );
+    const files = structuredClone([...kernel.files]),
+      effects = [...kernel.calls];
+    await assert.rejects(
+      managedOperation({ ...base, operation: 'cleanup' }, kernel.io, ctx),
+    );
+    assert.deepEqual([...kernel.files], files);
+    assert.deepEqual(kernel.calls, effects);
+  }
   for (const alteration of [
     (r) => {
       r.state = 'pending';
@@ -269,6 +350,12 @@ export async function checkMountedReader({ model, ctx, base, text }) {
     'mapping',
     'namespace',
     'source',
+    'absolute-source',
+    'foreign-filesystem',
+    'original-hash',
+    'root-birth',
+    'main-parent',
+    'profile',
     'saved',
   ]) {
     const bad = await fixture(),
@@ -283,8 +370,18 @@ export async function checkMountedReader({ model, ctx, base, text }) {
         if (changed === 'gid-zero')
           v = v.replace('group_id=1002', 'group_id=0');
         if (changed === 'source')
-          v = v.replace(managedPaths.original, '/foreign');
+          v = v.replace(' Canopy.AppImage ', ' Foreign.AppImage ');
+        if (changed === 'absolute-source')
+          v = v.replace(' Canopy.AppImage ', ` ${managedPaths.original} `);
+        if (changed === 'foreign-filesystem')
+          v = v.replace('fuse.Canopy.AppImage', 'fuse.Foreign.AppImage');
       }
+      if (p === '/proc/70/stat' && changed === 'root-birth')
+        v = text(50, '999');
+      if (p === '/proc/70/stat' && changed === 'main-parent')
+        v = text(999, '123');
+      if (p.endsWith('/attr/current') && changed === 'profile')
+        v = 'Canopy.AppImage (unconfined)';
       if (p === '/proc/70/status' && changed === 'gid-mismatch')
         v = v.replace('Gid: 1002', 'Gid: 1001');
       if (p === '/proc/70/status' && changed === 'saved')
@@ -296,12 +393,35 @@ export async function checkMountedReader({ model, ctx, base, text }) {
       changed === 'namespace' && p === '/proc/70/ns/user'
         ? 'user:[99]'
         : link(p);
+    if (changed === 'original-hash')
+      bad.files.get(managedPaths.original).content = 'foreign';
     const before = structuredClone([...bad.files]),
       effects = [...bad.calls];
     await assert.rejects(managedOperation(request, bad.io, ctx));
     assert.deepEqual([...bad.files], before);
     assert.deepEqual(bad.calls, effects);
   }
+  // The fixed source label reaches subsequent owner qualification unchanged.
+  const observed = await fixture();
+  const observedRead = observed.io.read;
+  let reachedOwner = false;
+  observed.io.read = async (p) => {
+    if (p === '/proc/70/status') {
+      reachedOwner = true;
+      return (await observedRead(p)).replace('Gid: 1002', 'Gid: 0');
+    }
+    return observedRead(p);
+  };
+  await assert.rejects(
+    readerScope(observed.io, request, managedPaths.original),
+  );
+  assert(reachedOwner);
+  await assert.rejects(
+    readerScope((await fixture()).io, request, '/tmp/Canopy.AppImage'),
+  );
+  console.log(
+    'Managed exact kernel label and independent original/retained/profile authority controls PASS (modeled)',
+  );
   // Failed but confirmed closed reader remains FAIL, while independent guards
   // can authorize resource cleanup after actual child absence.
   const failed = await fixture();

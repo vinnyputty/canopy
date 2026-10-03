@@ -2,7 +2,11 @@ import { ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { mountedPath, processIdentity } from './appimage-observer.mjs';
+import {
+  managedMountLabel,
+  mountedPath,
+  processIdentity,
+} from './appimage-observer.mjs';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -97,7 +101,10 @@ export async function readerScope(io, request, original) {
     executable,
     await io.read(`/proc/${pid}/mountinfo`),
   );
-  if (mount.source !== original || !/^fuse(?:\.|$)/.test(mount.filesystem))
+  if (
+    original !== '/var/lib/canopy-appimage-ci/Canopy.AppImage' ||
+    !managedMountLabel(mount)
+  )
     refuse();
   const owner = (name) => {
     const values = `${mount.options},${mount.superOptions}`
@@ -386,8 +393,7 @@ export function validReaderState(r, settled = false) {
       'superOptions',
     ]) ||
     !/^\/tmp\/\.mount_Canopy[a-zA-Z0-9]+$/.test(s.mount.path) ||
-    s.mount.source !== '/var/lib/canopy-appimage-ci/Canopy.AppImage' ||
-    !/^fuse(?:\.|$)/.test(s.mount.filesystem) ||
+    !managedMountLabel(s.mount) ||
     s.executable !== s.mount.path + '/canopy' ||
     !keys(s.namespaces, ['user', 'mnt']) ||
     !['user', 'mnt'].every((k) =>

@@ -28,6 +28,7 @@ import {
   boundedRead,
   boundedHash,
   processIdentity,
+  managedMountLabel,
   mountedEvidence,
   originalArtifact,
 } from './appimage-observer.mjs';
@@ -899,7 +900,7 @@ async function liveLaunch(io, request, receipt, save) {
   );
   if (
     sample.apparmorContext !== `${managedProfile} (unconfined)` ||
-    sample.mount.source !== managedPaths.original ||
+    !managedMountLabel(sample.mount) ||
     sample.sandboxHelper.uid !== 0 ||
     sample.sandboxHelper.gid !== 0 ||
     sample.sandboxHelper.mode !== request.helperMode
@@ -1010,8 +1011,7 @@ export function acceptManagedObservation(report, installed, actual, parent) {
     sample.sandboxHelper.uid !== 0 ||
     sample.sandboxHelper.gid !== 0 ||
     sample.sandboxHelper.mode !== expected?.helperMode ||
-    sample.mount?.source !== managedPaths.original ||
-    !sample.mount.filesystem.startsWith('fuse') ||
+    !managedMountLabel(sample.mount) ||
     !/^\/tmp\/\.mount_Canopy[a-zA-Z0-9]+$/.test(sample.mount.path) ||
     sample.executable !== join(sample.mount.path, 'canopy') ||
     sample.sandboxHelper.path !== join(sample.mount.path, 'chrome-sandbox')
@@ -1722,9 +1722,7 @@ export function validManagedResponse(response, request, onRefusal = () => {}) {
     (keys(mount, ['path', 'options', 'filesystem', 'source', 'superOptions']) &&
       typeof mount.path === 'string' &&
       /^\/tmp\/\.mount_Canopy[a-zA-Z0-9]+$/.test(mount.path) &&
-      mount.source === managedPaths.original &&
-      typeof mount.filesystem === 'string' &&
-      /^fuse(?:\.|$)/.test(mount.filesystem) &&
+      managedMountLabel(mount) &&
       typeof mount.options === 'string' &&
       mount.options.length > 0 &&
       mount.options.length <= 4096 &&

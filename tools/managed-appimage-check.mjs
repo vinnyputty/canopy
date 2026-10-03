@@ -792,9 +792,7 @@ export async function checkManagedAppImage() {
       : path.endsWith('/mountinfo')
         ? '25 1 0:100 / ' +
           mount +
-          ' ro,nosuid,nodev - fuse.Canopy ' +
-          paths.original +
-          ' ro,user_id=1001,group_id=1002'
+          ' ro,nosuid,nodev - fuse.Canopy.AppImage Canopy.AppImage ro,user_id=1001,group_id=1002'
         : path === '/proc/80/status'
           ? 'NoNewPrivs: 1\nSeccomp: 2\n'
           : realRead(path);

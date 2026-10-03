@@ -506,7 +506,7 @@ async function checkWorkerHandoff() {
           if(sampled && mode==='hung-after-sample') return new Promise(()=>{});
           if(sampled && mode==='parent-read-fail' && path===proc(process.ppid,'stat')) throw new Error('fixture parent read failed');
           return path.endsWith('/children') ? (path.startsWith('/proc/'+process.ppid+'/')?(sampled && mode==='ambiguity'?'70 71':'70'):'') :
-          path.endsWith('mountinfo') ? '25 1 0:100 / '+mount+' ro,nosuid,nodev - fuse.Canopy '+artifact+' ro' :
+          path.endsWith('mountinfo') ? '25 1 0:100 / '+mount+' ro,nosuid,nodev - fuse.Canopy.AppImage Canopy.AppImage ro' :
           path.endsWith('attr/current') ? 'fixture-profile (unconfined)' : text(path.startsWith('/proc/'+process.ppid+'/')?1:process.ppid,path.startsWith('/proc/'+process.ppid+'/')?(sampled && mode==='parent-change'?'322':'321'):(sampled && mode==='birth-change'?'124':'123'));},
       };
       const originalArtifact = config => realOriginal(config,io);
