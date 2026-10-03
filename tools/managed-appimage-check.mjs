@@ -994,6 +994,164 @@ export async function checkManagedAppImage() {
     new URL('./managed-appimage.mjs', import.meta.url),
     'utf8',
   );
+  // Exercise the exact protected-path implementation without privileged I/O.
+  const protectedSource = source.slice(
+    source.indexOf('function identity('),
+    source.indexOf('async function parents('),
+  );
+  const protect = new Function(
+    'managedPaths',
+    'fail',
+    `${protectedSource} return protectedPath;`,
+  )(paths, (message) => {
+    throw new Error(message);
+  });
+  const safeMetadata = {
+    dev: 1,
+    ino: 2,
+    uid: 0,
+    gid: 0,
+    mode: 0o100555,
+    nlink: 1,
+    size: 8,
+    mtimeMs: 1,
+    ctimeMs: 1,
+    isSymbolicLink: () => false,
+    isFile: () => true,
+    isDirectory: () => false,
+  };
+  const protectedIO = (metadata, canonical = paths.original) => ({
+    lstat: async () => metadata,
+    canonical: async () => canonical,
+  });
+  assert.equal(
+    (await protect(protectedIO(safeMetadata), paths.original, false, 0o555))
+      .mode,
+    0o100555,
+  );
+  for (const [patch, canonical, expectedCanonical] of [
+    [{ uid: 1001 }, paths.original, 'same'],
+    [{ gid: 1001 }, paths.original, 'same'],
+    [{ mode: 0o100575 }, paths.original, 'same'],
+    [{ mode: 0o104555 }, paths.original, 'same'],
+    [{ mode: 0o100755 }, paths.original, 'same'],
+    [{ nlink: 2 }, paths.original, 'same'],
+    [{ mode: 0o040555, isFile: () => false }, paths.original, 'unchecked'],
+    [
+      { mode: 0o120555, isSymbolicLink: () => true },
+      paths.original,
+      'unchecked',
+    ],
+    [{}, '/private/secret-canonical-target', 'different'],
+  ]) {
+    await assert.rejects(
+      protect(
+        protectedIO({ ...safeMetadata, ...patch }, canonical),
+        paths.original,
+        false,
+        0o555,
+      ),
+      (error) => {
+        assert(
+          error.message.startsWith(
+            'Managed ownership/path/mode mismatch; protected ',
+          ),
+        );
+        const detail = JSON.parse(error.message.split('; protected ')[1]);
+        assert.equal(detail.path, 'managed-original');
+        assert.equal(detail.canonical, expectedCanonical);
+        assert.equal(detail.uid, patch.uid ?? 0);
+        assert.equal(detail.gid, patch.gid ?? 0);
+        assert.equal(detail.mode, patch.mode ?? safeMetadata.mode);
+        assert.equal(detail.links, patch.nlink ?? 1);
+        assert.equal(detail.expectedMode, 0o555);
+        assert(!error.message.includes('secret-canonical-target'));
+        assert(Buffer.byteLength(error.message) < 600);
+        assert.equal(error.managedUncertain, undefined);
+        assert(
+          managedBootstrapObservation(String(error)).includes(
+            'managed-original',
+          ),
+        );
+        return true;
+      },
+    );
+  }
+  for (const path of [
+    '/',
+    '/opt',
+    '/etc',
+    '/etc/apparmor.d',
+    ...Object.values(paths),
+  ]) {
+    await assert.rejects(
+      protect(protectedIO({ ...safeMetadata, uid: 1001 }, path), path),
+      (error) => {
+        assert(error.message.includes('; protected '));
+        return true;
+      },
+    );
+  }
+  await assert.rejects(
+    protect(
+      protectedIO({ ...safeMetadata, uid: 1001 }, '/arbitrary-secret'),
+      '/arbitrary-secret',
+    ),
+    { message: 'Managed ownership/path/mode mismatch' },
+  );
+  let getterCalls = 0;
+  const accessor = { ...safeMetadata, isSymbolicLink: () => true };
+  Object.defineProperty(accessor, 'uid', {
+    get() {
+      getterCalls++;
+      throw new Error('secret');
+    },
+  });
+  await assert.rejects(
+    protect(protectedIO(accessor), paths.original),
+    (error) => {
+      assert.equal(
+        JSON.parse(error.message.split('; protected ')[1]).uid,
+        null,
+      );
+      return true;
+    },
+  );
+  assert.equal(getterCalls, 0);
+  const broken = new Proxy(
+    { ...safeMetadata, isSymbolicLink: () => true },
+    {
+      getOwnPropertyDescriptor() {
+        throw new Error('format fault');
+      },
+    },
+  );
+  await assert.rejects(protect(protectedIO(broken), paths.original), {
+    message: 'Managed ownership/path/mode mismatch',
+  });
+  for (const phase of ['lstat', 'canonical']) {
+    for (const primary of [
+      undefined,
+      null,
+      false,
+      0,
+      '',
+      new Error('original I/O'),
+    ]) {
+      const io = protectedIO(safeMetadata);
+      io[phase] = async () => {
+        throw primary;
+      };
+      let caught = false;
+      try {
+        await protect(io, paths.original);
+      } catch (error) {
+        caught = true;
+        assert.equal(error, primary);
+      }
+      assert(caught);
+    }
+  }
   const begin = source.indexOf('function nativeEffects() {');
   const end = source.indexOf('\nif', begin);
   assert(begin >= 0 && end > begin);

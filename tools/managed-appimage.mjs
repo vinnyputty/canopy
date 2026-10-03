@@ -120,12 +120,61 @@ function identity(metadata, stable = false) {
     fail('Finite managed file identity required');
   return Object.fromEntries(keys.map((key) => [key, metadata[key]]));
 }
+// Diagnostic labels identify only the fixed protected paths, never caller paths.
+function protectedPathRefusal(path, metadata, directory, mode, canonical) {
+  const error = new Error('Managed ownership/path/mode mismatch');
+  try {
+    const labels = new Map([
+      ['/', 'root'],
+      ['/opt', 'opt'],
+      ['/etc', 'etc'],
+      ['/etc/apparmor.d', 'apparmor-directory'],
+      [managedPaths.directory, 'managed-directory'],
+      [managedPaths.original, 'managed-original'],
+      [managedPaths.receipt, 'managed-receipt'],
+      [managedPaths.policy, 'managed-policy'],
+    ]);
+    if (!labels.has(path)) return error;
+    // Own data descriptors avoid invoking additional metadata getters.
+    const number = (key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(metadata, key);
+      const value = descriptor?.value;
+      return Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff
+        ? value
+        : null;
+    };
+    const observedMode = number('mode');
+    const detail = {
+      path: labels.get(path),
+      expectedType: directory ? 'directory' : 'file',
+      expectedMode: mode === undefined ? null : mode,
+      uid: number('uid'),
+      gid: number('gid'),
+      mode: observedMode,
+      links: number('nlink'),
+      type:
+        observedMode === null
+          ? 'unknown'
+          : ({ 16384: 'directory', 32768: 'file', 40960: 'symlink' }[
+              observedMode & 0o170000
+            ] ?? 'other'),
+      canonical,
+    };
+    const text = JSON.stringify(detail);
+    if (Buffer.byteLength(text) <= 512) error.message += `; protected ${text}`;
+  } catch {
+    // Diagnostic formatting must preserve the original refusal.
+  }
+  return error;
+}
 async function protectedPath(io, path, directory = false, mode) {
   const m = await io.lstat(path);
+  let canonical = 'unchecked';
   if (
     m.isSymbolicLink() ||
     (directory ? !m.isDirectory() : !m.isFile()) ||
-    (await io.canonical(path)) !== path ||
+    (canonical = (await io.canonical(path)) === path ? 'same' : 'different') !==
+      'same' ||
     m.uid !== 0 ||
     m.gid !== 0 ||
     m.mode & 0o022 ||
@@ -133,7 +182,7 @@ async function protectedPath(io, path, directory = false, mode) {
     (!directory && m.nlink !== 1) ||
     (mode !== undefined && (m.mode & 0o7777) !== mode)
   )
-    fail('Managed ownership/path/mode mismatch');
+    throw protectedPathRefusal(path, m, directory, mode, canonical);
   const pin = identity(m, directory);
   if (directory) delete pin.nlink; // Directory links change with our own creation/removal.
   return pin;
