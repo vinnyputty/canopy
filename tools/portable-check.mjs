@@ -1,3 +1,4 @@
+import { checkPackagedFirstSave } from './packaged-save-check.mjs';
 import { checkAppImageObserver } from './appimage-observer-check.mjs';
 import { checkPackagingPermissions } from './packaging-permissions-check.mjs';
 import { checkPackagedInstallCleanup } from './packaged-install-check.mjs';
@@ -15,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 const directory = dirname(fileURLToPath(import.meta.url));
 const cwd = await mkdtemp(join(tmpdir(), 'canopy tooling '));
 try {
+  await checkPackagedFirstSave();
   await checkAppImageObserver();
   await checkPackagedInstallCleanup();
   await checkPackagingPermissions();
