@@ -9,6 +9,14 @@ const api: CanopyAPI = {
   cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
   dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
   openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
+  supportReady: () => ipcRenderer.invoke('canopy:supportReady'),
+  appVersion: () => ipcRenderer.invoke('canopy:appVersion'),
+  openSupportLink: (link) => ipcRenderer.invoke('canopy:openSupportLink', link),
+  onShowSupport: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('canopy:showSupport', listener);
+    return () => ipcRenderer.removeListener('canopy:showSupport', listener);
+  },
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),

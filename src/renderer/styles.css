@@ -360,38 +360,25 @@ select:focus-visible,
   padding-left: 78px;
 }
 .brand-mark {
-  width: 18px;
-  height: 18px;
-  position: relative;
-  border-radius: 5px;
-  background: linear-gradient(145deg, var(--brand-from), var(--brand-to));
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.3);
+  width: 22px;
+  height: 22px;
 }
-.brand-mark:before,
-.brand-mark:after,
-.brand-mark span {
-  content: '';
-  position: absolute;
-  background: white;
-  border-radius: 50%;
-  width: 3px;
-  height: 3px;
+.support-dialog {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+  text-align: center;
 }
-.brand-mark:before {
-  left: 4px;
-  top: 4px;
-  box-shadow:
-    5px 3px white,
-    1px 8px white;
+.support-dialog h3,
+.support-dialog p {
+  margin: 0;
 }
-.brand-mark:after {
-  width: 1px;
-  height: 9px;
-  left: 6px;
-  top: 5px;
-  border-radius: 0;
-  background: rgba(255, 255, 255, 0.8);
-  transform: rotate(-30deg);
+.support-dialog button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .sidebar-toggle {
   position: absolute;

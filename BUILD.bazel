@@ -4,8 +4,13 @@ load("@npm//:defs.bzl", "npm_link_all_packages")
 npm_link_all_packages(name = "node_modules")
 
 filegroup(
+    name = "branding",
+    srcs = glob(["assets/branding/**"]),
+)
+
+filegroup(
     name = "sources",
-    srcs = glob(["src/**/*.ts", "src/**/*.tsx", "src/**/*.css", "broker/**/*.ts", "tests/**/*.ts"]) + ["package.json", "tsconfig.json", "tests/fixtures/sidebar-root-view.json", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts", "tools/palette-check.mjs", "tools/demo-check.mjs", "tools/windows-cim-control.mjs", "tools/windows-cim-control.d.mts", "tools/windows-cim-input-control.mjs", "tools/windows-cim-input-control.d.mts"],
+    srcs = glob(["src/**/*.ts", "src/**/*.tsx", "src/**/*.css", "broker/**/*.ts", "tests/**/*.ts"]) + ["package.json", "tsconfig.json", "tests/fixtures/sidebar-root-view.json", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts", "tools/palette-check.mjs", "tools/demo-check.mjs", "tools/windows-cim-control.mjs", "tools/windows-cim-control.d.mts", "tools/windows-cim-input-control.mjs", "tools/windows-cim-input-control.d.mts"] + glob(["assets/branding/**"]),
 )
 
 js_binary(
@@ -25,7 +30,7 @@ js_test(
     name = "test",
     timeout = "long",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/portable-check.mjs", "tools/ci.mjs"],
+    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-pickers.mjs", "tools/portable-check.mjs", "tools/ci.mjs"],
 )
 
 js_test(
@@ -39,20 +44,20 @@ js_test(
     name = "format_check",
     entry_point = "tools/check.mjs",
     args = ["format"],
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "tools/*.cjs", "docs/*.md", ".github/**/*.yml"]),
 )
 
 js_test(
     name = "portable_checks",
     timeout = "long",
     entry_point = "tools/portable-check.mjs",
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "tools/*.cjs", "docs/*.md", ".github/**/*.yml"]),
 )
 
 js_binary(
     name = "dev",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json"],
+    data = [":build", ":node_modules", ":branding", "package.json"],
     args = ["dev"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -61,7 +66,7 @@ js_binary(
 js_binary(
     name = "demo",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json"],
+    data = [":build", ":node_modules", ":branding", "package.json"],
     args = ["demo"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -70,7 +75,7 @@ js_binary(
 js_binary(
     name = "demo_check",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/demo-check.mjs"],
+    data = [":build", ":node_modules", ":branding", "package.json", "tools/demo-check.mjs"],
     args = ["demo-check"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -79,7 +84,7 @@ js_binary(
 js_binary(
     name = "smoke",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-sidebar.mjs", "tests/fixtures/sidebar-root-view.json", "tools/smoke-child.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-palette.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs"],
+    data = [":build", ":node_modules", ":branding", "package.json", "tools/smoke.mjs", "tools/smoke-sidebar.mjs", "tests/fixtures/sidebar-root-view.json", "tools/smoke-child.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-palette.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs"],
     args = ["smoke"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -88,7 +93,7 @@ js_binary(
 js_binary(
     name = "smoke_github",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/smoke-github.mjs", "tools/smoke-github-cli.mjs"],
+    data = [":build", ":node_modules", ":branding", "package.json", "tools/smoke-github.mjs", "tools/smoke-github-cli.mjs"],
     args = ["smoke-github"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -97,7 +102,7 @@ js_binary(
 js_binary(
     name = "package",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json"],
+    data = [":build", ":node_modules", ":branding", "package.json"],
     args = ["package"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -122,6 +127,30 @@ js_binary(
     name = "palette_check",
     entry_point = "tools/palette-check.mjs",
     data = [":build", ":node_modules", "package.json", "tools/audit-lifecycle.mjs"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "icons",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", ":branding", "package.json", "tools/render-icons.cjs", "tools/icon-formats.mjs"],
+    args = ["icons"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_test(
+    name = "branding_check",
+    entry_point = "tools/check-branding.mjs",
+    data = [":node_modules", ":branding", "package.json", "tools/icon-formats.mjs"],
+)
+
+js_binary(
+    name = "branding_smoke",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", ":branding", "package.json", "tools/smoke-branding.mjs"],
+    args = ["branding-check"],
     patch_node_fs = False,
     tags = ["manual"],
 )
