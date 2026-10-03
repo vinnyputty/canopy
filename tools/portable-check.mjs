@@ -1,3 +1,4 @@
+import { checkAppImageObserver } from './appimage-observer-check.mjs';
 import { checkPackagingPermissions } from './packaging-permissions-check.mjs';
 import { checkPackagedInstallCleanup } from './packaged-install-check.mjs';
 import assert from 'node:assert/strict';
@@ -14,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 const directory = dirname(fileURLToPath(import.meta.url));
 const cwd = await mkdtemp(join(tmpdir(), 'canopy tooling '));
 try {
+  await checkAppImageObserver();
   await checkPackagedInstallCleanup();
   await checkPackagingPermissions();
   // Exercise the pinned builder's actual desktop entry generation on every OS.
