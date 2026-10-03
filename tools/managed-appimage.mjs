@@ -1,0 +1,1092 @@
+import { ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { randomBytes, createHash } from 'node:crypto';
+import {
+  mkdir,
+  open,
+  lstat,
+  realpath,
+  readdir,
+  unlink,
+  rmdir,
+} from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  boundedRead,
+  boundedHash,
+  processIdentity,
+  mountedEvidence,
+  originalArtifact,
+} from './appimage-observer.mjs';
+
+export const managedPaths = Object.freeze({
+  directory: '/opt/Canopy',
+  original: '/opt/Canopy/Canopy.AppImage',
+  receipt: '/opt/.canopy-appimage-ci.json',
+  policy: '/etc/apparmor.d/canopy-appimage',
+});
+export const managedProfile = 'canopy-appimage';
+export const managedPolicy = `abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /opt/Canopy/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n`;
+const digest = (text) => createHash('sha256').update(text).digest('hex');
+const ownFile = fileURLToPath(import.meta.url);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const hex = (value) => /^[a-f0-9]{64}$/.test(value ?? '');
+const fail = (message) => {
+  throw new Error(message);
+};
+const preserved = [
+  'CANOPY_MANAGED_APPIMAGE',
+  'GITHUB_ACTIONS',
+  'RUNNER_ENVIRONMENT',
+  'RUNNER_OS',
+  'RUNNER_ARCH',
+  'GITHUB_RUN_ID',
+  'GITHUB_RUN_ATTEMPT',
+  'GITHUB_WORKSPACE',
+  'ImageOS',
+  'ImageVersion',
+];
+
+export function managedGuard(context) {
+  const { env, platform, arch, uid } = context;
+  if (
+    platform !== 'linux' ||
+    arch !== 'x64' ||
+    !Number.isSafeInteger(uid) ||
+    uid <= 0 ||
+    env.CANOPY_MANAGED_APPIMAGE !== '1' ||
+    env.GITHUB_ACTIONS !== 'true' ||
+    env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
+    env.RUNNER_OS !== 'Linux' ||
+    env.RUNNER_ARCH !== 'X64' ||
+    env.ImageOS !== 'ubuntu24' ||
+    !/^\d+(?:\.\d+)+$/.test(env.ImageVersion ?? '') ||
+    !/^[1-9]\d{0,19}$/.test(env.GITHUB_RUN_ID ?? '') ||
+    !/^[1-9]\d{0,5}$/.test(env.GITHUB_RUN_ATTEMPT ?? '') ||
+    !env.GITHUB_WORKSPACE?.startsWith('/')
+  )
+    fail(
+      'Managed AppImage requires explicit disposable Ubuntu hosted CI opt-in',
+    );
+  return { run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT, uid };
+}
+export async function managedHostedContext() {
+  const context = {
+    env: process.env,
+    platform: process.platform,
+    arch: process.arch,
+    uid: process.getuid?.(),
+  };
+  managedGuard(context);
+  context.osRelease = release(await boundedRead('/etc/os-release'));
+  if (
+    context.osRelease.ID !== 'ubuntu' ||
+    context.osRelease.VERSION_ID !== '24.04'
+  )
+    fail('Managed opt-in requires actual Ubuntu 24.04');
+  return context;
+}
+function release(text) {
+  return Object.fromEntries(
+    text
+      .split('\n')
+      .filter((line) => /^(ID|VERSION_ID)=/.test(line))
+      .map((line) => {
+        const [key, ...parts] = line.split('=');
+        return [key, parts.join('=').replace(/^"|"$/g, '')];
+      }),
+  );
+}
+function identity(metadata, stable = false) {
+  const keys = stable
+    ? ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink']
+    : [
+        'dev',
+        'ino',
+        'uid',
+        'gid',
+        'mode',
+        'nlink',
+        'size',
+        'mtimeMs',
+        'ctimeMs',
+      ];
+  if (keys.some((key) => !Number.isFinite(metadata[key])))
+    fail('Finite managed file identity required');
+  return Object.fromEntries(keys.map((key) => [key, metadata[key]]));
+}
+async function protectedPath(io, path, directory = false, mode) {
+  const m = await io.lstat(path);
+  if (
+    m.isSymbolicLink() ||
+    (directory ? !m.isDirectory() : !m.isFile()) ||
+    (await io.canonical(path)) !== path ||
+    m.uid !== 0 ||
+    m.gid !== 0 ||
+    m.mode & 0o022 ||
+    m.mode & 0o6000 ||
+    (!directory && m.nlink !== 1) ||
+    (mode !== undefined && (m.mode & 0o7777) !== mode)
+  )
+    fail('Managed ownership/path/mode mismatch');
+  const pin = identity(m, directory);
+  if (directory) delete pin.nlink; // Directory links change with our own creation/removal.
+  return pin;
+}
+async function parents(io) {
+  const result = [];
+  for (const path of ['/', '/opt', '/etc', '/etc/apparmor.d'])
+    result.push({ path, identity: await protectedPath(io, path, true) });
+  return result;
+}
+async function absent(io, path) {
+  try {
+    await io.lstat(path);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  fail('Existing managed destination, receipt or policy');
+}
+const globalFiles = [
+  '/sys/module/apparmor/parameters/enabled',
+  '/proc/sys/kernel/apparmor_restrict_unprivileged_userns',
+  '/proc/sys/kernel/unprivileged_userns_clone',
+];
+async function globalState(io) {
+  const values = await Promise.all(globalFiles.map((path) => io.read(path)));
+  if (values.map((value) => value.trim()).join(',') !== 'Y,1,1')
+    fail('Expected restricted AppArmor/user namespace state unavailable');
+  return Object.fromEntries(
+    globalFiles.map((path, index) => [path, values[index]]),
+  );
+}
+async function loadedProfile(io) {
+  const lines = (await io.read('/sys/kernel/security/apparmor/profiles'))
+    .trim()
+    .split('\n');
+  const matches = lines.filter((line) =>
+    /^canopy-appimage(?:\s|\/\/|$)/.test(line),
+  );
+  if (!matches.length) return null;
+  if (matches.length !== 1 || matches[0] !== `${managedProfile} (unconfined)`)
+    fail('Unexpected managed loaded profile');
+  const base = '/sys/kernel/security/apparmor/policy/profiles';
+  const entries = await io.list(base);
+  if (entries.length > 4096) fail('Profile inventory exceeds bound');
+  const found = [];
+  for (const name of entries) {
+    if (!/^[a-zA-Z0-9._-]+$/.test(name)) fail('Unknown profile inventory path');
+    const path = join(base, name);
+    if ((await io.read(join(path, 'name'))).trim() === managedProfile) {
+      const attach = (await io.read(join(path, 'attach'))).trim();
+      const mode = (await io.read(join(path, 'mode'))).trim();
+      const hash = (await io.read(join(path, 'hash'))).trim();
+      if (
+        attach !== managedPaths.original ||
+        mode !== 'unconfined' ||
+        !/^[a-f0-9]{40,128}$/.test(hash)
+      )
+        fail('Loaded profile identity unavailable');
+      found.push({
+        path,
+        attach,
+        mode,
+        hash,
+        identity: identity(await io.lstat(path), true),
+      });
+    }
+  }
+  if (found.length !== 1) fail('Ambiguous loaded profile identity');
+  return found[0];
+}
+async function parentIdentity(io, request) {
+  const value = processIdentity(
+    await io.read(`/proc/${request.parent.pid}/stat`),
+  );
+  if (
+    value.birth !== request.parent.birth ||
+    (await io.lstat(`/proc/${request.parent.pid}`)).uid !== request.uid
+  )
+    fail('Managed audit parent changed');
+}
+async function fileResource(io, path, mode) {
+  const before = await protectedPath(io, path, false, mode);
+  const sha256 = await io.hash(path);
+  const after = await protectedPath(io, path, false, mode);
+  if (!same(before, after)) fail('Managed file changed during hashing');
+  return { path, kind: 'file', mode, identity: after, sha256 };
+}
+async function receiptState(io, request) {
+  await parents(io);
+  const self = await protectedPath(io, managedPaths.receipt, false, 0o600);
+  const text = await io.read(managedPaths.receipt);
+  const receipt = JSON.parse(text);
+  if (
+    receipt.schema !== 1 ||
+    receipt.token !== request.token ||
+    receipt.run !== request.run ||
+    receipt.attempt !== request.attempt ||
+    receipt.uid !== request.uid ||
+    !same(receipt.parent, request.parent) ||
+    receipt.source.path !== request.source ||
+    receipt.source.sha256 !== request.sha256 ||
+    receipt.profile.name !== managedProfile ||
+    receipt.profile.content !== managedPolicy ||
+    receipt.profile.sha256 !== digest(managedPolicy) ||
+    !same(identity(self, true), receipt.self) ||
+    !Array.isArray(receipt.resources) ||
+    receipt.resources.length > 3 ||
+    !same(receipt.parents, await parents(io))
+  )
+    fail('Managed receipt ownership/content mismatch');
+  if (
+    !same(receipt.expected, {
+      executableSha256: request.executableSha256,
+      appAsarSha256: request.appAsarSha256,
+      helperSha256: request.helperSha256,
+      helperMode: request.helperMode,
+    })
+  )
+    fail('Receipt payload expectations changed');
+  const allowed = [
+    managedPaths.directory,
+    managedPaths.original,
+    managedPaths.policy,
+  ];
+  if (
+    new Set(receipt.resources.map((item) => item.path)).size !==
+      receipt.resources.length ||
+    receipt.resources.some((item) => !allowed.includes(item.path))
+  )
+    fail('Unknown receipt resource');
+  if (!same(receipt.global, await globalState(io)))
+    fail('Global namespace policy changed');
+  for (const item of receipt.resources) {
+    if (item.kind === 'directory') {
+      if (
+        item.path !== managedPaths.directory ||
+        !same(item.identity, await protectedPath(io, item.path, true, 0o755))
+      )
+        fail('Managed directory identity changed');
+      const expected = receipt.resources
+        .filter((r) => dirname(r.path) === item.path)
+        .map((r) => basename(r.path))
+        .sort();
+      if (!same((await io.list(item.path)).sort(), expected))
+        fail('Unowned installation directory entry');
+    } else {
+      if (
+        item.kind !== 'file' ||
+        ![managedPaths.original, managedPaths.policy].includes(item.path) ||
+        item.mode !== (item.path === managedPaths.original ? 0o555 : 0o444) ||
+        !same(item, await fileResource(io, item.path, item.mode))
+      )
+        fail('Managed resource identity/content changed');
+    }
+  }
+  for (const path of allowed)
+    if (!receipt.resources.some((item) => item.path === path))
+      await absent(io, path);
+  return { receipt, receiptSha256: digest(text) };
+}
+export async function noManagedOccupants(io) {
+  const pids = (await io.list('/proc')).filter((value) => /^\d+$/.test(value));
+  if (pids.length > 4096) fail('Process inventory exceeds cleanup bound');
+  let threads = 0;
+  for (const pid of pids) {
+    const path = `/proc/${pid}`;
+    try {
+      const before = processIdentity(await io.read(`${path}/stat`));
+      let executable;
+      try {
+        executable = await io.link(`${path}/exe`);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      if (
+        executable === managedPaths.original ||
+        executable === `${managedPaths.original} (deleted)`
+      )
+        fail('Managed original remains live');
+      const tids = await io.list(`${path}/task`);
+      if (
+        tids.some((tid) => !/^\d+$/.test(tid)) ||
+        (threads += tids.length) > 8192
+      )
+        fail('Unknown or oversized task inventory');
+      for (const tid of tids) {
+        const label = (
+          await io.read(`${path}/task/${tid}/attr/current`)
+        ).trim();
+        if (
+          !(
+            label === 'unconfined' ||
+            /^[^\n]+ \((?:enforce|complain|unconfined)\)$/.test(label)
+          ) ||
+          label.includes(managedProfile)
+        )
+          fail('Managed label live or unknown');
+      }
+      if (!same(before, processIdentity(await io.read(`${path}/stat`))))
+        fail('Process changed during cleanup inventory');
+    } catch (error) {
+      // A vanished proc directory establishes absence, unlike an unreadable live task.
+      try {
+        await io.lstat(path);
+      } catch (gone) {
+        if (gone?.code === 'ENOENT') continue;
+        throw gone;
+      }
+      throw error;
+    }
+  }
+}
+function validateRequest(request, host) {
+  if (
+    !['prepare', 'check', 'launch', 'cleanup'].includes(request.operation) ||
+    request.uid !== host.uid ||
+    request.run !== host.run ||
+    request.attempt !== host.attempt ||
+    !/^[a-f0-9]{32}$/.test(request.token ?? '') ||
+    !hex(request.sha256) ||
+    !Number.isSafeInteger(request.parent?.pid) ||
+    request.parent.pid <= 0 ||
+    !/^\d+$/.test(request.parent.birth ?? '') ||
+    !hex(request.executableSha256) ||
+    !hex(request.appAsarSha256) ||
+    !hex(request.helperSha256) ||
+    !/^(?:755|4755)$/.test(request.helperMode ?? '')
+  )
+    fail('Invalid scoped managed request');
+}
+// The effect interface exercises exact decisions in Node-only controls. Native
+// effects are private and reached only through the separately guarded root entry.
+export async function managedOperation(request, io, context) {
+  const host = managedGuard(context);
+  validateRequest(request, host);
+  if (
+    context.osRelease?.ID !== 'ubuntu' ||
+    context.osRelease?.VERSION_ID !== '24.04'
+  )
+    fail('Managed installation requires actual Ubuntu 24.04');
+  if (
+    (await io.canonical(context.env.GITHUB_WORKSPACE)) !==
+      context.env.GITHUB_WORKSPACE ||
+    dirname(request.source) !== join(context.env.GITHUB_WORKSPACE, 'release') ||
+    !/^Canopy-[a-zA-Z0-9.+-]+-linux-x86_64\.AppImage$/.test(
+      basename(request.source),
+    )
+  )
+    fail('Source outside hosted release artifacts');
+  await parentIdentity(io, request);
+  if (request.operation === 'prepare') {
+    const pins = await parents(io);
+    for (const path of Object.values(managedPaths)) await absent(io, path);
+    if (await loadedProfile(io)) fail('Existing loaded managed profile');
+    const sourceBefore = await io.lstat(request.source);
+    if (
+      sourceBefore.isSymbolicLink() ||
+      !sourceBefore.isFile() ||
+      sourceBefore.uid !== request.uid ||
+      sourceBefore.nlink !== 1 ||
+      sourceBefore.mode & 0o6022 ||
+      !(sourceBefore.mode & 0o111) ||
+      (await io.canonical(request.source)) !== request.source ||
+      (await io.hash(request.source)) !== request.sha256 ||
+      !same(identity(sourceBefore), identity(await io.lstat(request.source)))
+    )
+      fail('Original source provenance changed');
+    const receipt = {
+      schema: 1,
+      token: request.token,
+      ...host,
+      parent: request.parent,
+      source: {
+        path: request.source,
+        sha256: request.sha256,
+        identity: identity(sourceBefore),
+      },
+      expected: {
+        executableSha256: request.executableSha256,
+        appAsarSha256: request.appAsarSha256,
+        helperSha256: request.helperSha256,
+        helperMode: request.helperMode,
+      },
+      profile: {
+        name: managedProfile,
+        content: managedPolicy,
+        sha256: digest(managedPolicy),
+      },
+      parents: pins,
+      global: await globalState(io),
+      resources: [],
+      loaded: null,
+      loadAttempted: false,
+    };
+    const save = () => io.receipt(JSON.stringify(receipt), receipt.self);
+    try {
+      await io.create(
+        managedPaths.receipt,
+        () => JSON.stringify(receipt),
+        0o600,
+        async (meta) => {
+          receipt.self = identity(meta, true);
+        },
+      );
+      await io.mkdir(managedPaths.directory, 0o755);
+      receipt.resources.push({
+        path: managedPaths.directory,
+        kind: 'directory',
+        identity: await protectedPath(io, managedPaths.directory, true, 0o755),
+      });
+      await save();
+      const record = async (path, mode, meta) => {
+        receipt.resources.push({
+          path,
+          kind: 'file',
+          mode,
+          identity: identity(meta),
+          sha256: null,
+        });
+        await save();
+      };
+      await io.copy(request.source, managedPaths.original, 0o555, (meta) =>
+        record(managedPaths.original, 0o555, meta),
+      );
+      receipt.resources[1] = await fileResource(
+        io,
+        managedPaths.original,
+        0o555,
+      );
+      if (
+        receipt.resources[1].sha256 !== request.sha256 ||
+        !same(identity(sourceBefore), identity(await io.lstat(request.source)))
+      )
+        fail('Original copied bytes/identity changed');
+      receipt.original = await originalArtifact(
+        {
+          artifact: managedPaths.original,
+          artifactSha256: request.sha256,
+          uid: request.uid,
+        },
+        io,
+      );
+      await save();
+      await io.create(
+        managedPaths.policy,
+        () => managedPolicy,
+        0o444,
+        (meta) => record(managedPaths.policy, 0o444, meta),
+      );
+      receipt.resources[2] = await fileResource(io, managedPaths.policy, 0o444);
+      if (receipt.resources[2].sha256 !== digest(managedPolicy))
+        fail('Policy bytes changed');
+      receipt.loadAttempted = true;
+      await save();
+      await io.parser('add');
+      receipt.loaded = await loadedProfile(io);
+      if (!receipt.loaded) fail('Managed profile load not verified');
+      await save();
+      return await validateInstallation(io, request);
+    } catch (primary) {
+      // Capture only files whose exclusive creation was recorded. Unknown or
+      // failed receipt repair retains resources for disposable-runner evidence.
+      try {
+        for (let index = 0; index < receipt.resources.length; index++) {
+          const item = receipt.resources[index];
+          if (item.kind === 'file' && item.sha256 === null) {
+            const now = await fileResource(io, item.path, item.mode);
+            if (
+              !same(identity(item.identity, true), identity(now.identity, true))
+            )
+              fail('Partial resource inode changed');
+            receipt.resources[index] = now;
+          }
+        }
+        if (receipt.self) await save();
+      } catch (secondary) {
+        console.error(
+          'Managed partial receipt unavailable:',
+          String(secondary),
+        );
+      }
+      throw primary;
+    }
+  }
+  if (request.operation === 'cleanup') {
+    try {
+      await io.lstat(managedPaths.receipt);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      for (const path of [managedPaths.directory, managedPaths.policy])
+        await absent(io, path);
+      if (await loadedProfile(io))
+        fail('Profile without owned receipt retained');
+      return { empty: true };
+    }
+    const { receipt } = await receiptState(io, request);
+    const loaded = await loadedProfile(io);
+    if (loaded && (!receipt.loaded || !same(loaded, receipt.loaded)))
+      fail('Unknown loaded policy ownership; retain resources');
+    // Finish slow file/hash validation before the required live-task inventory.
+    await receiptState(io, request);
+    if (!same(await loadedProfile(io), loaded))
+      fail('Policy changed before absence check');
+    await noManagedOccupants(io);
+    await parentIdentity(io, request);
+    if (loaded) {
+      await io.parser('remove');
+      if (await loadedProfile(io)) fail('Managed profile remains loaded');
+    }
+    for (const item of [...receipt.resources].reverse())
+      await io.remove(item.path, item.kind);
+    if (!same(receipt.global, await globalState(io)))
+      fail('Global policy changed during cleanup');
+    await io.remove(managedPaths.receipt, 'file');
+    return { removed: true };
+  }
+  const installed = await validateInstallation(io, request);
+  if (request.operation === 'check') return installed;
+  const launch = await liveLaunch(io, request);
+  if (
+    !same(installed.receipt.global, await globalState(io)) ||
+    !same(installed.receipt.loaded, await loadedProfile(io))
+  )
+    fail('Managed policy changed during live verification');
+  for (const [pid, birth] of [
+    [launch.rootPid, launch.rootBirth],
+    [launch.sample.pid, launch.sample.birth],
+    [request.launch.rendererPid, request.launch.rendererBirth],
+  ]) {
+    if (
+      processIdentity(await io.read(`/proc/${pid}/stat`)).birth !== birth ||
+      (await io.lstat(`/proc/${pid}`)).uid !== request.uid ||
+      (await io.read(`/proc/${pid}/attr/current`)).trim() !==
+        `${managedProfile} (unconfined)`
+    )
+      fail('Managed process changed after policy verification');
+  }
+  return { ...installed, launch };
+}
+async function validateInstallation(io, request) {
+  const state = await receiptState(io, request);
+  if (
+    state.receipt.resources.length !== 3 ||
+    state.receipt.resources[1].sha256 !== request.sha256 ||
+    state.receipt.resources[2].sha256 !== digest(managedPolicy) ||
+    !state.receipt.loaded ||
+    !same(state.receipt.loaded, await loadedProfile(io))
+  )
+    fail('Incomplete or changed managed installation');
+  if (
+    !same(
+      state.receipt.original,
+      await originalArtifact(
+        {
+          artifact: managedPaths.original,
+          artifactSha256: request.sha256,
+          uid: request.uid,
+        },
+        io,
+      ),
+    )
+  )
+    fail('Managed original snapshot changed');
+  await parentIdentity(io, request);
+  return state;
+}
+async function liveLaunch(io, request) {
+  const { pid, mainBirth, rootPid, rootBirth, rendererPid, rendererBirth } =
+    request.launch ?? {};
+  if (
+    [pid, rootPid, rendererPid].some(
+      (value) => !Number.isSafeInteger(value) || value <= 0,
+    ) ||
+    !/^\d+$/.test(rootBirth ?? '') ||
+    !/^\d+$/.test(mainBirth ?? '') ||
+    !/^\d+$/.test(rendererBirth ?? '') ||
+    rendererPid === pid
+  )
+    fail('Invalid actual launch identity');
+  const root = processIdentity(await io.read(`/proc/${rootPid}/stat`));
+  if (
+    root.parent !== request.parent.pid ||
+    root.birth !== rootBirth ||
+    (await io.lstat(`/proc/${rootPid}`)).uid !== request.uid ||
+    (await io.read(`/proc/${rootPid}/attr/current`)).trim() !==
+      `${managedProfile} (unconfined)`
+  )
+    fail('Actual launcher identity/label mismatch');
+  const main = processIdentity(await io.read(`/proc/${pid}/stat`));
+  if (main.birth !== mainBirth || (pid !== rootPid && main.parent !== rootPid))
+    fail('Mounted main is outside actual launcher');
+  const sample = await mountedEvidence(
+    pid,
+    main,
+    {
+      uid: request.uid,
+      executableSha256: request.executableSha256,
+      appAsarSha256: request.appAsarSha256,
+      helperSha256: request.helperSha256,
+    },
+    io,
+  );
+  if (
+    sample.apparmorContext !== `${managedProfile} (unconfined)` ||
+    sample.mount.source !== managedPaths.original ||
+    sample.sandboxHelper.uid !== 0 ||
+    sample.sandboxHelper.gid !== 0 ||
+    sample.sandboxHelper.mode !== request.helperMode
+  )
+    fail('Mounted managed identity/helper/label mismatch');
+  let ancestor = rendererPid;
+  const seen = new Set();
+  for (let depth = 0; ancestor !== pid && depth < 16; depth++) {
+    if (
+      seen.has(ancestor) ||
+      (await io.lstat(`/proc/${ancestor}`)).uid !== request.uid
+    )
+      fail('Renderer ancestry unavailable');
+    seen.add(ancestor);
+    ancestor = processIdentity(await io.read(`/proc/${ancestor}/stat`)).parent;
+  }
+  if (
+    ancestor !== pid ||
+    (await io.read(`/proc/${rendererPid}/attr/current`)).trim() !==
+      `${managedProfile} (unconfined)`
+  )
+    fail('Renderer effective profile mismatch');
+  const rendererIdentity = processIdentity(
+    await io.read(`/proc/${rendererPid}/stat`),
+  );
+  if (rendererIdentity.birth !== rendererBirth) fail('Renderer birth changed');
+  const renderer = await io.read(`/proc/${rendererPid}/status`);
+  if (!/^NoNewPrivs:\s+1$/m.test(renderer) || !/^Seccomp:\s+2$/m.test(renderer))
+    fail('Managed renderer sandbox unavailable');
+  for (const [checkedPid, expected] of [
+    [rootPid, root],
+    [pid, main],
+    [rendererPid, rendererIdentity],
+  ]) {
+    if (
+      !same(
+        expected,
+        processIdentity(await io.read(`/proc/${checkedPid}/stat`)),
+      ) ||
+      (await io.lstat(`/proc/${checkedPid}`)).uid !== request.uid ||
+      (await io.read(`/proc/${checkedPid}/attr/current`)).trim() !==
+        `${managedProfile} (unconfined)`
+    )
+      fail('Managed process/label changed during verification');
+  }
+  await parentIdentity(io, request);
+  if (!same(root, processIdentity(await io.read(`/proc/${rootPid}/stat`))))
+    fail('Launcher changed during verification');
+  return { rootPid, rootBirth, sample, rendererPid, profile: managedProfile };
+}
+export function managedChild(app) {
+  const child = app.process();
+  if (
+    !(child instanceof ChildProcess) ||
+    !Number.isSafeInteger(child.pid) ||
+    child.pid <= 0 ||
+    child.exitCode !== null ||
+    child.signalCode !== null ||
+    child.spawnfile !== managedPaths.original ||
+    !same(child.spawnargs, [
+      managedPaths.original,
+      '--inspect=0',
+      '--remote-debugging-port=0',
+    ])
+  )
+    fail('Actual Playwright launch object mismatch');
+  return child;
+}
+export function acceptManagedObservation(report, installed, actual, parent) {
+  const { receipt, receiptSha256, launch } = installed;
+  const sample = launch?.sample;
+  const expected = receipt?.expected;
+  if (
+    receipt?.schema !== 1 ||
+    receipt.profile?.name !== managedProfile ||
+    receipt.profile.content !== managedPolicy ||
+    receipt.profile.sha256 !== digest(managedPolicy) ||
+    receipt.original?.managed !== true ||
+    receipt.original.hash !== receipt.source?.sha256 ||
+    receipt.original.metadata.uid !== 0 ||
+    (receipt.original.metadata.mode & 0o7777) !== 0o555 ||
+    !sample ||
+    sample.uid !== receipt.uid ||
+    sample.uid <= 0 ||
+    sample.birth !== actual.mainBirth ||
+    sample.apparmorContext !== `${managedProfile} (unconfined)` ||
+    sample.executableSha256 !== expected?.executableSha256 ||
+    sample.appAsarSha256 !== expected?.appAsarSha256 ||
+    sample.sandboxHelper?.sha256 !== expected?.helperSha256 ||
+    sample.sandboxHelper.uid !== 0 ||
+    sample.sandboxHelper.gid !== 0 ||
+    sample.sandboxHelper.mode !== expected?.helperMode ||
+    sample.mount?.source !== managedPaths.original ||
+    !sample.mount.filesystem.startsWith('fuse') ||
+    !/^\/tmp\/\.mount_Canopy[a-zA-Z0-9]+$/.test(sample.mount.path) ||
+    sample.executable !== join(sample.mount.path, 'canopy') ||
+    sample.sandboxHelper.path !== join(sample.mount.path, 'chrome-sandbox')
+  )
+    fail('Managed receipt/payload/profile observation mismatch');
+  if (
+    !hex(receiptSha256) ||
+    report.completed !== true ||
+    report.status !== 'observed' ||
+    !Number.isFinite(report.finalizedAt) ||
+    report.finalizedAt > Date.now() ||
+    report.artifact !== managedPaths.original ||
+    report.parent !== parent.pid ||
+    report.parentBirth !== parent.birth ||
+    report.managedReceipt !== receipt.token ||
+    !same(report.original, {
+      managed: true,
+      hash: receipt.source.sha256,
+      parents: receipt.original.parents,
+      metadata: receipt.original.metadata,
+    }) ||
+    !['retained-spawn', 'native-original'].includes(report.authority?.kind) ||
+    report.authority.pid !== actual.rootPid ||
+    report.authority.birth !== actual.rootBirth ||
+    report.authority.originalSha256 !== receipt.source.sha256 ||
+    report.authority.managed !== true ||
+    launch.rootPid !== actual.rootPid ||
+    launch.rootBirth !== actual.rootBirth ||
+    launch.sample.pid !== actual.pid ||
+    !report.samples.some((sample) => same(sample, launch.sample))
+  )
+    fail('Completed bound managed observation required');
+  return {
+    receiptSha256,
+    profile: managedProfile,
+    rootPid: actual.rootPid,
+    rootBirth: actual.rootBirth,
+    finalizedAt: report.finalizedAt,
+    sample: launch.sample,
+  };
+}
+export async function withManagedAppImage(
+  config,
+  run,
+  {
+    context,
+    invoke,
+    parent: injectedParent,
+    signals = process,
+    secondary = (error) =>
+      console.error('Managed cleanup also failed:', String(error)),
+  } = {},
+) {
+  context ??= await managedHostedContext();
+  const host = managedGuard(context);
+  const parent = injectedParent ?? {
+    pid: process.pid,
+    ...processIdentity(await boundedRead('/proc/self/stat')),
+  };
+  const auditParent = { pid: parent.pid, birth: parent.birth };
+  const request = {
+    ...config,
+    ...host,
+    parent: auditParent,
+    token: randomBytes(16).toString('hex'),
+  };
+  invoke ??= rootInvoke;
+  let cancelled;
+  const listeners = ['SIGINT', 'SIGTERM'].map((signal) => {
+    const listener = () => {
+      cancelled ??= new Error(`Managed AppImage cancelled by ${signal}`);
+    };
+    signals.on(signal, listener);
+    return [signal, listener];
+  });
+  const checkCancellation = () => {
+    if (cancelled) throw cancelled;
+  };
+  let failed = false;
+  let primary;
+  let result;
+  try {
+    try {
+      const installed = await invoke({ ...request, operation: 'prepare' });
+      checkCancellation();
+      const guarded = (operation, launch) => {
+        checkCancellation();
+        return invoke({ ...request, operation, ...(launch ? { launch } : {}) });
+      };
+      const session = {
+        installed,
+        parent: auditParent,
+        request,
+        check: () => guarded('check'),
+        verify: (launch) => guarded('launch', launch),
+      };
+      result = await run(managedPaths.original, session);
+      checkCancellation();
+    } catch (error) {
+      failed = true;
+      primary = error;
+    }
+    try {
+      await invoke({ ...request, operation: 'cleanup' });
+    } catch (error) {
+      if (!failed) throw error;
+      try {
+        secondary(error);
+      } catch {
+        // Reporting a cleanup failure must not replace the raw primary value.
+      }
+    }
+    if (failed) throw primary;
+    checkCancellation();
+    return result;
+  } finally {
+    for (const [signal, listener] of listeners)
+      signals.removeListener(signal, listener);
+  }
+}
+async function rootInvoke(request) {
+  await managedHostedContext();
+  managedGuard({
+    env: process.env,
+    platform: process.platform,
+    arch: process.arch,
+    uid: process.getuid?.(),
+  });
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      '/usr/bin/sudo',
+      [
+        '-n',
+        `--preserve-env=${preserved.join(',')}`,
+        '--',
+        process.execPath,
+        ownFile,
+        '--managed-appimage-private',
+      ],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+          LANG: 'C',
+          ...Object.fromEntries(
+            preserved.map((key) => [key, process.env[key]]),
+          ),
+        },
+      },
+    );
+    let output = '',
+      error = '',
+      overflow = false;
+    const timer = setTimeout(() => child.kill('SIGKILL'), 12000);
+    for (const [stream, kind] of [
+      [child.stdout, 'out'],
+      [child.stderr, 'err'],
+    ])
+      stream.on('data', (chunk) => {
+        if (output.length + error.length + chunk.length > 65536) {
+          overflow = true;
+          child.kill('SIGKILL');
+          return;
+        }
+        if (kind === 'out') output += chunk;
+        else error += chunk;
+      });
+    child.stdin.on('error', () => {});
+    child.stdin.end(JSON.stringify(request));
+    child.once('error', (cause) => {
+      clearTimeout(timer);
+      reject(cause);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || signal || overflow)
+        return reject(
+          new Error(
+            `Managed ${request.operation} failed: ${error.slice(0, 1000)}`,
+          ),
+        );
+      try {
+        resolve(JSON.parse(output));
+      } catch (cause) {
+        reject(cause);
+      }
+    });
+  });
+}
+function nativeEffects() {
+  const authorize = () => {
+    managedGuard({
+      env: process.env,
+      platform: process.platform,
+      arch: process.arch,
+      uid: Number(process.env.SUDO_UID),
+    });
+    if (process.getuid() !== 0)
+      fail('Private managed operation requires sudo from ordinary audit user');
+  };
+  const allowed = new Set(Object.values(managedPaths));
+  const pathGuard = (path) => {
+    authorize();
+    if (!allowed.has(path)) fail('Unscoped managed mutation');
+  };
+  const create = async (path, text, mode, onCreated) => {
+    pathGuard(path);
+    const handle = await open(path, 'wx', mode);
+    try {
+      await onCreated(await handle.stat());
+      await handle.writeFile(text());
+    } finally {
+      await handle.close();
+    }
+  };
+  return {
+    read: boundedRead,
+    hash: boundedHash,
+    lstat,
+    stat: lstat,
+    canonical: realpath,
+    link: async (path) => (await import('node:fs/promises')).readlink(path),
+    list: readdir,
+    mkdir: async (path, mode) => {
+      pathGuard(path);
+      await mkdir(path, { mode });
+    },
+    create,
+    receipt: async (text, expected) => {
+      pathGuard(managedPaths.receipt);
+      const handle = await open(
+        managedPaths.receipt,
+        constants.O_RDWR | constants.O_NOFOLLOW,
+      );
+      try {
+        if (!same(identity(await handle.stat(), true), expected))
+          fail('Receipt inode changed');
+        await handle.truncate(0);
+        await handle.writeFile(text);
+      } finally {
+        await handle.close();
+      }
+    },
+    copy: async (source, destination, mode, onCreated) => {
+      pathGuard(destination);
+      const input = await open(
+        source,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      let output;
+      try {
+        const meta = await input.stat();
+        if (
+          !meta.isFile() ||
+          meta.uid !== Number(process.env.SUDO_UID) ||
+          meta.nlink !== 1 ||
+          meta.mode & 0o6022 ||
+          !Number.isSafeInteger(meta.size) ||
+          meta.size < 0 ||
+          meta.size > 256 * 1024 * 1024
+        )
+          fail('Original exceeds copy bound');
+        output = await open(destination, 'wx', mode);
+        await onCreated(await output.stat());
+        const buffer = Buffer.alloc(65536);
+        for (let offset = 0; offset < meta.size;) {
+          const { bytesRead } = await input.read(
+            buffer,
+            0,
+            Math.min(buffer.length, meta.size - offset),
+            offset,
+          );
+          if (!bytesRead) fail('Original truncated');
+          for (let written = 0; written < bytesRead;) {
+            const result = await output.write(
+              buffer,
+              written,
+              bytesRead - written,
+              offset + written,
+            );
+            if (!result.bytesWritten) fail('Copy made no progress');
+            written += result.bytesWritten;
+          }
+          offset += bytesRead;
+        }
+      } finally {
+        await output?.close();
+        await input.close();
+      }
+    },
+    parser: async (operation) => {
+      authorize();
+      if (!['add', 'remove'].includes(operation))
+        fail('Unscoped parser command');
+      const result = spawnSync(
+        '/usr/sbin/apparmor_parser',
+        [
+          '--config-file=/dev/null',
+          '--skip-cache',
+          `--${operation}`,
+          '--',
+          managedPaths.policy,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 5000,
+          killSignal: 'SIGKILL',
+          maxBuffer: 65536,
+          env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C' },
+        },
+      );
+      if (result.error) throw result.error;
+      if (result.status !== 0)
+        fail(
+          `App-specific parser ${operation} failed: ${result.stderr.slice(0, 1000)}`,
+        );
+    },
+    remove: async (path, kind) => {
+      pathGuard(path);
+      if (kind === 'directory' && path === managedPaths.directory)
+        await rmdir(path);
+      else if (kind === 'file' && path !== managedPaths.directory)
+        await unlink(path);
+      else fail('Unscoped removal');
+    },
+  };
+}
+if (
+  basename(process.argv[1] ?? '') === 'managed-appimage.mjs' &&
+  process.argv[2] === '--managed-appimage-private'
+) {
+  const timer = setTimeout(() => process.exit(1), 10000);
+  try {
+    const context = {
+      env: process.env,
+      platform: process.platform,
+      arch: process.arch,
+      uid: Number(process.env.SUDO_UID),
+    };
+    managedGuard(context);
+    if (process.getuid() !== 0) fail('Private managed operation requires root');
+    context.osRelease = release(await boundedRead('/etc/os-release'));
+    let input = '';
+    for await (const chunk of process.stdin) {
+      input += chunk;
+      if (input.length > 16384) fail('Managed request exceeds bound');
+    }
+    const result = await managedOperation(
+      JSON.parse(input),
+      nativeEffects(),
+      context,
+    );
+    process.stdout.write(JSON.stringify(result));
+  } catch (error) {
+    console.error(String(error));
+    process.exitCode = 1;
+  } finally {
+    clearTimeout(timer);
+  }
+}

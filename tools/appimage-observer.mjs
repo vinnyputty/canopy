@@ -174,6 +174,11 @@ export async function mountedEvidence(pid, identity, config, effects = io) {
       config.appAsarSha256
   )
     throw new Error('Mounted payload identity mismatch');
+  const helperSha256 = config.helperSha256
+    ? await effects.hash(helper)
+    : undefined;
+  if (config.helperSha256 && helperSha256 !== config.helperSha256)
+    throw new Error('Mounted helper identity mismatch');
   const metadata = await effects.stat(helper);
   const context = await effects.read(proc(pid, 'attr/current'));
   await retained(pid, identity, effects);
@@ -185,7 +190,15 @@ export async function mountedEvidence(pid, identity, config, effects = io) {
     executable,
     mount,
     apparmorContext: context.trim(),
+    ...(config.helperSha256
+      ? {
+          uid: config.uid,
+          executableSha256: config.executableSha256,
+          appAsarSha256: config.appAsarSha256,
+        }
+      : {}),
     sandboxHelper: {
+      ...(config.helperSha256 ? { sha256: helperSha256 } : {}),
       path: helper,
       uid: metadata.uid,
       gid: metadata.gid,
@@ -330,6 +343,7 @@ export function captureAppImageSpawn(
   let target;
   let matches = 0;
   let confirmed = false;
+  let revoked = false;
   const pending = new Map();
   const alive = () =>
     active &&
@@ -346,6 +360,7 @@ export function captureAppImageSpawn(
     }
   };
   const invalidate = () => {
+    revoked = true;
     transmit({ type: 'revoke' });
     close();
   };
@@ -399,6 +414,17 @@ export function captureAppImageSpawn(
   diagnostics.subscribe(onConstruct);
   return {
     close,
+    matches(child) {
+      // A completed observer is historical; retain exact object association,
+      // while requiring the actual child to remain live at the consumer.
+      return (
+        child === target &&
+        confirmed &&
+        !revoked &&
+        target.exitCode === null &&
+        target.signalCode === null
+      );
+    },
     confirm(value) {
       if (
         confirmed ||
@@ -626,6 +652,10 @@ async function worker(config) {
     await mkdir(dirname(config.output), { recursive: true });
     await save();
     if (config.nonce) original = await originalArtifact(config);
+    if (config.managedReceipt) {
+      evidence.managedReceipt = config.managedReceipt;
+      evidence.original = original;
+    }
     if (process.connected)
       process.send('ready', (error) => {
         if (error) note(error);
@@ -704,6 +734,14 @@ async function worker(config) {
                   fileUid: original?.metadata.uid ?? config.uid,
                 }),
               );
+              if (config.managedReceipt)
+                evidence.authority = {
+                  kind: 'native-original',
+                  pid,
+                  birth: roots.get(pid).birth,
+                  originalSha256: original.hash,
+                  managed: original.managed,
+                };
             } catch (error) {
               // A missed transient original can be retried before any binding;
               // it grants no evidence and does not invalidate an accepted root.
@@ -898,7 +936,7 @@ async function startObserver(config) {
   child.on('message', onMessage);
   child.once('exit', () => capture.close());
   child.once('disconnect', () => capture.close());
-  return () =>
+  const finish = () =>
     new Promise((resolve) => {
       capture.close();
       child.removeListener('message', onMessage);
@@ -914,7 +952,28 @@ async function startObserver(config) {
       });
       if (child.connected) child.send('stop', () => {});
     });
+  finish.matches = (actualChild) => capture.matches(actualChild);
+  return finish;
 }
+
+const managedLaunches = new WeakMap();
+export function assertManagedLaunchChild(app, kind) {
+  const binding = managedLaunches.get(app);
+  const child = app.process();
+  if (
+    !binding ||
+    child !== binding.child ||
+    !(child instanceof ChildProcess) ||
+    child.exitCode !== null ||
+    child.signalCode !== null ||
+    !['retained-spawn', 'native-original'].includes(kind) ||
+    (kind === 'retained-spawn' && !binding.matched)
+  )
+    throw new Error(
+      'Managed launcher object does not match retained authority',
+    );
+}
+
 export async function observeAppImageLaunch(
   config,
   launch,
@@ -939,7 +998,21 @@ export async function observeAppImageLaunch(
     console.error('AppImage observer unavailable:', message(error));
   }
   try {
-    return await launch();
+    const app = await launch();
+    if (config.managedReceipt) {
+      // Return the acquired app even if binding fails, so its caller owns
+      // closure. The managed consumer refuses a missing association.
+      try {
+        const child = app.process();
+        managedLaunches.set(app, {
+          child,
+          matched: finish?.matches?.(child) === true,
+        });
+      } catch {
+        /* Acceptance remains unavailable. */
+      }
+    }
+    return app;
   } finally {
     try {
       if (finish) await waitWithin(Promise.resolve().then(finish), 750);

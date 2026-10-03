@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { once } from 'node:events';
 import {
   captureAppImageSpawn,
+  observeAppImageLaunch,
+  assertManagedLaunchChild,
   originalArtifact,
   retainedSpawnIdentity,
   runtimeIdentity,
@@ -16,6 +18,7 @@ const statText = (parent, birth) =>
   `70 (fixture) S ${parent} ${Array(17).fill('0').join(' ')} ${birth}`;
 export async function checkRetainedAppImage() {
   await checkWorkerHandoff();
+  await checkManagedChildBinding();
   const hash = createHash('sha256')
     .update('owned artifact sample')
     .digest('hex');
@@ -226,8 +229,17 @@ export async function checkRetainedAppImage() {
         birth: '123',
       });
       assert.equal(sent[1].type, 'confirm');
+      assert.equal(capture.matches(child), true);
+      const impostor = new ChildProcess();
+      Object.assign(impostor, {
+        pid: child.pid,
+        spawnargs: [...child.spawnargs],
+        spawnfile: child.spawnfile,
+      });
+      assert.equal(capture.matches(impostor), false);
       await once(child, 'exit');
       assert.equal(sent.at(-1).type, 'revoke');
+      assert.equal(capture.matches(child), false);
       const count = sent.length;
       capture.confirm({
         type: 'confirm-request',
@@ -434,8 +446,8 @@ async function checkWorkerHandoff() {
             if(mode==='validation-hung') return new Promise(()=>{});
             await new Promise(resolve=>setTimeout(resolve,75));
           }
-          if (mode === 'hung') return new Promise(()=>{});if(mode==='late-sample' && path.endsWith('/canopy')) await new Promise(resolve=>setTimeout(resolve,800));return path===artifact?'original':path.endsWith('app.asar')?'asar':'binary'},
-        link: async () => {if(mode==='native-no-offer' && !nativeOriginalSeen){nativeOriginalSeen=true;return artifact;}return mount+'/canopy'},
+          if (mode === 'hung') return new Promise(()=>{});if(mode==='late-sample' && path.endsWith('/canopy')) await new Promise(resolve=>setTimeout(resolve,800));return path===artifact?'original':path.endsWith('app.asar')?'asar':path.endsWith('chrome-sandbox')?'helper':'binary'},
+        link: async () => {if(['native-no-offer','managed-native-no-offer'].includes(mode) && !nativeOriginalSeen){nativeOriginalSeen=true;return artifact;}return mount+'/canopy'},
         read: async path => {
           if(finalLoss && mode==='validation-parent-read' && path===proc(process.ppid,'stat')) throw new Error('fixture parent unavailable during final hash');
           if(finalLoss && mode==='validation-ambiguity' && path===proc(process.ppid,'task/'+process.ppid+'/children')) return '70 71';
@@ -463,11 +475,13 @@ async function checkWorkerHandoff() {
       ${source.slice(retainedBegin, retainedEnd)}
       ${source.slice(begin, end)}
       await worker({artifact,artifactSha256:'original',parent:process.ppid,parentBirth:'321',uid:1001,
-        baseline:[],nonce:'fixture-private-nonce',executableSha256:'binary',appAsarSha256:'asar',output,deadline:Date.now()+1400});
+        baseline:[],nonce:'fixture-private-nonce',...(mode.startsWith('managed-')?{managedReceipt:'a'.repeat(32),helperSha256:'helper'}:{}),executableSha256:'binary',appAsarSha256:'asar',output,deadline:Date.now()+1400});
     `,
     );
     for (const mode of [
       'success',
+      'managed-retained',
+      'managed-native-no-offer',
       'duplicate-offer',
       'bad-nonce',
       'duplicate-confirm',
@@ -545,7 +559,8 @@ async function checkWorkerHandoff() {
           return;
         }
         if (value === 'ready') {
-          if (mode === 'native-no-offer') return;
+          if (['native-no-offer', 'managed-native-no-offer'].includes(mode))
+            return;
           const offer = {
             type: 'offer',
             nonce: mode === 'bad-nonce' ? 'foreign' : 'fixture-private-nonce',
@@ -608,6 +623,8 @@ async function checkWorkerHandoff() {
         if (
           [
             'success',
+            'managed-retained',
+            'managed-native-no-offer',
             'final-revoke',
             'final-disconnect',
             'final-hung',
@@ -619,7 +636,19 @@ async function checkWorkerHandoff() {
           assert.equal(report.status, 'observed');
           if (mode === 'native-no-offer')
             assert.equal(report.authority, undefined);
-          else assert.equal(report.authority.kind, 'retained-spawn');
+          else
+            assert.equal(
+              report.authority.kind,
+              mode === 'managed-native-no-offer'
+                ? 'native-original'
+                : 'retained-spawn',
+            );
+          if (mode.startsWith('managed-')) {
+            assert.equal(report.managedReceipt, 'a'.repeat(32));
+            assert.equal(report.original.managed, true);
+            assert.equal(report.samples[0].sandboxHelper.sha256, 'helper');
+            assert.equal(report.samples[0].uid, 1001);
+          }
           assert.equal(report.samples.length, 1);
           assert.equal(
             report.samples[0].apparmorContext,
@@ -690,5 +719,53 @@ async function checkWorkerHandoff() {
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// Real owned Node child; modeled observer completion only. This tests object
+// association, not Linux payload, policy, or native product acceptance.
+async function checkManagedChildBinding() {
+  const child = spawn(
+    process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
+    ['-e', 'setTimeout(() => {}, 10000)'],
+    { stdio: 'ignore' },
+  );
+  try {
+    await once(child, 'spawn');
+    const options = {
+      platform: 'linux',
+      env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' },
+    };
+    for (const matched of [true, false]) {
+      let current = child;
+      const app = { process: () => current };
+      const finish = async () => {};
+      finish.matches = (actual) => matched && actual === child;
+      await observeAppImageLaunch(
+        { managedReceipt: 'fixture' },
+        async () => app,
+        { ...options, start: async () => finish },
+      );
+      if (matched) assertManagedLaunchChild(app, 'retained-spawn');
+      else assert.throws(() => assertManagedLaunchChild(app, 'retained-spawn'));
+      assertManagedLaunchChild(app, 'native-original');
+      assert.throws(() => assertManagedLaunchChild(app, 'unknown'));
+      current = new ChildProcess();
+      Object.assign(current, {
+        pid: child.pid,
+        spawnargs: child.spawnargs,
+        spawnfile: child.spawnfile,
+      });
+      assert.throws(() => assertManagedLaunchChild(app, 'native-original'));
+    }
+    assert.throws(() =>
+      assertManagedLaunchChild({ process: () => child }, 'native-original'),
+    );
+  } finally {
+    const exited = once(child, 'exit');
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await exited;
+    }
   }
 }

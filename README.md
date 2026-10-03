@@ -2,7 +2,7 @@
 
 A focused Electron desktop workspace for Jira and GitHub issue trees, with one root issue per tab. Expand the provider's parent/child hierarchy and open linked issues in their own tabs. Jira supports inline summaries, priorities, assignees, status, and sibling ranking. GitHub supports title, assignee, labels, and open/closed state.
 
-Canopy’s candidate package matrix is macOS arm64, Windows x64, and Linux x64; see [platform requirements and release blockers](docs/platforms.md). Its provider boundary keeps the tree UI independent of Jira and GitHub REST payloads.
+Canopy’s candidate package matrix is macOS arm64, Windows x64, and Linux x64; see [platform requirements and release blockers](docs/platforms.md). Hosted Linux AppImage checks use a guarded receipt-owned installation and app-specific namespace profile; genuine runtime and native qualification remain pending. Its provider boundary keeps the tree UI independent of Jira and GitHub REST payloads.
 
 ## Run
 

@@ -470,7 +470,7 @@ export async function checkAppImageObserver() {
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const executeLaunch = new AsyncFunction(
     'dependencies',
-    `const {electron, executablePath, env, identity, restart, workspace, artifact, join, observeAppImageLaunch} = dependencies; let app; ${source.slice(begin, end)} return app;`,
+    `const {electron, executablePath, env, identity, restart, workspace, artifact, join, observeAppImageLaunch, managed} = dependencies; let app; ${source.slice(begin, end)} return app;`,
   );
   for (const paths of [posix, win32, { join }]) {
     for (const identity of [undefined, { ...config, appImage: artifact }]) {

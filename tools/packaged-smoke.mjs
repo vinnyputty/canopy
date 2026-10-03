@@ -1,5 +1,13 @@
 import {
+  withManagedAppImage,
+  managedChild,
+  acceptManagedObservation,
+  managedHostedContext,
+} from './managed-appimage.mjs';
+import { boundedRead, processIdentity } from './appimage-observer.mjs';
+import {
   observeAppImageLaunch,
+  assertManagedLaunchChild,
   recordCanopyPolicy,
 } from './appimage-observer.mjs';
 import { checkDesktopEntry } from './linux-package-check.mjs';
@@ -37,6 +45,7 @@ if (!platform || platform.arch !== process.arch)
   throw new Error(
     `Unexercised package platform: ${process.platform}/${process.arch}`,
   );
+if (process.env.CANOPY_MANAGED_APPIMAGE === '1') await managedHostedContext();
 const verified = join(workspace, '.cache', 'verified-packages');
 // Only payloads checked by this invocation are eligible for artifact upload.
 await rm(verified, { recursive: true, force: true });
@@ -187,7 +196,7 @@ async function linuxStartupEvidence(executable, artifact, format, directory) {
     JSON.stringify(evidence, null, 2),
   );
 }
-async function smoke(executablePath, directory, artifact, identity) {
+async function smoke(executablePath, directory, artifact, identity, managed) {
   const userData = join(directory, 'user-data');
   await mkdir(userData);
   const env = { ...process.env, CANOPY_USER_DATA: userData };
@@ -208,8 +217,10 @@ async function smoke(executablePath, directory, artifact, identity) {
   let page;
   const errors = [];
   const launches = [];
+  let smokeFailed = false;
   try {
     for (const restart of [false, true]) {
+      if (managed) await managed.check();
       const createApplication = () =>
         electron.launch({
           executablePath,
@@ -223,6 +234,12 @@ async function smoke(executablePath, directory, artifact, identity) {
               {
                 artifact: identity.appImage,
                 artifactSha256: identity.artifactSha256,
+                ...(managed
+                  ? {
+                      managedReceipt: managed.request.token,
+                      helperSha256: identity.helperSha256,
+                    }
+                  : {}),
                 executableSha256: identity.executableSha256,
                 appAsarSha256: identity.appAsarSha256,
                 output: join(
@@ -236,6 +253,7 @@ async function smoke(executablePath, directory, artifact, identity) {
               createApplication,
             )
           : await createApplication();
+      const actualChild = managed ? managedChild(app) : undefined;
       page = await app.firstWindow();
       page.on('pageerror', (error) => errors.push(error.message));
       await page.context().setOffline(true);
@@ -295,10 +313,12 @@ async function smoke(executablePath, directory, artifact, identity) {
         `Packaged launch security evidence: ${JSON.stringify(launches.at(-1))}`,
       );
       if (identity) {
-        const actual = await app.evaluate(({ app }) => ({
+        const actual = await app.evaluate(({ app, BrowserWindow }) => ({
           pid: process.pid,
           appAsar: app.getAppPath(),
           appImage: process.env.APPIMAGE,
+          rendererPid:
+            BrowserWindow.getAllWindows()[0].webContents.getOSProcessId(),
         }));
         actual.executable = await realpath(`/proc/${actual.pid}/exe`);
         const hash = async (path) =>
@@ -311,6 +331,52 @@ async function smoke(executablePath, directory, artifact, identity) {
         expect(actual.appAsarSha256).toBe(identity.appAsarSha256);
         if (identity.appImage) expect(actual.appImage).toBe(identity.appImage);
         else expect(actual.executable).toBe(executablePath);
+        if (managed) {
+          const rootBirth = processIdentity(
+            await boundedRead(`/proc/${actualChild.pid}/stat`),
+          ).birth;
+          const bound = {
+            pid: actual.pid,
+            mainBirth: processIdentity(
+              await boundedRead(`/proc/${actual.pid}/stat`),
+            ).birth,
+            rootPid: actualChild.pid,
+            rootBirth,
+            rendererPid: actual.rendererPid,
+            rendererBirth: processIdentity(
+              await boundedRead(`/proc/${actual.rendererPid}/stat`),
+            ).birth,
+          };
+          const installed = await managed.verify(bound);
+          if (installed.receiptSha256 !== managed.installed.receiptSha256)
+            throw new Error('Managed receipt changed between launches');
+          if (!restart) {
+            const observation = JSON.parse(
+              await boundedRead(
+                join(
+                  workspace,
+                  '.cache',
+                  'smoke-failure',
+                  artifact,
+                  'mounted-launch.json',
+                ),
+              ),
+            );
+            assertManagedLaunchChild(app, observation.authority?.kind);
+            actual.managed = acceptManagedObservation(
+              observation,
+              installed,
+              bound,
+              managed.parent,
+            );
+          } else
+            actual.managed = {
+              receiptSha256: installed.receiptSha256,
+              profile: installed.launch.profile,
+              ...installed.launch,
+            };
+          managedChild(app); // Refuse exit/error or object changes during validation.
+        }
         Object.assign(launches.at(-1), actual);
       }
       expect(launch.frameUrl).toBe(launch.expectedUrl);
@@ -387,29 +453,47 @@ async function smoke(executablePath, directory, artifact, identity) {
       })
       .toBe(false);
   } catch (error) {
-    const diagnostics = join(workspace, '.cache', 'smoke-failure', artifact);
-    await mkdir(diagnostics, { recursive: true });
-    if (page && !page.isClosed())
-      await page
-        .screenshot({ path: join(diagnostics, 'window.png'), timeout: 3000 })
-        .catch(() => {});
-    await writeFile(
-      join(diagnostics, 'failure.json'),
-      JSON.stringify(
-        {
-          error: String(error.stack ?? error),
-          errors,
-          launches,
-          platform: process.platform,
-          arch: process.arch,
-        },
-        null,
-        2,
-      ),
-    );
+    smokeFailed = true;
+    try {
+      const diagnostics = join(workspace, '.cache', 'smoke-failure', artifact);
+      await mkdir(diagnostics, { recursive: true });
+      if (page && !page.isClosed())
+        await page
+          .screenshot({ path: join(diagnostics, 'window.png'), timeout: 3000 })
+          .catch(() => {});
+      await writeFile(
+        join(diagnostics, 'failure.json'),
+        JSON.stringify(
+          {
+            error: String(error?.stack ?? error),
+            errors,
+            launches,
+            platform: process.platform,
+            arch: process.arch,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (secondary) {
+      console.error(
+        'Packaged failure diagnostics unavailable:',
+        String(secondary),
+      );
+    }
     throw error;
   } finally {
-    if (app) await app.close();
+    if (app) {
+      try {
+        await app.close();
+      } catch (secondary) {
+        if (!smokeFailed) throw secondary;
+        console.error(
+          'Packaged application close also failed:',
+          String(secondary),
+        );
+      }
+    }
   }
   return launches;
 }
@@ -428,6 +512,8 @@ for (const format of platform.formats) {
   const directory = await realpath(
     await mkdtemp(join(tmpdir(), 'canopy-packaged-')),
   );
+  let managedAttempted = false;
+  let managedFinished = false;
   try {
     await access(artifact);
     const executable = await extract(artifact, format, directory);
@@ -500,9 +586,44 @@ for (const format of platform.formats) {
           launchExecutable = artifact;
           identity.appImage = artifact;
           identity.artifactSha256 = await hash(artifact);
+          if (process.env.CANOPY_MANAGED_APPIMAGE === '1') {
+            identity.helperSha256 = await hash(
+              join(dirname(executable), 'chrome-sandbox'),
+            );
+            identity.helperMode = (
+              (await stat(join(dirname(executable), 'chrome-sandbox'))).mode &
+              0o7777
+            ).toString(8);
+          }
         }
       }
-      launches = await smoke(launchExecutable, directory, name, identity);
+      if (
+        format === 'AppImage' &&
+        process.env.CANOPY_MANAGED_APPIMAGE === '1'
+      ) {
+        managedAttempted = true;
+        launches = await withManagedAppImage(
+          {
+            source: artifact,
+            sha256: identity.artifactSha256,
+            executableSha256: identity.executableSha256,
+            appAsarSha256: identity.appAsarSha256,
+            helperSha256: identity.helperSha256,
+            helperMode: identity.helperMode,
+          },
+          (installedPath, managed) =>
+            smoke(
+              installedPath,
+              directory,
+              name,
+              { ...identity, appImage: installedPath },
+              managed,
+            ),
+        );
+        managedFinished = true;
+        launchExecutable = '/opt/Canopy/Canopy.AppImage';
+      } else
+        launches = await smoke(launchExecutable, directory, name, identity);
     } catch (error) {
       primaryFailed = true;
       throw error;
@@ -531,25 +652,36 @@ for (const format of platform.formats) {
         }
       }
     }
+    const artifactSha256 = createHash('sha256')
+      .update(await readFile(artifact))
+      .digest('hex');
+    if (format === 'AppImage')
+      expect(artifactSha256).toBe(identity.artifactSha256);
     results.push({
       artifact: name,
       launchExecutable,
       launches,
-      sha256: createHash('sha256')
-        .update(await readFile(artifact))
-        .digest('hex'),
+      sha256: artifactSha256,
     });
     console.log(`Packaged first-run and restart passed: ${name}`);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    if (!managedAttempted || managedFinished)
+      await rm(directory, { recursive: true, force: true });
+    else console.error('Managed failure fixtures retained:', directory);
   }
 }
 await mkdir(verified, { recursive: true });
-for (const result of results)
+for (const result of results) {
   await cp(
     join(workspace, 'release', result.artifact),
     join(verified, result.artifact),
   );
+  expect(
+    createHash('sha256')
+      .update(await readFile(join(verified, result.artifact)))
+      .digest('hex'),
+  ).toBe(result.sha256);
+}
 await writeFile(
   join(verified, 'release-checks.json'),
   JSON.stringify(
