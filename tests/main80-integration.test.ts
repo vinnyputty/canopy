@@ -5,6 +5,8 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { Updates } from '../src/main/updates';
 import type { UpdateState } from '../src/shared/updates';
+import { largeProvider } from './fixtures/large-trees';
+import { defaultShortcuts } from '../src/renderer/tree';
 
 function source(path: string) {
   const text = readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -42,6 +44,82 @@ const storage = {
   read: async <T>() => null as T | null,
   write: async () => {},
 };
+
+for (const kind of ['jira', 'github'] as const) {
+  test(`actual performance bootstrap supplies Inbox identity through production ${kind} current-user handler`, async () => {
+    const bootstrap = source('./fixtures/performance-main.ts');
+    const callback = (
+      bootstrap.find(
+        (n) =>
+          ts.isCallExpression(n) &&
+          n.expression.getText(bootstrap.ast) === 'launch',
+      ) as ts.CallExpression
+    ).arguments[0];
+    const shapes = [
+      ['wide', 9901],
+      ['tiered', 10101],
+      ['deep', 2001],
+    ] as const;
+    const fixtures = shapes.map(([shape, size], index) =>
+      largeProvider(kind, shape, size, index),
+    );
+    const connectionId = `perf-${kind}`;
+    const state = new Map<string, unknown>();
+    const fixture = await bootstrap.execute(callback, {
+      kind,
+      shapes,
+      fixtures,
+      connectionId,
+      defaultShortcuts,
+      process: { platform: 'darwin', env: {} },
+      globalThis: {},
+      performance,
+    })({
+      read: async (key: string) => state.get(key),
+      write: async (key: string, value: unknown) => state.set(key, value),
+    });
+    const main = source('../src/main/app.ts');
+    const handler = (
+      main.find(
+        (n) =>
+          ts.isPropertyAssignment(n) &&
+          n.name.getText(main.ast) === 'currentUser',
+      ) as ts.PropertyAssignment
+    ).initializer;
+    const providerDeclaration = main.find(
+      (n) =>
+        ts.isVariableDeclaration(n) && n.name.getText(main.ast) === 'provider',
+    ) as ts.VariableDeclaration;
+    const forbidden = () => {
+      throw new Error(
+        'Fixture identity must not use credentials or live providers',
+      );
+    };
+    const provider = main.execute(providerDeclaration.initializer!, {
+      fixture,
+      text: (value: string) => value,
+      connections: forbidden,
+      providers: { get: forbidden },
+    });
+    const currentUser = main.execute(handler, {
+      fixture,
+      provider,
+      auth: { githubUser: forbidden, request: forbidden },
+      connections: forbidden,
+    });
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(await currentUser(connectionId))),
+      { id: 'alex', name: 'Alex Morgan' },
+    );
+    await assert.rejects(currentUser('unowned'), /must not use credentials/);
+    assert.equal(fixture.connection.id, connectionId);
+    assert.deepEqual(
+      fixtures.map((item) => item.calls()),
+      [0, 0, 0],
+      'bootstrap identity does not trigger hierarchy IPC',
+    );
+  });
+}
 
 test('actual main teardown cancels both an in-flight update check and tree/search controllers', async () => {
   let release!: () => void,

@@ -342,6 +342,7 @@ test('actual App navigation restores history offsets and preserves a just-scroll
   const refs = { current: withScrollPositions(state, positions.current) };
   const navigate = run(callback, {
     workspaceRef: refs,
+    setInboxOpen: (open: boolean) => assert.equal(open, false),
     historyRef: { current: { back: [], forward: [] } },
     setHistory: () => {},
     visit,

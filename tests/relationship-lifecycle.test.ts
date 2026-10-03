@@ -450,7 +450,6 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
             pending.push({ key, resolve, reject }),
           ),
         cancelTree: async () => {},
-        syncStatus: async () => ({ retryAt: null }),
         cancelRelationships: (id: string, request: string) => {
           cancelled.push(`${id}:${request}`);
           return Promise.resolve();
@@ -2523,10 +2522,10 @@ for (const change of ['source content', 'tree coverage']) {
 
 // These calls come from the production command, toolbar, saved-view and retry
 // actions; their argument wiring must satisfy both independent permissions.
-for (let action = 0; action < 7; action++) {
+for (let action = 0; action < 8; action++) {
   test(`actual user refresh action ${action + 1} restarts cancellation and invalidates delivered manual relationships`, async () => {
     const api = rendererRequests(true);
-    assert.equal(api.userActions.length, 7);
+    assert.equal(api.userActions.length, 8);
     let calls = 0;
     api.setTree(async (_connection: string, key: string) => {
       calls++;
