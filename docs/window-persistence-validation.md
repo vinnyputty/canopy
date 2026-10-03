@@ -15,7 +15,7 @@ bazel --output_base=/tmp/canopy-bazel-95 build //:build
 bazel --output_base=/tmp/canopy-bazel-95 test //:test //:typecheck //:format_check //:portable_checks --test_output=errors
 ```
 
-Deterministic tests cover event bursts, a blocked write, debounce timing, events during close, immediate flush, maximize/unmaximize restoration, invalid snapshots, removed-monitor clamping, and final write failure. The disk regression uses a temporary directory and a bundled fake keychain to check actual workspace and credential persistence after a failed bounds replacement. It launches no Electron process and uses no live providers or credentials. Harness source probes mock transport, child-process methods, and timers to verify that close rejection or hangs preserve the original assertion and still remove the disposable profile. Failure cleanup waits at most five seconds for transport close, then terminates only the owned fixture child if it remains alive and waits at most five seconds for exit. Profile removal is attempted independently; secondary cleanup errors are logged without replacing the original failure. Successful exit handling is unchanged.
+Deterministic tests cover event bursts, a blocked write, debounce timing, events during close, immediate flush, maximize/unmaximize restoration, invalid snapshots, removed-monitor clamping, and final write failure. The disk regression uses a temporary directory and a bundled fake keychain to check actual workspace and credential persistence after a failed bounds replacement. It launches no Electron process and uses no live providers or credentials. Harness source probes mock transport, child-process methods, and timers to verify that close rejection or hangs preserve the original assertion and still remove the disposable profile. Failure cleanup waits at most five seconds for transport close, then terminates only the owned fixture child if it remains alive and waits at most five seconds for exit. Profile removal is attempted independently; secondary cleanup errors are logged without replacing the original failure. Stop callback controls execute the actual extracted callback with owned disposable Node children under `--unhandled-rejections=throw`. They cover healthy exit, nonzero or signalled exit while evaluation is held, deadline expiry, and rejected or synchronously thrown evaluation values, including falsy primaries. Every path clears the 15-second deadline; failures retain the running owner for outer cleanup, and healthy termination returns the observed geometry.
 
 ## Actual Electron fixture checks
 
@@ -38,7 +38,7 @@ Observed on macOS / arm64 with Electron 44.3.0 on 2026-10-02, against main `2d57
 
 ## Pending native acceptance
 
-Keep the PR draft until required user-dependent checks are complete. Use disposable sample profiles and an exclusive GUI token for further automated desktop runs.
+Keep the PR draft until required user-dependent checks are complete. Use disposable sample profiles and an exclusive GUI token for further automated desktop runs. Further `window_check` execution also requires qualified `AuditOwner` evidence of ownership and absence before profile removal. The existing child-only cleanup and mocked removal controls do not establish that authority; lifecycle adoption remains separately scoped.
 
 - [ ] Complete fullscreen entry, ignored bounds changes, close/quit, and relaunch on a desktop session that delivers the native fullscreen transition.
 - [ ] Confirm physical drag/resize, maximize, minimized quit, and immediate quit/relaunch ordering on macOS.
