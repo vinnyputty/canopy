@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { AuditOwner, finishAudit } from './audit-lifecycle.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,53 +17,66 @@ const results = [];
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const readSaved = async () => JSON.parse(await readFile(savedFile, 'utf8'));
 
-async function closeFailedWindow() {
-  const child = running.process();
-  let timeout;
-  try {
-    await Promise.race([
-      Promise.resolve().then(() => running.close()),
-      new Promise((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error('Failure cleanup close timed out')),
-          5000,
+// One AuditOwner captures one launch. Keep every owner for the shared profile,
+// including failed acquisition, until final qualified shutdown.
+const launches = [];
+const profileOwner = {
+  profile,
+  async shutdown() {
+    let terminated = launches.length > 0;
+    const errors = [];
+    for (const entry of launches) {
+      try {
+        const result = await entry.owner.shutdown(
+          entry.confirmed && running === entry.app
+            ? () => entry.app.close()
+            : undefined,
         );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timeout);
-    // Only the owned fixture child may be terminated, and only after a failure.
-    if (child.exitCode === null && child.signalCode === null) {
-      await new Promise((resolve, reject) => {
-        const finish = (error) => {
-          clearTimeout(timer);
-          child.off('exit', onExit);
-          if (error) reject(error);
-          else resolve();
-        };
-        const onExit = () => finish();
-        const timer = setTimeout(
-          () => finish(new Error('Failure cleanup child exit timed out')),
-          5000,
+        terminated &&= result.terminated;
+        errors.push(...result.errors);
+      } catch (error) {
+        terminated = false;
+        errors.push(error);
+      }
+      if (!entry.settled || !entry.confirmed) {
+        terminated = false;
+        errors.push(
+          new Error('Unsettled or unconfirmed window launch; profile retained'),
         );
-        child.once('exit', onExit);
-        try {
-          child.kill('SIGKILL');
-        } catch (error) {
-          finish(error);
-        }
-      });
+      }
     }
-  }
-}
+    return { terminated, errors };
+  },
+};
 
 async function launch() {
-  running = await electron.launch({
-    executablePath: process.env.CANOPY_ELECTRON_PATH,
-    args: [process.env.CANOPY_APP_PATH],
-    env,
-    timeout: 30_000,
-  });
+  const entry = {
+    owner: new AuditOwner({
+      profile,
+      executable: process.env.CANOPY_ELECTRON_PATH,
+    }),
+    settled: false,
+    confirmed: false,
+    app: undefined,
+  };
+  launches.push(entry);
+  try {
+    const app = await entry.owner.launch(async () => {
+      const app = await electron.launch({
+        executablePath: process.env.CANOPY_ELECTRON_PATH,
+        args: [process.env.CANOPY_APP_PATH],
+        env,
+        timeout: 30_000,
+      });
+      entry.app = app;
+      return app;
+    });
+    entry.owner.confirm(app.process());
+    entry.confirmed = true;
+    running = app;
+  } finally {
+    entry.settled = true;
+  }
   processOutput = '';
   running.process().stderr.on('data', (data) => {
     processOutput = (processOutput + data.toString()).slice(-8192);
@@ -75,6 +89,18 @@ async function launch() {
     controls.writes.length = 0;
     controls.events = { move: 0, moved: 0, resize: 0 };
   });
+}
+
+async function settleWindowScope(app, close) {
+  const entry = launches.find((entry) => entry.app === app);
+  assert.ok(
+    entry?.settled && entry.confirmed,
+    'Missing qualified window owner',
+  );
+  const shutdown = await entry.owner.shutdown(close);
+  assert.equal(shutdown.terminated, true, 'Window scope remains live');
+  if (shutdown.errors.length)
+    throw new AggregateError(shutdown.errors, 'Window scope shutdown failed');
 }
 
 async function snapshot() {
@@ -133,6 +159,7 @@ async function stop(action = 'quit', finalChange = false) {
       { action, finalChange },
     );
     await exited;
+    await settleWindowScope(running);
     running = undefined;
     return final;
   } finally {
@@ -194,6 +221,7 @@ async function burst(action) {
 }
 
 let failed = false;
+let failure;
 try {
   await launch();
   await burst('close');
@@ -256,7 +284,8 @@ try {
         reason:
           'Native enter-full-screen event not delivered in this desktop session',
       });
-      await running.close();
+      const app = running;
+      await settleWindowScope(app, () => app.close());
       running = undefined;
       await reopen(before);
       continue;
@@ -406,23 +435,16 @@ try {
   );
 } catch (error) {
   failed = true;
+  failure = error;
   console.error(JSON.stringify({ completed: results }, null, 2));
-  throw error;
 } finally {
-  try {
-    if (running) {
-      if (failed) await closeFailedWindow();
-      else await running.close();
-    }
-  } catch (error) {
-    if (!failed) throw error;
-    console.error('Window fixture cleanup also failed:', error);
-  } finally {
-    try {
-      await rm(profile, { recursive: true, force: true });
-    } catch (error) {
-      if (!failed) throw error;
-      console.error('Window fixture profile removal also failed:', error);
-    }
-  }
+  await finishAudit({
+    owner: profileOwner,
+    primary: failure,
+    primaryFailed: failed,
+    removeProfile: () => rm(profile, { recursive: true, force: true }),
+    writeEvidence: async () => {},
+    secondary: (error) =>
+      console.error('Window fixture cleanup also failed:', error),
+  });
 }
