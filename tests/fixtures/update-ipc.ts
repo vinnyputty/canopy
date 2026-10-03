@@ -38,9 +38,18 @@ const handlers = new Map<string, (...args: any[]) => any>();
 const requests: string[] = [],
   browsers: string[] = [],
   dialogs: unknown[] = [];
+const identity: string[] = [];
 const app = Object.assign(new EventEmitter(), {
   isPackaged: true,
   setName() {},
+  setDesktopName(name: string) {
+    assert.equal(name, 'canopy.desktop');
+    identity.push('linux');
+  },
+  setAppUserModelId(id: string) {
+    assert.equal(id, 'app.canopy.desktop');
+    identity.push('win32');
+  },
   setPath(_name: string, path: string) {
     assert.equal(path, profile);
   },
@@ -248,6 +257,11 @@ moduleLoader._load = function (name, ...args) {
 };
 globalThis.fetch = forbidden;
 const source = createRequire(__filename)(process.argv[2]);
+const platform = process.env.CANOPY_IPC_PLATFORM ?? process.platform;
+assert.deepEqual(
+  identity,
+  platform === 'linux' || platform === 'win32' ? [platform] : [],
+);
 const { launch, Updates, createDemoFixture } = source;
 launch(
   async (storage: any) => ({
