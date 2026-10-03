@@ -57,7 +57,7 @@ test('native CI comparisons isolate module environment and canonical resolution 
     [false, false, true],
   );
   assert.equal(result[0].phase, 'module-load');
-  assert.match(result[1].error!, /SyntaxError/);
+  assert.equal(result[1].error, 'INVALID_SNAPSHOT_JSON_OR_SCHEMA');
   assert.equal(result[2].rows, 1);
   assert.equal(reports.length, 3);
   assert.equal(env.PSModulePath, 'fixture-PowerShell-7');

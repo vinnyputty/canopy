@@ -109,8 +109,8 @@ async function processes(ms) {
           timeoutMs: ms,
           phase:
             [
-              ...String(error.stderr ?? '').matchAll(
-                /canopy-cim phase=([\w-]+)/g,
+              ...String(error?.stderr ?? '').matchAll(
+                /canopy-cim phase=(script-entry|module-load|query|projection|serialization|complete)(?=\s|$)/g,
               ),
             ].at(-1)?.[1] ?? 'startup-or-script-entry',
           spawnedMs,
@@ -127,18 +127,45 @@ async function processes(ms) {
                 }
               : null,
           hostMemoryBytes: { free: freemem(), total: totalmem() },
-          code: error.code ?? null,
-          killed: error.killed ?? null,
-          signal: error.signal ?? null,
-          stdout: String(error.stdout ?? '').slice(0, 4096),
-          stderr: String(error.stderr ?? '').slice(0, 4096),
+          status: Number.isSafeInteger(error?.code) ? error.code : null,
+          code: [
+            'ENOENT',
+            'EACCES',
+            'EPERM',
+            'ENOBUFS',
+            'EPIPE',
+            'ETIMEDOUT',
+            'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+            'ABORT_ERR',
+          ].includes(error?.code)
+            ? error.code
+            : 'CHILD_ERROR',
+          killed: typeof error?.killed === 'boolean' ? error.killed : null,
+          signal: [
+            'SIGTERM',
+            'SIGKILL',
+            'SIGINT',
+            'SIGABRT',
+            'SIGSEGV',
+            'SIGBREAK',
+          ].includes(error?.signal)
+            ? error.signal
+            : null,
+          stdoutBytes: Buffer.byteLength(String(error?.stdout ?? '')),
+          stderrBytes: Buffer.byteLength(String(error?.stderr ?? '')),
         })}`,
-        { cause: error },
       );
     } finally {
       activeCimSnapshots--;
     }
-    const result = JSON.parse(stdout);
+    let result;
+    try {
+      result = JSON.parse(stdout);
+    } catch {
+      throw new Error(
+        `Invalid CIM snapshot JSON: ${JSON.stringify({ stdoutBytes: Buffer.byteLength(String(stdout ?? '')) })}`,
+      );
+    }
     return (Array.isArray(result) ? result : [result]).map((row) => {
       if (
         !row ||

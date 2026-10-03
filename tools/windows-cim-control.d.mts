@@ -6,7 +6,11 @@ export interface CimControlRecord {
   timeoutMs: number;
   phase: string;
   rows?: number;
-  stderr: string;
+  status: number | null;
+  signal: string | null;
+  code: string | null;
+  stderrBytes: number;
+  stdoutBytes: number;
   error?: string;
 }
 export function runCimModuleControls(options?: {

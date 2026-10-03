@@ -41,13 +41,15 @@ for (const phase of [
       let primary;
       try { await owner.launch(async () => cp.spawn('node-fixture', [], { env: { CANOPY_USER_DATA: 'fixture' } })); }
       catch (error) { primary = error; }
-      assert.equal(primary.cause, failure);
+      assert.equal(primary.cause, undefined);
       const evidence = JSON.parse(primary.message.slice(primary.message.indexOf('{')));
       assert.equal(evidence.phase, phase);
       assert.equal(evidence.timeoutMs, 15000);
       assert.equal(evidence.concurrentSnapshots, 1);
       assert.equal(evidence.observerPid, process.pid);
-      assert.equal(evidence.stderr, failure.stderr);
+      assert.equal(evidence.stderrBytes, Buffer.byteLength(failure.stderr));
+      assert.equal(evidence.stdoutBytes, 0);
+      assert.equal(evidence.code, 'CHILD_ERROR');
       assert.equal(evidence.killed, true);
       assert.equal(evidence.signal, 'SIGTERM');
       let removed = false;

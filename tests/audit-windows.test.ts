@@ -115,11 +115,16 @@ for (const mode of [
         } else {
           assert.ok(primary);
           if (mode === 'timeout' || mode === 'syntax') {
-            assert.equal(primary.cause, failure);
+            assert.equal(primary.cause, undefined);
             const details = JSON.parse(primary.message.slice(primary.message.indexOf('{')));
             assert.equal(details.timeoutMs, 15000);
-            for (const field of ['code', 'killed', 'signal', 'stdout', 'stderr'])
-              assert.equal(details[field], failure[field]);
+            assert.equal(details.code, 'CHILD_ERROR');
+            assert.equal(details.status, mode === 'syntax' ? 1 : null);
+            for (const field of ['killed', 'signal']) assert.equal(details[field], failure[field]);
+            assert.equal(details.stdoutBytes, Buffer.byteLength(failure.stdout));
+            assert.equal(details.stderrBytes, Buffer.byteLength(failure.stderr));
+            assert.equal(details.stdout, undefined);
+            assert.equal(details.stderr, undefined);
           } else assert.match(primary.message, /Unestablished process creation identity/);
           await assert.rejects(finishAudit({ owner, primary,
             removeProfile: async () => { removed = true; }, writeEvidence: async () => {} }),

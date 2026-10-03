@@ -50,9 +50,10 @@ $manifest = $PSHOME + '\Modules\CimCmdlets\CimCmdlets.psd1';
         encoding: 'utf8',
       },
     );
+    const hasError = Object.hasOwn(result, 'error');
     let rows;
     let parseError;
-    if (result.status === 0 && !result.error) {
+    if (result.status === 0 && !hasError) {
       try {
         const parsed = JSON.parse(result.stdout);
         rows = Array.isArray(parsed) ? parsed : [parsed];
@@ -67,29 +68,52 @@ $manifest = $PSHOME + '\Modules\CimCmdlets\CimCmdlets.psd1';
           )
         )
           throw new Error('Incomplete CIM control snapshot');
-      } catch (error) {
-        parseError = String(error);
+      } catch {
+        parseError = 'INVALID_SNAPSHOT_JSON_OR_SCHEMA';
       }
     }
     const record = {
       mode,
-      ok: result.status === 0 && !result.error && !parseError,
+      ok: result.status === 0 && !hasError && !parseError,
       elapsedMs: Date.now() - started,
       timeoutMs: 15000,
-      status: result.status,
-      signal: result.signal,
-      code: result.error?.code ?? null,
-      error: result.error ? String(result.error) : parseError,
+      status: Number.isSafeInteger(result.status) ? result.status : null,
+      signal: [
+        'SIGTERM',
+        'SIGKILL',
+        'SIGINT',
+        'SIGABRT',
+        'SIGSEGV',
+        'SIGBREAK',
+      ].includes(result.signal)
+        ? result.signal
+        : null,
+      code: hasError
+        ? [
+            'ENOENT',
+            'EACCES',
+            'EPERM',
+            'ENOBUFS',
+            'EPIPE',
+            'ETIMEDOUT',
+            'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+            'ABORT_ERR',
+          ].includes(result.error?.code)
+          ? result.error.code
+          : 'CHILD_ERROR'
+        : null,
+      error: hasError
+        ? 'CHILD_OPERATION_FAILED'
+        : (parseError ?? (result.status !== 0 ? 'NONZERO_EXIT' : undefined)),
       phase:
-        [...String(result.stderr).matchAll(/canopy-cim phase=([\w-]+)/g)].at(
-          -1,
-        )?.[1] ?? 'startup-or-script-entry',
+        [
+          ...String(result.stderr).matchAll(
+            /canopy-cim phase=(script-entry|module-load|query|projection|serialization|complete)(?=\s|$)/g,
+          ),
+        ].at(-1)?.[1] ?? 'startup-or-script-entry',
       rows: rows?.length,
-      stderr: String(result.stderr ?? '').slice(0, 4096),
-      stdout:
-        result.status === 0 && !parseError
-          ? undefined
-          : String(result.stdout ?? '').slice(0, 4096),
+      stderrBytes: Buffer.byteLength(String(result.stderr ?? '')),
+      stdoutBytes: Buffer.byteLength(String(result.stdout ?? '')),
     };
     results.push(record);
     report(record);
