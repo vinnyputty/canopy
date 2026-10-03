@@ -1,6 +1,14 @@
+import { validateTrust } from './macos-release.mjs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import {
+  cp,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  writeFile,
+} from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -29,6 +37,19 @@ export const platforms = [
       ['amd64', 'deb'],
     ],
   },
+];
+export const signedPlatforms = [
+  platforms[0],
+  {
+    platform: 'darwin',
+    arch: 'x64',
+    artifact: 'mac-x64',
+    formats: [
+      ['x64', 'dmg'],
+      ['x64', 'zip'],
+    ],
+  },
+  ...platforms.slice(1),
 ];
 export function validateTag(tag, version) {
   const semver =
@@ -62,17 +83,48 @@ function equalNames(actual, expected) {
   )
     throw new Error(`Unexpected asset set: ${actual.join(', ')}`);
 }
-export async function assemble(input, output, tag, version, commit, runUrl) {
+function validateMacPublisher(assets) {
+  const publishers = new Set();
+  for (const asset of assets.filter((item) => item.name.includes('-mac-'))) {
+    const trust = validateTrust(
+      asset.macosTrust,
+      asset.name.includes('-arm64.') ? 'arm64' : 'x64',
+    );
+    publishers.add(
+      JSON.stringify([
+        trust.identity,
+        trust.teamId,
+        trust.certificateSha1.toLowerCase(),
+      ]),
+    );
+  }
+  if (publishers.size !== 1)
+    throw new Error('macOS publisher differs across release assets');
+}
+export async function assemble(
+  input,
+  output,
+  tag,
+  version,
+  commit,
+  runUrl,
+  signing = 'unsigned',
+) {
+  if (!['unsigned', 'signed'].includes(signing))
+    throw new Error('Invalid signing mode');
+  const matrix = signing === 'signed' ? signedPlatforms : platforms;
   validateTag(tag, version);
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Invalid source commit');
   equalNames(
     await readdir(input),
-    platforms.map((row) => `Canopy-${row.artifact}`),
+    matrix.map((row) => `Canopy-${row.artifact}`),
   );
   const assets = [];
   // Validate the entire matrix before making any file eligible for release.
-  for (const row of platforms) {
+  for (const row of matrix) {
     const directory = join(input, `Canopy-${row.artifact}`);
+    if (!(await lstat(directory)).isDirectory())
+      throw new Error('Unsafe artifact directory');
     const names = assetNames(version, row);
     equalNames(await readdir(directory), [...names, 'release-checks.json']);
     const report = await json(join(directory, 'release-checks.json'));
@@ -88,7 +140,13 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
       report.checks.map((check) => check.artifact),
       names,
     );
+    const macosTrust =
+      row.platform === 'darwin' && signing === 'signed'
+        ? validateTrust(report.macosTrust, row.arch)
+        : undefined;
     for (const check of report.checks) {
+      if (!(await lstat(join(directory, check.artifact))).isFile())
+        throw new Error('Unsafe artifact');
       const bytes = await readFile(join(directory, check.artifact));
       if (!bytes.length || hash(bytes) !== check.sha256)
         throw new Error(`Hash mismatch: ${check.artifact}`);
@@ -96,9 +154,11 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
         name: check.artifact,
         sha256: check.sha256,
         source: join(directory, check.artifact),
+        ...(macosTrust ? { macosTrust } : {}),
       });
     }
   }
+  if (signing === 'signed') validateMacPublisher(assets);
   await mkdir(output); // Refuse stale output from another invocation.
   for (const asset of assets) await cp(asset.source, join(output, asset.name));
   const manifest = {
@@ -106,8 +166,13 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
     version,
     commit,
     runUrl,
+    macosSigning: signing,
     nativeDesktopChecks: 'pending',
-    assets: assets.map(({ name, sha256 }) => ({ name, sha256 })),
+    assets: assets.map(({ name, sha256, macosTrust }) => ({
+      name,
+      sha256,
+      ...(macosTrust ? { macosTrust } : {}),
+    })),
   };
   await writeFile(
     join(output, 'release-manifest.json'),
@@ -119,7 +184,7 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
   );
   await writeFile(
     join(output, 'release-notes.md'),
-    `Canopy ${version}\n\nSource: ${commit}\n[Verified build](${runUrl})\n\nUnsigned test builds awaiting native qualification. Public release is blocked.\n\n- macOS 15 arm64: DMG (copy to Applications) or ZIP. Developer ID signing/notarization pending.\n- Windows 11 x64: NSIS EXE. Native installation and signing/SmartScreen qualification pending.\n- Ubuntu 24.04 x64: DEB or AppImage. AppImage needs FUSE 2 (libfuse2t64); credentials need an unlocked Secret Service/KWallet and session D-Bus. Native sandbox/desktop qualification pending.\n\nOther OS/CPU combinations are unqualified. See docs/platforms.md and docs/releases.md at this source commit for installation, limitations, and native release gates. Verify downloads against SHA256SUMS.\n`,
+    `Canopy ${version}\n\nSource: ${commit}\n[Verified build](${runUrl})\n\n${signing === 'signed' ? 'Developer ID signed/notarized macOS candidates; Windows/Linux test builds' : 'Unsigned test builds'} awaiting native qualification. Public release is blocked.\n\n- macOS 15 ${signing === 'signed' ? 'arm64/x64' : 'arm64'}: DMG (copy to /Applications) or ZIP. ${signing === 'signed' ? 'Developer ID signatures and notarization verified; native qualification pending.' : 'Developer ID signing/notarization pending.'}\n- Windows 11 x64: NSIS EXE. Native installation and signing/SmartScreen qualification pending.\n- Ubuntu 24.04 x64: DEB or AppImage. AppImage needs FUSE 2 (libfuse2t64); credentials need an unlocked Secret Service/KWallet and session D-Bus. Native sandbox/desktop qualification pending.\n\nOther OS/CPU combinations are unqualified. See docs/platforms.md and docs/releases.md at this source commit for installation, limitations, and native release gates. Verify downloads against SHA256SUMS.\n`,
   );
   return manifest;
 }
@@ -134,7 +199,11 @@ export async function verifyDownloads(directory, tag, version, commit) {
     manifest.nativeDesktopChecks !== 'pending'
   )
     throw new Error('Release manifest identity mismatch');
-  const names = platforms.flatMap((row) => assetNames(version, row));
+  if (!['unsigned', 'signed'].includes(manifest.macosSigning))
+    throw new Error('Invalid manifest signing mode');
+  const matrix =
+    manifest.macosSigning === 'signed' ? signedPlatforms : platforms;
+  const names = matrix.flatMap((row) => assetNames(version, row));
   equalNames(
     manifest.assets.map((asset) => asset.name),
     names,
@@ -149,7 +218,10 @@ export async function verifyDownloads(directory, tag, version, commit) {
     .join('');
   if ((await readFile(join(directory, 'SHA256SUMS'), 'utf8')) !== sums)
     throw new Error('Checksum manifest mismatch');
+  if (manifest.macosSigning === 'signed') validateMacPublisher(manifest.assets);
   for (const asset of manifest.assets) {
+    if (!(await lstat(join(directory, asset.name))).isFile())
+      throw new Error('Unsafe artifact');
     const bytes = await readFile(join(directory, asset.name));
     if (!bytes.length || hash(bytes) !== asset.sha256)
       throw new Error(`Hash mismatch: ${asset.name}`);
@@ -157,6 +229,9 @@ export async function verifyDownloads(directory, tag, version, commit) {
   return manifest;
 }
 export async function qualify(manifest, path) {
+  if (manifest.macosSigning !== 'signed')
+    throw new Error('Unsigned macOS distribution cannot publish');
+  validateMacPublisher(manifest.assets);
   const evidence = await json(path);
   if (
     evidence.tag !== manifest.tag ||
@@ -186,6 +261,13 @@ export async function qualify(manifest, path) {
       result.signingPolicy !== 'Developer ID signed and notarized'
     )
       throw new Error(`macOS distribution trust pending: ${asset.name}`);
+    if (
+      asset.macosTrust &&
+      (result.teamId !== asset.macosTrust.teamId ||
+        result.identity !== asset.macosTrust.identity ||
+        result.certificateSha1 !== asset.macosTrust.certificateSha1)
+    )
+      throw new Error(`Native signing identity mismatch: ${asset.name}`);
   }
   return evidence;
 }

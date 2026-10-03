@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import {
   assemble,
   assetNames,
-  platforms,
+  signedPlatforms as platforms,
   publish,
   resolveTagSource,
   qualify,
@@ -19,6 +19,30 @@ import {
 const version = '0.1.0';
 const tag = `v${version}`;
 const commit = 'a'.repeat(40);
+const trust = (arch) => ({
+  status: 'verified',
+  arch,
+  teamId: 'ABCDEFGHIJ',
+  identity: 'Developer ID Application: Fixture (ABCDEFGHIJ)',
+  certificateSha1: 'd'.repeat(40),
+  appSignature: 'passed',
+  hardenedRuntime: 'passed',
+  gatekeeper: 'passed',
+  appStaple: 'passed',
+  dmgSignature: 'passed',
+  dmgStaple: 'passed',
+  zipPayload: 'passed',
+  submissions: [
+    {
+      id: 'a'.repeat(8) + '-aaaa-aaaa-aaaa-' + 'a'.repeat(12),
+      status: 'Accepted',
+    },
+    {
+      id: 'b'.repeat(8) + '-bbbb-bbbb-bbbb-' + 'b'.repeat(12),
+      status: 'Accepted',
+    },
+  ],
+});
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 async function fixture(fn) {
   const root = await mkdtemp(join(tmpdir(), 'canopy-release-'));
@@ -42,6 +66,7 @@ async function fixture(fn) {
         version,
         commit,
         checks,
+        ...(row.platform === 'darwin' ? { macosTrust: trust(row.arch) } : {}),
         nativeDesktopChecks: 'pending',
       }),
     );
@@ -60,6 +85,7 @@ const build = (input, output) =>
     version,
     commit,
     'https://github.com/example/canopy/actions/runs/1',
+    'signed',
   );
 test('version tags match exactly and reject malformed or unsafe input', () => {
   for (const value of ['0.1.0', '1.2.3-rc.1'])
@@ -77,7 +103,7 @@ test('version tags match exactly and reject malformed or unsafe input', () => {
 test('complete matrix assembles deterministic hashes and verifies downloaded bytes', async () =>
   fixture(async ({ input, output, root }) => {
     const manifest = await build(input, output);
-    assert.equal(manifest.assets.length, 5);
+    assert.equal(manifest.assets.length, 7);
     assert.equal(manifest.nativeDesktopChecks, 'pending');
     assert.match(
       await readFile(join(output, 'release-notes.md'), 'utf8'),
@@ -167,6 +193,9 @@ test('publication requires exact-hash native evidence and macOS distribution tru
       { nativeChecks: 'pending' },
       { signingPolicy: 'unsigned' },
       { tester: '' },
+      { identity: 'Developer ID Application: Other (ABCDEFGHIJ)' },
+      { certificateSha1: 'f'.repeat(40) },
+      { teamId: 'OTHERTEAM1' },
     ]) {
       const changed = structuredClone(evidence);
       Object.assign(changed.assets[0], patch);
@@ -188,6 +217,13 @@ function qualification(manifest) {
       osBuild: 'mock desktop',
       date: '2026-10-02',
       evidenceUrl: 'https://example.test/result',
+      ...(asset.macosTrust
+        ? {
+            teamId: asset.macosTrust.teamId,
+            identity: asset.macosTrust.identity,
+            certificateSha1: asset.macosTrust.certificateSha1,
+          }
+        : {}),
       signingPolicy: asset.name.includes('-mac-')
         ? 'Developer ID signed and notarized'
         : 'unsigned; trust prompts recorded',
@@ -619,6 +655,121 @@ test('live final ref verification rejects Git ref changes before publication', a
         } finally {
           await rm(directory, { recursive: true, force: true });
         }
+      }),
+    );
+});
+
+test('unsigned or incomplete macOS trust cannot qualify or reach publication', async () =>
+  fixture(async ({ input, output, root }) => {
+    for (const patch of [
+      undefined,
+      { status: 'pending' },
+      { dmgStaple: 'pending' },
+      { identity: 'Developer ID Application: Other (ABCDEFGHIJ)' },
+      { certificateSha1: '' },
+      { arch: 'x64' },
+      { submissions: [] },
+    ]) {
+      const path = join(input, 'Canopy-mac-arm64', 'release-checks.json');
+      const report = JSON.parse(await readFile(path));
+      report.macosTrust =
+        patch === undefined ? undefined : { ...trust('arm64'), ...patch };
+      await writeFile(path, JSON.stringify(report));
+      await assert.rejects(build(input, output));
+    }
+  }));
+
+test('unsigned drafts retain the original matrix and cannot qualify as signed', async () =>
+  fixture(async ({ input, output, root }) => {
+    await rm(join(input, 'Canopy-mac-x64'), { recursive: true });
+    const manifest = await assemble(
+      input,
+      output,
+      tag,
+      version,
+      commit,
+      'https://example.test/run',
+    );
+    assert.equal(manifest.assets.length, 5);
+    assert.equal(manifest.macosSigning, 'unsigned');
+    assert.ok(manifest.assets.every((asset) => !asset.macosTrust));
+    await rm(join(output, 'release-notes.md'));
+    await verifyDownloads(output, tag, version, commit);
+    const path = join(root, 'evidence.json');
+    await writeFile(path, JSON.stringify(qualification(manifest)));
+    await assert.rejects(qualify(manifest, path), /Unsigned/);
+  }));
+
+test('mixed macOS publishers cannot verify, qualify or reach a public edit with matching native evidence', async (t) => {
+  for (const [label, select, patch] of [
+    [
+      'different CPUs',
+      (name) => name.includes('-mac-x64.'),
+      {
+        teamId: 'ZZZZZZZZZZ',
+        identity: 'Developer ID Application: Other (ZZZZZZZZZZ)',
+        certificateSha1: 'e'.repeat(40),
+      },
+    ],
+    [
+      'same CPU formats',
+      (name) => name.endsWith('-mac-arm64.zip'),
+      {
+        teamId: 'ZZZZZZZZZZ',
+        identity: 'Developer ID Application: Other (ZZZZZZZZZZ)',
+        certificateSha1: 'e'.repeat(40),
+      },
+    ],
+    [
+      'different certificate',
+      (name) => name.endsWith('-mac-x64.zip'),
+      { certificateSha1: 'e'.repeat(40) },
+    ],
+    [
+      'different identity',
+      (name) => name.endsWith('-mac-arm64.dmg'),
+      { identity: 'Developer ID Application: Other (ABCDEFGHIJ)' },
+    ],
+  ])
+    await t.test(label, async () =>
+      publicationFixture(async ({ output, evidence, notes }) => {
+        const path = join(output, 'release-manifest.json');
+        const manifest = JSON.parse(await readFile(path, 'utf8'));
+        for (const asset of manifest.assets.filter((item) => select(item.name)))
+          Object.assign(asset.macosTrust, patch);
+        await writeFile(path, JSON.stringify(manifest));
+        await writeFile(evidence, JSON.stringify(qualification(manifest)));
+        const calls = [];
+        let failure;
+        try {
+          await publish(
+            output,
+            tag,
+            version,
+            commit,
+            evidence,
+            notes,
+            (args) => {
+              calls.push(args);
+              return args[0] === 'api'
+                ? JSON.stringify(remoteRef('commit', commit))
+                : '';
+            },
+          );
+        } catch (error) {
+          failure = error;
+        }
+        assert.equal(
+          calls.length,
+          0,
+          `mixed publishers reached remote calls: ${JSON.stringify(calls)}`,
+        );
+        assert.match(failure?.message ?? '', /publisher differs/);
+        await assert.rejects(
+          verifyDownloads(output, tag, version, commit),
+          /publisher differs/,
+        );
+        await assert.rejects(qualify(manifest, evidence), /publisher differs/);
       }),
     );
 });

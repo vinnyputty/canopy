@@ -2,6 +2,7 @@ import {
   observeAppImageLaunch,
   recordCanopyPolicy,
 } from './appimage-observer.mjs';
+import { containedAppRoot, validateTrust } from './macos-release.mjs';
 import { checkDesktopEntry } from './linux-package-check.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
@@ -28,7 +29,11 @@ const { version } = JSON.parse(
   await readFile(join(root, 'package.json'), 'utf8'),
 );
 const platforms = {
-  darwin: { os: 'mac', arch: 'arm64', formats: ['dmg', 'zip'] },
+  darwin: {
+    os: 'mac',
+    arch: process.env.CANOPY_SIGNED_RELEASE === '1' ? process.arch : 'arm64',
+    formats: ['dmg', 'zip'],
+  },
   win32: { os: 'win', arch: 'x64', formats: ['exe'] },
   linux: { os: 'linux', arch: 'x64', formats: ['deb', 'AppImage'] },
 };
@@ -68,7 +73,7 @@ async function extract(artifact, format, directory) {
       artifact,
     ]);
     try {
-      await cp(join(mount, 'Canopy.app'), join(payload, 'Canopy.app'), {
+      await cp(await containedAppRoot(mount), join(payload, 'Canopy.app'), {
         recursive: true,
         verbatimSymlinks: true,
       });
@@ -77,6 +82,7 @@ async function extract(artifact, format, directory) {
     }
   } else if (format === 'zip') {
     run('ditto', ['-x', '-k', artifact, payload]);
+    await containedAppRoot(payload);
   } else if (format === 'exe') {
     // Inspect the NSIS payload without claiming a native installation check.
     run('7z', ['x', '-y', `-o${payload}`, artifact]);
@@ -542,6 +548,21 @@ for (const format of platform.formats) {
     await rm(directory, { recursive: true, force: true });
   }
 }
+let macosTrust;
+if (
+  process.platform === 'darwin' &&
+  process.env.CANOPY_SIGNED_RELEASE === '1'
+) {
+  const report = JSON.parse(
+    await readFile(join(workspace, 'release', 'macos-trust.json'), 'utf8'),
+  );
+  macosTrust = validateTrust(report.trust, process.arch);
+  for (const result of results) {
+    const asset = report.assets.find((item) => item.name === result.artifact);
+    if (!asset || asset.sha256 !== result.sha256)
+      throw new Error('Signed smoke artifact mismatch');
+  }
+}
 await mkdir(verified, { recursive: true });
 for (const result of results)
   await cp(
@@ -557,6 +578,7 @@ await writeFile(
       version,
       commit: process.env.GITHUB_SHA,
       checks: results,
+      ...(macosTrust ? { macosTrust } : {}),
       nativeDesktopChecks: 'pending',
     },
     null,

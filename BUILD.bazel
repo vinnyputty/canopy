@@ -104,7 +104,7 @@ js_binary(
 js_binary(
     name = "packaged_smoke",
     entry_point = "tools/desktop.mjs",
-    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/appimage-observer.mjs", "tools/AppRun"],
+    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/appimage-observer.mjs", "tools/AppRun", "tools/macos-release.mjs", "tools/release.mjs"],
     args = ["packaged-smoke"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -113,7 +113,7 @@ js_binary(
 js_binary(
     name = "packaged_smoke_failure",
     entry_point = "tools/packaged-smoke-failure.mjs",
-    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/appimage-observer.mjs", "tools/AppRun"],
+    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/appimage-observer.mjs", "tools/AppRun", "tools/macos-release.mjs", "tools/release.mjs"],
     patch_node_fs = False,
     tags = ["manual"],
 )
@@ -136,5 +136,20 @@ js_binary(
 js_test(
     name = "release_checks",
     entry_point = "tools/release.test.mjs",
-    data = ["tools/release.mjs", ".github/workflows/publish.yml"],
+    data = ["tools/release.mjs", "tools/macos-release.mjs", ".github/workflows/publish.yml"],
+)
+
+js_binary(
+    name = "signed_package",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", "package.json", "tools/macos-release.mjs", "tools/release.mjs"],
+    args = ["signed-package"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_test(
+    name = "macos_release_checks",
+    entry_point = "tools/macos-release.test.mjs",
+    data = ["tools/macos-release.mjs", "tools/release.mjs", ".github/workflows/sign-macos.yml"],
 )
