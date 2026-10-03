@@ -1,9 +1,11 @@
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, open, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import {
+  boundedHash,
   boundedRead,
   canopyPolicyEvidence,
   childPids,
@@ -199,6 +201,93 @@ export async function checkAppImageObserver() {
 
   const temporary = await mkdtemp(join(tmpdir(), 'canopy-observer-controls-'));
   try {
+    // Official electron-v44.3.0-linux-x64.zip lists electron at 228130120 bytes.
+    // The sparse fixture has independent nonzero endpoints and a precomputed
+    // whole-file digest; it exercises the real reader, not effects.hash.
+    const payload = join(temporary, 'supported-size-payload');
+    const supportedSize = 228130120;
+    const file = await open(payload, 'wx');
+    try {
+      await file.truncate(supportedSize);
+      const beginning = Buffer.from('supported Linux-size fixture');
+      await file.write(beginning, 0, beginning.length, 0);
+      const ending = Buffer.from('end of supported-size payload');
+      await file.write(ending, 0, ending.length, supportedSize - ending.length);
+    } finally {
+      await file.close();
+    }
+    assert.equal(
+      await boundedHash(payload),
+      '18c1ac4cf37374b57602a174da8659d24543b8123792bfad33bb97035eb279d1',
+    );
+    const oversized = await open(payload, 'r+');
+    try {
+      await oversized.truncate(256 * 1024 * 1024 + 1);
+    } finally {
+      await oversized.close();
+    }
+    await assert.rejects(boundedHash(payload), /hash limit/);
+    await rm(payload);
+    await assert.rejects(boundedHash(payload), { code: 'ENOENT' });
+    await assert.rejects(boundedHash(temporary));
+
+    // Execute the exact reader with a real file that changes immediately after
+    // its first physical read. There are no timing races or mock digest results.
+    const readerSource = await readFile(
+      join(dirname(fileURLToPath(import.meta.url)), 'appimage-observer.mjs'),
+      'utf8',
+    );
+    const readerStart = readerSource.indexOf(
+      'export async function boundedHash(',
+    );
+    const readerEnd = readerSource.indexOf('const io =', readerStart);
+    assert(readerStart >= 0 && readerEnd > readerStart);
+    const makeReader = new Function(
+      'open',
+      'createHash',
+      'MAX_HASH',
+      `${readerSource.slice(readerStart, readerEnd).replace('export ', '')} return boundedHash;`,
+    );
+    for (const change of ['grow', 'shrink']) {
+      await writeFile(
+        payload,
+        change === 'grow' ? 'small retained payload' : Buffer.alloc(65537),
+      );
+      let modified = false;
+      const changingReader = makeReader(
+        async (...args) => {
+          const handle = await open(...args);
+          return {
+            stat: () => handle.stat(),
+            close: () => handle.close(),
+            read: async (...readArgs) => {
+              assert(
+                readArgs[1] === 0 && readArgs[2] <= 65536,
+                'Fixed streaming buffer exceeded',
+              );
+              const result = await handle.read(...readArgs);
+              if (!modified) {
+                modified = true;
+                const writer = await open(payload, 'r+');
+                try {
+                  await writer.truncate(change === 'grow' ? 100 : 0);
+                } finally {
+                  await writer.close();
+                }
+              }
+              return result;
+            },
+          };
+        },
+        createHash,
+        256 * 1024 * 1024,
+      );
+      await assert.rejects(
+        changingReader(payload),
+        change === 'grow' ? /changed during/ : /disappeared during/,
+      );
+      assert(modified);
+    }
     const path = join(temporary, 'modeled-proc-input');
     await writeFile(path, 'small retained input');
     assert.equal(await boundedRead(path), 'small retained input');
