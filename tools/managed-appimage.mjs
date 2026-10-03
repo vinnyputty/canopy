@@ -1205,92 +1205,320 @@ export function waitManagedChild(
 export function validManagedResponse(response, request) {
   const object = (value) =>
     value !== null && typeof value === 'object' && !Array.isArray(value);
+  const keys = (value, expected) =>
+    object(value) &&
+    Object.keys(value).length === expected.length &&
+    expected.every((key) => Object.hasOwn(value, key));
+  const birth = (value) => typeof value === 'string' && /^\d+$/.test(value);
+  const pid = (value) => Number.isSafeInteger(value) && value > 0;
+  const hash = (value) => typeof value === 'string' && hex(value);
+  const fileIdentity = (value, fields, type, uid, mode) =>
+    keys(value, fields) &&
+    fields.every(
+      (key) => typeof value[key] === 'number' && Number.isFinite(value[key]),
+    ) &&
+    fields
+      .filter((key) => !['mtimeMs', 'ctimeMs'].includes(key))
+      .every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0) &&
+    value.ino > 0 &&
+    (value.mode & 0o170000) === type &&
+    value.uid === uid &&
+    (mode === undefined || (value.mode & 0o7777) === mode);
+  const stable = ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink'];
+  const directory = stable.filter((key) => key !== 'nlink');
+  const full = [...stable, 'size', 'mtimeMs', 'ctimeMs'];
+  const originalFields = full.filter((key) => key !== 'nlink');
+  const protectedDirectory = (value) =>
+    fileIdentity(value, directory, 0o40000, 0) &&
+    value.gid === 0 &&
+    !(value.mode & 0o6022);
+  const protectedFile = (value, mode) =>
+    fileIdentity(value, full, 0o100000, 0, mode) &&
+    value.gid === 0 &&
+    value.nlink === 1;
+  const writer = (value) =>
+    keys(value, ['pid', 'birth', 'uid']) &&
+    pid(value.pid) &&
+    birth(value.birth) &&
+    value.uid === 0;
   if (!object(response) || typeof response.ok !== 'boolean') return false;
   if (!response.ok)
     return (
-      Object.keys(response).length === 3 &&
+      keys(response, ['ok', 'error', 'uncertain']) &&
       typeof response.error === 'string' &&
       response.error.length <= 4096 &&
       typeof response.uncertain === 'boolean'
     );
-  if (Object.keys(response).length !== 2 || !object(response.value))
-    return false;
+  if (!keys(response, ['ok', 'value']) || !object(response.value)) return false;
   const value = response.value;
   if (request.operation === 'cleanup')
     return (
-      Object.keys(value).length === 1 &&
-      (value.removed === true || value.empty === true)
+      (keys(value, ['removed']) && value.removed === true) ||
+      (keys(value, ['empty']) && value.empty === true)
     );
   if (
     !['prepare', 'check', 'launch'].includes(request.operation) ||
-    !hex(value.receiptSha256) ||
+    !hash(value.receiptSha256) ||
     !object(value.receipt)
   )
     return false;
   const r = value.receipt;
   if (
+    !keys(r, [
+      'schema',
+      'token',
+      'run',
+      'attempt',
+      'uid',
+      'parent',
+      'source',
+      'expected',
+      'profile',
+      'parents',
+      'global',
+      'resources',
+      'loaded',
+      'loadAttempted',
+      'writer',
+      'mutation',
+      'self',
+      'original',
+    ]) ||
     r.schema !== 1 ||
+    typeof r.token !== 'string' ||
     r.token !== request.token ||
+    typeof r.run !== 'string' ||
     r.run !== request.run ||
+    typeof r.attempt !== 'string' ||
     r.attempt !== request.attempt ||
+    !pid(r.uid) ||
     r.uid !== request.uid ||
+    !keys(r.parent, ['pid', 'birth']) ||
+    !pid(r.parent.pid) ||
+    !birth(r.parent.birth) ||
     !same(r.parent, request.parent) ||
-    !object(r.self) ||
-    !object(r.source?.identity) ||
+    !fileIdentity(r.self, stable, 0o100000, 0, 0o600) ||
+    r.self.gid !== 0 ||
+    r.self.nlink !== 1 ||
+    !keys(r.source, ['path', 'sha256', 'identity']) ||
+    typeof r.source.path !== 'string' ||
     r.source.path !== request.source ||
+    !hash(r.source.sha256) ||
     r.source.sha256 !== request.sha256 ||
-    !object(r.expected) ||
-    r.expected.executableSha256 !== request.executableSha256 ||
-    r.expected.appAsarSha256 !== request.appAsarSha256 ||
-    r.expected.helperSha256 !== request.helperSha256 ||
+    !fileIdentity(r.source.identity, full, 0o100000, request.uid) ||
+    r.source.identity.nlink !== 1 ||
+    r.source.identity.mode & 0o6022 ||
+    !(r.source.identity.mode & 0o111) ||
+    !keys(r.expected, [
+      'executableSha256',
+      'appAsarSha256',
+      'helperSha256',
+      'helperMode',
+    ]) ||
+    !['executableSha256', 'appAsarSha256', 'helperSha256'].every(
+      (key) => hash(r.expected[key]) && r.expected[key] === request[key],
+    ) ||
+    typeof r.expected.helperMode !== 'string' ||
+    !/^[0-7]{3,4}$/.test(r.expected.helperMode) ||
     r.expected.helperMode !== request.helperMode ||
-    r.profile?.name !== managedProfile ||
+    !keys(r.profile, ['name', 'content', 'sha256']) ||
+    r.profile.name !== managedProfile ||
     r.profile.content !== managedPolicy ||
     r.profile.sha256 !== digest(managedPolicy) ||
     !Array.isArray(r.parents) ||
     r.parents.length !== 4 ||
+    !['/', '/opt', '/etc', '/etc/apparmor.d'].every(
+      (path, index) =>
+        keys(r.parents[index], ['path', 'identity']) &&
+        r.parents[index].path === path &&
+        protectedDirectory(r.parents[index].identity),
+    ) ||
+    !keys(r.global, globalFiles) ||
+    !globalFiles.every(
+      (path, index) =>
+        typeof r.global[path] === 'string' &&
+        r.global[path].length <= 256 &&
+        r.global[path].trim() === ['Y', '1', '1'][index],
+    ) ||
     !Array.isArray(r.resources) ||
     r.resources.length !== 3 ||
-    !object(r.original) ||
-    r.original.managed !== true ||
-    r.original.hash !== request.sha256 ||
-    !object(r.original.metadata) ||
-    !Array.isArray(r.original.parents) ||
-    !object(r.loaded?.identity) ||
-    !hex(r.loaded.sha256) ||
-    r.loaded.attach !== managedPaths.original ||
-    r.loaded.mode !== 'unconfined' ||
-    !Number.isSafeInteger(r.writer?.pid) ||
-    r.writer.pid <= 0 ||
-    !/^\d+$/.test(r.writer.birth ?? '') ||
-    r.writer.uid !== 0 ||
-    r.mutation?.state !== 'closed' ||
-    !object(r.mutation.proof) ||
-    r.mutation.proof.spawned !== true ||
-    r.mutation.proof.closed !== true ||
-    r.mutation.proof.timedOut !== false
+    r.loadAttempted !== true ||
+    !writer(r.writer)
   )
     return false;
-  if (request.operation !== 'launch') return Object.keys(value).length === 2;
+  const [dir, original, policy] = r.resources;
+  if (
+    !keys(dir, ['path', 'kind', 'identity']) ||
+    dir.path !== managedPaths.directory ||
+    dir.kind !== 'directory' ||
+    !protectedDirectory(dir.identity) ||
+    (dir.identity.mode & 0o7777) !== 0o755 ||
+    ![
+      [original, managedPaths.original, 0o555, request.sha256],
+      [policy, managedPaths.policy, 0o444, digest(managedPolicy)],
+    ].every(
+      ([item, path, mode, sha]) =>
+        keys(item, ['path', 'kind', 'mode', 'identity', 'sha256']) &&
+        item.path === path &&
+        item.kind === 'file' &&
+        item.mode === mode &&
+        protectedFile(item.identity, mode) &&
+        hash(item.sha256) &&
+        item.sha256 === sha,
+    )
+  )
+    return false;
+  const o = r.original;
+  if (
+    !keys(o, ['managed', 'hash', 'parents', 'metadata']) ||
+    o.managed !== true ||
+    o.hash !== request.sha256 ||
+    !fileIdentity(o.metadata, originalFields, 0o100000, 0, 0o555) ||
+    o.metadata.gid !== 0 ||
+    !originalFields.every(
+      (key) => o.metadata[key] === original.identity[key],
+    ) ||
+    !Array.isArray(o.parents) ||
+    o.parents.length !== 3 ||
+    !['/', '/opt', managedPaths.directory].every((path, index) => {
+      const parent = o.parents[index],
+        expected = index < 2 ? r.parents[index].identity : dir.identity;
+      return (
+        keys(parent, ['path', ...directory]) &&
+        parent.path === path &&
+        directory.every((key) => parent[key] === expected[key])
+      );
+    })
+  )
+    return false;
+  const loaded = r.loaded;
+  if (
+    !keys(loaded, ['path', 'attach', 'mode', 'sha256', 'identity']) ||
+    typeof loaded.path !== 'string' ||
+    !/^\/sys\/kernel\/security\/apparmor\/policy\/profiles\/[a-zA-Z0-9._-]+$/.test(
+      loaded.path,
+    ) ||
+    loaded.attach !== managedPaths.original ||
+    loaded.mode !== 'unconfined' ||
+    !hash(loaded.sha256) ||
+    !fileIdentity(loaded.identity, stable, 0o40000, 0) ||
+    loaded.identity.gid !== 0 ||
+    loaded.identity.nlink < 1
+  )
+    return false;
+  const m = r.mutation,
+    child = m?.child,
+    proof = m?.proof;
+  if (
+    !keys(m, ['operation', 'state', 'writer', 'child', 'proof']) ||
+    m.operation !== 'add' ||
+    m.state !== 'closed' ||
+    !writer(m.writer) ||
+    !same(m.writer, r.writer) ||
+    !keys(child, ['pid', 'birth', 'uid', 'parent']) ||
+    !pid(child.pid) ||
+    !birth(child.birth) ||
+    child.uid !== 0 ||
+    child.parent !== m.writer.pid ||
+    child.pid === m.writer.pid ||
+    !keys(proof, [
+      'spawned',
+      'closed',
+      'timedOut',
+      'pid',
+      'birth',
+      'identity',
+      'code',
+      'signal',
+    ]) ||
+    proof.spawned !== true ||
+    proof.closed !== true ||
+    proof.timedOut !== false ||
+    proof.pid !== child.pid ||
+    !birth(proof.birth) ||
+    proof.birth !== child.birth ||
+    !same(proof.identity, child) ||
+    proof.code !== 0 ||
+    proof.signal !== null
+  )
+    return false;
+  // The helper writes and hashes JSON.stringify(receipt), without a newline.
+  if (value.receiptSha256 !== digest(JSON.stringify(r))) return false;
+  if (request.operation !== 'launch')
+    return keys(value, ['receipt', 'receiptSha256']);
   const launch = value.launch,
-    expected = request.launch;
+    expected = request.launch,
+    sample = launch?.sample;
+  if (
+    !keys(value, ['receipt', 'receiptSha256', 'launch']) ||
+    !keys(expected, [
+      'pid',
+      'mainBirth',
+      'rootPid',
+      'rootBirth',
+      'rendererPid',
+      'rendererBirth',
+    ]) ||
+    ![expected.pid, expected.rootPid, expected.rendererPid].every(pid) ||
+    ![expected.mainBirth, expected.rootBirth, expected.rendererBirth].every(
+      birth,
+    ) ||
+    expected.rendererPid === expected.pid ||
+    !keys(launch, [
+      'rootPid',
+      'rootBirth',
+      'sample',
+      'rendererPid',
+      'profile',
+    ]) ||
+    launch.rootPid !== expected.rootPid ||
+    !birth(launch.rootBirth) ||
+    launch.rootBirth !== expected.rootBirth ||
+    launch.rendererPid !== expected.rendererPid ||
+    launch.profile !== managedProfile ||
+    !keys(sample, [
+      'pid',
+      'birth',
+      'executable',
+      'mount',
+      'apparmorContext',
+      'uid',
+      'executableSha256',
+      'appAsarSha256',
+      'sandboxHelper',
+    ]) ||
+    sample.pid !== expected.pid ||
+    !birth(sample.birth) ||
+    sample.birth !== expected.mainBirth ||
+    sample.uid !== request.uid ||
+    sample.executableSha256 !== request.executableSha256 ||
+    sample.appAsarSha256 !== request.appAsarSha256 ||
+    sample.apparmorContext !== `${managedProfile} (unconfined)`
+  )
+    return false;
+  const mount = sample.mount,
+    helper = sample.sandboxHelper;
   return (
-    Object.keys(value).length === 3 &&
-    object(launch) &&
-    object(expected) &&
-    launch.rootPid === expected.rootPid &&
-    launch.rootBirth === expected.rootBirth &&
-    launch.rendererPid === expected.rendererPid &&
-    launch.profile === managedProfile &&
-    object(launch.sample) &&
-    launch.sample.pid === expected.pid &&
-    launch.sample.birth === expected.mainBirth &&
-    launch.sample.uid === request.uid &&
-    launch.sample.executableSha256 === request.executableSha256 &&
-    launch.sample.appAsarSha256 === request.appAsarSha256 &&
-    launch.sample.sandboxHelper?.sha256 === request.helperSha256 &&
-    launch.sample.mount?.source === managedPaths.original &&
-    launch.sample.apparmorContext === `${managedProfile} (unconfined)`
+    keys(mount, ['path', 'options', 'filesystem', 'source', 'superOptions']) &&
+    typeof mount.path === 'string' &&
+    /^\/tmp\/\.mount_Canopy[a-zA-Z0-9]+$/.test(mount.path) &&
+    mount.source === managedPaths.original &&
+    typeof mount.filesystem === 'string' &&
+    /^fuse(?:\.|$)/.test(mount.filesystem) &&
+    typeof mount.options === 'string' &&
+    mount.options.length > 0 &&
+    mount.options.length <= 4096 &&
+    typeof mount.superOptions === 'string' &&
+    mount.superOptions.length > 0 &&
+    mount.superOptions.length <= 4096 &&
+    sample.executable === join(mount.path, 'canopy') &&
+    keys(helper, ['sha256', 'path', 'uid', 'gid', 'mode']) &&
+    helper.sha256 === request.helperSha256 &&
+    helper.path === join(mount.path, 'chrome-sandbox') &&
+    helper.uid === 0 &&
+    helper.gid === 0 &&
+    typeof helper.mode === 'string' &&
+    helper.mode === request.helperMode
   );
 }
 async function rootInvoke(request) {
@@ -1333,25 +1561,20 @@ async function rootInvoke(request) {
   try {
     response = JSON.parse(proof.output);
     if (
-      performance.now() >= expires ||
-      !validManagedResponse(response, request)
+      !validManagedResponse(response, request) ||
+      proof.signal ||
+      ![0, 1].includes(proof.code) ||
+      response.ok !== (proof.code === 0)
     )
-      throw new Error('Incomplete response');
+      throw new Error('Incomplete or incoherent response');
+    // Validation and terminal classification consume the same original budget.
+    if (performance.now() >= expires)
+      throw new Error('Elapsed response deadline');
   } catch {
     throw Object.assign(new Error('Managed helper response unknown'), {
       managedUncertain: true,
     });
   }
-  if (
-    proof.signal ||
-    ![0, 1].includes(proof.code) ||
-    typeof response.ok !== 'boolean' ||
-    response.ok !== (proof.code === 0)
-  )
-    throw Object.assign(
-      new Error('Managed helper terminal response unproved'),
-      { managedUncertain: true },
-    );
   if (!response.ok)
     throw Object.assign(new Error(response.error), {
       managedUncertain: response.uncertain === true,

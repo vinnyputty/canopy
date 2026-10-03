@@ -997,6 +997,7 @@ export async function checkManagedAppImage() {
   assert.equal(commands.length, 2);
   await checkManagedLifecycle();
   await checkManagedTransport(source);
+  await checkManagedSuccessTransport(source, proof, launch);
   const refused = spawnSync(
     process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
     [
@@ -1438,5 +1439,308 @@ async function checkManagedTransport(source) {
         await ended;
       }
     }
+  }
+}
+
+// Complete success transport controls use source-produced values and actual
+// owned Node IPC. Kernel/file/process identities remain models, never native proof.
+async function checkManagedSuccessTransport(source, launchProof, launchInput) {
+  const begin = source.indexOf('async function rootInvoke('),
+    end = source.indexOf('function nativeEffects(', begin);
+  assert(begin >= 0 && end > begin);
+  const node = process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
+    children = [];
+  const mutations = [
+    [
+      'missing-parser-identity',
+      (r) => {
+        delete r.mutation.child;
+        for (const key of ['pid', 'birth', 'identity', 'code', 'signal'])
+          delete r.mutation.proof[key];
+      },
+    ],
+    [
+      'null-resource-identities',
+      (r) => {
+        r.resources = [null, null, null];
+        r.parents = [null, null, null, null];
+        r.self = {};
+        r.source.identity = {};
+        r.loaded.identity = {};
+        r.original.metadata = {};
+        r.original.parents = [];
+      },
+    ],
+    [
+      'missing-global-state',
+      (r) => {
+        delete r.global;
+        delete r.loadAttempted;
+      },
+    ],
+    [
+      'numeric-writer-birth',
+      (r) => {
+        r.writer.birth = 123;
+      },
+    ],
+    [
+      'missing-mutation-operation-writer',
+      (r) => {
+        delete r.mutation.operation;
+        delete r.mutation.writer;
+      },
+    ],
+    [
+      'source-mode',
+      (r) => {
+        r.source.identity.mode = 0o100777;
+      },
+    ],
+    [
+      'resource-mode',
+      (r) => {
+        r.resources[1].identity.mode = 0o100755;
+      },
+    ],
+    [
+      'foreign-parent',
+      (r) => {
+        r.parents[1].path = '/tmp';
+      },
+    ],
+    [
+      'foreign-resource',
+      (r) => {
+        r.resources[2].path = '/tmp/policy';
+      },
+    ],
+    [
+      'global-value',
+      (r) => {
+        r.global['/proc/sys/kernel/unprivileged_userns_clone'] = '0\n';
+      },
+    ],
+    [
+      'loaded-hash-type',
+      (r) => {
+        r.loaded.sha256 = 0;
+      },
+    ],
+    [
+      'original-size-type',
+      (r) => {
+        r.original.metadata.size = '8';
+      },
+    ],
+    [
+      'parser-code',
+      (r) => {
+        r.mutation.proof.code = 1;
+      },
+    ],
+    [
+      'parser-signal',
+      (r) => {
+        r.mutation.proof.signal = 'SIGTERM';
+      },
+    ],
+    [
+      'parser-parent',
+      (r) => {
+        r.mutation.child.parent = 999;
+        r.mutation.proof.identity.parent = 999;
+      },
+    ],
+    [
+      'parser-birth-type',
+      (r) => {
+        r.mutation.child.birth = 112;
+        r.mutation.proof.birth = 112;
+        r.mutation.proof.identity.birth = 112;
+      },
+    ],
+  ];
+  const cases = [];
+  for (const operation of ['prepare', 'check']) {
+    cases.push([operation, 'valid', undefined]);
+    for (const [name, change] of mutations)
+      cases.push([
+        operation,
+        name,
+        (value) => {
+          change(value.receipt);
+          value.receiptSha256 = hash(JSON.stringify(value.receipt));
+        },
+      ]);
+    cases.push([
+      operation,
+      'receipt-hash',
+      (value) => {
+        value.receiptSha256 = 'f'.repeat(64);
+      },
+    ]);
+  }
+  cases.push(['launch', 'valid', undefined]);
+  for (const [name, change] of [
+    [
+      'helper-owner',
+      (v) => {
+        v.launch.sample.sandboxHelper.uid = 1001;
+      },
+    ],
+    [
+      'helper-mode',
+      (v) => {
+        v.launch.sample.sandboxHelper.mode = 755;
+      },
+    ],
+    [
+      'missing-mount-options',
+      (v) => {
+        delete v.launch.sample.mount.options;
+      },
+    ],
+    [
+      'foreign-mount-source',
+      (v) => {
+        v.launch.sample.mount.source = '/tmp/other';
+      },
+    ],
+    [
+      'renderer-type',
+      (v) => {
+        v.launch.rendererPid = '80';
+      },
+    ],
+    [
+      'main-birth-type',
+      (v) => {
+        v.launch.sample.birth = 123;
+      },
+    ],
+    [
+      'payload-hash',
+      (v) => {
+        v.launch.sample.appAsarSha256 = 'f'.repeat(64);
+      },
+    ],
+  ])
+    cases.push(['launch', name, change]);
+  // Both success and legitimate known failure must be uncertain if their
+  // validation consumes the same expiration. Scale only this extracted fixture.
+  cases.push(
+    ['prepare', 'late-success', undefined],
+    ['prepare', 'late-known-failure', undefined],
+  );
+  try {
+    for (const [phase, name, change] of cases) {
+      const kernel = model(),
+        operations = [];
+      let current,
+        runEntered = false;
+      const late = name.startsWith('late-');
+      const body = source
+        .slice(begin, end)
+        .replace(
+          'performance.now() + 12000',
+          late ? 'performance.now() + 150' : 'performance.now() + 12000',
+        );
+      const invoke = new Function(
+        'd',
+        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse}=d;${body};return rootInvoke;`,
+      )({
+        managedHostedContext: async () => ctx,
+        process,
+        preserved: [],
+        ownFile: '/unused',
+        waitManagedChild,
+        boundedRead: async () => '',
+        processIdentity: () => ({ birth: '1' }),
+        validManagedResponse: (response, request) => {
+          const result = validManagedResponse(response, request);
+          if (late && request.operation === phase) {
+            const until = performance.now() + 180;
+            while (performance.now() < until) {}
+          }
+          return result;
+        },
+        spawn: () => {
+          const text = JSON.stringify(current),
+            code = current.ok ? 0 : 1;
+          const child = spawn(
+            node,
+            [
+              '-e',
+              `const timer=setTimeout(()=>process.exit(1),1000);process.stdin.resume();process.stdin.on('end',()=>{clearTimeout(timer);process.stdout.write(${JSON.stringify(text)});process.exitCode=${code};});`,
+            ],
+            { stdio: ['pipe', 'pipe', 'pipe'] },
+          );
+          children.push(child);
+          return child;
+        },
+      });
+      let failed = false,
+        failure;
+      try {
+        await withManagedAppImage(
+          base,
+          async (_, session) => {
+            runEntered = true;
+            if (phase === 'check') await session.check();
+            if (phase === 'launch') await session.verify(launchInput);
+            return true;
+          },
+          {
+            context: ctx,
+            parent: base.parent,
+            secondary: () => {},
+            invoke: async (request) => {
+              operations.push(request.operation);
+              let value =
+                request.operation === 'launch'
+                  ? {
+                      ...(await managedOperation(
+                        { ...request, operation: 'check' },
+                        kernel.io,
+                        ctx,
+                      )),
+                      launch: structuredClone(launchProof.launch),
+                    }
+                  : await managedOperation(request, kernel.io, ctx);
+              if (request.operation === phase && change) change(value);
+              current =
+                name === 'late-known-failure' && request.operation === phase
+                  ? {
+                      ok: false,
+                      error: 'fixture known failure',
+                      uncertain: false,
+                    }
+                  : { ok: true, value };
+              return invoke(request);
+            },
+          },
+        );
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
+      if (name === 'valid') {
+        assert(!failed, phase);
+        assert(operations.includes('cleanup'));
+      } else {
+        assert(failed, `${phase}/${name}`);
+        assert.equal(failure.managedUncertain, true, `${phase}/${name}`);
+        assert(!operations.includes('cleanup'), `${phase}/${name}`);
+        if (phase === 'prepare') assert(!runEntered);
+      }
+    }
+  } finally {
+    for (const child of children)
+      if (child.exitCode === null && child.signalCode === null) {
+        const ended = once(child, 'exit');
+        child.kill('SIGKILL');
+        await ended;
+      }
   }
 }
