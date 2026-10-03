@@ -149,6 +149,7 @@ import {
 import { Mutations } from './mutations';
 import {
   refreshDestination,
+  treeRefreshError,
   RefreshAnnouncements,
   type RefreshAnnouncement,
   RefreshSchedule,
@@ -1529,15 +1530,12 @@ export function App() {
           cooldowns.current[tab.connectionId] = status.retryAt;
           setCooldownTimes({ ...cooldowns.current });
         }
-        refreshAnnouncements.fail(
-          announcement,
-          tab.rootKey,
-          error instanceof Error ? error.message : String(error),
-        );
+        const message = treeRefreshError(error);
+        refreshAnnouncements.fail(announcement, tab.rootKey, message);
         setConnectionErrors((current) => new Set(current).add(tab.id));
         setErrors((current) => ({
           ...current,
-          [tab.id]: error instanceof Error ? error.message : String(error),
+          [tab.id]: message,
         }));
       } finally {
         refreshAnnouncements.end(announcement);

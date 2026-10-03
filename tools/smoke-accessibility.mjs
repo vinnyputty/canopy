@@ -371,6 +371,9 @@ export async function auditAccessibility(app, page, evidence) {
       before,
     ),
   );
+  await expect(
+    page.getByRole('alert').filter({ hasText: 'Sample refresh failure' }),
+  ).not.toContainText("Error invoking remote method 'canopy:tree'");
   await expect(timestamp).toHaveAttribute('title', previousTitle);
   expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);
   await expect(

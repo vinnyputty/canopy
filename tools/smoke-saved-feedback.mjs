@@ -148,6 +148,9 @@ export async function auditSavedFeedback({
   await expect(live).toContainText('refreshed 1 of 2 roots');
   await expect(live).toContainText('1 roots failed');
   await expect(live).toContainText('Sample saved-view failure');
+  await expect(live).not.toContainText(
+    "Error invoking remote method 'canopy:tree'",
+  );
   await expect(live).toContainText('issues retained, last updated at');
   await expect(live).toContainText('1 roots returned partial results');
   expect((await latestTree('CAN-100')).fetchedAt).toBe(retained100.fetchedAt);
@@ -377,6 +380,9 @@ export async function auditSavedFeedback({
     'Accessibility A: Changes found across 2 roots.',
   );
   await expect(live).toContainText('Sample automatic saved-view failure');
+  await expect(live).not.toContainText(
+    "Error invoking remote method 'canopy:tree'",
+  );
   expect((await latestTree('CAN-200')).fetchedAt).toBe(retained200.fetchedAt);
   await checkLive('saved-view-automatic-change-and-failure', [
     await latestTree('CAN-100'),

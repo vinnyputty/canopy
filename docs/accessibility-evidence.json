@@ -78,7 +78,8 @@
     "poll_feedback_follow_on_GUI": "pending fresh independent review and exclusive lead GUI token",
     "limits": "No native speech/events qualification, native preferences or exhaustive provider/dialog/long-label/clipping acceptance; Chromium trees and formula ratios are separate evidence categories.",
     "saved_view_destination_follow_on_GUI": "pending fresh independent delta review, then focused/full Mac acceptance under an exclusive lead GUI token",
-    "consecutive_delivery_editor_follow_on_GUI": "pending fresh independent delta review, then focused/full Mac acceptance under an exclusive lead GUI token; actual App ReactDOM/jsdom commit and reachable editor-event probes passed headlessly"
+    "consecutive_delivery_editor_follow_on_GUI": "pending fresh independent delta review, then focused/full Mac acceptance under an exclusive lead GUI token; actual App ReactDOM/jsdom commit and reachable editor-event probes passed headlessly",
+    "main_integration_IPC_GUI": "pending fresh limited source review and ROOT exclusive focused/full Mac GUI acceptance on integrated source; native AT holds remain"
   },
   "headless_saved_feedback": {
     "reviewed_parent": "baecd0a11bf42dde2547db4503f34db3da242e23",
@@ -104,6 +105,47 @@
       "old-editor.log": "9f0984ef6611b843cd0971b23f1c55d925ecb48bb399a2af6bc02a574a540ad7",
       "new-editor.log": "dd11a62aafd4e6a3368ef654ddb7512ac94b7d7d132db9d4ecb5ff63f2a43606"
     },
-    "limits": "Headless actual App/ReactDOM with controlled read-only sample IPC and scheduled ticks; no Chromium layout/accessibility events, native APIs or speech qualification. Fresh focused/full Mac GUI remains pending."
+    "limits": "Headless actual App/ReactDOM with controlled read-only sample IPC and scheduled ticks; no Chromium layout/accessibility events, native APIs or speech qualification. Fresh focused/full Mac GUI remains pending.",
+    "source_commit": "f37b6a5343b15c977282513b7a9917793b17b482",
+    "source_scope": "Historical pre-integration headless observations; current main integration is recorded separately."
+  },
+  "observed_feedback_failure": {
+    "source_commit": "f37b6a5343b15c977282513b7a9917793b17b482",
+    "focused": "FAIL at exact retained refresh-error assertion",
+    "expected_provider_message": "Sample refresh failure",
+    "actual_delivered_message": "Error invoking remote method 'canopy:tree': Error: Sample refresh failure",
+    "full": "not started",
+    "native_AT": "not qualified",
+    "focused_log_sha256": "3fca062acbc11f56d8928b939ebe3bd13ec119deea45c947ea013bfb901655d3",
+    "cleanup_sha256": "d7fcaa9e5004e1e2135e2d6343c1c75ffa246ae00b6daf55d6329eecb8cdf501",
+    "cleanup": {
+      "owned_processes": [],
+      "new_smoke_profiles": [],
+      "tracked_hashes_verified": 32,
+      "runtime_archive_entries_verified": 273,
+      "staging_removed": true
+    },
+    "limits": "Recorded sample Electron GUI failure; no cause claimed beyond the observed IPC wrapper mismatch and no new acceptance PASS."
+  },
+  "main_integration_source": {
+    "base_commit": "177a133a1b3464be9978b57d287df9d5e97fdb09",
+    "reviewed_pre_rebase_commit": "f37b6a5343b15c977282513b7a9917793b17b482",
+    "rebased_predecessor": "9b3bf931a640b69b8d3bf33a9ae9c50d073d4f00",
+    "scope": "Five issue88 commits rebased; current main Inbox/relationship/partial-tree/update/draft behavior retained. No unmerged palette qualification source borrowed.",
+    "production_sha256": {
+      "src/renderer/App.tsx": "7754f174608bebd43475f6a0ce058a282fabe77b6ccb27c831fa8dc767420c61",
+      "src/renderer/refresh.ts": "21641eb8befa8f243ef6dfafe0a4e2bcf9fe46c73ed775a65a456a1e50bef3e4",
+      "src/main/preload.ts": "ac54b10ae8b453e757c0a76ddfeae6ec86061c29f236076a7ef5865800330572"
+    },
+    "headless_IPC_controls": "Actual App and production preload API with real controlled sample provider holds; faithful recorded IPC rejection envelope. Old exact-message failure reproduced; corrected alert/status, retained 15 issues, held Retry completion, shared/virtual saved-view failure/recovery and zero timestamp-only status mutations passed.",
+    "headless_Inbox_controls": "Actual App first ten of thirteen known roots, held ten-root manual aggregate, outgoing Inbox suppression across saved-view/same-tree navigation passed.",
+    "probe_log_sha256": {
+      "old.log": "4acca10adbfc6faaa320be17eedd1b6c143f664c6e971ab6e60c479a3599f7a5",
+      "new.log": "1650bfb0cf01103b5d863bde46a6fce187bb88a17dbe101caf6af8d9ba7a6bba",
+      "inbox.log": "3732c8af81a4ba1614096dd4de3d8d3a9135471714d81c3809ad238274279a8a",
+      "consecutive-final.log": "94d7a8e8099b1930825270146890c4a44d88ebe5edf17293859b62a61fd75c05",
+      "editor-final.log": "dd11a62aafd4e6a3368ef654ddb7512ac94b7d7d132db9d4ecb5ff63f2a43606"
+    },
+    "limits": "Source/headless DOM only. Electron transport envelope replay is faithful to the recorded failure; no Electron/native execution occurred. Fresh source review and focused/full GUI acceptance pending."
   }
 }

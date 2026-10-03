@@ -1,5 +1,15 @@
 import type { TreeSnapshot } from '../shared/types';
 
+// Electron wraps this rejected invoke; present the provider's tree failure in
+// the visible alert and the live region without speaking transport internals.
+export function treeRefreshError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const prefix = "Error invoking remote method 'canopy:tree': Error: ";
+  return message.startsWith(prefix) && message.length > prefix.length
+    ? message.slice(prefix.length)
+    : message;
+}
+
 export const ACTIVE_REFRESH_MS = 30_000;
 export const MAX_BACKGROUND_REFRESH_MS = 60 * 60_000;
 
