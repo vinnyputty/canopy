@@ -10,12 +10,12 @@ import type { AuditOwner } from '../tools/audit-lifecycle.mjs';
 import { disposeProcess } from './fixtures/owned-process';
 
 // Match the shared owner's native Windows operation/kill allowances in these
-// disposable Node fixtures. Fresh removal needs two snapshots plus filesystem
+// disposable Node fixtures. Fresh removal needs three snapshots plus filesystem
 // work; the old 3s total kill allowance expired inside a completed CIM query.
 const windows = process.platform === 'win32';
 const operationMs = windows ? 15000 : 3000;
 const killMs = windows ? 60000 : 3000;
-const removalMs = windows ? 2 * operationMs + 5000 : 3000;
+const removalMs = windows ? 3 * operationMs + 5000 : 3000;
 
 // Bundle each actual harness. Only Playwright/provider UI is substituted;
 // AuditOwner captures real disposable Node launches and performs real shutdown.
