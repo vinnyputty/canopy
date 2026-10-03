@@ -38,6 +38,9 @@ export function runCimContextControls(options?: {
     closed: boolean;
     metadata?: Record<string, unknown>;
     childPid?: number | null;
+    elapsedMs?: number;
+    suiteElapsedMs?: number;
+    timeoutMs?: number;
   }) => void;
 }): Promise<
   {
@@ -47,5 +50,8 @@ export function runCimContextControls(options?: {
     closed: boolean;
     metadata?: Record<string, unknown>;
     childPid?: number | null;
+    elapsedMs?: number;
+    suiteElapsedMs?: number;
+    timeoutMs?: number;
   }[]
 >;

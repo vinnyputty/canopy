@@ -6,10 +6,9 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { runCimContextControls } from '../tools/windows-cim-input-control.mjs';
 
-const helper = new URL(
-  '../tools/windows-cim-input-control.mjs',
-  import.meta.url,
-).href;
+const helper =
+  process.env.CANOPY_CIM_CONTEXT_SOURCE ??
+  new URL('../tools/windows-cim-input-control.mjs', import.meta.url).href;
 const hash = (value: string) =>
   createHash('sha256').update(value).digest('hex');
 const metadata = {
@@ -86,7 +85,7 @@ test('actual context helper isolates one boundary per child, keeps private value
   assert.deepEqual(env, original);
   assert.equal(records.length, 4);
   assert.ok(records.every((r) => r.ok && r.closed));
-  assert.equal(records[2].metadata!.cacheHash, hash('NUL'));
+  assert.notEqual(records[2].metadata!.cacheHash, hash('private-cache-value'));
   assert.equal(records[3].metadata!.tempHash, hash(tmpdir()));
   assert.equal(new Set(scripts).size, 1);
   assert.ok(!scripts[0].includes('Get-CimInstance'));
@@ -106,7 +105,7 @@ test('injected contexts preserve environment and cwd boundaries without secrets 
     assert.deepEqual(env,original);assert.equal(records.length,4);
     assert.deepEqual(contexts[0].env,Object.fromEntries(Object.entries(env).filter(([key])=>key!=='PSModulePath')));
     assert.equal(contexts[0].cwd,undefined);assert.equal(contexts[1].cwd,env.SystemRoot);
-    assert.equal(contexts[2].env.PSModuleAnalysisCachePath,'NUL');assert.ok(!('pSmOdUlEaNaLySiScAcHePaTh' in contexts[2].env));
+    assert.equal(contexts[2].env.PRIVATE_SECRET,env.PRIVATE_SECRET);assert.ok(!('pSmOdUlEaNaLySiScAcHePaTh' in contexts[2].env));assert.match(contexts[2].env.PSModuleAnalysisCachePath,/ModuleAnalysisCache$/);
     assert.equal(contexts[3].env.TEMP,env.RUNNER_TEMP);assert.equal(contexts[3].env.TMP,env.RUNNER_TEMP);assert.ok(!('Temp' in contexts[3].env));
     assert.ok(!JSON.stringify(records).includes('private-'));assert.ok(records.every(r=>r.ok));
     for(const options of contexts){assert.equal(options.timeout,0);assert.equal(options.maxBuffer,16384);assert.deepEqual(options.stdio,['ignore','pipe','pipe']);}
@@ -217,3 +216,94 @@ test('real owned context output limits drain and close every direct child withou
     );
   }
 });
+
+test('context operation timing stays distinct from cumulative suite timing', () => {
+  modeled(`${setup}
+    let clock=1000;Date.now=()=>clock;
+    cp.spawn=(command,args,options)=>{const c=child(options);queueMicrotask(()=>{clock+=120;c.stdout.emit('data',JSON.stringify(metadata)+'\\ncanopy-context complete\\n');c.emit('close',0,null);});return c;};
+    syncBuiltinESMExports();const {runCimContextControls}=await import(${JSON.stringify(helper)});
+    const records=await runCimContextControls({env,report:()=>{}});
+    assert.deepEqual(records.map(r=>r.elapsedMs),[120,120,120,120],'operation durations must not include previous comparisons');
+    assert.deepEqual(records.map(r=>r.suiteElapsedMs),[120,240,360,480]);
+    assert.ok(records.every(r=>r.timeoutMs===10000 && r.closed && r.ok));
+  `);
+});
+
+test('private writable cache comparison changes only the child cache path and removes it after confirmed closure', () => {
+  modeled(`${setup}
+    import fs from 'node:fs';
+    import path from 'node:path';
+    const scripts=[];let cacheDirectory;
+    cp.spawn=(command,args,options)=>{scripts.push(Buffer.from(args.at(-1),'base64').toString('utf16le'));const c=child(options);
+      if(children.length===3){cacheDirectory=path.dirname(options.env.PSModuleAnalysisCachePath);assert.ok(path.isAbsolute(cacheDirectory) && path.basename(cacheDirectory).startsWith('canopy-cim-cache-'));assert.ok(fs.existsSync(cacheDirectory));fs.writeFileSync(options.env.PSModuleAnalysisCachePath,'private-cache-token');}
+      queueMicrotask(()=>{c.stdout.emit('data',JSON.stringify(metadata)+'\\ncanopy-context complete\\n');c.emit('close',0,null);});return c;};
+    syncBuiltinESMExports();const {runCimContextControls}=await import(${JSON.stringify(helper)});
+    const records=await runCimContextControls({env,report:()=>{}});
+    assert.equal(records[2].mode,'isolated-cache');assert.equal(new Set(scripts).size,1);
+    const clean=e=>Object.fromEntries(Object.entries(e).filter(([key])=>key.toUpperCase()!=='PSMODULEANALYSISCACHEPATH'));
+    assert.deepEqual(clean(contexts[2].env),clean(contexts[0].env));assert.equal(contexts[2].cwd,contexts[0].cwd);
+    assert.notEqual(contexts[2].env.PSModuleAnalysisCachePath,'NUL');assert.equal(fs.existsSync(cacheDirectory),false);
+    assert.ok(records.every(r=>r.ok && r.closed));assert.ok(!JSON.stringify(records).includes('private-'));
+    for(const c of children)assert.equal(c.listenerCount('close'),0);
+  `);
+});
+
+test('unconfirmed private-cache child retains its owned cache without exposing its path or launching another comparison', () => {
+  modeled(`${setup}
+    import fs from 'node:fs';import path from 'node:path';
+    let cacheDirectory;
+    cp.spawn=(command,args,options)=>{const c=child(options);c.kill=()=>false;
+      if(children.length===3){cacheDirectory=path.dirname(options.env.PSModuleAnalysisCachePath);queueMicrotask(()=>c.stderr.emit('error',undefined));}
+      else queueMicrotask(()=>{c.stdout.emit('data',JSON.stringify(metadata)+'\\ncanopy-context complete\\n');c.emit('close',0,null);});return c;};
+    syncBuiltinESMExports();const {runCimContextControls}=await import(${JSON.stringify(helper)});
+    let failure;try{await runCimContextControls({env,report:()=>{}})}catch(error){failure=error;}
+    try {
+      assert.equal(children.length,3);assert.equal(failure.child,children[2]);assert.equal(failure.primary,undefined);
+      assert.equal(failure.cacheDirectory,cacheDirectory);assert.ok(fs.existsSync(cacheDirectory));
+      assert.ok(!inspect(failure).includes(cacheDirectory));assert.ok(!JSON.stringify(failure).includes(cacheDirectory));
+    } finally {if(cacheDirectory)fs.rmSync(cacheDirectory,{recursive:true,force:true});}
+  `);
+});
+
+for (const fault of ['allocate', 'remove']) {
+  test(`private cache ${fault} failure retains private primary and stops later comparisons`, () => {
+    modeled(`${setup}
+      import fs from 'node:fs';import fsp from 'node:fs/promises';import path from 'node:path';
+      const originalRemove=fsp.rm;let cacheDirectory;
+      if(${JSON.stringify(fault)}==='allocate')fsp.mkdtemp=async()=>{throw undefined};
+      else fsp.rm=async()=>{throw null};
+      cp.spawn=(command,args,options)=>{const c=child(options);c.kill=()=>true;
+        if(children.length===3){cacheDirectory=path.dirname(options.env.PSModuleAnalysisCachePath);queueMicrotask(()=>{c.stderr.emit('error',false);c.emit('close',null,'SIGKILL');});}
+        else queueMicrotask(()=>{c.stdout.emit('data',JSON.stringify(metadata)+'\\ncanopy-context complete\\n');c.emit('close',0,null);});return c;};
+      syncBuiltinESMExports();const {runCimContextControls}=await import(${JSON.stringify(helper)});
+      let failure;try{await runCimContextControls({env,report:r=>{if(r.mode==='isolated-cache')throw undefined}})}catch(error){failure=error;}
+      try {
+        assert.ok(Object.hasOwn(failure,'primary'));
+        assert.equal(failure.primary,${JSON.stringify(fault)}==='allocate'?undefined:false);
+        assert.equal(children.length,${JSON.stringify(fault)}==='allocate'?2:3);
+        if(cacheDirectory){assert.equal(failure.cacheDirectory,cacheDirectory);assert.deepEqual(failure.cleanupErrors,[null]);assert.ok(Object.hasOwn(failure,'reportError'));assert.equal(failure.reportError,undefined);assert.ok(!inspect(failure).includes(cacheDirectory));}
+      } finally {if(cacheDirectory)await originalRemove(cacheDirectory,{recursive:true,force:true});}
+    `);
+  });
+}
+
+for (const operation of ['allocate', 'remove']) {
+  test(`hung cache ${operation} is bounded and retains its private pending filesystem handle`, () => {
+    modeled(`${setup}
+      import fs from 'node:fs/promises';import path from 'node:path';
+      const originalMkdir=fs.mkdtemp;const originalRemove=fs.rm;let directory;let resolveWork;
+      const pending=new Promise(resolve=>{resolveWork=resolve});
+      if(${JSON.stringify(operation)}==='allocate')fs.mkdtemp=()=>pending;
+      else fs.rm=()=>pending;
+      cp.spawn=(command,args,options)=>{const c=child(options);if(children.length===3)directory=path.dirname(options.env.PSModuleAnalysisCachePath);queueMicrotask(()=>{c.stdout.emit('data',JSON.stringify(metadata)+'\\ncanopy-context complete\\n');c.emit('close',0,null);});return c;};
+      syncBuiltinESMExports();const {runCimContextControls}=await import(${JSON.stringify(helper)});
+      const start=Date.now();let failure;
+      try{await runCimContextControls({env,report:()=>{}})}catch(error){failure=error;}
+      assert.ok(Date.now()-start<3000);assert.match(failure.message,/cache (allocation|cleanup) failed/);
+      assert.equal(children.length,${JSON.stringify(operation)}==='allocate'?2:3);
+      assert.equal(failure[${JSON.stringify(operation)}==='allocate'?'cacheAllocation':'cacheRemoval'],pending);
+      if(${JSON.stringify(operation)}==='allocate'){directory=await originalMkdir(path.join((await import('node:os')).tmpdir(),'canopy-cim-cache-'));resolveWork(directory);}else resolveWork();
+      await originalRemove(directory,{recursive:true,force:true});
+    `);
+  });
+}

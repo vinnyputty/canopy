@@ -1,6 +1,9 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { cpus, freemem } from 'node:os';
+import { cpus, freemem, tmpdir } from 'node:os';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
+  deadline,
   powershellEnvironment,
   windowsSnapshotScript,
 } from './audit-lifecycle.mjs';
@@ -398,14 +401,7 @@ export async function runCimContextControls({
       value('SystemRoot'),
       Boolean(value('SystemRoot')),
     ],
-    [
-      'cache-disabled',
-      changed(['PSMODULEANALYSISCACHEPATH'], {
-        PSModuleAnalysisCachePath: 'NUL',
-      }),
-      undefined,
-      true,
-    ],
+    ['isolated-cache', inherited, undefined, true],
     [
       'runner-temp',
       changed(['TEMP', 'TMP'], {
@@ -417,7 +413,8 @@ export async function runCimContextControls({
     ],
   ];
   for (const [mode, childEnv, cwd, available] of contexts) {
-    // Four 10s operations plus four 2s close allowances fit below 60s.
+    // Four 10s operations, four 2s close allowances and two 1s cache
+    // filesystem allowances fit below 60s.
     // Reserve close observation within the remaining overall allowance.
     const timeout = Math.min(10000, 58000 - (Date.now() - started));
     if (!available || timeout <= 0) {
@@ -431,11 +428,40 @@ export async function runCimContextControls({
       report(record);
       continue;
     }
+    const operationStarted = Date.now();
+    // Compare a writable isolated cache with inherited discovery, not NUL.
+    // Compute trusted command arguments before allocating its directory.
+    const args = argsFor(contextScript);
+    let cacheDirectory;
+    if (mode === 'isolated-cache') {
+      const allocation = mkdtemp(join(tmpdir(), 'canopy-cim-cache-'));
+      try {
+        cacheDirectory = await deadline(
+          () => allocation,
+          1000,
+          'CIM cache allocation',
+        );
+      } catch (primary) {
+        const failure = new Error('CIM context cache allocation failed');
+        Object.defineProperties(failure, {
+          primary: { value: primary },
+          cacheAllocation: { value: allocation },
+        });
+        throw failure;
+      }
+    }
     const result = await asyncControl(
       command,
-      argsFor(contextScript),
+      args,
       {
-        env: childEnv,
+        env: cacheDirectory
+          ? changed(['PSMODULEANALYSISCACHEPATH'], {
+              PSModuleAnalysisCachePath: join(
+                cacheDirectory,
+                'ModuleAnalysisCache',
+              ),
+            })
+          : childEnv,
         cwd,
         timeout,
         windowsHide: true,
@@ -527,7 +553,8 @@ export async function runCimContextControls({
           ? result.error.code
           : 'CHILD_ERROR'
         : null,
-      elapsedMs: Date.now() - started,
+      elapsedMs: Date.now() - operationStarted,
+      suiteElapsedMs: Date.now() - started,
       timeoutMs: timeout,
       stdoutBytes: result.stdoutBytes,
       stderrBytes: result.stderrBytes,
@@ -537,6 +564,10 @@ export async function runCimContextControls({
     results.push(record);
     if (!result.closed) {
       const failure = new Error('CIM context control closure unconfirmed');
+      if (cacheDirectory)
+        Object.defineProperty(failure, 'cacheDirectory', {
+          value: cacheDirectory,
+        });
       Object.defineProperties(failure, {
         child: { value: result.child },
         primary: { value: result.error },
@@ -549,6 +580,27 @@ export async function runCimContextControls({
         Object.defineProperty(failure, 'reportError', { value: secondary });
       }
       throw failure;
+    }
+    if (cacheDirectory) {
+      const removal = rm(cacheDirectory, { recursive: true, force: true });
+      try {
+        await deadline(() => removal, 1000, 'CIM cache cleanup');
+      } catch (secondary) {
+        const failure = new Error('CIM context cache cleanup failed');
+        Object.defineProperties(failure, {
+          primary: { value: result.hasError ? result.error : secondary },
+          cleanupErrors: { value: [secondary] },
+          cacheRemoval: { value: removal },
+          cacheDirectory: { value: cacheDirectory },
+          record: { value: record },
+        });
+        try {
+          report(record);
+        } catch (reportError) {
+          Object.defineProperty(failure, 'reportError', { value: reportError });
+        }
+        throw failure;
+      }
     }
     report(record);
   }

@@ -302,6 +302,7 @@ export function App() {
   const workspaceRef = useRef(workspace);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
+  const demoResetting = useRef(false);
   const appearanceSaving = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
@@ -1285,9 +1286,12 @@ export function App() {
   }, [workspace.theme, workspace.palette, appearancePreview]);
 
   const saveWorkspace = useCallback((value: Workspace) => {
+    if (demoResetting.current) return Promise.resolve();
     const save = pendingWorkspaceSave.current
       .catch(() => {})
-      .then(() => window.canopy.saveWorkspace(value));
+      .then(() => {
+        if (!demoResetting.current) return window.canopy.saveWorkspace(value);
+      });
     pendingWorkspaceSave.current = save;
     return save;
   }, []);
@@ -2897,14 +2901,23 @@ export function App() {
     const seek = async (step: number, keepPaused = paused) => {
       if (navigating || step < 0 || step > 7) return;
       navigating = true;
+      demoResetting.current = true;
+      if (workspaceSaveTimer.current !== null) {
+        window.clearTimeout(workspaceSaveTimer.current);
+        workspaceSaveTimer.current = null;
+      }
       try {
         stop();
         if (restoreWork) await restoreWork;
+        // Finish any dispatched old-document save before installing reset data.
+        // Later autosaves remain blocked until the new document takes over.
+        await pendingWorkspaceSave.current.catch(() => {});
         sessionStorage.setItem('canopy-demo-step', String(step));
         sessionStorage.setItem('canopy-demo-paused', String(keepPaused));
         await window.canopy.resetDemo();
       } catch (error) {
         navigating = false;
+        demoResetting.current = false;
         sessionStorage.removeItem('canopy-demo-step');
         sessionStorage.removeItem('canopy-demo-paused');
         throw error;
