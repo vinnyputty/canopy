@@ -57,7 +57,11 @@ for (const [label, source] of [
   await mkdir(archive, { recursive: true });
   const tar = execFileSync('git', ['archive', source, 'src'], { cwd: repo });
   execFileSync('tar', ['-x', '-C', archive], { input: tar });
-  await symlink(join(repo, 'node_modules'), join(archive, 'node_modules'));
+  await symlink(
+    join(repo, 'node_modules'),
+    join(archive, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
   await mkdir(join(dist, 'renderer'), { recursive: true });
   const harnessPlugin = {
     name: 'exact-source',

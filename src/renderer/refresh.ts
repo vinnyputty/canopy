@@ -61,6 +61,12 @@ export class RootRefreshGate<T> {
         void promise
           .finally(() => {
             if (root.active?.generation === generation) root.active = undefined;
+            // Queued invalidation can restore this raw provider promise as the
+            // inflight owner, distinct from load's queued wrapper promise.
+            if (root.inflight === promise) {
+              root.inflight = undefined;
+              root.inflightExplicit = undefined;
+            }
           })
           .catch(() => {});
         return promise;

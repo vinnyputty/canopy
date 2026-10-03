@@ -2,11 +2,13 @@ import { register } from 'tsx/cjs/api';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 const production = (path) =>
   require(
     resolve(
-      process.env.CANOPY_PERF_SOURCE ?? new URL('..', import.meta.url).pathname,
+      process.env.CANOPY_PERF_SOURCE ??
+        fileURLToPath(new URL('..', import.meta.url)),
       path,
     ),
   );
@@ -140,7 +142,7 @@ process.stdout.write(
       head:
         process.env.CANOPY_PERF_HEAD ??
         execFileSync('git', ['rev-parse', 'HEAD'], {
-          cwd: new URL('..', import.meta.url).pathname,
+          cwd: fileURLToPath(new URL('..', import.meta.url)),
           encoding: 'utf8',
         }).trim(),
       runtime: process.version,

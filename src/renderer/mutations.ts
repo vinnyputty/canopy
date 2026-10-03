@@ -145,7 +145,17 @@ export class Mutations {
     // retaining a second issue store after its consumers release it.
     let bytes = this.serializedSizes.get(value);
     if (bytes === undefined) {
-      bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      if ('issues' in value) {
+        // Preserve the exact JSON envelope and array separators, reusing sizes
+        // of immutable issues shared by refreshed/optimistic snapshots.
+        bytes = new TextEncoder().encode(
+          JSON.stringify({ ...value, issues: [] }),
+        ).byteLength;
+        for (const issue of value.issues) bytes += this.serializedSize(issue);
+        bytes += Math.max(0, value.issues.length - 1);
+      } else {
+        bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      }
       this.serializedSizes.set(value, bytes);
     }
     return bytes;

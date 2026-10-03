@@ -11,6 +11,7 @@ if (
 const { readFile, writeFile, mkdtemp, rm } = await import('node:fs/promises');
 const { createHash } = await import('node:crypto');
 const { join } = await import('node:path');
+const { tmpdir } = await import('node:os');
 const manifestBytes = await readFile(process.env.CANOPY_PERF_PAIR);
 const manifest = JSON.parse(manifestBytes.toString('utf8'));
 const approvedBase = process.env.CANOPY_PERF_APPROVED_BASE;
@@ -166,7 +167,8 @@ const { _electron: electron, expect: defaultExpect } =
 const LOAD_MS = 180000;
 const expect = defaultExpect.configure({ timeout: LOAD_MS });
 const output =
-  process.env.CANOPY_PERF_DESKTOP_OUTPUT ?? '/tmp/canopy-perf-90-desktop.json';
+  process.env.CANOPY_PERF_DESKTOP_OUTPUT ??
+  join(tmpdir(), 'canopy-perf-90-desktop.json');
 const report = {
   manifest,
   electron: process.env.CANOPY_ELECTRON_PATH,
