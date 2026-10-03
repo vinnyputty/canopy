@@ -39,6 +39,7 @@ bazel(
   '//:typecheck',
   '//:format_check',
   '//:portable_checks',
+  '//:release_checks',
   '--test_output=errors',
 );
 if (process.platform === 'linux' && !env.DISPLAY) {

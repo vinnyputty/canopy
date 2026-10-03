@@ -47,3 +47,5 @@ Native prerequisites: an interactive macOS 15 Apple-silicon desktop, Windows 11 
 ## Release notes requirements
 
 Copy the qualified rows and exact OS minimums into each release's notes, together with installer format/CPU, unsigned/signed/notarized status, installation prerequisites (including Linux FUSE and secure keyring), known limitations, and native check evidence. Link the matching CI run and hash report. Keep unsupported CPUs and unqualified OS versions explicit. Until the pending checks pass, label these downloads **test builds awaiting native qualification**, and leave public release blocked.
+
+Version tags assemble these checked downloads into an unpublished GitHub Release draft. [Release instructions](releases.md) define the exact asset names, SHA-256 verification, native evidence and separate publication gate. Native qualification remains pending.
