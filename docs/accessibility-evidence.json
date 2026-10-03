@@ -147,5 +147,14 @@
       "editor-final.log": "dd11a62aafd4e6a3368ef654ddb7512ac94b7d7d132db9d4ecb5ff63f2a43606"
     },
     "limits": "Source/headless DOM only. Electron transport envelope replay is faithful to the recorded failure; no Electron/native execution occurred. Fresh source review and focused/full GUI acceptance pending."
+  },
+  "main85_source_preparation": {
+    "base_commit": "a8502c1c50ed82be986770f04d4ae6aae742514a",
+    "reviewed_pre_rebase_commit": "d2e6926cf95695c75d1bfbf47a6ff8f9635b8d97",
+    "rebased_predecessor": "2fd0e50d7e5acf87a26f0a64ff147373660bf413",
+    "scope": "Six issue88 commits rebased onto merged palette/navigation and qualified audit lifecycle main. Production accessibility feedback remains intact; source integration fixes only palette DOM harness constructor/hook bindings.",
+    "helper_sha256": "7d793fdc7bd53e3bfd76376f8425cb63ef74cedb7fdab158dd712220fff14bd4",
+    "helper_types_sha256": "e02df8cb96069a6cb9e83ab76729f157d34239150d78cb77b57506d066f00985",
+    "acceptance": "Current integrated focused/full Electron and physical native AT UNRUN. Private bounded controller/stager preparation requires fresh review and ROOT exclusive ownership before staging/execution."
   }
 }
