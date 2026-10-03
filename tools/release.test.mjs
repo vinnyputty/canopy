@@ -1,3 +1,4 @@
+import { fixturePolicy, fixtureSignature } from './windows-signing-fixture.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -19,6 +20,7 @@ import {
 const version = '0.1.0';
 const tag = `v${version}`;
 const commit = 'a'.repeat(40);
+const signature = fixtureSignature;
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 async function fixture(fn) {
   const root = await mkdtemp(join(tmpdir(), 'canopy-release-'));
@@ -43,6 +45,16 @@ async function fixture(fn) {
         commit,
         checks,
         nativeDesktopChecks: 'pending',
+        ...(row.platform === 'win32'
+          ? {
+              windowsSigning: {
+                policy: 'Authenticode signed and timestamped',
+                service: fixturePolicy,
+                installer: signature(checks[0].sha256),
+                executable: signature(digest('synthetic executable')),
+              },
+            }
+          : {}),
       }),
     );
   }
@@ -190,7 +202,9 @@ function qualification(manifest) {
       evidenceUrl: 'https://example.test/result',
       signingPolicy: asset.name.includes('-mac-')
         ? 'Developer ID signed and notarized'
-        : 'unsigned; trust prompts recorded',
+        : asset.name.includes('-win-')
+          ? 'Authenticode signed and timestamped'
+          : 'unsigned; trust prompts recorded',
     })),
   };
 }
@@ -254,6 +268,7 @@ test('publication resolves live lightweight and annotated tags to the qualified 
         evidence,
         notes,
         mockGh(responses, calls),
+        async () => {},
       );
       assert.deepEqual(calls.at(-1), [
         'release',
@@ -315,6 +330,7 @@ test('deleted or moved remote tags block publication despite a matching checkout
           evidence,
           notes,
           mockGh([...responses], calls),
+          async () => {},
         ),
         /tag deleted|Remote tag/,
       );
@@ -344,6 +360,7 @@ test('publication fails before remote calls for corrupt artifacts or pending nat
           evidence,
           notes,
           mockGh([], calls),
+          async () => {},
         ),
       );
       assert.equal(calls.length, 0);
@@ -407,6 +424,7 @@ test('an older qualified release uses its tagged version after the dispatch bran
           ],
           remoteCalls,
         ),
+        async () => {},
       );
       assert.equal(remoteCalls.at(-1)[0], 'release');
     } finally {
@@ -602,6 +620,7 @@ test('live final ref verification rejects Git ref changes before publication', a
             evidence,
             notes,
             gh,
+            async () => {},
           );
           if (mutation === 'none' || mutation === 'nested') {
             await attempt;
@@ -621,4 +640,50 @@ test('live final ref verification rejects Git ref changes before publication', a
         }
       }),
     );
+});
+
+test('Windows signing metadata cannot qualify unsigned or altered installer reports', async () => {
+  for (const patch of [
+    undefined,
+    { policy: 'unsigned' },
+    { installer: { status: 'NotSigned' } },
+    { executable: { status: 'NotTrusted' } },
+  ]) {
+    await fixture(async ({ input, output }) => {
+      const path = join(input, 'Canopy-win-x64', 'release-checks.json');
+      const report = JSON.parse(await readFile(path, 'utf8'));
+      report.windowsSigning =
+        patch === undefined
+          ? undefined
+          : { ...report.windowsSigning, ...patch };
+      await writeFile(path, JSON.stringify(report));
+      await assert.rejects(build(input, output), /Windows/);
+      await assert.rejects(readFile(join(output, 'release-manifest.json')), {
+        code: 'ENOENT',
+      });
+    });
+  }
+});
+test('actual Windows signature verification failure blocks publication before remote calls', async () => {
+  await publicationFixture(async ({ output, evidence, notes }) => {
+    const calls = [];
+    await assert.rejects(
+      publish(
+        output,
+        tag,
+        version,
+        commit,
+        evidence,
+        notes,
+        mockGh([], calls),
+        async (path, report) => {
+          assert.equal(path, join(output, 'Canopy-0.1.0-win-x64.exe'));
+          assert.equal(report.installer.status, 'Valid');
+          throw new Error('actual Windows signature rejected');
+        },
+      ),
+      /actual Windows signature rejected/,
+    );
+    assert.deepEqual(calls, []);
+  });
 });

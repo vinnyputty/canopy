@@ -4,6 +4,12 @@ import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import {
+  validateWindowsReport,
+  verifyWindowsInstaller,
+  windowsSigningPolicy,
+} from './windows-signing.mjs';
+
 export const platforms = [
   {
     platform: 'darwin',
@@ -70,6 +76,7 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
     platforms.map((row) => `Canopy-${row.artifact}`),
   );
   const assets = [];
+  let windowsSigning;
   // Validate the entire matrix before making any file eligible for release.
   for (const row of platforms) {
     const directory = join(input, `Canopy-${row.artifact}`);
@@ -92,6 +99,10 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
       const bytes = await readFile(join(directory, check.artifact));
       if (!bytes.length || hash(bytes) !== check.sha256)
         throw new Error(`Hash mismatch: ${check.artifact}`);
+      if (row.platform === 'win32') {
+        validateWindowsReport(report.windowsSigning, check.sha256);
+        windowsSigning = report.windowsSigning;
+      }
       assets.push({
         name: check.artifact,
         sha256: check.sha256,
@@ -106,6 +117,7 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
     version,
     commit,
     runUrl,
+    windowsSigning,
     nativeDesktopChecks: 'pending',
     assets: assets.map(({ name, sha256 }) => ({ name, sha256 })),
   };
@@ -119,7 +131,7 @@ export async function assemble(input, output, tag, version, commit, runUrl) {
   );
   await writeFile(
     join(output, 'release-notes.md'),
-    `Canopy ${version}\n\nSource: ${commit}\n[Verified build](${runUrl})\n\nUnsigned test builds awaiting native qualification. Public release is blocked.\n\n- macOS 15 arm64: DMG (copy to Applications) or ZIP. Developer ID signing/notarization pending.\n- Windows 11 x64: NSIS EXE. Native installation and signing/SmartScreen qualification pending.\n- Ubuntu 24.04 x64: DEB or AppImage. AppImage needs FUSE 2 (libfuse2t64); credentials need an unlocked Secret Service/KWallet and session D-Bus. Native sandbox/desktop qualification pending.\n\nOther OS/CPU combinations are unqualified. See docs/platforms.md and docs/releases.md at this source commit for installation, limitations, and native release gates. Verify downloads against SHA256SUMS.\n`,
+    `Canopy ${version}\n\nSource: ${commit}\n[Verified build](${runUrl})\n\nTest builds awaiting native qualification; Windows Authenticode signatures verified. Public release is blocked.\n\n- macOS 15 arm64: DMG (copy to Applications) or ZIP. Developer ID signing/notarization pending.\n- Windows 11 x64: NSIS EXE. Signed and timestamped publisher; native installation and SmartScreen qualification pending.\n- Ubuntu 24.04 x64: DEB or AppImage. AppImage needs FUSE 2 (libfuse2t64); credentials need an unlocked Secret Service/KWallet and session D-Bus. Native sandbox/desktop qualification pending.\n\nOther OS/CPU combinations are unqualified. See docs/platforms.md and docs/releases.md at this source commit for installation, limitations, and native release gates. Verify downloads against SHA256SUMS.\n`,
   );
   return manifest;
 }
@@ -154,6 +166,10 @@ export async function verifyDownloads(directory, tag, version, commit) {
     if (!bytes.length || hash(bytes) !== asset.sha256)
       throw new Error(`Hash mismatch: ${asset.name}`);
   }
+  validateWindowsReport(
+    manifest.windowsSigning,
+    manifest.assets.find((asset) => asset.name.includes('-win-')).sha256,
+  );
   return manifest;
 }
 export async function qualify(manifest, path) {
@@ -187,6 +203,9 @@ export async function qualify(manifest, path) {
     )
       throw new Error(`macOS distribution trust pending: ${asset.name}`);
   }
+  const windows = evidence.assets.find((asset) => asset.name.includes('-win-'));
+  if (windows.signingPolicy !== windowsSigningPolicy)
+    throw new Error('Windows distribution trust pending');
   return evidence;
 }
 function runGh(args) {
@@ -227,10 +246,13 @@ export async function publish(
   evidence,
   notes,
   gh = runGh,
+  verifyWindows = verifyWindowsInstaller,
 ) {
   const manifest = await verifyDownloads(directory, tag, version, commit);
   await qualify(manifest, evidence);
   await readFile(notes, 'utf8');
+  const windows = manifest.assets.find((asset) => asset.name.includes('-win-'));
+  await verifyWindows(join(directory, windows.name), manifest.windowsSigning);
   // Resolve the live ref after artifact/native verification, not the checkout snapshot.
   const endpoint = `repos/{owner}/{repo}/git/ref/tags/${manifest.tag}`;
   const ref = JSON.parse(gh(['api', endpoint]));

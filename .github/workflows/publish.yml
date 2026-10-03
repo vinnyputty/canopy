@@ -14,7 +14,7 @@ concurrency:
 jobs:
   publish:
     environment: public-release
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
     permissions:
       contents: write
     steps:
@@ -25,9 +25,16 @@ jobs:
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: '22.16.0'
+      - name: Locate Windows SDK verifier
+        shell: pwsh
+        run: |
+          $tool = Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin/*/x64/signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $tool) { throw 'Windows SDK SignTool missing' }
+          "CANOPY_SIGNTOOL=$($tool.FullName)" >> $env:GITHUB_ENV
       - name: Verify draft, tag, downloaded bytes and native evidence before publication
         shell: bash
         env:
+          CANOPY_WINDOWS_POLICY: ${{ vars.WINDOWS_SIGNING_POLICY }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |

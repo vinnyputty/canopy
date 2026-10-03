@@ -95,7 +95,7 @@ js_binary(
 js_binary(
     name = "package",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/AppRun"],
+    data = ["tools/windows-signing.mjs", "tools/windows-native.ps1", "tools/windows-native.cs", "tools/release.mjs", ":build", ":node_modules", "package.json", "tools/AppRun"],
     args = ["package"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -136,5 +136,11 @@ js_binary(
 js_test(
     name = "release_checks",
     entry_point = "tools/release.test.mjs",
-    data = ["tools/release.mjs", ".github/workflows/publish.yml"],
+    data = ["tools/release.mjs", "tools/windows-signing.mjs", "tools/windows-signing-fixture.mjs", ".github/workflows/publish.yml"],
+)
+
+js_test(
+    name = "windows_signing_checks",
+    entry_point = "tools/windows-signing.test.mjs",
+    data = ["tools/windows-signing.mjs", "tools/release.mjs", "tools/windows-signing-fixture.mjs", "tools/windows-lifecycle.mjs", "tools/windows-lifecycle.test.mjs", "tools/windows-signing-scope.test.mjs", "tools/windows-native-deadline.test.mjs", "tools/desktop.mjs", "tools/windows-native.ps1", "tools/windows-native.cs"],
 )

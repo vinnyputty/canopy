@@ -133,15 +133,26 @@ if (
       { mode: 0o755 },
     );
   }
-  const { build } = require('electron-builder');
-  const { version } = require('electron/package.json');
-  await build({
-    projectDir: staging,
-    config: {
-      electronVersion: version,
-      npmRebuild: false,
-      directories: { output: join(workspace, 'release') },
-    },
-    publish: 'never',
-  });
+  const { prepareWindowsSigning } = await import('./windows-signing.mjs');
+  const signing = prepareWindowsSigning(
+    process.env,
+    process.platform,
+    manifest.version,
+  );
+  try {
+    const { build } = require('electron-builder');
+    const { version } = require('electron/package.json');
+    await build({
+      projectDir: staging,
+      config: {
+        ...signing.config,
+        electronVersion: version,
+        npmRebuild: false,
+        directories: { output: join(workspace, 'release') },
+      },
+      publish: 'never',
+    });
+  } finally {
+    signing.close();
+  }
 }

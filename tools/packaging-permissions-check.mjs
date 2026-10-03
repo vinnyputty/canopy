@@ -11,6 +11,8 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { signingConfig } from './windows-signing.mjs';
+import { checkWindowsBuilderSigning } from './windows-builder-check.mjs';
 import { checkDesktopEntry } from './linux-package-check.mjs';
 
 export async function checkPackagingPermissions() {
@@ -27,21 +29,25 @@ export async function checkPackagingPermissions() {
   const launcher = await readFile(join(root, 'tools', 'AppRun'));
   const source = await readFile(join(root, 'tools', 'desktop.mjs'), 'utf8');
   const optionsStart = source.indexOf(
-    '    config: {',
-    source.indexOf('  await build({'),
+    '      config: {',
+    source.indexOf('    await build({'),
   );
-  const optionsEnd = source.indexOf('\n    publish:', optionsStart);
+  const optionsEnd = source.indexOf('\n      publish:', optionsStart);
   assert(optionsStart >= 0 && optionsEnd > optionsStart);
   const options = new Function(
     'version',
     'workspace',
     'join',
+    'signing',
     `return ({${source.slice(optionsStart, optionsEnd)}}).config;`,
   );
   const stagingStart = source.lastIndexOf(
     "  if (process.platform === 'linux') {",
   );
-  const stagingEnd = source.indexOf('  const { build }', stagingStart);
+  const stagingEnd = source.indexOf(
+    '  const { prepareWindowsSigning }',
+    stagingStart,
+  );
   assert(stagingStart >= 0 && stagingEnd > stagingStart);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const stageLauncher = new AsyncFunction(
@@ -112,8 +118,11 @@ export async function checkPackagingPermissions() {
     const config = await getConfig(
       project,
       null,
-      options(manifest.devDependencies.electron, directory, join),
+      options(manifest.devDependencies.electron, directory, join, {
+        config: signingConfig({}, 'linux', manifest.version, () => {}),
+      }),
     );
+    await checkWindowsBuilderSigning(builderRequire, lib, directory, manifest);
     const appDir = join(directory, 'app');
     await mkdir(appDir);
     const actualMatchers = matchers(config, project, appDir);
