@@ -1,4 +1,4 @@
-import { ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { ChildProcess, spawn } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import {
   mkdir,
@@ -182,18 +182,18 @@ async function loadedProfile(io) {
     if ((await io.read(join(path, 'name'))).trim() === managedProfile) {
       const attach = (await io.read(join(path, 'attach'))).trim();
       const mode = (await io.read(join(path, 'mode'))).trim();
-      const hash = (await io.read(join(path, 'hash'))).trim();
+      const sha256 = await io.read(join(path, 'sha256'));
       if (
         attach !== managedPaths.original ||
         mode !== 'unconfined' ||
-        !/^[a-f0-9]{40,128}$/.test(hash)
+        !/^[a-f0-9]{64}\n$/.test(sha256)
       )
         fail('Loaded profile identity unavailable');
       found.push({
         path,
         attach,
         mode,
-        hash,
+        sha256: sha256.trim(),
         identity: identity(await io.lstat(path), true),
       });
     }
@@ -201,6 +201,94 @@ async function loadedProfile(io) {
   if (found.length !== 1) fail('Ambiguous loaded profile identity');
   return found[0];
 }
+async function previousWriterAbsent(io, receipt) {
+  const writer = receipt.writer;
+  if (
+    !Number.isSafeInteger(writer?.pid) ||
+    writer.pid <= 0 ||
+    !/^\d+$/.test(writer.birth ?? '') ||
+    writer.uid !== 0
+  )
+    fail('Unknown managed writer identity; retain resources');
+  const mutation = receipt.mutation;
+  if (mutation) {
+    const proof = mutation.proof;
+    if (
+      mutation.state !== 'closed' ||
+      !['add', 'remove'].includes(mutation.operation) ||
+      !proof?.spawned ||
+      !proof.closed ||
+      proof.timedOut ||
+      !Number.isSafeInteger(proof.pid) ||
+      proof.pid <= 0 ||
+      !/^\d+$/.test(proof.birth ?? '') ||
+      !same(proof.identity, mutation.child) ||
+      proof.identity.uid !== 0 ||
+      proof.identity.parent !== mutation.writer?.pid ||
+      proof.identity.pid !== proof.pid ||
+      proof.identity.birth !== proof.birth ||
+      (!Number.isInteger(proof.code) && !proof.signal)
+    )
+      fail('Uncertain in-flight policy mutation; retain resources');
+  }
+  try {
+    const current = processIdentity(await io.read(`/proc/${writer.pid}/stat`));
+    if (current.birth === writer.birth)
+      fail('Prior managed writer remains live; retain resources');
+    if (!/^\d+$/.test(current.birth)) fail('Unknown managed writer state');
+  } catch (error) {
+    try {
+      await io.lstat(`/proc/${writer.pid}`);
+    } catch (gone) {
+      if (gone?.code === 'ENOENT') return;
+      throw gone;
+    }
+    throw error;
+  }
+}
+async function mutatePolicy(io, receipt, save, operation) {
+  // Persist uncertainty BEFORE any child can read or apply the policy. Failure
+  // to persist its actual terminal proof keeps independent cleanup blocked.
+  receipt.mutation = {
+    operation,
+    state: 'pending',
+    writer: receipt.writer,
+    child: null,
+  };
+  await save();
+  const proof = await io.parser(operation, async (child) => {
+    receipt.mutation.child = child;
+    await save();
+  });
+  if (
+    !proof?.spawned ||
+    !proof.closed ||
+    proof.timedOut ||
+    !Number.isSafeInteger(proof.pid) ||
+    !/^\d+$/.test(proof.birth ?? '') ||
+    !same(proof.identity, receipt.mutation.child)
+  )
+    fail('Policy command termination unproved; retain resources');
+  const terminal = Object.fromEntries(
+    [
+      'spawned',
+      'closed',
+      'timedOut',
+      'pid',
+      'birth',
+      'identity',
+      'code',
+      'signal',
+    ].map((key) => [key, proof[key]]),
+  );
+  receipt.mutation = { ...receipt.mutation, state: 'closed', proof: terminal };
+  await save();
+  if (proof.code !== 0 || proof.signal)
+    fail(
+      `App-specific parser ${operation} failed: ${proof.stderr.slice(0, 1000)}`,
+    );
+}
+
 async function parentIdentity(io, request) {
   const value = processIdentity(
     await io.read(`/proc/${request.parent.pid}/stat`),
@@ -424,6 +512,8 @@ export async function managedOperation(request, io, context) {
       resources: [],
       loaded: null,
       loadAttempted: false,
+      writer: await io.writer(),
+      mutation: null,
     };
     const save = () => io.receipt(JSON.stringify(receipt), receipt.self);
     try {
@@ -485,7 +575,7 @@ export async function managedOperation(request, io, context) {
         fail('Policy bytes changed');
       receipt.loadAttempted = true;
       await save();
-      await io.parser('add');
+      await mutatePolicy(io, receipt, save, 'add');
       receipt.loaded = await loadedProfile(io);
       if (!receipt.loaded) fail('Managed profile load not verified');
       await save();
@@ -527,6 +617,7 @@ export async function managedOperation(request, io, context) {
       return { empty: true };
     }
     const { receipt } = await receiptState(io, request);
+    await previousWriterAbsent(io, receipt);
     const loaded = await loadedProfile(io);
     if (loaded && (!receipt.loaded || !same(loaded, receipt.loaded)))
       fail('Unknown loaded policy ownership; retain resources');
@@ -536,8 +627,11 @@ export async function managedOperation(request, io, context) {
       fail('Policy changed before absence check');
     await noManagedOccupants(io);
     await parentIdentity(io, request);
+    receipt.writer = await io.writer();
+    const save = () => io.receipt(JSON.stringify(receipt), receipt.self);
+    await save();
     if (loaded) {
-      await io.parser('remove');
+      await mutatePolicy(io, receipt, save, 'remove');
       if (await loadedProfile(io)) fail('Managed profile remains loaded');
     }
     for (const item of [...receipt.resources].reverse())
@@ -548,6 +642,7 @@ export async function managedOperation(request, io, context) {
     return { removed: true };
   }
   const installed = await validateInstallation(io, request);
+  await previousWriterAbsent(io, installed.receipt);
   if (request.operation === 'check') return installed;
   const launch = await liveLaunch(io, request);
   if (
@@ -797,10 +892,16 @@ export async function withManagedAppImage(
     token: randomBytes(16).toString('hex'),
   };
   invoke ??= rootInvoke;
-  let cancelled;
+  let cancelled,
+    cancelRun,
+    uncertain = false,
+    activeRequests = 0,
+    runInFlight = false,
+    finished = false;
   const listeners = ['SIGINT', 'SIGTERM'].map((signal) => {
     const listener = () => {
       cancelled ??= new Error(`Managed AppImage cancelled by ${signal}`);
+      cancelRun?.(cancelled);
     };
     signals.on(signal, listener);
     return [signal, listener];
@@ -808,116 +909,309 @@ export async function withManagedAppImage(
   const checkCancellation = () => {
     if (cancelled) throw cancelled;
   };
-  let failed = false;
-  let primary;
-  let result;
+  const call = async (operation, launch) => {
+    if (operation !== 'cleanup') {
+      checkCancellation();
+      if (uncertain || finished)
+        fail('Managed verification stopped after uncertainty');
+    }
+    activeRequests++;
+    try {
+      const value = await invoke({
+        ...request,
+        operation,
+        ...(launch ? { launch } : {}),
+      });
+      if (operation !== 'cleanup') {
+        checkCancellation();
+        if (uncertain || finished)
+          fail('Managed verification stopped after uncertainty');
+      }
+      return value;
+    } catch (error) {
+      if (error?.managedUncertain) uncertain = true;
+      throw error;
+    } finally {
+      activeRequests--;
+    }
+  };
+  let failed = false,
+    primary,
+    result;
   try {
     try {
-      const installed = await invoke({ ...request, operation: 'prepare' });
+      const installed = await call('prepare');
       checkCancellation();
-      const guarded = (operation, launch) => {
-        checkCancellation();
-        return invoke({ ...request, operation, ...(launch ? { launch } : {}) });
-      };
+      const closing = new WeakMap();
       const session = {
         installed,
         parent: auditParent,
         request,
-        check: () => guarded('check'),
-        verify: (launch) => guarded('launch', launch),
+        check: () => call('check'),
+        verify: (launch) => call('launch', launch),
+        refuseCleanup: () => {
+          uncertain = true;
+        },
+        close: async (app) => {
+          try {
+            if (!closing.has(app)) closing.set(app, boundedManagedClose(app));
+            return await closing.get(app);
+          } catch (error) {
+            uncertain = true;
+            throw error;
+          }
+        },
       };
-      result = await run(managedPaths.original, session);
+      const cancellation = new Promise((_, reject) => {
+        cancelRun = reject;
+      });
+      runInFlight = true;
+      const running = Promise.resolve()
+        .then(() => {
+          checkCancellation();
+          return run(managedPaths.original, session);
+        })
+        .finally(() => {
+          runInFlight = false;
+        });
+      result = await Promise.race([running, cancellation]);
       checkCancellation();
     } catch (error) {
       failed = true;
       primary = error;
+      if (error?.managedUncertain) uncertain = true;
     }
-    try {
-      await invoke({ ...request, operation: 'cleanup' });
-    } catch (error) {
-      if (!failed) throw error;
+    // No deletion while an implementation-owned helper or callback may still
+    // mutate/launch/close. Rejection is finite; it is not process-death proof.
+    if (uncertain || activeRequests || runInFlight) {
+      const refusal = Object.assign(
+        new Error('Managed cleanup refused: operation/closure still uncertain'),
+        { managedUncertain: true },
+      );
+      if (!failed) throw refusal;
       try {
-        secondary(error);
+        secondary(refusal);
       } catch {
-        // Reporting a cleanup failure must not replace the raw primary value.
+        /* Preserve even falsy primary. */
+      }
+    } else {
+      try {
+        await call('cleanup');
+      } catch (error) {
+        if (!failed) throw error;
+        try {
+          secondary(error);
+        } catch {
+          /* Preserve raw primary. */
+        }
       }
     }
     if (failed) throw primary;
     checkCancellation();
     return result;
   } finally {
+    finished = true;
+    cancelRun = undefined;
     for (const [signal, listener] of listeners)
       signals.removeListener(signal, listener);
   }
 }
-async function rootInvoke(request) {
-  await managedHostedContext();
-  managedGuard({
-    env: process.env,
-    platform: process.platform,
-    arch: process.arch,
-    uid: process.getuid?.(),
-  });
+export function boundedManagedClose(app, { deadline = 5000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      '/usr/bin/sudo',
-      [
-        '-n',
-        `--preserve-env=${preserved.join(',')}`,
-        '--',
-        process.execPath,
-        ownFile,
-        '--managed-appimage-private',
-      ],
-      {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
-          LANG: 'C',
-          ...Object.fromEntries(
-            preserved.map((key) => [key, process.env[key]]),
-          ),
-        },
-      },
+    const timer = setTimeout(
+      () =>
+        reject(
+          Object.assign(new Error('Managed application closure unproved'), {
+            managedUncertain: true,
+          }),
+        ),
+      deadline,
     );
-    let output = '',
-      error = '',
-      overflow = false;
-    const timer = setTimeout(() => child.kill('SIGKILL'), 12000);
+    Promise.resolve()
+      .then(() => app.close())
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timer));
+  });
+}
+// Track only the actual returned child object. A deadline is failure even if
+// exit/pipe closure arrives later. Destroy owned pipes so descendants cannot
+// keep this promise pending; this neither kills nor proves descendant absence.
+export function waitManagedChild(
+  child,
+  { deadline, onSpawn, killOwned = false },
+) {
+  return new Promise((resolve, reject) => {
+    let settled = false,
+      spawned = false,
+      exited = false,
+      closed = false;
+    let identity,
+      ready = false,
+      output = '',
+      stderr = '',
+      code,
+      signal;
+    const uncertain = (message) =>
+      Object.assign(new Error(message), { managedUncertain: true });
+    const detach = () => {
+      child.stdin?.destroy();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    };
+    const refuse = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      detach();
+      reject(error);
+    };
+    const finish = () => {
+      if (settled || !closed || !ready) return;
+      if (
+        !spawned ||
+        !exited ||
+        !Number.isSafeInteger(child.pid) ||
+        identity?.pid !== child.pid ||
+        !/^\d+$/.test(identity.birth ?? '')
+      )
+        return refuse(uncertain('Managed command lifecycle unproved'));
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        spawned,
+        closed,
+        timedOut: false,
+        pid: child.pid,
+        birth: identity.birth,
+        identity,
+        code,
+        signal,
+        output,
+        stderr,
+      });
+    };
+    const timer = setTimeout(() => {
+      // Native root parser only: the actual child handle, never an arbitrary
+      // PID/group or an ordinary-user attempt to kill a root helper.
+      if (
+        killOwned &&
+        ready &&
+        !exited &&
+        child.exitCode === null &&
+        child.signalCode === null
+      ) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* Uncertain; never proof. */
+        }
+      }
+      refuse(uncertain('Managed command deadline/closure unproved'));
+    }, deadline);
     for (const [stream, kind] of [
       [child.stdout, 'out'],
       [child.stderr, 'err'],
-    ])
-      stream.on('data', (chunk) => {
-        if (output.length + error.length + chunk.length > 65536) {
-          overflow = true;
-          child.kill('SIGKILL');
-          return;
-        }
+    ]) {
+      stream?.on('data', (chunk) => {
+        if (settled) return;
+        if (
+          Buffer.byteLength(output) + Buffer.byteLength(stderr) + chunk.length >
+          65536
+        )
+          return refuse(uncertain('Managed command output exceeds bound'));
         if (kind === 'out') output += chunk;
-        else error += chunk;
+        else stderr += chunk;
       });
-    child.stdin.on('error', () => {});
-    child.stdin.end(JSON.stringify(request));
-    child.once('error', (cause) => {
-      clearTimeout(timer);
-      reject(cause);
+      stream?.on('error', () =>
+        refuse(uncertain('Managed command stream failed')),
+      );
+    }
+    child.stdin?.on('error', () => {
+      /* Closure/deadline still required. */
     });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      if (code !== 0 || signal || overflow)
-        return reject(
-          new Error(
-            `Managed ${request.operation} failed: ${error.slice(0, 1000)}`,
-          ),
+    child.once('spawn', () => {
+      spawned = true;
+      Promise.resolve()
+        .then(() => onSpawn(child))
+        .then(
+          (value) => {
+            if (settled) return;
+            identity = value;
+            ready = true;
+            finish();
+          },
+          () => refuse(uncertain('Managed successful-spawn birth unproved')),
         );
-      try {
-        resolve(JSON.parse(output));
-      } catch (cause) {
-        reject(cause);
-      }
+    });
+    child.once('error', () =>
+      refuse(uncertain('Managed child error; closure unknown')),
+    );
+    child.once('exit', (value, sig) => {
+      exited = true;
+      code = value;
+      signal = sig;
+    });
+    child.once('close', () => {
+      closed = true;
+      finish();
     });
   });
+}
+async function rootInvoke(request) {
+  await managedHostedContext();
+  const started = performance.now();
+  const child = spawn(
+    '/usr/bin/sudo',
+    [
+      '-n',
+      `--preserve-env=${preserved.join(',')}`,
+      '--',
+      process.execPath,
+      ownFile,
+      '--managed-appimage-private',
+    ],
+    {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+        LANG: 'C',
+        ...Object.fromEntries(preserved.map((key) => [key, process.env[key]])),
+      },
+    },
+  );
+  const pending = waitManagedChild(child, {
+    deadline: Math.max(0, 12000 - (performance.now() - started)),
+    onSpawn: async (actual) => ({
+      pid: actual.pid,
+      birth: processIdentity(await boundedRead(`/proc/${actual.pid}/stat`))
+        .birth,
+    }),
+  });
+  child.stdin.end(JSON.stringify(request));
+  const proof = await pending;
+  let response;
+  try {
+    response = JSON.parse(proof.output);
+  } catch {
+    throw Object.assign(new Error('Managed helper response unknown'), {
+      managedUncertain: true,
+    });
+  }
+  if (
+    proof.signal ||
+    ![0, 1].includes(proof.code) ||
+    typeof response.ok !== 'boolean' ||
+    response.ok !== (proof.code === 0)
+  )
+    throw Object.assign(
+      new Error('Managed helper terminal response unproved'),
+      { managedUncertain: true },
+    );
+  if (!response.ok)
+    throw Object.assign(new Error(response.error), {
+      managedUncertain: response.uncertain === true,
+    });
+  return response.value;
 }
 function nativeEffects() {
   const authorize = () => {
@@ -1020,32 +1314,53 @@ function nativeEffects() {
         await input.close();
       }
     },
-    parser: async (operation) => {
+    writer: async () => ({
+      pid: process.pid,
+      uid: process.getuid(),
+      birth: processIdentity(await boundedRead('/proc/self/stat')).birth,
+    }),
+    parser: async (operation, record) => {
       authorize();
       if (!['add', 'remove'].includes(operation))
         fail('Unscoped parser command');
-      const result = spawnSync(
+      const started = performance.now();
+      const child = spawn(
         '/usr/sbin/apparmor_parser',
         [
           '--config-file=/dev/null',
           '--skip-cache',
+          '--jobs=0',
           `--${operation}`,
           '--',
           managedPaths.policy,
         ],
         {
-          encoding: 'utf8',
-          timeout: 5000,
-          killSignal: 'SIGKILL',
-          maxBuffer: 65536,
+          stdio: ['ignore', 'pipe', 'pipe'],
           env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C' },
         },
       );
-      if (result.error) throw result.error;
-      if (result.status !== 0)
-        fail(
-          `App-specific parser ${operation} failed: ${result.stderr.slice(0, 1000)}`,
-        );
+      return waitManagedChild(child, {
+        deadline: Math.max(0, 5000 - (performance.now() - started)),
+        killOwned: true,
+        onSpawn: async (actual) => {
+          const current = processIdentity(
+            await boundedRead(`/proc/${actual.pid}/stat`),
+          );
+          if (
+            current.parent !== process.pid ||
+            (await lstat(`/proc/${actual.pid}`)).uid !== 0
+          )
+            fail('Actual parser identity unproved');
+          const identity = {
+            pid: actual.pid,
+            birth: current.birth,
+            uid: 0,
+            parent: process.pid,
+          };
+          await record(identity);
+          return identity;
+        },
+      });
     },
     remove: async (path, kind) => {
       pathGuard(path);
@@ -1082,9 +1397,16 @@ if (
       nativeEffects(),
       context,
     );
-    process.stdout.write(JSON.stringify(result));
+    process.stdout.write(JSON.stringify({ ok: true, value: result }));
   } catch (error) {
     console.error(String(error));
+    process.stdout.write(
+      JSON.stringify({
+        ok: false,
+        error: String(error),
+        uncertain: error?.managedUncertain === true,
+      }),
+    );
     process.exitCode = 1;
   } finally {
     clearTimeout(timer);

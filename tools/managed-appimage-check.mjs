@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import {
@@ -13,6 +14,8 @@ import {
   withManagedAppImage,
   acceptManagedObservation,
   noManagedOccupants,
+  waitManagedChild,
+  boundedManagedClose,
 } from './managed-appimage.mjs';
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const ctx = {
@@ -88,6 +91,7 @@ function model(failure) {
   const io = {
     canonical: async (path) => path,
     lstat: async (path) => {
+      if (path === '/proc/90') throw missing();
       if (path.startsWith('/proc/')) return { uid: 1001 };
       if (path === profilePath)
         return { ...files.get('/').meta, mode: 0o40755 };
@@ -115,7 +119,7 @@ function model(failure) {
       if (path === profilePath + '/name') return managedProfile;
       if (path === profilePath + '/attach') return paths.original;
       if (path === profilePath + '/mode') return 'unconfined';
-      if (path === profilePath + '/hash') return 'd'.repeat(64);
+      if (path === profilePath + '/sha256') return 'd'.repeat(64) + '\n';
       if (path.endsWith('/attr/current')) {
         if (unknown) throw new Error('unreadable live task');
         return occupancy ? managedProfile + ' (unconfined)' : 'unconfined';
@@ -189,16 +193,34 @@ function model(failure) {
       files.get(paths.receipt).content = content;
       files.get(paths.receipt).meta.size = content.length;
     },
-    parser: async (operation) => {
+    writer: async () => ({ pid: 90, birth: '111', uid: 0 }),
+    parser: async (operation, record) => {
       calls.push('parser:' + operation);
-      if (operation === 'add') {
-        if (failure === 'parser') throw new Error('parser failed');
+      const identity = { pid: 91, birth: '112', uid: 0, parent: 90 };
+      await record(identity);
+      if (failure === 'parser-uncertain')
+        throw Object.assign(new Error('parser unknown'), {
+          managedUncertain: true,
+        });
+      if (operation === 'add' && failure !== 'parser') {
         loaded = true;
         if (failure === 'load-status')
           io.read = async () => {
             throw new Error('status unreadable');
           };
-      } else loaded = false;
+      } else if (operation === 'remove') loaded = false;
+      return {
+        spawned: true,
+        closed: true,
+        timedOut: false,
+        pid: identity.pid,
+        birth: identity.birth,
+        identity,
+        code: failure === 'parser' ? 1 : 0,
+        signal: null,
+        output: '',
+        stderr: 'fixture parser failure',
+      };
     },
     remove: async (path, kind) => {
       calls.push('remove:' + path);
@@ -270,6 +292,94 @@ export async function checkManagedAppImage() {
       .receiptSha256,
     installed.receiptSha256,
   );
+  assert.equal(installed.receipt.loaded.sha256, 'd'.repeat(64));
+  for (const value of [
+    null,
+    '',
+    'disabled\n',
+    'D'.repeat(64) + '\n',
+    'd'.repeat(40) + '\n',
+    'd'.repeat(64),
+  ]) {
+    const broken = model(),
+      read = broken.io.read;
+    broken.io.read = async (path) => {
+      if (path.endsWith('/sha256')) {
+        if (value === null)
+          throw Object.assign(new Error('absent sha256'), { code: 'ENOENT' });
+        return value;
+      }
+      assert(!path.endsWith('/hash'));
+      return read(path);
+    };
+    await assert.rejects(
+      managedOperation({ ...base, operation: 'prepare' }, broken.io, ctx),
+    );
+    await assert.rejects(
+      managedOperation({ ...base, operation: 'cleanup' }, broken.io, ctx),
+    );
+    assert(broken.files.has(paths.receipt));
+    assert(!broken.calls.includes('parser:remove'));
+  }
+  for (const changed of [
+    { closed: false },
+    { timedOut: true },
+    { birth: 'unknown' },
+    { identity: { pid: 91, birth: '112', uid: 1001, parent: 90 } },
+  ]) {
+    const bad = model(),
+      parser = bad.io.parser;
+    bad.io.parser = async (...args) => ({
+      ...(await parser(...args)),
+      ...changed,
+    });
+    await assert.rejects(
+      managedOperation({ ...base, operation: 'prepare' }, bad.io, ctx),
+    );
+    await assert.rejects(
+      managedOperation({ ...base, operation: 'cleanup' }, bad.io, ctx),
+    );
+    assert(bad.files.has(paths.receipt));
+    assert(!bad.calls.includes('parser:remove'));
+  }
+  const late = model('parser-uncertain');
+  await assert.rejects(
+    managedOperation({ ...base, operation: 'prepare' }, late.io, ctx),
+  );
+  assert.equal(
+    JSON.parse(late.files.get(paths.receipt).content).mutation.state,
+    'pending',
+  );
+  await assert.rejects(
+    managedOperation({ ...base, operation: 'cleanup' }, late.io, ctx),
+    /in-flight/,
+  );
+  late.setLoaded(true); // An uncertain writer may apply later: receipt stays.
+  await assert.rejects(
+    managedOperation({ ...base, operation: 'cleanup' }, late.io, ctx),
+    /in-flight/,
+  );
+  assert(Object.values(paths).every((path) => late.files.has(path)));
+  for (const kind of ['live', 'unreadable']) {
+    const writer = model();
+    await managedOperation({ ...base, operation: 'prepare' }, writer.io, ctx);
+    const read = writer.io.read;
+    writer.io.read = async (path) => {
+      if (path === '/proc/90/stat') {
+        if (kind === 'unreadable') throw new Error('unreadable writer');
+        return text(1, '111');
+      }
+      return read(path);
+    };
+    const stat = writer.io.lstat;
+    writer.io.lstat = async (path) =>
+      path === '/proc/90' ? { uid: 0 } : stat(path);
+    await assert.rejects(
+      managedOperation({ ...base, operation: 'cleanup' }, writer.io, ctx),
+    );
+    assert(writer.files.has(paths.receipt));
+    assert(!writer.calls.includes('parser:remove'));
+  }
   const originalCalls = [...m.calls];
   const live = model();
   await managedOperation({ ...base, operation: 'prepare' }, live.io, ctx);
@@ -569,9 +679,15 @@ export async function checkManagedAppImage() {
       ),
       /cancelled/,
     );
-    assert.equal(operations.at(-1), 'cleanup');
-    if (phase === 'prepare' || phase === 'check')
-      assert.deepEqual(operations, ['prepare', 'cleanup']);
+    assert(!operations.includes('check'));
+    assert.equal(operations[0], 'prepare');
+    assert(
+      operations.every((operation) =>
+        ['prepare', 'cleanup'].includes(operation),
+      ),
+    );
+    if (phase === 'prepare' || phase === 'cleanup')
+      assert.equal(operations.at(-1), 'cleanup');
     assert.equal(signals.listenerCount('SIGINT'), 0);
     assert.equal(signals.listenerCount('SIGTERM'), 0);
   }
@@ -743,48 +859,48 @@ export async function checkManagedAppImage() {
   const commands = [];
   const native = new Function(
     'd',
-    `const {managedGuard,managedPaths,process,spawnSync,fail,same,identity,boundedRead,boundedHash,lstat,realpath,readdir,open,mkdir,unlink,rmdir,constants}=d; ${source.slice(begin, end)} return nativeEffects();`,
+    `const {managedGuard,managedPaths,process,spawn,waitManagedChild,processIdentity,fail,same,identity,boundedRead,boundedHash,lstat,realpath,readdir,open,mkdir,unlink,rmdir,constants}=d; ${source.slice(begin, end)} return nativeEffects();`,
   )({
     managedGuard,
     managedPaths: paths,
     process: {
       platform: 'linux',
       arch: 'x64',
+      pid: 90,
       env: { ...ctx.env, SUDO_UID: '1001' },
       getuid: () => 0,
     },
-    spawnSync: (command, args, options) => {
+    spawn: (command, args, options) => {
       commands.push({ command, args, options });
-      return { status: 0 };
+      return {};
+    },
+    waitManagedChild: async (_, options) => {
+      assert(options.deadline > 0 && options.deadline <= 5000);
+      assert.equal(options.killOwned, true);
     },
     fail: (message) => {
       throw new Error(message);
     },
   });
-  await native.parser('add');
-  await native.parser('remove');
+  await native.parser('add', async () => {});
+  await native.parser('remove', async () => {});
   assert.deepEqual(
-    commands.map((command) => [command.command, command.args]),
+    commands.map(({ command, args }) => [command, args]),
     ['add', 'remove'].map((operation) => [
       '/usr/sbin/apparmor_parser',
       [
         '--config-file=/dev/null',
         '--skip-cache',
+        '--jobs=0',
         '--' + operation,
         '--',
         paths.policy,
       ],
     ]),
   );
-  assert(
-    commands.every(
-      (command) =>
-        command.options.timeout === 5000 &&
-        command.options.killSignal === 'SIGKILL',
-    ),
-  );
-  await assert.rejects(native.parser('replace'));
+  await assert.rejects(native.parser('replace', async () => {}));
   assert.equal(commands.length, 2);
+  await checkManagedLifecycle();
   const refused = spawnSync(
     process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
     [
@@ -805,4 +921,187 @@ export async function checkManagedAppImage() {
     'utf8',
   );
   assert(workflow.includes("matrix.platform == 'linux/x64' && '1' || '0'"));
+}
+
+// Actual owned Node processes/stdio; fixture birth is modeled on non-Linux
+// hosts. This verifies terminal event/budget handling, never kernel policy.
+async function checkManagedLifecycle() {
+  const node = process.env.JS_BINARY__NODE_BINARY ?? process.execPath;
+  const children = [];
+  const launch = (source) => {
+    const child = spawn(node, ['-e', source], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    children.push(child);
+    return child;
+  };
+  const onSpawn = async (child) => ({
+    pid: child.pid,
+    birth: 'fixture1'.replace('fixture', ''),
+  });
+  const exit = (child) =>
+    child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve()
+      : once(child, 'exit');
+  try {
+    for (const code of [0, 7]) {
+      const child = launch(
+        `process.stdout.write('bounded');process.exitCode=${code}`,
+      );
+      const proof = await waitManagedChild(child, { deadline: 2000, onSpawn });
+      assert(proof.spawned && proof.closed && !proof.timedOut);
+      assert.equal(proof.code, code);
+      assert.equal(proof.output, 'bounded');
+    }
+    for (const killOwned of [true, false]) {
+      const child = launch('setTimeout(() => {}, 350)');
+      const started = Date.now();
+      await assert.rejects(
+        waitManagedChild(child, { deadline: 100, onSpawn, killOwned }),
+        (error) => error.managedUncertain === true,
+      );
+      assert(Date.now() - started < 1500);
+      await exit(child); // The signal itself was not death proof.
+      if (killOwned) assert.equal(child.signalCode, 'SIGKILL');
+      else assert.equal(child.exitCode, 0); // Later exit zero cannot turn timeout into success.
+    }
+    const supervisor = launch(
+      `const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},600)'],{stdio:['ignore','inherit','inherit']});`,
+    );
+    const started = Date.now();
+    await assert.rejects(
+      waitManagedChild(supervisor, { deadline: 150, onSpawn }),
+      /deadline\/closure/,
+    );
+    await exit(supervisor);
+    assert.equal(supervisor.exitCode, 0);
+    assert(Date.now() - started < 1500); // No wait for inherited worker pipes.
+    const transient = launch('setTimeout(() => {}, 200)');
+    const pending = waitManagedChild(transient, { deadline: 500, onSpawn });
+    await once(transient, 'spawn');
+    transient.emit('error', new Error('fixture transient'));
+    await assert.rejects(pending, (error) => error.managedUncertain === true);
+    await exit(transient);
+    const unproved = launch('setTimeout(() => {}, 200)');
+    await assert.rejects(
+      waitManagedChild(unproved, {
+        deadline: 100,
+        onSpawn: () => new Promise(() => {}),
+      }),
+      /deadline/,
+    );
+    await exit(unproved);
+
+    const signals = new EventEmitter(),
+      operations = [];
+    let finish, session;
+    const held = new Promise((resolve) => {
+      finish = resolve;
+    });
+    const cancelled = withManagedAppImage(
+      base,
+      async (_, current) => {
+        session = current;
+        signals.emit('SIGTERM');
+        await held;
+        return true;
+      },
+      {
+        context: ctx,
+        parent: base.parent,
+        signals,
+        secondary: () => {},
+        invoke: async (request) => {
+          operations.push(request.operation);
+          return {};
+        },
+      },
+    );
+    await assert.rejects(cancelled, /cancelled/);
+    assert.deepEqual(operations, ['prepare']); // No deletion during held callback.
+    await assert.rejects(session.check(), /cancelled|verification stopped/);
+    finish();
+    assert.equal(signals.listenerCount('SIGTERM'), 0);
+    let releaseClose;
+    await assert.rejects(
+      boundedManagedClose(
+        {
+          close: () =>
+            new Promise((resolve) => {
+              releaseClose = resolve;
+            }),
+        },
+        { deadline: 20 },
+      ),
+      (error) => error.managedUncertain === true,
+    );
+    releaseClose();
+    const closeCalls = [],
+      closeOperations = [];
+    let caught = false,
+      raw;
+    try {
+      await withManagedAppImage(
+        base,
+        async (_, session) => {
+          const app = {
+            close: async () => {
+              closeCalls.push('close');
+              throw undefined;
+            },
+          };
+          for (let i = 0; i < 2; i++) {
+            try {
+              await session.close(app);
+            } catch (error) {
+              assert.equal(error, undefined);
+            }
+          }
+          throw false;
+        },
+        {
+          context: ctx,
+          parent: base.parent,
+          secondary: () => {},
+          invoke: async (request) => {
+            closeOperations.push(request.operation);
+            return {};
+          },
+        },
+      );
+    } catch (error) {
+      caught = true;
+      raw = error;
+    }
+    assert(caught);
+    assert.equal(raw, false);
+    assert.deepEqual(closeCalls, ['close']);
+    assert.deepEqual(closeOperations, ['prepare']);
+    const uncertainOps = [];
+    await assert.rejects(
+      withManagedAppImage(base, async () => true, {
+        context: ctx,
+        parent: base.parent,
+        secondary: () => {},
+        invoke: async (request) => {
+          uncertainOps.push(request.operation);
+          throw Object.assign(new Error('helper deadline'), {
+            managedUncertain: true,
+          });
+        },
+      }),
+      /helper deadline/,
+    );
+    assert.deepEqual(uncertainOps, ['prepare']); // No racing cleanup after helper timeout.
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const ended = once(child, 'exit');
+        child.kill('SIGKILL');
+        await ended;
+      }
+    }
+    // Pipe-holder worker has its own finite lifetime; never target an arbitrary
+    // PID. Its inherited local pipes were detached by the actual tracker.
+  }
 }

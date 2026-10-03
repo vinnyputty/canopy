@@ -437,7 +437,8 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
       // the live listener attaches. Check each launch while its page is open.
       errors.push(...(await page.pageErrors()).map((error) => error.message));
       expect(errors).toEqual([]);
-      await app.close();
+      if (managed) await managed.close(app);
+      else await app.close();
       app = undefined;
     }
     expect(errors).toEqual([]);
@@ -485,8 +486,10 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
   } finally {
     if (app) {
       try {
-        await app.close();
+        if (managed) await managed.close(app);
+        else await app.close();
       } catch (secondary) {
+        if (managed && secondary?.managedUncertain) managed.refuseCleanup();
         if (!smokeFailed) throw secondary;
         console.error(
           'Packaged application close also failed:',
