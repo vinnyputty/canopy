@@ -430,6 +430,7 @@ export function planImport(
     key: (item: T) => string,
     label: string,
     maximum: number,
+    dropOverflow = false,
   ): T[] => {
     const result = [...local];
     const keys = new Set(local.map(key));
@@ -440,6 +441,13 @@ export function planImport(
         result.push(item);
         keys.add(id);
       }
+    }
+    if (dropOverflow) {
+      for (const item of result.slice(maximum))
+        conflicts.push(
+          `${label}: ${key(item)} — omit from full closed history`,
+        );
+      return result.slice(0, maximum);
     }
     if (result.length > maximum)
       throw new Error(
@@ -502,6 +510,7 @@ export function planImport(
         identity,
         'Closed root',
         20,
+        true,
       ),
       pinnedRoots: combine(
         current.pinnedRoots ?? [],
