@@ -101,40 +101,43 @@ async function stop(action = 'quit', finalChange = false) {
       15_000,
     );
   });
-  const final = await running.evaluate(
-    ({ app, BrowserWindow }, { action, finalChange }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      if (finalChange) {
-        const bounds = window.getNormalBounds();
-        window.setBounds({
-          ...bounds,
-          x: bounds.x + 3,
-          width: bounds.width + 3,
-        });
-      }
-      const value = {
-        bounds: window.getNormalBounds(),
-        maximized: window.isMaximized(),
-      };
-      // Return the observation before process teardown; quit is still issued in
-      // the same native turn, well before the 200 ms bounds debounce expires.
-      setTimeout(() => {
-        if (action === 'close') {
-          app.once('window-all-closed', () => app.quit());
-          window.close();
-        } else app.quit();
-      }, 0);
-      return value;
-    },
-    { action, finalChange },
-  );
+  // Observe early exit failures while evaluate is pending; awaiting the original
+  // promise below still verifies termination and propagates its failure.
+  exited.catch(() => {});
   try {
+    const final = await running.evaluate(
+      ({ app, BrowserWindow }, { action, finalChange }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        if (finalChange) {
+          const bounds = window.getNormalBounds();
+          window.setBounds({
+            ...bounds,
+            x: bounds.x + 3,
+            width: bounds.width + 3,
+          });
+        }
+        const value = {
+          bounds: window.getNormalBounds(),
+          maximized: window.isMaximized(),
+        };
+        // Return the observation before process teardown; quit is still issued in
+        // the same native turn, well before the 200 ms bounds debounce expires.
+        setTimeout(() => {
+          if (action === 'close') {
+            app.once('window-all-closed', () => app.quit());
+            window.close();
+          } else app.quit();
+        }, 0);
+        return value;
+      },
+      { action, finalChange },
+    );
     await exited;
     running = undefined;
+    return final;
   } finally {
     clearTimeout(timeout);
   }
-  return final;
 }
 
 async function reopen(expected) {
