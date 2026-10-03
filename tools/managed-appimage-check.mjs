@@ -15,6 +15,8 @@ import {
   readlink,
 } from 'node:fs/promises';
 import { boundedHash } from './appimage-observer.mjs';
+import { readerSource } from './mounted-reader.mjs';
+import { checkMountedReader } from './mounted-reader-check.mjs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import {
@@ -108,7 +110,7 @@ function model(failure) {
   const io = {
     canonical: async (path) => path,
     lstat: async (path) => {
-      if (path === '/proc/90') throw missing();
+      if (path === '/proc/90' || path === '/proc/92') throw missing();
       if (path.startsWith('/proc/')) return { uid: 1001 };
       if (path === profilePath)
         return { ...files.get('/').meta, mode: 0o40755 };
@@ -141,6 +143,10 @@ function model(failure) {
         if (unknown) throw new Error('unreadable live task');
         return occupancy ? managedProfile + ' (unconfined)' : 'unconfined';
       }
+      if (path.endsWith('/uid_map') || path.endsWith('/gid_map'))
+        return '         0          0 4294967295\n';
+      if (path === '/proc/70/status')
+        return 'Uid: 1001 1001 1001 1001\nGid: 1002 1002 1002 1002\n';
       if (path === '/proc/50/stat') return text(1, '321');
       if (path === '/proc/70/stat') return text(50, '123');
       if (path === '/proc/80/stat') return text(70, '456');
@@ -168,7 +174,73 @@ function model(failure) {
         )
         .map((key) => key.slice(path.length + 1));
     },
-    link: async () => '/usr/bin/node',
+    link: async (path) =>
+      path.endsWith('/ns/user')
+        ? 'user:[1]'
+        : path.endsWith('/ns/mnt')
+          ? 'mnt:[2]'
+          : '/usr/bin/node',
+    readerExecutable: async () => ({
+      path: '/usr/bin/node',
+      identity: {
+        dev: 1,
+        ino: 600,
+        uid: 1001,
+        gid: 1002,
+        mode: 0o100755,
+        nlink: 1,
+        size: 6,
+        mtimeMs: 1,
+        ctimeMs: 1,
+      },
+      sha256: hash('node'),
+      source: readerSource,
+    }),
+    reader: async (r, record) => {
+      const identity = {
+        pid: 92,
+        birth: '113',
+        uid: r.scope.uid,
+        parent: r.writer.pid,
+      };
+      await record(identity);
+      const files = [];
+      for (const suffix of ['canopy', 'resources/app.asar', 'chrome-sandbox']) {
+        const path = r.scope.mount.path + '/' + suffix;
+        assert.equal(await io.canonical(path), path);
+        const m = suffix === 'chrome-sandbox' ? await io.stat(path) : {};
+        files.push({
+          path,
+          identity: {
+            dev: 1,
+            ino: 601 + files.length,
+            uid: 0,
+            gid: 0,
+            mode: 0o100755,
+            nlink: 1,
+            size: 6,
+            mtimeMs: 1,
+            ctimeMs: 1,
+            ...m,
+          },
+          sha256: await io.hash(path),
+        });
+      }
+      return {
+        proof: {
+          spawned: true,
+          closed: true,
+          timedOut: false,
+          pid: 92,
+          birth: '113',
+          identity,
+          code: 0,
+          signal: null,
+          accepted: true,
+        },
+        files,
+      };
+    },
     mkdir: async (path, mode) => {
       assert(!files.has(path));
       calls.push('mkdir');
@@ -437,7 +509,7 @@ async function checkLiteralProfileIdentity() {
         );
         receipt.profile.sha256 = hash(receipt.profile.content);
       }
-      if (change === 'schema') receipt.schema = 2;
+      if (change === 'schema') receipt.schema = 1;
       file.content = JSON.stringify(receipt);
       file.meta.size = file.content.length;
     }
@@ -454,6 +526,7 @@ async function checkLiteralProfileIdentity() {
   );
 }
 export async function checkManagedAppImage() {
+  await checkMountedReader({ model, ctx, base, text });
   await checkLiteralProfileIdentity();
   await checkLoadedProfileRefusals();
   assert.equal(
@@ -721,7 +794,7 @@ export async function checkManagedAppImage() {
           mount +
           ' ro,nosuid,nodev - fuse.Canopy ' +
           paths.original +
-          ' ro'
+          ' ro,user_id=1001,group_id=1002'
         : path === '/proc/80/status'
           ? 'NoNewPrivs: 1\nSeccomp: 2\n'
           : realRead(path);
@@ -737,7 +810,9 @@ export async function checkManagedAppImage() {
         : path === mount + '/chrome-sandbox'
           ? base.helperSha256
           : realHash(path);
-  live.io.link = async () => mount + '/canopy';
+  const realLink = live.io.link;
+  live.io.link = async (path) =>
+    path.endsWith('/exe') ? mount + '/canopy' : realLink(path);
   const launch = {
     pid: 70,
     mainBirth: '123',
@@ -1051,30 +1126,10 @@ export async function checkManagedAppImage() {
   );
   assert(!called);
 
-  const sample = {
-    pid: 70,
-    birth: '123',
-    uid: 1001,
-    executableSha256: base.executableSha256,
-    appAsarSha256: base.appAsarSha256,
-    executable: '/tmp/.mount_CanopyFIXTURE/canopy',
-    mount: {
-      path: '/tmp/.mount_CanopyFIXTURE',
-      source: paths.original,
-      filesystem: 'fuse.Canopy',
-    },
-    sandboxHelper: {
-      path: '/tmp/.mount_CanopyFIXTURE/chrome-sandbox',
-      uid: 0,
-      gid: 0,
-      mode: '755',
-      sha256: base.helperSha256,
-    },
-    apparmorContext: managedProfile + ' (unconfined)',
-  };
-  const actual = { pid: 70, mainBirth: '123', rootPid: 70, rootBirth: '123' };
+  const sample = structuredClone(proof.launch.sample);
+  const actual = launch;
   const evidence = {
-    ...installed,
+    ...proof,
     launch: { rootPid: 70, rootBirth: '123', sample },
   };
   const report = {
@@ -1457,7 +1512,7 @@ export async function checkManagedAppImage() {
   const commands = [];
   const native = new Function(
     'd',
-    `const {managedGuard,managedPaths,process,spawn,waitManagedChild,processIdentity,fail,same,identity,boundedRead,boundedHash,lstat,realpath,readdir,open,mkdir,unlink,rmdir,constants}=d; ${source.slice(begin, end)} return nativeEffects();`,
+    `const {managedGuard,managedPaths,process,spawn,waitManagedChild,processIdentity,fail,same,identity,boundedRead,boundedHash,lstat,stat,realpath,readdir,open,mkdir,unlink,rmdir,constants}=d; ${source.slice(begin, end)} return nativeEffects();`,
   )({
     managedGuard,
     managedPaths: paths,
@@ -2922,6 +2977,12 @@ async function checkManagedSuccessTransport(source, launchProof, launchInput) {
                       launch: structuredClone(launchProof.launch),
                     }
                   : await managedOperation(request, kernel.io, ctx);
+              if (request.operation === 'launch') {
+                value.receipt.reader = structuredClone(
+                  launchProof.receipt.reader,
+                );
+                value.receiptSha256 = hash(JSON.stringify(value.receipt));
+              }
               if (request.operation === phase && change) change(value);
               current =
                 name === 'late-known-failure' && request.operation === phase

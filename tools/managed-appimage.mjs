@@ -13,6 +13,14 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import {
+  mountedReader,
+  readerExecutable,
+  readerProgram,
+  readerTransport,
+  qualifyReaderChild,
+  validReaderState,
+} from './mounted-reader.mjs';
 import { basename as hostBasename, posix } from 'node:path';
 const { dirname, join, basename } = posix;
 import { fileURLToPath } from 'node:url';
@@ -34,6 +42,7 @@ export const managedProfile = managedPaths.original;
 export const managedPolicy = `abi <abi/4.0>,\ninclude <tunables/global>\nprofile ${managedProfile} flags=(unconfined) {\n  userns,\n}\n`;
 const digest = (text) => createHash('sha256').update(text).digest('hex');
 const ownFile = fileURLToPath(import.meta.url);
+const rootExpiration = performance.now() + 10000;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const hex = (value) => /^[a-f0-9]{64}$/.test(value ?? '');
 const fail = (message) => {
@@ -291,6 +300,8 @@ async function loadedProfile(io) {
   return found[0];
 }
 async function previousWriterAbsent(io, receipt) {
+  await previousReaderAbsent(io, receipt);
+
   const writer = receipt.writer;
   if (
     !Number.isSafeInteger(writer?.pid) ||
@@ -333,6 +344,31 @@ async function previousWriterAbsent(io, receipt) {
       throw gone;
     }
     throw error;
+  }
+}
+async function previousReaderAbsent(io, receipt) {
+  if (!Object.hasOwn(receipt, 'reader') || !validReaderState(receipt.reader))
+    fail('Unknown mounted reader ownership; retain resources');
+  const r = receipt.reader;
+  if (r === null) return;
+  if (!validReaderState(r, true))
+    fail('Unsettled mounted reader; retain resources');
+  for (const expected of [r.writer, r.child]) {
+    try {
+      const current = processIdentity(
+        await io.read(`/proc/${expected.pid}/stat`),
+      );
+      if (current.birth === expected.birth)
+        fail('Prior mounted reader or writer remains live; retain resources');
+    } catch (error) {
+      try {
+        await io.lstat(`/proc/${expected.pid}`);
+      } catch (gone) {
+        if (gone?.code === 'ENOENT') continue;
+        throw gone;
+      }
+      throw error;
+    }
   }
 }
 async function mutatePolicy(io, receipt, save, operation) {
@@ -401,7 +437,10 @@ async function receiptState(io, request) {
   const text = await io.read(managedPaths.receipt);
   const receipt = JSON.parse(text);
   if (
-    receipt.schema !== 1 ||
+    receipt.schema !== 2 ||
+    !Object.hasOwn(receipt, 'reader') ||
+    !validReaderState(receipt.reader) ||
+    (receipt.reader !== null && receipt.reader.scope.uid !== request.uid) ||
     receipt.token !== request.token ||
     receipt.run !== request.run ||
     receipt.attempt !== request.attempt ||
@@ -576,7 +615,7 @@ export async function managedOperation(request, io, context) {
     )
       fail('Original source provenance changed');
     const receipt = {
-      schema: 1,
+      schema: 2,
       token: request.token,
       ...host,
       parent: request.parent,
@@ -603,6 +642,7 @@ export async function managedOperation(request, io, context) {
       loadAttempted: false,
       writer: await io.writer(),
       mutation: null,
+      reader: null,
     };
     const save = () => io.receipt(JSON.stringify(receipt), receipt.self);
     try {
@@ -715,6 +755,7 @@ export async function managedOperation(request, io, context) {
     if (!same(await loadedProfile(io), loaded))
       fail('Policy changed before absence check');
     await noManagedOccupants(io);
+    await previousReaderAbsent(io, receipt);
     await parentIdentity(io, request);
     receipt.writer = await io.writer();
     const save = () => io.receipt(JSON.stringify(receipt), receipt.self);
@@ -733,7 +774,9 @@ export async function managedOperation(request, io, context) {
   const installed = await validateInstallation(io, request);
   await previousWriterAbsent(io, installed.receipt);
   if (request.operation === 'check') return installed;
-  const launch = await liveLaunch(io, request);
+  const save = () =>
+    io.receipt(JSON.stringify(installed.receipt), installed.receipt.self);
+  const launch = await liveLaunch(io, request, installed.receipt, save);
   if (
     !same(installed.receipt.global, await globalState(io)) ||
     !same(installed.receipt.loaded, await loadedProfile(io))
@@ -752,11 +795,14 @@ export async function managedOperation(request, io, context) {
     )
       fail('Managed process changed after policy verification');
   }
-  return { ...installed, launch };
+  return { ...(await validateInstallation(io, request)), launch };
 }
 async function validateInstallation(io, request) {
   const state = await receiptState(io, request);
   if (
+    (state.receipt.reader !== null &&
+      (!validReaderState(state.receipt.reader, true) ||
+        !state.receipt.reader.proof.accepted)) ||
     state.receipt.resources.length !== 3 ||
     state.receipt.resources[1].sha256 !== request.sha256 ||
     state.receipt.resources[2].sha256 !== digest(managedPolicy) ||
@@ -781,7 +827,7 @@ async function validateInstallation(io, request) {
   await parentIdentity(io, request);
   return state;
 }
-async function liveLaunch(io, request) {
+async function liveLaunch(io, request, receipt, save) {
   const { pid, mainBirth, rootPid, rootBirth, rendererPid, rendererBirth } =
     request.launch ?? {};
   if (
@@ -806,6 +852,34 @@ async function liveLaunch(io, request) {
   const main = processIdentity(await io.read(`/proc/${pid}/stat`));
   if (main.birth !== mainBirth || (pid !== rootPid && main.parent !== rootPid))
     fail('Mounted main is outside actual launcher');
+  const mounted = await mountedReader(
+    io,
+    receipt,
+    request,
+    save,
+    managedPaths.original,
+    async () => {
+      await receiptState(io, request);
+      if (!same(receipt.loaded, await loadedProfile(io)))
+        fail('Reader policy changed');
+      for (const [checkedPid, expected] of [
+        [rootPid, root],
+        [pid, main],
+      ]) {
+        if (
+          !same(
+            expected,
+            processIdentity(await io.read(`/proc/${checkedPid}/stat`)),
+          ) ||
+          (await io.lstat(`/proc/${checkedPid}`)).uid !== request.uid ||
+          (await io.read(`/proc/${checkedPid}/attr/current`)).trim() !==
+            `${managedProfile} (unconfined)`
+        )
+          fail('Reader original process changed');
+      }
+      await parentIdentity(io, request);
+    },
+  );
   const sample = await mountedEvidence(
     pid,
     main,
@@ -815,7 +889,13 @@ async function liveLaunch(io, request) {
       appAsarSha256: request.appAsarSha256,
       helperSha256: request.helperSha256,
     },
-    io,
+    {
+      ...io,
+      canonical: mounted.canonical,
+      hash: mounted.hash,
+      stat: async (path) =>
+        path.startsWith('/proc/') ? io.stat(path) : mounted.stat(path),
+    },
   );
   if (
     sample.apparmorContext !== `${managedProfile} (unconfined)` ||
@@ -888,12 +968,30 @@ export function managedChild(app) {
     fail('Actual Playwright launch object mismatch');
   return child;
 }
+// Reader lifecycle updates are the only mutable installation receipt field.
+export function managedInstallationSha256(value) {
+  const r = value.receipt;
+  if (
+    !validReaderState(r.reader) ||
+    (r.reader !== null &&
+      (!validReaderState(r.reader, true) || !r.reader.proof.accepted)) ||
+    digest(JSON.stringify(r)) !== value.receiptSha256
+  )
+    fail('Unqualified managed installation receipt');
+  return digest(JSON.stringify({ ...r, reader: null }));
+}
 export function acceptManagedObservation(report, installed, actual, parent) {
   const { receipt, receiptSha256, launch } = installed;
   const sample = launch?.sample;
   const expected = receipt?.expected;
   if (
-    receipt?.schema !== 1 ||
+    receipt?.schema !== 2 ||
+    !validReaderState(receipt.reader, true) ||
+    !receipt.reader.proof.accepted ||
+    !same(receipt.reader.scope.launch, actual) ||
+    !same(receipt.reader.scope.mount, sample?.mount) ||
+    receipt.reader.scope.uid !== receipt.uid ||
+    digest(JSON.stringify(receipt)) !== receiptSha256 ||
     receipt.profile?.name !== managedProfile ||
     receipt.profile.content !== managedPolicy ||
     receipt.profile.sha256 !== digest(managedPolicy) ||
@@ -1385,10 +1483,16 @@ export function validManagedResponse(response, request, onRefusal = () => {}) {
       'loadAttempted',
       'writer',
       'mutation',
+      'reader',
       'self',
       'original',
     ]) ||
-    r.schema !== 1 ||
+    r.schema !== 2 ||
+    !validReaderState(r.reader) ||
+    (r.reader !== null &&
+      (r.reader.scope.uid !== request.uid ||
+        !validReaderState(r.reader, true) ||
+        !r.reader.proof.accepted)) ||
     typeof r.token !== 'string' ||
     r.token !== request.token ||
     typeof r.run !== 'string' ||
@@ -1604,6 +1708,14 @@ export function validManagedResponse(response, request, onRefusal = () => {}) {
     sample.apparmorContext !== `${managedProfile} (unconfined)`
   )
     return refuse('launch');
+  if (
+    !validReaderState(r.reader, true) ||
+    !r.reader.proof.accepted ||
+    !same(r.reader.scope.launch, expected) ||
+    !same(r.reader.scope.mount, sample.mount) ||
+    r.reader.scope.executable !== sample.executable
+  )
+    return refuse('mounted-reader');
   const mount = sample.mount,
     helper = sample.sandboxHelper;
   return (
@@ -1693,6 +1805,7 @@ export async function recordManagedProtocol(
       'launch',
       'installation-envelope',
       'mounted-payload',
+      'mounted-reader',
       'file-identity.keys',
       'file-identity.ino.positive',
       'file-identity.mode.type',
@@ -2009,6 +2122,46 @@ function nativeEffects() {
   };
   return {
     read: boundedRead,
+    execStat: stat,
+    readerExecutable: () =>
+      readerExecutable({
+        read: boundedRead,
+        link: readlink,
+        canonical: realpath,
+        lstat,
+        execStat: stat,
+        hash: boundedHash,
+      }),
+    reader: async (r, record) => {
+      authorize();
+      if (performance.now() >= rootExpiration)
+        fail('Mounted reader setup deadline');
+      const argv = ['--input-type=module', '--eval', readerProgram];
+      const child = spawn(r.node.path, argv, {
+        uid: r.scope.uid,
+        gid: r.scope.gid,
+        env: { PATH: '/usr/bin:/bin', LANG: 'C' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      return readerTransport(child, r, {
+        expires: rootExpiration,
+        record,
+        qualify: (actual) =>
+          qualifyReaderChild(
+            {
+              read: boundedRead,
+              link: readlink,
+              execStat: stat,
+              canonical: realpath,
+              lstat,
+              hash: boundedHash,
+            },
+            actual,
+            r,
+            argv,
+          ),
+      });
+    },
     hash: boundedHash,
     lstat,
     stat: lstat,
@@ -2148,7 +2301,7 @@ if (
   hostBasename(process.argv[1] ?? '') === 'managed-appimage.mjs' &&
   process.argv[2] === '--managed-appimage-private'
 ) {
-  const expires = performance.now() + 10000;
+  const expires = rootExpiration;
   const timer = setTimeout(
     () => process.exit(1),
     Math.max(0, expires - performance.now()),

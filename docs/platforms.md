@@ -47,3 +47,5 @@ Native prerequisites: an interactive macOS 15 Apple-silicon desktop, Windows 11 
 ## Release notes requirements
 
 Copy the qualified rows and exact OS minimums into each release's notes, together with installer format/CPU, unsigned/signed/notarized status, installation prerequisites (including Linux FUSE and secure keyring), known limitations, and native check evidence. Link the matching CI run and hash report. Keep unsupported CPUs and unqualified OS versions explicit. Until the pending checks pass, label these downloads **test builds awaiting native qualification**, and leave public release blocked.
+
+Managed AppImage mounted qualification uses a fixed mount-owner Node reader, independently verified credentials and durable reader closure/absence evidence. Missing mount owner/mapping metadata or unsettled reader ownership retains resources. The reader has source/model validation only; exact-head Linux launch, restart and qualified cleanup remain unverified and require separately authorized hosted CI after fresh complete source/security review.

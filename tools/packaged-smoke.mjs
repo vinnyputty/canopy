@@ -3,6 +3,7 @@ import {
   recordManagedProtocol,
   managedChild,
   acceptManagedObservation,
+  managedInstallationSha256,
   managedHostedContext,
 } from './managed-appimage.mjs';
 import { boundedRead, processIdentity } from './appimage-observer.mjs';
@@ -349,7 +350,10 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
             ).birth,
           };
           const installed = await managed.verify(bound);
-          if (installed.receiptSha256 !== managed.installed.receiptSha256)
+          if (
+            managedInstallationSha256(installed) !==
+            managedInstallationSha256(managed.installed)
+          )
             throw new Error('Managed receipt changed between launches');
           if (!restart) {
             const observation = JSON.parse(
