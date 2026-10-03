@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { build } from 'esbuild';
 
+const importPath = (path: string) => JSON.stringify(path);
+
 // Extract production callbacks rather than reproducing the renderer's persistence controller.
 test('held import and reload reject old-renderer saves and preserve actual imported data and Undo', async () => {
   const root = resolve('.');
@@ -69,12 +71,12 @@ test('held import and reload reject old-renderer saves and preserve actual impor
   try {
     const source = `
 import assert from 'node:assert/strict'; import * as fs from 'node:fs/promises';
-import {Storage} from '${root}/src/main/storage';
-import {WorkspaceTransfer} from '${root}/src/main/workspace-transfer';
-import {createBackup} from '${root}/src/shared/workspace-backup';
-import {recoverWorkspaceViews} from '${root}/src/shared/views';
-import {migrateViews} from '${root}/src/renderer/table-view';
-import {backupWorkspace,backupConnections} from '${root}/tests/fixtures/workspace-backup';
+import {Storage} from ${importPath(root + '/src/main/storage')};
+import {WorkspaceTransfer} from ${importPath(root + '/src/main/workspace-transfer')};
+import {createBackup} from ${importPath(root + '/src/shared/workspace-backup')};
+import {recoverWorkspaceViews} from ${importPath(root + '/src/shared/views')};
+import {migrateViews} from ${importPath(root + '/src/renderer/table-view')};
+import {backupWorkspace,backupConnections} from ${importPath(root + '/tests/fixtures/workspace-backup')};
 const storage=new Storage(${JSON.stringify(directory)}),transfer=new WorkspaceTransfer(storage,()=>backupConnections);
 const baseline=migrateViews(recoverWorkspaceViews(structuredClone(backupWorkspace)));
 const workspaceRef={current:baseline},pendingWorkspaceSave={current:Promise.resolve()},workspaceSaveTimer={current:null},workspaceTransferBusy={current:false},appearanceSaving={current:false},demoResetting={current:false};
@@ -162,6 +164,63 @@ assert.equal(await fs.readFile(${JSON.stringify(join(directory, 'credentials.jso
     await import(pathToFileURL(file).href);
   } finally {
     delete (globalThis as Record<string, unknown>).rendererStageGate;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// Exercise esbuild's parser and real resolver with generated specifiers. Windows
+// paths use a resolver bridge on POSIX; their spelling must reach it intact.
+test('generated renderer imports resolve paths with spaces, quotes and backslashes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), "canopy import's space "));
+  try {
+    const actual = join(directory, 'fixture.ts');
+    await writeFile(actual, 'export const sentinel = "resolved real fixture";');
+    const paths = [
+      actual,
+      String.raw`C:\fixture space\quote's\module.ts`,
+      '/fixture space/quote\'s/"double"/back\\slash.ts',
+    ];
+    for (const [index, path] of paths.entries()) {
+      let resolved = false;
+      const result = await build({
+        stdin: {
+          contents: `export {sentinel} from ${importPath(path)};`,
+          resolveDir: directory,
+          loader: 'ts',
+        },
+        bundle: true,
+        platform: 'node',
+        format: 'esm',
+        write: false,
+        plugins:
+          index === 0
+            ? []
+            : [
+                {
+                  name: 'foreign-path-resolution',
+                  setup(b) {
+                    b.onResolve({ filter: /.*/ }, async (args) => {
+                      if (args.importer !== '<stdin>') return;
+                      assert.equal(args.path, path);
+                      resolved = true;
+                      return b.resolve(actual, {
+                        resolveDir: directory,
+                        kind: args.kind,
+                      });
+                    });
+                  },
+                },
+              ],
+      });
+      if (index !== 0) assert.equal(resolved, true);
+      const file = join(directory, `resolved-${index}.mjs`);
+      await writeFile(file, result.outputFiles[0].contents);
+      assert.equal(
+        (await import(pathToFileURL(file).href)).sentinel,
+        'resolved real fixture',
+      );
+    }
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });

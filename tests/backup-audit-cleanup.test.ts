@@ -6,13 +6,28 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import childProcess, { type ChildProcess } from 'node:child_process';
 import { build } from 'esbuild';
+import type { AuditOwner } from '../tools/audit-lifecycle.mjs';
 import { disposeProcess } from './fixtures/owned-process';
+
+// Match the shared owner's native Windows operation/kill allowances in these
+// disposable Node fixtures. Fresh removal needs two snapshots plus filesystem
+// work; the old 3s total kill allowance expired inside a completed CIM query.
+const windows = process.platform === 'win32';
+const operationMs = windows ? 15000 : 3000;
+const killMs = windows ? 60000 : 3000;
+const removalMs = windows ? 2 * operationMs + 5000 : 3000;
 
 // Bundle each actual harness. Only Playwright/provider UI is substituted;
 // AuditOwner captures real disposable Node launches and performs real shutdown.
 const state = globalThis as typeof globalThis & {
   backupProbe: {
     child?: ChildProcess;
+    owner?: AuditOwner & {
+      scopes: { live(): Promise<{ pid: number; start: string }[]> }[];
+    };
+    closeCalls: number;
+    signalCalls: { pid: number; signal?: string | number; ms?: number }[];
+    refuse: (pid: number, signal?: string | number, ms?: number) => never;
     unrelated?: ChildProcess;
     directory?: string;
     pending?: Set<Promise<unknown>>;
@@ -44,7 +59,20 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
     test(`${harness}: actual launch/cleanup ${scenario}`, async () => {
       const directory = await mkdtemp(join(tmpdir(), 'canopy-backup-control-'));
       const previousArgs = process.argv;
-      state.backupProbe = { primary: new Error('PRIMARY evidence failure') };
+      state.backupProbe = {
+        primary: new Error('PRIMARY evidence failure'),
+        closeCalls: 0,
+        signalCalls: [],
+        refuse(pid, signal, ms) {
+          const probe = state.backupProbe;
+          assert.equal(probe.owner?.child, probe.child);
+          assert.equal(pid, windows ? probe.child!.pid : -probe.child!.pid!);
+          if (windows) assert.ok(ms! > 0 && ms! <= operationMs);
+          else assert.equal(signal, 'SIGKILL');
+          probe.signalCalls.push({ pid, signal, ms });
+          throw Error('OWNED signal refused');
+        },
+      };
       const probe = state.backupProbe;
       const unrelated = childProcess.spawn(
         process.execPath,
@@ -89,7 +117,7 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
                       ${scenario === 'pending-writer' ? "s.writer=s.write(s.directory+'/late.txt','owned delayed write');" : ''}
                       ${scenario === 'unreadable-scope' ? 'globalThis.backupProbe.owner.scopes[0].valid=false;' : ''}
                       ${scenario.includes('diagnostic') ? `return {on(){throw s.primary},isClosed(){return false},locator(){return {innerText:async()=>{${scenario === 'pending-diagnostic' ? 'return new Promise(r=>s.release=()=>r("late diagnostic"));' : 'throw Error("DIAGNOSTIC fault");'}}}}};` : 'throw s.primary;'}
-                    },close:async()=>{
+                    },close:async()=>{s.closeCalls++;
                       ${scenario === 'parent-exit' ? "const ended=once(s.child,'exit');s.child.send('exit');await ended;throw Error('PARENT close failed after exit');" : scenario === 'reject-close' || scenario === 'refused-signal' ? 'throw Error("CLOSE fault");' : scenario === 'pending-close' ? 'return new Promise(r=>s.release=r);' : "const ended=once(s.child,'exit');s.child.send('exit');await ended;"}
                     }};
                 }};`,
@@ -100,9 +128,9 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
                     contents: (await readFile(a.path, 'utf8'))
                       .replace(
                         'executable: resolve(runtime)',
-                        'executable: resolve(runtime), graceMs:1000, killMs:3000, operationMs:3000' +
+                        `executable: resolve(runtime), graceMs:1000, killMs:${killMs}, operationMs:${operationMs}` +
                           (scenario === 'refused-signal'
-                            ? ", signalGroup:()=>{throw Error('OWNED signal refused')}"
+                            ? ', signalGroup:(pid,signal)=>globalThis.backupProbe.refuse(pid,signal), killPid:async(pid,ms)=>globalThis.backupProbe.refuse(pid,undefined,ms)'
                             : ''),
                       )
                       .replace(
@@ -121,7 +149,7 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
                   async (a) => ({
                     contents: (await readFile(a.path, 'utf8')).replace(
                       'timeoutMs = 5000',
-                      'timeoutMs = 3000',
+                      `timeoutMs = ${removalMs}`,
                     ),
                     loader: 'js',
                   }),
@@ -166,6 +194,34 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
             assert.equal(caught.errors[0], probe.primary);
           }
         }
+        if (scenario === 'reject-close' || scenario === 'refused-signal') {
+          assert.equal(probe.closeCalls, 1);
+          assert.ok(caught instanceof AggregateError);
+          assert.ok(
+            caught.errors.some((error: Error) =>
+              /CLOSE fault/.test(error.message),
+            ),
+          );
+        }
+        if (scenario === 'refused-signal') {
+          assert.ok(
+            probe.signalCalls.length > 0,
+            'qualified signal path must execute',
+          );
+          assert.equal(probe.child!.exitCode, null);
+          assert.equal(probe.child!.signalCode, null);
+          const live = await probe.owner!.scopes[0].live();
+          assert.deepEqual(
+            live.map((row) => row.pid),
+            [probe.child!.pid],
+          );
+          assert.ok(live[0].start);
+          assert.ok(
+            (caught as AggregateError).errors.some((error: Error) =>
+              /OWNED signal refused/.test(error.message),
+            ),
+          );
+        }
         const retained = [
           'pending-close',
           'failed-launch',
@@ -208,6 +264,15 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
         process.argv = previousArgs;
         await disposeProcess(probe.child);
         await disposeProcess(unrelated);
+        if (scenario === 'refused-signal') {
+          const teardown = await probe.owner!.shutdown();
+          assert.equal(
+            teardown.terminated,
+            true,
+            'qualified full-scope teardown',
+          );
+          assert.deepEqual(await probe.owner!.scopes[0].live(), []);
+        }
         if (probe.directory)
           await rm(probe.directory, { recursive: true, force: true });
         await rm(directory, { recursive: true, force: true });
@@ -290,8 +355,8 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
         profile: directory,
         executable: process.execPath,
         graceMs: 1000,
-        killMs: 3000,
-        operationMs: 3000,
+        killMs,
+        operationMs,
       });
       let child: ChildProcess | undefined;
       try {
@@ -359,7 +424,8 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
           app,
           directory,
           undefined,
-          finishBackupAudit,
+          (options: object) =>
+            finishBackupAudit({ ...options, timeoutMs: removalMs }),
           mode,
           mode === 'healthy' || mode === 'forced' || mode === 'fresh-error',
         );
