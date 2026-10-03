@@ -30,7 +30,7 @@ js_test(
     name = "test",
     timeout = "long",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/portable-check.mjs", "tools/ci.mjs"],
+    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-pickers.mjs", "tools/portable-check.mjs", "tools/ci.mjs"],
 )
 
 js_test(
