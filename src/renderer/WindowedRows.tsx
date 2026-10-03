@@ -33,6 +33,7 @@ export function WindowedRows({
   const heights = useRef(new Map<string, number>());
   const layout = useRef('');
   const pendingAnchor = useRef<{ id: string; inside: number } | null>(null);
+  const pendingLayout = useRef(false);
   const [revision, setRevision] = useState(0);
   const [estimate, setEstimate] = useState(38);
   const [viewport, setViewport] = useState({ top: 0, height: 600 });
@@ -44,6 +45,7 @@ export function WindowedRows({
     owner: readonly string[];
     stable: number;
     passes: number;
+    acquiring: boolean;
     scrollTop: number;
   } | null>(null);
   const windowed = ids.length > 200;
@@ -111,6 +113,7 @@ export function WindowedRows({
       owner: ids,
       stable: 0,
       passes: 0,
+      acquiring: true,
       scrollTop: container.scrollTop,
     };
     pendingAnchor.current = null;
@@ -125,11 +128,16 @@ export function WindowedRows({
     container.scrollTop = Math.max(0, top);
     alignment.current!.scrollTop = container.scrollTop;
     // Keyboard/edit destinations must exist before their caller focuses them.
-    flushSync(() => {
-      setRequested(id);
-      readViewport();
-    });
-    return elements.current.get(id) ?? null;
+    const request = alignment.current;
+    try {
+      flushSync(() => {
+        setRequested(id);
+        readViewport();
+      });
+      return elements.current.get(id) ?? null;
+    } finally {
+      request.acquiring = false;
+    }
   };
   const navigation = useRef(ensure);
   navigation.current = ensure;
@@ -185,6 +193,7 @@ export function WindowedRows({
   currentLayout.current = { offsets, estimate };
 
   useLayoutEffect(() => {
+    pendingLayout.current = false;
     const anchor = pendingAnchor.current,
       container = scroller();
     if (alignment.current) {
@@ -225,6 +234,19 @@ export function WindowedRows({
     if (!container || !element || !windowed) return;
     let frame = 0;
     const measure = () => {
+      const finalRequest = alignment.current;
+      if (finalRequest && finalRequest.passes >= 8 && !finalRequest.acquiring) {
+        // Finish the last queued layout before the bounded final correction;
+        // do not queue another measurement/estimate cycle at the work limit.
+        if (pendingLayout.current) {
+          schedule();
+          return;
+        }
+        alignRequested();
+        alignment.current = null;
+        setRequested(null);
+        return;
+      }
       const style = getComputedStyle(container);
       const signature = [
         container.clientWidth,
@@ -257,11 +279,18 @@ export function WindowedRows({
           }
         }
       }
-      // Estimates come from actual mounted rows, then each observed member uses
+      // Use every still-valid observed height: leaving a short-row region must
+      // not make a tall viewport repeatedly re-estimate all unseen members.
+      for (const height of heights.current.values())
+        sample = sample ? Math.min(sample, height) : height;
+      // Estimates come from actual measured rows, then each observed member uses
       // its own measurement (including expanded links and active editors).
-      if (sample)
-        setEstimate((previous) => (previous === sample ? previous : sample));
+      if (sample && sample !== old.estimate) {
+        setEstimate(sample);
+        changed = true;
+      }
       if (changed) {
+        pendingLayout.current = true;
         if (
           !alignment.current &&
           ids[anchor] &&
@@ -277,10 +306,13 @@ export function WindowedRows({
       const request = alignment.current;
       if (request) {
         const visible = alignRequested();
-        request.stable = !changed && visible ? request.stable + 1 : 0;
+        const committed = !changed && !pendingLayout.current;
+        request.stable =
+          committed && visible && !request.acquiring ? request.stable + 1 : 0;
         // One transient owner and finite settlement work. Focus/editor pins are
         // separate durable interaction ownership; passive scrolling is separate.
-        if (request.stable >= 2 || ++request.passes >= 8) {
+        request.passes++;
+        if (!request.acquiring && committed && request.stable >= 2) {
           alignment.current = null;
           setRequested(null);
         } else schedule();

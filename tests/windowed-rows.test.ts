@@ -826,3 +826,161 @@ test('exact preparer hierarchy projections match real filtered, ranked, subtree 
     await state.cleanup();
   }
 });
+
+test('first ensure and focused tall-band requests retain visible targets through estimate settlement without a short-row pin', async () => {
+  for (const strict of [false, true])
+    for (const align of ['nearest', 'center'] as const)
+      for (const focused of [false, true])
+        for (const clamp of [false, true]) {
+          const state = await dom(),
+            api = { current: null as RowWindow | null },
+            ids = Array.from({ length: 1000 }, (_, i) => `v${i}`);
+          try {
+            for (let i = 480; i <= 515; i++) state.custom.set(`v${i}`, 150);
+            if (clamp) {
+              let offset = 0;
+              const maximum = () =>
+                Math.max(
+                  0,
+                  [
+                    ...state.host.querySelectorAll<HTMLElement>(
+                      '[data-window-row],[data-window-spacer]',
+                    ),
+                  ].reduce(
+                    (sum, row) =>
+                      sum +
+                      (row.hasAttribute('data-window-spacer')
+                        ? parseFloat(row.style.height) || 0
+                        : (state.custom.get(row.dataset.windowRow!) ?? 30)),
+                    0,
+                  ) - 300,
+                );
+              Object.defineProperty(state.host, 'scrollTop', {
+                get: () => (offset = Math.min(offset, maximum())),
+                set: (value: number) =>
+                  (offset = Math.min(Math.max(0, value), maximum())),
+              });
+            }
+            const element = React.createElement(WindowedRows, {
+              ids,
+              api,
+              pinned: focused ? ['v500'] : [],
+              scrollSelector: '.tree-scroll',
+              renderRow: (i) => React.createElement('button', null, ids[i]),
+            });
+            await state.render(
+              strict
+                ? React.createElement(React.StrictMode, null, element)
+                : element,
+            );
+            if (focused) {
+              await act(async () =>
+                state.host
+                  .querySelector<HTMLElement>(
+                    '[data-window-row="v500"] button',
+                  )!
+                  .focus({ preventScroll: true }),
+              );
+              await state.flush();
+            }
+            await act(async () => {
+              const destination = api.current!.ensure('v500', align);
+              assert.ok(
+                destination,
+                'first ensure retains its requested owner',
+              );
+              assert.ok(
+                destination instanceof state.window.HTMLElement,
+                'first ensure returns the actual owning element before focus',
+              );
+              destination
+                .querySelector<HTMLElement>('button')!
+                .focus({ preventScroll: true });
+            });
+            await state.flush();
+            const target = state.host.querySelector<HTMLElement>(
+              '[data-window-row="v500"]',
+            )!;
+            assert.equal(
+              state.window.document.activeElement?.textContent,
+              'v500',
+            );
+            assert.ok(
+              target.getBoundingClientRect().top >= -1 &&
+                target.getBoundingClientRect().bottom <= 301,
+              'first fitting target stays visible after all committed estimate/offset work',
+            );
+            assert.equal(model(state.host).length, 1000);
+            assert.ok(
+              !state.host.querySelector('[data-window-row="v0"]'),
+              'no artificial short DOM owner',
+            );
+            if (!focused) {
+              await act(async () =>
+                state.window.document.activeElement?.blur(),
+              );
+              await state.scroll(0);
+              assert.ok(
+                !state.host.querySelector('[data-window-row="v500"]'),
+                'settled transient destination releases',
+              );
+            }
+          } finally {
+            await state.cleanup();
+          }
+        }
+});
+
+test('queued uniform reading-height estimates commit before explicit alignment settles', async () => {
+  for (const align of ['nearest', 'center'] as const) {
+    const state = await dom(),
+      api = { current: null as RowWindow | null },
+      ids = Array.from({ length: 1000 }, (_, i) => `v${i}`);
+    try {
+      await state.render(
+        React.createElement(WindowedRows, {
+          ids,
+          api,
+          scrollSelector: '.tree-scroll',
+          renderRow: (i) => React.createElement('button', null, ids[i]),
+        }),
+      );
+      await act(async () =>
+        api
+          .current!.ensure('v500', align)!
+          .querySelector<HTMLElement>('button')!
+          .focus({ preventScroll: true }),
+      );
+      // Width/signature invalidation removes every old short-row measurement.
+      // The real observer then queues the new global estimate during this request.
+      await state.resize(150, 700, 300);
+      await state.flush();
+      const rect = state.host
+        .querySelector('[data-window-row="v500"]')!
+        .getBoundingClientRect();
+      assert.equal(state.window.document.activeElement?.textContent, 'v500');
+      assert.ok(
+        rect.top >= -1 && rect.bottom <= 301,
+        'new committed estimate preserves requested visibility',
+      );
+      state.custom.set('v500', 600);
+      await state.resize(150);
+      const oversized = state.host
+        .querySelector('[data-window-row="v500"]')!
+        .getBoundingClientRect();
+      await act(async () => api.current!.ensure('v500', align));
+      await state.flush();
+      assert.equal(oversized.height, 600);
+      assert.ok(
+        Math.abs(
+          state.host
+            .querySelector('[data-window-row="v500"]')!
+            .getBoundingClientRect().top,
+        ) <= 1,
+        'oversized destination exposes its start',
+      );
+    } finally {
+      await state.cleanup();
+    }
+  }
+});
