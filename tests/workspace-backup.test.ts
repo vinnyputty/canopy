@@ -434,3 +434,160 @@ test('portable imports preserve destination triage and validate local inbox pref
     /Invalid inbox preferences/,
   );
 });
+
+test('merge retains full local closed history and previews every dropped unique root', () => {
+  const current = {
+    ...empty(),
+    closedTabs: Array.from({ length: 20 }, (_, i) => ({
+      ...backupWorkspace.closedTabs![0],
+      id: `local-${i}`,
+      rootKey: `SAMPLE-${100 - i}`,
+      connectionId: 'destination-jira',
+    })),
+  };
+  validateWorkspace(current);
+  const backup = fixture();
+  backup.workspace.closedTabs!.push({
+    ...backup.workspace.closedTabs![0],
+    id: 'another-closed',
+    rootKey: 'SAMPLE-3',
+  });
+  const parsed = parseBackup(JSON.stringify(backup));
+  const before = structuredClone({ current, parsed, destinations, mapping });
+  const plan = planImport(parsed, current, destinations, mapping, 'merge');
+  assert.deepEqual(
+    plan.workspace.closedTabs?.map((t) => t.id),
+    current.closedTabs.map((t) => t.id),
+  );
+  assert.deepEqual(
+    plan.conflicts.filter((c) => c.startsWith('Closed root:')),
+    [
+      'Closed root: ["destination-jira","sample-2"] — omit from full closed history',
+      'Closed root: ["destination-jira","sample-3"] — omit from full closed history',
+    ],
+  );
+  assert.equal(plan.workspace.tabs.length, 2);
+  assert.ok(plan.effects.some((e) => e.includes('20 closed roots')));
+  assert.deepEqual({ current, parsed, destinations, mapping }, before);
+  assert.equal(
+    planImport(parsed, current, destinations, mapping, 'replace').workspace
+      .closedTabs?.length,
+    2,
+  );
+});
+
+test('merge fills closed history in local-first order with connection identity and unique tab IDs', () => {
+  const current = {
+    ...empty(),
+    tabs: [{ ...backupWorkspace.tabs[0], connectionId: 'destination-jira' }],
+    activeTabId: 'tab-1',
+    closedTabs: Array.from({ length: 18 }, (_, i) => ({
+      ...backupWorkspace.closedTabs![0],
+      id: i === 0 ? 'closed-1' : i === 1 ? 'import-tab-1' : `local-${i}`,
+      rootKey: i === 0 ? 'sample-2' : `SAMPLE-${100 - i}`,
+      connectionId: 'destination-jira',
+      summary: 'local visit',
+    })),
+  };
+  const backup = fixture();
+  backup.workspace.tabs[0].id = 'source-open';
+  backup.workspace.activeTabId = 'source-open';
+  backup.connections.push({ ...backup.connections[0], id: 'other-source' });
+  const extraDestination = { ...destinations[0], id: 'other-destination' };
+  backup.workspace.closedTabs!.push(
+    {
+      ...backup.workspace.closedTabs![0],
+      id: 'import-closed-1',
+      connectionId: 'other-source',
+      summary: 'separate account',
+    },
+    { ...backup.workspace.closedTabs![0], id: 'tab-1', rootKey: 'SAMPLE-3' },
+    { ...backup.workspace.closedTabs![0], id: 'drop-1', rootKey: 'SAMPLE-4' },
+    { ...backup.workspace.closedTabs![0], id: 'drop-2', rootKey: 'SAMPLE-5' },
+  );
+  const parsed = parseBackup(JSON.stringify(backup));
+  const connections = [...destinations, extraDestination];
+  const mapped = { ...mapping, 'other-source': extraDestination.id };
+  const before = structuredClone({ current, parsed, connections, mapped });
+  const plan = planImport(parsed, current, connections, mapped, 'merge');
+  const closed = plan.workspace.closedTabs!;
+  assert.deepEqual(
+    closed.slice(0, 18).map((t) => t.id),
+    current.closedTabs.map((t) => t.id),
+  );
+  assert.equal(closed[0].summary, 'local visit');
+  assert.deepEqual(
+    closed.slice(18).map((t) => [t.connectionId, t.rootKey, t.id]),
+    [
+      ['other-destination', 'SAMPLE-2', 'import-import-closed-1'],
+      ['destination-jira', 'SAMPLE-3', 'import-import-tab-1'],
+    ],
+  );
+  assert.deepEqual(
+    plan.conflicts.filter((c) => c.startsWith('Closed root:')),
+    [
+      'Closed root: ["destination-jira","sample-2"] — keep existing',
+      'Closed root: ["destination-jira","sample-4"] — omit from full closed history',
+      'Closed root: ["destination-jira","sample-5"] — omit from full closed history',
+    ],
+  );
+  assert.deepEqual(
+    plan.workspace.tabs.map((t) => t.id),
+    ['tab-1', 'tab-2'],
+  );
+  assert.equal(plan.workspace.activeTabId, 'tab-1');
+  const tabs = [...plan.workspace.tabs, ...closed];
+  assert.equal(new Set(tabs.map((t) => t.id)).size, tabs.length);
+  assert.deepEqual({ current, parsed, connections, mapped }, before);
+});
+
+test('merge keeps strict favorite and recent-root capacity limits', () => {
+  for (const key of ['pinnedRoots', 'recentRoots'] as const) {
+    const current = {
+      ...empty(),
+      [key]: Array.from({ length: 1000 }, (_, i) => ({
+        connectionId: 'destination-jira',
+        rootKey: `SAMPLE-${i + 10}`,
+      })),
+    };
+    validateWorkspace(current);
+    assert.throws(
+      () => planImport(fixture(), current, destinations, mapping, 'merge'),
+      /Merged (Favorite|Recent root) exceed/,
+    );
+  }
+});
+
+test('external backups retain strict closed, open, favorite and recent-root limits', () => {
+  for (const [key, limit] of [
+    ['closedTabs', 20],
+    ['tabs', 100],
+    ['pinnedRoots', 1000],
+    ['recentRoots', 1000],
+  ] as const) {
+    const backup = fixture();
+    const roots = Array.from({ length: limit }, (_, i) => ({
+      connectionId: 'sample-jira',
+      rootKey: `SAMPLE-${i + 10}`,
+    }));
+    if (key === 'tabs' || key === 'closedTabs')
+      backup.workspace[key] = roots.map((root, i) => ({
+        ...backup.workspace.tabs[0],
+        ...root,
+        id: `limit-${i}`,
+      }));
+    else backup.workspace[key] = roots;
+    if (key === 'tabs') backup.workspace.activeTabId = 'limit-0';
+    assert.doesNotThrow(() => parseBackup(JSON.stringify(backup)), key);
+    backup.workspace[key]!.push({
+      ...backup.workspace.tabs[0],
+      id: 'overflow',
+      rootKey: 'SAMPLE-9999',
+    });
+    assert.throws(
+      () => parseBackup(JSON.stringify(backup)),
+      /Invalid backup list/,
+      key,
+    );
+  }
+});
