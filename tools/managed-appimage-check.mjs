@@ -263,7 +263,128 @@ function model(failure) {
     },
   };
 }
+async function checkLoadedProfileRefusals() {
+  const good = {
+    attach: paths.original,
+    mode: 'unconfined',
+    sha256: 'd'.repeat(64) + '\n',
+  };
+  const secret = 'private-profile-value-🔒'.repeat(300);
+  const opaque = new Proxy(
+    {},
+    {
+      get(_target, key) {
+        if (key === 'then') return undefined; // Async read may check thenability.
+        throw new Error('Diagnostic inspected profile object');
+      },
+    },
+  );
+  const cases = [
+    { attach: '<unknown>' },
+    { attach: '/opt/Canopy/Canopy.AppImage' },
+    { attach: secret },
+    { mode: 'enforce' },
+    { mode: secret },
+    ...[
+      '',
+      'disabled\n',
+      'D'.repeat(64) + '\n',
+      'd'.repeat(40) + '\n',
+      'd'.repeat(64),
+      'd'.repeat(64) + '\r\n',
+      'd'.repeat(64) + '\n\n',
+      secret,
+      null,
+      12,
+    ].map((sha256) => ({ sha256 })),
+    { attach: '<unknown>', sha256: opaque },
+    { attach: '<unknown>', sha256: Symbol(secret) },
+  ];
+  for (const change of cases) {
+    const values = { ...good, ...change };
+    const m = model(),
+      read = m.io.read;
+    m.io.read = async (path) => {
+      for (const key of Object.keys(values))
+        if (path.endsWith('/' + key)) return values[key];
+      return read(path);
+    };
+    for (const operation of ['prepare', 'cleanup']) {
+      const before = [...m.calls];
+      await assert.rejects(
+        managedOperation({ ...base, operation }, m.io, ctx),
+        (error) => {
+          assert(
+            error.message.startsWith(
+              'Loaded profile identity unavailable; loaded ',
+            ),
+          );
+          const detail = error.message.split('; loaded ')[1];
+          assert(Buffer.byteLength(detail) <= 512);
+          assert.deepEqual(JSON.parse(detail), {
+            attach:
+              values.attach === paths.original
+                ? 'expected'
+                : values.attach === '<unknown>'
+                  ? 'unknown'
+                  : 'different',
+            attachBytes: Buffer.byteLength(values.attach),
+            mode: values.mode === 'unconfined' ? 'expected' : 'different',
+            modeBytes: Buffer.byteLength(values.mode),
+            sha256Type: values.sha256 === null ? 'null' : typeof values.sha256,
+            sha256Bytes:
+              typeof values.sha256 === 'string'
+                ? Buffer.byteLength(values.sha256)
+                : null,
+            sha256Format:
+              typeof values.sha256 === 'string' &&
+              /^[a-f0-9]{64}\n$/.test(values.sha256),
+          });
+          assert(!error.message.includes('private-profile-value'));
+          assert(!error.message.includes(paths.original));
+          assert(!error.message.includes(good.sha256.trim()));
+          return true;
+        },
+      );
+      assert(m.files.has(paths.receipt));
+      assert(m.files.has(paths.original));
+      assert(m.files.has(paths.policy));
+      assert(!m.calls.includes('parser:remove'));
+      if (operation === 'cleanup') assert.deepEqual(m.calls, before);
+    }
+  }
+  const m = model();
+  const installed = await managedOperation(
+    { ...base, operation: 'prepare' },
+    m.io,
+    ctx,
+  );
+  const read = m.io.read;
+  m.io.read = async (path) =>
+    path.endsWith('/attach') ? '<unknown>' : read(path);
+  for (const operation of ['check', 'cleanup']) {
+    const before = [...m.calls];
+    await assert.rejects(
+      managedOperation({ ...base, operation }, m.io, ctx),
+      /Loaded profile identity unavailable; loaded /,
+    );
+    assert.deepEqual(m.calls, before);
+    assert(m.files.has(paths.receipt));
+  }
+  m.io.read = read;
+  assert.equal(
+    (await managedOperation({ ...base, operation: 'check' }, m.io, ctx))
+      .receiptSha256,
+    installed.receiptSha256,
+  );
+  await managedOperation({ ...base, operation: 'cleanup' }, m.io, ctx);
+  assert(!m.files.has(paths.receipt));
+  console.log(
+    'Loaded profile bounded diagnostics and unchanged prepare/check/cleanup refusals PASS (modeled)',
+  );
+}
 export async function checkManagedAppImage() {
+  await checkLoadedProfileRefusals();
   assert.equal(
     managedPolicy,
     'abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /var/lib/canopy-appimage-ci/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n',

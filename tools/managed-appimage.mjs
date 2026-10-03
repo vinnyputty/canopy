@@ -216,6 +216,37 @@ async function globalState(io) {
     globalFiles.map((path, index) => [path, values[index]]),
   );
 }
+function loadedProfileRefusal(attach, mode, sha256) {
+  const error = new Error('Loaded profile identity unavailable');
+  try {
+    // Only fixed comparisons and primitive lengths; never serialize profile data.
+    const bytes = (value) => {
+      if (typeof value !== 'string') return null;
+      const length = Buffer.byteLength(value);
+      return length <= 0xffffffff ? length : null;
+    };
+    const detail = {
+      attach:
+        attach === managedPaths.original
+          ? 'expected'
+          : attach === '<unknown>'
+            ? 'unknown'
+            : 'different',
+      attachBytes: bytes(attach),
+      mode: mode === 'unconfined' ? 'expected' : 'different',
+      modeBytes: bytes(mode),
+      sha256Type: sha256 === null ? 'null' : typeof sha256,
+      sha256Bytes: bytes(sha256),
+      sha256Format:
+        typeof sha256 === 'string' && /^[a-f0-9]{64}\n$/.test(sha256),
+    };
+    const text = JSON.stringify(detail);
+    if (Buffer.byteLength(text) <= 512) error.message += `; loaded ${text}`;
+  } catch {
+    // Diagnostic formatting must preserve the original refusal.
+  }
+  return error;
+}
 async function loadedProfile(io) {
   const lines = (await io.read('/sys/kernel/security/apparmor/profiles'))
     .trim()
@@ -242,7 +273,7 @@ async function loadedProfile(io) {
         mode !== 'unconfined' ||
         !/^[a-f0-9]{64}\n$/.test(sha256)
       )
-        fail('Loaded profile identity unavailable');
+        throw loadedProfileRefusal(attach, mode, sha256);
       found.push({
         path,
         attach,
