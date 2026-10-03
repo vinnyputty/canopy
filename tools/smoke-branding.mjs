@@ -173,9 +173,11 @@ try {
   await page.keyboard.press(
     process.platform === 'darwin' ? 'Meta+k' : 'Control+k',
   );
-  await page
-    .getByRole('button', { name: 'About & Support', exact: true })
-    .last()
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await palette
+    .getByRole('option')
+    .filter({ hasText: 'About & Support' })
     .click();
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Close dialog' }).click();
