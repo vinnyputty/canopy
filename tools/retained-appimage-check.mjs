@@ -400,6 +400,9 @@ async function checkWorkerHandoff() {
       const [mode, output] = process.argv.slice(2);
       let sampled = false;
       let nativeOriginalSeen = false;
+      let finalAudit = false;
+      let finalLoss = false;
+      let originalHashes = 0;
       const writeFile = async (path, data) => {
         const value = JSON.parse(data);
         if (value.completed && mode.startsWith('final-')) {
@@ -422,10 +425,23 @@ async function checkWorkerHandoff() {
       const io = {
         canonical: async path => path,
         stat: async path => path === artifact ? {uid:0,gid:0,mode:0o100555,dev:1,ino:2,size:21,mtimeMs:1,ctimeMs:1,isFile:()=>true} :
-          path.endsWith('/exe') ? {uid:0} : path.startsWith('/proc/') ? {uid:mode==='owner-change' && sampled ? 1002 : 1001} : path.endsWith('chrome-sandbox') ? {uid:0,gid:0,mode:0o100755} : {uid:0,gid:0,dev:1,ino:10,mode:0o40755,isDirectory:()=>true},
-        hash: async path => {if (mode === 'hung') return new Promise(()=>{});if(mode==='late-sample' && path.endsWith('/canopy')) await new Promise(resolve=>setTimeout(resolve,800));return path===artifact?'original':path.endsWith('app.asar')?'asar':'binary'},
+          path.endsWith('/exe') ? {uid:0} : path.startsWith('/proc/') ? {uid:(mode==='owner-change' && sampled) || (mode==='validation-owner' && finalLoss && path===proc(70,'')) ? 1002 : 1001} : path.endsWith('chrome-sandbox') ? {uid:0,gid:0,mode:0o100755} : {uid:0,gid:0,dev:1,ino:10,mode:0o40755,isDirectory:()=>true},
+        hash: async path => {
+          if(path===artifact && ++originalHashes===3 && mode==='validation-slow-confirm') await new Promise(resolve=>setTimeout(resolve,550));
+          if(path===artifact && finalAudit && mode.startsWith('validation-')) {
+            finalLoss = true;
+            process.send('validation-loss');
+            if(mode==='validation-hung') return new Promise(()=>{});
+            await new Promise(resolve=>setTimeout(resolve,75));
+          }
+          if (mode === 'hung') return new Promise(()=>{});if(mode==='late-sample' && path.endsWith('/canopy')) await new Promise(resolve=>setTimeout(resolve,800));return path===artifact?'original':path.endsWith('app.asar')?'asar':'binary'},
         link: async () => {if(mode==='native-no-offer' && !nativeOriginalSeen){nativeOriginalSeen=true;return artifact;}return mount+'/canopy'},
         read: async path => {
+          if(finalLoss && mode==='validation-parent-read' && path===proc(process.ppid,'stat')) throw new Error('fixture parent unavailable during final hash');
+          if(finalLoss && mode==='validation-ambiguity' && path===proc(process.ppid,'task/'+process.ppid+'/children')) return '70 71';
+          if(finalLoss && mode==='validation-birth' && path===proc(70,'stat')) return text(process.ppid,'124');
+          if(finalLoss && mode==='validation-process-gone' && path===proc(70,'stat')) throw Object.assign(new Error('fixture process gone'),{code:'ENOENT'});
+          if(finalLoss && mode==='validation-null-error' && path===proc(70,'stat')) throw null;
           if(sampled && mode==='hung-after-sample') return new Promise(()=>{});
           if(sampled && mode==='parent-read-fail' && path===proc(process.ppid,'stat')) throw new Error('fixture parent read failed');
           return path.endsWith('/children') ? (path.startsWith('/proc/'+process.ppid+'/')?(sampled && mode==='ambiguity'?'70 71':'70'):'') :
@@ -437,6 +453,7 @@ async function checkWorkerHandoff() {
       const runtimeIdentity = (pid,config) => realRuntime(pid,config,io);
       const mountedEvidence = (pid,identity,config) => realMounted(pid,identity,config,io);
       const diagnosticCommand = async () => {
+        finalAudit = true;
         if(mode==='pre-final-revoke') {
           process.send('pre-finalize');
           await new Promise(resolve=>setTimeout(resolve,100));
@@ -471,6 +488,15 @@ async function checkWorkerHandoff() {
       'late-sample',
       'hung-after-sample',
       'native-no-offer',
+      'validation-ambiguity',
+      'validation-birth',
+      'validation-owner',
+      'validation-parent-read',
+      'validation-process-gone',
+      'validation-null-error',
+      'validation-revoke',
+      'validation-hung',
+      'validation-slow-confirm',
     ]) {
       const output = join(dir, mode + '.json');
       const child = fork(fixture, [mode, output], {
@@ -485,10 +511,20 @@ async function checkWorkerHandoff() {
       const timers = [];
       const timer = setTimeout(() => child.kill('SIGKILL'), 3000);
       let savedPositive = false;
+      let lossDuringFinalHash = false;
       let boundary;
       child.on('message', (value) => {
         if (value === 'sample-saved') {
           savedPositive = true;
+          return;
+        }
+        if (value === 'validation-loss') {
+          lossDuringFinalHash = true;
+          if (mode === 'validation-revoke')
+            child.send(
+              { type: 'revoke', nonce: 'fixture-private-nonce' },
+              () => {},
+            );
           return;
         }
         if (value === 'pre-finalize') {
@@ -576,6 +612,7 @@ async function checkWorkerHandoff() {
             'final-disconnect',
             'final-hung',
             'hung-after-sample',
+            'validation-hung',
             'native-no-offer',
           ].includes(mode)
         ) {
@@ -594,7 +631,12 @@ async function checkWorkerHandoff() {
         }
         assert.equal(
           report.completed,
-          !['hung', 'hung-after-sample', 'final-hung'].includes(mode),
+          ![
+            'hung',
+            'hung-after-sample',
+            'final-hung',
+            'validation-hung',
+          ].includes(mode),
         );
         if (
           [
@@ -611,6 +653,23 @@ async function checkWorkerHandoff() {
             mode + ' must invalidate a previously persisted positive sample',
           );
           assert.equal(report.authority, undefined);
+        }
+        if (mode.startsWith('validation-')) {
+          if (mode === 'validation-slow-confirm') {
+            assert.equal(savedPositive, false);
+            assert.equal(lossDuringFinalHash, false);
+          } else {
+            assert(
+              savedPositive,
+              'final hash control requires persisted positive evidence',
+            );
+            assert(
+              lossDuringFinalHash,
+              'loss must occur during final original validation',
+            );
+          }
+          if (mode !== 'validation-hung')
+            assert.equal(report.authority, undefined);
         }
         if (mode.startsWith('final-')) {
           assert(savedPositive);

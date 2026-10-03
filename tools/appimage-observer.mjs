@@ -797,6 +797,9 @@ async function worker(config) {
             JSON.stringify(original)
         )
           throw new Error('Retained original changed before finalization');
+        // Original hashing is asynchronous; required launch identity must still
+        // hold after those reads and before the historical protocol boundary.
+        await requiredIdentity();
       } catch (error) {
         invalidate(error);
       }
