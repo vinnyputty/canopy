@@ -276,13 +276,7 @@ for (const provider of ['jira', 'github'])
       };
       const paint = () =>
         deadline(
-          () =>
-            renderer(
-              () =>
-                new Promise((resolve) =>
-                  requestAnimationFrame(() => requestAnimationFrame(resolve)),
-                ),
-            ),
+          () => renderer(() => window.canopyPerfUI.paintOpportunity()),
           LOAD_MS,
           'Paint opportunities',
         );
@@ -292,8 +286,8 @@ for (const provider of ['jira', 'github'])
         await memory();
         return performance.now();
       };
-      const end = async (name, start) => {
-        await paint();
+      const end = async (name, start, painted = false) => {
+        if (!painted) await paint();
         const detail = await renderer(() => window.canopyPerfUI.counts());
         sample.phases.push({
           name,
@@ -302,15 +296,27 @@ for (const provider of ['jira', 'github'])
         });
         await memory();
       };
-      const logical = async (kind, count, digest, projection) => {
+      const logical = async (
+        kind,
+        count,
+        digest,
+        projection,
+        settled = false,
+      ) => {
         let observed;
         await expect
           .poll(
             async () => {
               observed = await renderer(
-                async ({ kind, count, digest, projection, implicit }) => {
+                async ({
+                  kind,
+                  count,
+                  digest,
+                  projection,
+                  implicit,
+                  settled,
+                }) => {
                   const members = window.canopyPerfUI.members(kind);
-                  const ui = window.canopyPerfUI.counts();
                   const container = document.querySelector(
                     kind === 'tree' ? '[role="tree"]' : '.saved-view-list',
                   );
@@ -334,6 +340,44 @@ for (const provider of ['jira', 'github'])
                   const sha256 = [...new Uint8Array(bytes)]
                     .map((byte) => byte.toString(16).padStart(2, '0'))
                     .join('');
+                  // The digest yields. Capture a real quiet-DOM opportunity only
+                  // for the expected model, then recheck live ownership/membership.
+                  const captured =
+                    settled &&
+                    sha256 === digest &&
+                    members.length === count &&
+                    membership.size === count
+                      ? await window.canopyPerfUI.paintOpportunity({
+                          kind,
+                          members,
+                        })
+                      : undefined;
+                  const latestMembers = window.canopyPerfUI.members(kind);
+                  const ui = window.canopyPerfUI.counts();
+                  const latestContainer = document.querySelector(
+                    kind === 'tree' ? '[role="tree"]' : '.saved-view-list',
+                  );
+                  const latestMounted = [
+                    ...(latestContainer?.querySelectorAll(
+                      kind === 'tree'
+                        ? '[data-tree-key]'
+                        : '.saved-view-result',
+                    ) ?? []),
+                  ];
+                  const coherent =
+                    (!settled || captured?.membersValid === true) &&
+                    container === latestContainer &&
+                    latestMembers.length === members.length &&
+                    latestMembers.every((key, i) => key === members[i]) &&
+                    latestMounted.length === mounted.length &&
+                    latestMounted.every((row, i) => row === mounted[i]) &&
+                    mounted.every(
+                      (row, i) =>
+                        (kind === 'tree'
+                          ? row.getAttribute('data-tree-key')
+                          : row.querySelector('strong')?.textContent) ===
+                        mountedKeys[i],
+                    );
                   const windowed = Boolean(
                     container?.querySelector('[data-row-window="viewport"]'),
                   );
@@ -411,7 +455,9 @@ for (const provider of ['jira', 'github'])
                     windowed,
                     positionsValid,
                     spacersValid,
+                    coherent,
                     valid:
+                      coherent &&
                       !(kind === 'tree'
                         ? ui.treeLoading || ui.treeIncomplete
                         : ui.savedLoading || ui.savedIncomplete) &&
@@ -431,6 +477,7 @@ for (const provider of ['jira', 'github'])
                   digest,
                   projection,
                   implicit: sample.label === 'base',
+                  settled,
                 },
               );
               return observed.valid;
@@ -648,11 +695,13 @@ for (const provider of ['jira', 'github'])
           spec.expandedRows,
           spec.treeMembersSha256,
           spec.treeAria,
+          true,
         );
-        await end('initial-load', started);
+        await end('initial-load', started, true);
         const initial = await renderer(() => ({
           ipc: window.canopyPerfAudit.events(),
           ui: window.canopyPerfUI.events(),
+          counts: window.canopyPerfUI.counts(),
         }));
         const progress = initial.ipc.events.find(
           (e) =>
@@ -674,18 +723,20 @@ for (const provider of ['jira', 'github'])
             e.treeLogicalRows === spec.expandedRows &&
             !e.treeLoading &&
             !e.treeIncomplete &&
-            e.at >= full.at,
+            initial.ui.timeOrigin + e.at >= initial.ipc.timeOrigin + full.at,
         );
         const fullPaint =
           fullCommit &&
           initial.ui.events.find(
             (e) =>
               e.event === 'paint-opportunity' &&
+              e.modelKind === 'tree' &&
+              e.membersValid === true &&
               e.at >= fullCommit.at &&
               e.treeLogicalRows === spec.expandedRows &&
               !e.treeLoading &&
               !e.treeIncomplete &&
-              e.at >= full.at,
+              initial.ui.timeOrigin + e.at >= initial.ipc.timeOrigin + full.at,
           );
         const partialCommit =
           progress &&
@@ -717,7 +768,14 @@ for (const provider of ['jira', 'github'])
               paintOpportunityBeforeFullCommit: Boolean(partialPaint),
             }
           : { state: 'No partial progress emitted by this exact source' };
-        if (!fullCommit || !fullPaint)
+        if (
+          !fullCommit ||
+          !fullPaint ||
+          initial.ui.truncated ||
+          initial.counts.treeLogicalRows !== spec.expandedRows ||
+          initial.counts.treeLoading ||
+          initial.counts.treeIncomplete
+        )
           throw new Error(
             'Complete renderer commit/paint-opportunity evidence missing.',
           );

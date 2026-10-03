@@ -52,6 +52,28 @@
     ),
     elements: document.getElementsByTagName('*').length,
   });
+  const opportunity = (
+    frameAt: number,
+    expected?: { kind: 'tree' | 'saved'; members: readonly string[] },
+  ) => {
+    const counts = dom();
+    const current = expected ? members(expected.kind) : undefined;
+    const event = {
+      event: 'paint-opportunity',
+      // A shared frame timestamp can precede this callback's DOM observation.
+      // Preserve it separately; chronology uses the clock read after observation.
+      at: performance.now(),
+      frameAt,
+      ...counts,
+      modelKind: expected?.kind,
+      membersValid: expected
+        ? current!.length === expected.members.length &&
+          current!.every((key, i) => key === expected.members[i])
+        : undefined,
+    };
+    record(event);
+    return event;
+  };
   new MutationObserver(() => {
     // Capture at observer delivery before the subsequent RAF opportunity.
     const counts = dom(),
@@ -64,7 +86,7 @@
     scheduled = true;
     requestAnimationFrame((at) => {
       scheduled = false;
-      record({ event: 'paint-opportunity', at, ...dom() });
+      opportunity(at);
     });
   }).observe(document.documentElement, {
     childList: true,
@@ -92,6 +114,17 @@
         phase = name;
         record({ event: 'phase', at: performance.now(), ...dom() });
       },
+      paintOpportunity: (expected?: {
+        kind: 'tree' | 'saved';
+        members: readonly string[];
+      }) =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame((frameAt) =>
+              resolve(opportunity(frameAt, expected)),
+            ),
+          ),
+        ),
       members,
       counts: dom,
       events: () => ({
