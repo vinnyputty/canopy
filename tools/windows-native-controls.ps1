@@ -12,6 +12,7 @@ if ($ProcessHarness) {
     $node=(Get-Command node).Source
     foreach ($fixture in @(
         @{ args=@('-e','process.exit(0)'); timeout=1000; ok=$true },
+        @{ args=@('-e', 'require("node:child_process").spawn(process.execPath,["-e","setTimeout(()=>process.exit(0),12000)"],{stdio:"ignore"});setTimeout(()=>process.exit(0),100)'); timeout=90000; ok=$true },
         @{ args=@('-e','process.exit(17)'); timeout=1000; ok=$false },
         @{ args=@('-e','setInterval(()=>{},100)'); timeout=500; ok=$false },
         @{ args=@('-e', 'require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},100)"],{stdio:"ignore"});setTimeout(()=>process.exit(0),100)'); timeout=1000; ok=$false }

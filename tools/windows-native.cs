@@ -43,13 +43,22 @@ public static class CanopyNative {
         text.Append('\\',slashes*2); return text.Append('"').ToString();
     }
     static bool Empty(IntPtr job) { Accounting a; Require(QueryInformationJobObject(job,1,out a,Marshal.SizeOf(typeof(Accounting)),IntPtr.Zero)); return a.Active==0; }
-    static bool WaitEmpty(IntPtr job,int deadlineMs) {
-        var clock=Stopwatch.StartNew(); do { if (Empty(job)) return true; Thread.Sleep(25); } while(clock.ElapsedMilliseconds<deadlineMs); return Empty(job);
+    static int Remaining(Stopwatch clock,int deadlineMs) { return (int)Math.Max(0, deadlineMs-clock.ElapsedMilliseconds); }
+    static bool WaitEmpty(IntPtr job,Stopwatch clock,int deadlineMs) {
+        while(true) {
+            if(clock.ElapsedMilliseconds>deadlineMs) return false;
+            if(Empty(job)) return clock.ElapsedMilliseconds<=deadlineMs;
+            int remaining=Remaining(clock,deadlineMs);
+            if(remaining==0) return false;
+            Thread.Sleep(Math.Min(25,remaining));
+        }
     }
+    static bool WaitEmpty(IntPtr job,int deadlineMs) { return WaitEmpty(job,Stopwatch.StartNew(),deadlineMs); }
     public static Dictionary<string,object> Run(string file,string[] args,int timeoutMs,bool observe) {
         if(timeoutMs<1 || timeoutMs>90000) throw new ArgumentException("Deadline required");
         IntPtr job=IntPtr.Zero, sink=IntPtr.Zero, attributes=IntPtr.Zero, jobPointer=IntPtr.Zero; bool initialized=false; ProcessInfo pi=new ProcessInfo(); bool assigned=false, absent=false;
         string primary=null, secondary=null; uint code=259;
+        var operation=Stopwatch.StartNew();
         try {
             job=CreateJobObject(IntPtr.Zero,null); Require(job!=IntPtr.Zero);
             var limits=new Limits(); limits.Basic.Flags=0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, no breakaway.
@@ -68,12 +77,12 @@ public static class CanopyNative {
             // The main thread is both job-owned and suspended before any user code can execute.
             Require(CreateProcess(file,line,IntPtr.Zero,IntPtr.Zero,true,0x08080004,IntPtr.Zero,null,ref startup,out pi)); assigned=true;
             Require(ResumeThread(pi.Thread)!=0xffffffff);
-            uint wait=WaitForSingleObject(pi.Process,(uint)timeoutMs);
+            uint wait=WaitForSingleObject(pi.Process,(uint)Remaining(operation,timeoutMs));
             if(observe) { if(wait!=258) primary="Owned application exited before observation deadline"; }
             else if(wait!=0) primary="Owned native operation timed out or wait failed";
             else { Require(GetExitCodeProcess(pi.Process,out code)); if(code!=0) primary="Owned native operation returned failure"; }
             // A parent exiting does not imply that its installer/application descendants exited.
-            if(!observe && primary==null && !WaitEmpty(job,10000)) primary="Owned descendants did not exit";
+            if(!observe && primary==null && !WaitEmpty(job,operation,timeoutMs)) primary="Owned descendants exceeded operation deadline";
             if(observe || primary!=null) Require(TerminateJobObject(job,1));
             absent=WaitEmpty(job,10000) && WaitForSingleObject(pi.Process,0)==0;
             if(!absent) secondary="Owned job absence could not be confirmed";
@@ -95,7 +104,7 @@ public static class CanopyNative {
             if(sink!=IntPtr.Zero && sink!=new IntPtr(-1)) CloseHandle(sink);
             if(job!=IntPtr.Zero) CloseHandle(job); // Last-resort kill-on-close; uncertainty stays a failure.
         }
-        return new Dictionary<string,object> { {"ok",primary==null && secondary==null && absent}, {"error",primary}, {"cleanupError",secondary}, {"ownedAbsent",absent}, {"exitCode",code} };
+        return new Dictionary<string,object> { {"ok",primary==null && secondary==null && absent}, {"error",primary}, {"cleanupError",secondary}, {"ownedAbsent",absent}, {"exitCode",code}, {"descendantExitCodesObserved",false} };
     }
     [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid id,uint flags,IntPtr token,out IntPtr path);
     public static string KnownFolder(string id) { Guid guid=new Guid(id); IntPtr p=IntPtr.Zero; try { if(SHGetKnownFolderPath(ref guid,0x4000,IntPtr.Zero,out p)!=0) throw new Exception("Known folder unresolved"); return Marshal.PtrToStringUni(p); } finally { if(p!=IntPtr.Zero) Marshal.FreeCoTaskMem(p); } }
