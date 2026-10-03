@@ -104,7 +104,7 @@ js_binary(
 js_binary(
     name = "packaged_smoke",
     entry_point = "tools/desktop.mjs",
-    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/AppRun"],
+    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/appimage-observer.mjs", "tools/AppRun"],
     args = ["packaged-smoke"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -113,7 +113,7 @@ js_binary(
 js_binary(
     name = "packaged_smoke_failure",
     entry_point = "tools/packaged-smoke-failure.mjs",
-    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/AppRun"],
+    data = [":node_modules", "package.json", "tools/packaged-smoke.mjs", "tools/linux-package-check.mjs", "tools/appimage-observer.mjs", "tools/AppRun"],
     patch_node_fs = False,
     tags = ["manual"],
 )

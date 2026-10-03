@@ -20,7 +20,7 @@ export async function checkPackagedInstallCleanup() {
     'dependencies',
     `const { process, executable, artifact, format, directory, name, root,
       createHash, dirname, join, readFile, run, checkDesktopEntry,
-      linuxStartupEvidence, smoke, console } = dependencies;
+      linuxStartupEvidence, smoke, console, workspace, recordCanopyPolicy } = dependencies;
     ${source.slice(start, end)}
     return launches;`,
   );
@@ -54,6 +54,7 @@ export async function checkPackagedInstallCleanup() {
   )) {
     const calls = [];
     const logs = [];
+    const policyCalls = [];
     const primary = new Error(scenario.name);
     const cleanup = new Error('cleanup failure');
     let desktopError;
@@ -75,6 +76,10 @@ export async function checkPackagedInstallCleanup() {
       directory: '/temporary',
       name: 'canopy.deb',
       root: '/source',
+      workspace: '/workspace',
+      recordCanopyPolicy: async (path, phase) => {
+        policyCalls.push({ path, phase, calls: [...calls] });
+      },
       createHash,
       dirname,
       join,
@@ -156,6 +161,7 @@ export async function checkPackagedInstallCleanup() {
         /requires a disposable GitHub-hosted runner/,
       );
       assert.deepEqual(calls, [], scenario.name);
+      assert.deepEqual(policyCalls, []);
     } else if (scenario.failure?.startsWith('dependencies-')) {
       assert.deepEqual(
         calls,
@@ -164,6 +170,7 @@ export async function checkPackagedInstallCleanup() {
           : ['dependencies-update', 'dependencies-install'],
       );
       assert.equal(error, primary);
+      assert.deepEqual(policyCalls, []);
       assert.equal(
         partialDependencies,
         scenario.failure === 'dependencies-install',
@@ -174,6 +181,12 @@ export async function checkPackagedInstallCleanup() {
       assert.equal(calls[0], 'dependencies-update', scenario.name);
       assert.equal(calls.at(-1), 'remove', scenario.name);
       assert.equal(calls.filter((call) => call === 'remove').length, 1);
+      assert.deepEqual(
+        policyCalls.map((call) => call.phase),
+        ['before DEB removal', 'after DEB removal attempt'],
+      );
+      assert.notEqual(policyCalls[0].calls.at(-1), 'remove');
+      assert.equal(policyCalls[1].calls.at(-1), 'remove');
       const expected = {
         install: ['install', 'remove'],
         read: ['install', 'read', 'remove'],

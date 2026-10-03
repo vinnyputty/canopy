@@ -1,3 +1,7 @@
+import {
+  observeAppImageLaunch,
+  recordCanopyPolicy,
+} from './appimage-observer.mjs';
 import { checkDesktopEntry } from './linux-package-check.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
@@ -206,12 +210,31 @@ async function smoke(executablePath, directory, artifact, identity) {
   const launches = [];
   try {
     for (const restart of [false, true]) {
-      app = await electron.launch({
-        executablePath,
-        env,
-        chromiumSandbox: true,
-        timeout: 30000,
-      });
+      const createApplication = () =>
+        electron.launch({
+          executablePath,
+          env,
+          chromiumSandbox: true,
+          timeout: 30000,
+        });
+      app =
+        identity?.appImage && !restart
+          ? await observeAppImageLaunch(
+              {
+                artifact: identity.appImage,
+                executableSha256: identity.executableSha256,
+                appAsarSha256: identity.appAsarSha256,
+                output: join(
+                  workspace,
+                  '.cache',
+                  'smoke-failure',
+                  artifact,
+                  'mounted-launch.json',
+                ),
+              },
+              createApplication,
+            )
+          : await createApplication();
       page = await app.firstWindow();
       page.on('pageerror', (error) => errors.push(error.message));
       await page.context().setOffline(true);
@@ -479,11 +502,26 @@ for (const format of platform.formats) {
       throw error;
     } finally {
       if (installAttempted) {
+        const policyDirectory = join(
+          workspace,
+          '.cache',
+          'smoke-failure',
+          name,
+        );
+        await recordCanopyPolicy(
+          join(policyDirectory, 'policy-before-removal.json'),
+          'before DEB removal',
+        );
         try {
           run('sudo', ['-n', 'dpkg', '--remove', 'canopy']);
         } catch (cleanupError) {
           if (!primaryFailed) throw cleanupError;
           console.error('DEB removal also failed:', cleanupError);
+        } finally {
+          await recordCanopyPolicy(
+            join(policyDirectory, 'policy-after-removal.json'),
+            'after DEB removal attempt',
+          );
         }
       }
     }
