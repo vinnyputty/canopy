@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -239,13 +240,11 @@ test('publication resolves live lightweight and annotated tags to the qualified 
       );
       const responses = [{ endpoint: refEndpoint, body: ref }];
       if (annotated)
-        responses.push(
-          {
-            endpoint: tagEndpoint,
-            body: { object: { type: 'commit', sha: commit } },
-          },
-          { endpoint: refEndpoint, body: ref },
-        );
+        responses.push({
+          endpoint: tagEndpoint,
+          body: { object: { type: 'commit', sha: commit } },
+        });
+      responses.push({ endpoint: refEndpoint, body: ref });
       const calls = [];
       await publish(
         output,
@@ -267,7 +266,7 @@ test('publication resolves live lightweight and annotated tags to the qualified 
         '--draft=false',
         '--verify-tag',
       ]);
-      assert.equal(calls.length, annotated ? 4 : 2);
+      assert.equal(calls.length, annotated ? 4 : 3);
     });
 });
 test('deleted or moved remote tags block publication despite a matching checkout and qualified manifest', async () => {
@@ -402,7 +401,10 @@ test('an older qualified release uses its tagged version after the dispatch bran
         evidence,
         notes,
         mockGh(
-          [{ endpoint: refEndpoint, body: remoteRef('commit', commit) }],
+          [
+            { endpoint: refEndpoint, body: remoteRef('commit', commit) },
+            { endpoint: refEndpoint, body: remoteRef('commit', commit) },
+          ],
           remoteCalls,
         ),
       );
@@ -465,4 +467,158 @@ test('missing tag, invalid commit and mismatched tagged package version fail clo
     );
     assert.deepEqual(calls[1], ['show', `${commit}:package.json`]);
   }
+});
+
+test('live final ref verification rejects Git ref changes before publication', async (t) => {
+  const cases = [
+    ['lightweight unchanged', false, 'none'],
+    ['annotated unchanged', true, 'none'],
+    ['nested annotated unchanged', true, 'nested'],
+    ['lightweight moved', false, 'move'],
+    ['lightweight deleted', false, 'delete'],
+    ['lightweight becomes annotated at the same commit', false, 'annotate'],
+    ['annotated moved', true, 'move'],
+    ['annotated deleted', true, 'delete'],
+    ['annotated becomes lightweight at the same commit', true, 'lightweight'],
+    ['annotated replaced at the same commit', true, 'retag'],
+    ['lightweight ref name mismatch', false, 'ref-name'],
+  ];
+  for (const [name, annotated, mutation] of cases)
+    await t.test(name, async () =>
+      publicationFixture(async ({ output, evidence, notes }) => {
+        const directory = await mkdtemp(
+          join(tmpdir(), 'canopy-release-ref-git-'),
+        );
+        const config = join(directory, 'empty-config');
+        await writeFile(config, '');
+        const git = (...args) => {
+          const result = spawnSync(
+            'git',
+            [
+              '-c',
+              'user.name=Release fixture',
+              '-c',
+              'user.email=release@example.invalid',
+              '-c',
+              'commit.gpgSign=false',
+              '-c',
+              'tag.gpgSign=false',
+              '-c',
+              `core.hooksPath=${join(directory, 'no-hooks')}`,
+              ...args,
+            ],
+            {
+              cwd: directory,
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GIT_CONFIG_GLOBAL: config,
+                GIT_CONFIG_NOSYSTEM: '1',
+              },
+            },
+          );
+          if (result.error) throw result.error;
+          if (result.status !== 0)
+            throw new Error('Remote tag unavailable in fixture');
+          return result.stdout.trim();
+        };
+        try {
+          git('init', '--quiet');
+          await writeFile(
+            join(directory, 'package.json'),
+            JSON.stringify({ version }),
+          );
+          git('add', 'package.json');
+          git('commit', '--quiet', '-m', 'Fixture release');
+          const sourceCommit = git('rev-parse', 'HEAD');
+          await writeFile(
+            join(directory, 'package.json'),
+            JSON.stringify({ version: '0.2.0' }),
+          );
+          git('commit', '--quiet', '-am', 'Fixture next version');
+          const movedCommit = git('rev-parse', 'HEAD');
+          if (mutation === 'nested') {
+            git('tag', '-a', '-m', 'Inner annotation', 'inner', sourceCommit);
+            git('tag', '-a', '-m', 'Outer annotation', tag, 'refs/tags/inner');
+          } else if (annotated)
+            git('tag', '-a', '-m', 'Initial annotation', tag, sourceCommit);
+          else git('tag', tag, sourceCommit);
+          const manifestPath = join(output, 'release-manifest.json');
+          const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+          manifest.commit = sourceCommit;
+          await writeFile(manifestPath, JSON.stringify(manifest));
+          const qualified = qualification(manifest);
+          qualified.commit = sourceCommit;
+          await writeFile(evidence, JSON.stringify(qualified));
+          let queries = 0;
+          let edits = 0;
+          const events = [];
+          const gh = (args) => {
+            events.push(args[0] === 'api' ? args[1] : 'edit');
+            if (args[0] === 'release') {
+              edits++;
+              return '';
+            }
+            assert.equal(args[0], 'api');
+            if (args[1] === refEndpoint) {
+              queries++;
+              const sha = git('rev-parse', '--verify', `refs/tags/${tag}`);
+              const response = remoteRef(git('cat-file', '-t', sha), sha);
+              // Capture the initial identity, then mutate only this disposable Git ref.
+              if (queries === 1) {
+                if (mutation === 'move') git('tag', '-f', tag, movedCommit);
+                if (mutation === 'delete') git('tag', '-d', tag);
+                if (mutation === 'annotate' || mutation === 'retag')
+                  git(
+                    'tag',
+                    '-a',
+                    '-f',
+                    '-m',
+                    'Replacement annotation',
+                    tag,
+                    sourceCommit,
+                  );
+                if (mutation === 'lightweight')
+                  git('tag', '-f', tag, sourceCommit);
+              }
+              if (queries === 2 && mutation === 'ref-name')
+                response.ref = 'refs/tags/other';
+              return JSON.stringify(response);
+            }
+            assert.match(args[1], /\/git\/tags\/[a-f0-9]{40}$/);
+            const header = git('cat-file', '-p', args[1].split('/').at(-1));
+            return JSON.stringify({
+              object: {
+                type: header.match(/^type (\w+)$/m)[1],
+                sha: header.match(/^object ([a-f0-9]{40})$/m)[1],
+              },
+            });
+          };
+          const attempt = publish(
+            output,
+            tag,
+            version,
+            sourceCommit,
+            evidence,
+            notes,
+            gh,
+          );
+          if (mutation === 'none' || mutation === 'nested') {
+            await attempt;
+            assert.equal(edits, 1);
+            assert.equal(queries, 2);
+            assert.deepEqual(events.slice(-2), [refEndpoint, 'edit']);
+          } else {
+            await assert.rejects(attempt, /Remote tag/);
+            assert.equal(
+              edits,
+              0,
+              'changed ref must never reach the release mutation',
+            );
+          }
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      }),
+    );
 });
