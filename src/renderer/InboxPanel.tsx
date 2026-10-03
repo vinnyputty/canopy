@@ -154,8 +154,9 @@ export function InboxPanel(props: Props) {
         selected;{' '}
         {props.sources.filter((source) => props.snapshots[source.id]).length}{' '}
         confirmed snapshots. {candidates.length} returned issues; {uninspected}{' '}
-        unfinished issues await blocker inspection. Refreshing a tree
-        invalidates its inspected blockers; inspect again for current blocker
+        unfinished issues await blocker inspection. Manual tree refreshes and
+        confirmed data changes invalidate affected inspections; unchanged
+        background fetches preserve them. Inspect again for current blocker
         coverage. Provider visibility and tree limits apply. This inbox cannot
         establish global absence of work.
       </p>

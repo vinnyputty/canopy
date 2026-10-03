@@ -25,8 +25,9 @@ export type InboxItem = InboxCandidate & {
   snoozedUntil?: number;
   blockerUnknown: boolean;
 };
-export const inboxStamp = (snapshot: TreeSnapshot, issue: Issue) =>
-  JSON.stringify([snapshot.fetchedAt, issue]);
+// Poll time updates confirmation display, not the identity of confirmed data.
+export const inboxStamp = (_snapshot: TreeSnapshot, issue: Issue) =>
+  JSON.stringify(issue);
 export type InboxGraph = {
   revision?: number;
   stamp: string;

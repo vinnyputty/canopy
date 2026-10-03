@@ -30,6 +30,8 @@ export async function auditInbox(app, page) {
       searches: 0,
       reads: 0,
       lateCompleted: 0,
+      fetchTime: Date.now(),
+      fetches: {},
     };
     globalThis.inboxAudit = controls;
     const roots = ['org/repo#1', 'org/repo#10'];
@@ -117,9 +119,11 @@ export async function auditInbox(app, page) {
         if (key === 'org/repo#10' && controls.failed)
           throw new Error('Sample root unavailable');
         controls.reads++;
+        const fetchedAt = controls.fetchTime + controls.reads;
+        controls.fetches[JSON.stringify([connection, key])] = fetchedAt;
         return {
           rootKey: key,
-          fetchedAt: Date.now() + controls.reads,
+          fetchedAt,
           warnings: key === 'A-1' ? ['Sample partial hierarchy'] : [],
           issues: [
             issue(
@@ -201,6 +205,8 @@ export async function auditInbox(app, page) {
     }
   });
   try {
+    // Install before App mounts so scheduling and RootRefreshGate share one clock.
+    await page.clock.install({ time: new Date() });
     await page.reload();
     await page
       .getByRole('button', { name: 'Triage inbox', exact: true })
@@ -278,6 +284,56 @@ export async function auditInbox(app, page) {
     await expect(other).toHaveCount(1);
     await expect(other.getByText(/Assigned to you/)).toBeVisible();
     await expect(work.getByText(/Assigned to you/)).toBeVisible();
+    const quietRefresh = async () => {
+      const before = await app.evaluate(() => ({
+        fetchedAt:
+          globalThis.inboxAudit.fetches[JSON.stringify(['work', 'org/repo#1'])],
+        calls: globalThis.inboxAudit.calls.length,
+        cancelled: globalThis.inboxAudit.cancelled.length,
+      }));
+      await app.evaluate(() => {
+        globalThis.inboxAudit.fetchTime += 210_000;
+      });
+      await page.clock.fastForward(210_000);
+      await expect
+        .poll(() =>
+          app.evaluate(
+            () =>
+              globalThis.inboxAudit.fetches[
+                JSON.stringify(['work', 'org/repo#1'])
+              ],
+          ),
+        )
+        .toBeGreaterThan(before.fetchedAt);
+      const fetchedAt = await app.evaluate(
+        () =>
+          globalThis.inboxAudit.fetches[JSON.stringify(['work', 'org/repo#1'])],
+      );
+      await expect(work.getByText(/confirmed fetch/)).toContainText(
+        new Date(fetchedAt).toLocaleString(),
+      );
+      expect(
+        await app.evaluate(() => globalThis.inboxAudit.cancelled.length),
+      ).toBe(before.cancelled);
+      expect(await app.evaluate(() => globalThis.inboxAudit.calls.length)).toBe(
+        before.calls,
+      );
+    };
+    await expect(
+      inbox.getByRole('button', {
+        name: 'Retry partial / failed blockers',
+        exact: true,
+      }),
+    ).toBeEnabled();
+    const confirmedBefore = await work
+      .getByText(/confirmed fetch/)
+      .textContent();
+    await quietRefresh();
+    await expect(work.getByText(/Blocked by org\/repo#9/)).toBeVisible();
+    await expect(work.getByText(/confirmed fetch/)).not.toHaveText(
+      confirmedBefore,
+    );
+
     const jira = inbox
       .locator('.inbox-item')
       .filter({
@@ -437,6 +493,13 @@ export async function auditInbox(app, page) {
       .poll(() => app.evaluate(() => typeof globalThis.inboxAudit.release))
       .toBe('function');
     const held = await app.evaluate(() => globalThis.inboxAudit.calls.at(-1));
+    await quietRefresh();
+    await expect(
+      inbox.getByRole('button', {
+        name: 'Cancel blocker inspection',
+        exact: true,
+      }),
+    ).toBeVisible();
     const boundary = await app.evaluate(
       () => globalThis.inboxAudit.cancelled.length,
     );
@@ -479,6 +542,8 @@ export async function auditInbox(app, page) {
       delete globalThis.inboxAuditHandlers;
       delete globalThis.inboxAudit;
     });
+    await page.clock.resume();
+    await page.clock.setSystemTime(new Date());
     await page.reload();
   }
 }

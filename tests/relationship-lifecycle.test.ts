@@ -1,3 +1,6 @@
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { InboxPanel } from '../src/renderer/InboxPanel';
 import {
   configuredRoots,
   viewSources,
@@ -2248,3 +2251,219 @@ test('outside-page invalidation preserves other-account keys, unrelated roots an
   api.receiveInbox({ [id]: entry });
   assert.equal(api.graphRef()[id], undefined);
 });
+
+// Execute the actual panel's candidate/effect block with persistent hook slots.
+// App's real mutation publication, inspection controller and handoff run alongside it.
+function inboxPanelEffects(inspection: InboxInspection) {
+  const source = parsed('../src/renderer/InboxPanel.tsx');
+  const component = nodes(
+    source,
+    (node) =>
+      ts.isFunctionDeclaration(node) && node.name?.text === 'InboxPanel',
+  )[0] as ts.FunctionDeclaration;
+  const block = component.body!.getText(source);
+  const prefix = block.slice(1, block.indexOf('  const items ='));
+  const effects: { deps: unknown[]; cleanup?: () => void }[] = [];
+  const refs: { current: unknown }[] = [];
+  return (props: React.ComponentProps<typeof InboxPanel>) => {
+    let effectIndex = 0;
+    let refIndex = 0;
+    return runInNewContext(js(`(() => { ${prefix}; return candidates; })()`), {
+      props: { ...props, inspection },
+      inboxCandidates,
+      queueMicrotask,
+      useMemo: (fn: () => unknown) => fn(),
+      useState: (value: unknown) => [value, () => {}],
+      useRef: (value: unknown) => (refs[refIndex++] ??= { current: value }),
+      useEffect: (fn: () => (() => void) | void, deps: unknown[]) => {
+        const index = effectIndex++;
+        const previous = effects[index];
+        if (!previous || deps.some((value, i) => value !== previous.deps[i])) {
+          previous?.cleanup?.();
+          effects[index] = { deps, cleanup: fn() || undefined };
+        }
+      },
+    });
+  };
+}
+
+for (const path of ['completed', 'pending']) {
+  test(`quiet confirmed fetch preserves ${path} Inbox inspection and updates confirmation display`, async () => {
+    const api = rendererRequests(true);
+    const controller: InboxInspection = api.inspection;
+    const panel = inboxPanelEffects(controller);
+    const connections = [
+      {
+        id: 'work',
+        name: 'Work',
+        provider: 'github' as const,
+        url: 'https://sample.invalid',
+      },
+    ];
+    const id = '["work","A-1"]';
+    let release!: (result: IssueRelationships) => void;
+    let reads = 0;
+    api.context.window.canopy.relationships = async () => {
+      reads++;
+      return path === 'completed'
+        ? blockerGraph('A-1')
+        : new Promise<IssueRelationships>((resolve) => {
+            release = resolve;
+          });
+    };
+    const props = (): React.ComponentProps<typeof InboxPanel> => ({
+      workspace: {
+        tabs: [],
+        activeTabId: null,
+        shortcuts: {},
+        theme: 'system',
+        sidebarCollapsed: false,
+      },
+      inspection: controller,
+      graphs: api.context.inboxInspectionGraphs,
+      busy: controller.busy,
+      connections,
+      sources: [api.tabs[0]],
+      snapshots: api.context.snapshotsRef.current,
+      totalRoots: 1,
+      errors: {},
+      identityErrors: {},
+      users: {},
+      loading: new Set(),
+      now: 0,
+      onChange: () => {},
+      onSeen: () => {},
+      onOpen: () => {},
+      onRefresh: () => {},
+      onMoreRoots: () => {},
+    });
+    panel(props());
+    await api.settle();
+    assert.equal(reads, 1);
+    const initialStamp = inboxCandidates(
+      [api.tabs[0]],
+      props().snapshots,
+      connections,
+    )[0].stamp;
+    const updatedFetch = 1_800_000_000_000;
+    api.next({
+      rootKey: 'A-1',
+      issues: [issue('A-1')],
+      fetchedAt: updatedFetch,
+      warnings: [],
+    });
+    await api.refresh(api.tabs[0], false, true);
+    const fresh = panel(props());
+    await api.settle();
+    assert.equal(
+      fresh[0].stamp,
+      initialStamp,
+      'poll time is separate from issue content identity',
+    );
+    assert.equal(
+      api.cancelled.length,
+      0,
+      'quiet publication/reset preserves active ownership',
+    );
+    assert.equal(
+      reads,
+      1,
+      'quiet publication adds no inspection or discovery work',
+    );
+    if (path === 'pending') {
+      assert.equal(controller.busy, true);
+      release(blockerGraph('A-1'));
+      await api.settle();
+    }
+    assert.equal(controller.busy, false);
+    assert.equal(
+      api.context.inboxInspectionGraphs[id].graph.groups[0].items[0]
+        .statusCategory,
+      'new',
+    );
+    assert.equal(
+      api.graphRef()[id].groups[0].items[0].statusCategory,
+      'new',
+      'actual App handoff admits the original read after the newer quiet fetch',
+    );
+    const markup = renderToStaticMarkup(
+      React.createElement(InboxPanel, props()),
+    );
+    assert.match(markup, /Blocked by B-2/);
+    assert.ok(
+      markup.includes(new Date(updatedFetch).toLocaleString()),
+      'latest confirmation display remains fresh',
+    );
+    assert.match(markup, /0<!-- --> unfinished|0 unfinished/);
+
+    // A real source change still invalidates the local result and App authority.
+    api.confirmed(api.tabs[0], [
+      { ...issue('A-1'), summary: 'Source changed' },
+    ]);
+    panel(props());
+    await api.settle();
+    assert.equal(api.context.inboxInspectionGraphs[id], undefined);
+    assert.equal(api.graphRef()[id], undefined);
+    assert.equal(
+      reads,
+      1,
+      'changed content waits for explicit bounded inspection',
+    );
+  });
+}
+
+for (const change of ['source content', 'tree coverage']) {
+  test(`quiet Inbox refresh keeps pending read guarded against later ${change} changes`, async () => {
+    const api = rendererRequests(true);
+    const controller: InboxInspection = api.inspection;
+    const sources = [api.tabs[0]];
+    const connections = [
+      {
+        id: 'work',
+        name: 'Work',
+        provider: 'github' as const,
+        url: 'https://sample.invalid',
+      },
+    ];
+    const candidates = () =>
+      inboxCandidates(sources, api.context.snapshotsRef.current, connections);
+    let release!: (result: IssueRelationships) => void;
+    api.context.window.canopy.relationships = async () =>
+      new Promise<IssueRelationships>((resolve) => {
+        release = resolve;
+      });
+    controller.reset(candidates());
+    const held = controller.load(candidates());
+    await api.settle();
+    api.next({
+      rootKey: 'A-1',
+      issues: [issue('A-1')],
+      fetchedAt: 300,
+      warnings: [],
+    });
+    await api.refresh(api.tabs[0], false, true);
+    controller.reset(candidates());
+    assert.equal(api.cancelled.length, 0);
+    if (change === 'source content')
+      api.confirmed(api.tabs[0], [{ ...issue('A-1'), summary: 'Real change' }]);
+    else {
+      // Relationship authority also includes coverage, independently of issue content.
+      api.next({
+        rootKey: 'A-1',
+        issues: [issue('A-1')],
+        fetchedAt: 400,
+        warnings: ['Incomplete hierarchy'],
+      });
+      await api.refresh(api.tabs[0], false, true);
+    }
+    controller.reset(candidates());
+    assert.equal(api.cancelled.length, 1);
+    release(blockerGraph('A-1'));
+    await held;
+    assert.equal(
+      api.context.inboxInspectionGraphs['["work","A-1"]'],
+      undefined,
+    );
+    assert.equal(api.graphRef()['["work","A-1"]'], undefined);
+  });
+}
