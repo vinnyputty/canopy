@@ -1,3 +1,4 @@
+import { auditInbox } from './smoke-inbox.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
@@ -516,10 +517,12 @@ async function auditGlobalReading() {
   );
   await close();
   await launch();
-  await expect(page.locator('.saved-view-choice').first()).toHaveCSS(
-    'font-size',
-    '13px',
-  );
+  await expect(
+    page
+      .getByRole('region', { name: 'New view saved view', exact: true })
+      .locator('.saved-view-choice')
+      .first(),
+  ).toHaveCSS('font-size', '13px');
   await expectReading('Text size', 'medium');
   await expectReading('Row spacing', 'compact');
   await page.getByRole('tab', { name: /CAN-100/ }).click();
@@ -3513,6 +3516,7 @@ try {
   await auditGithub(app, page);
 
   await auditRelationships(app, page);
+  await auditInbox(app, page);
 
   await auditWorkflow(app, page);
 

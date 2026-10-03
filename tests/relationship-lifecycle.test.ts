@@ -1,3 +1,19 @@
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { InboxPanel } from '../src/renderer/InboxPanel';
+import {
+  configuredRoots,
+  viewSources,
+  sourceTabId,
+} from '../src/renderer/saved-views';
+import { inboxCandidates } from '../src/renderer/inbox';
+import {
+  emptySidebarSession,
+  organizeSidebar,
+} from '../src/renderer/sidebar-organization';
+import { changeTriage } from '../src/shared/triage';
+import { ancestorPath, buildIssueTree } from '../src/renderer/tree';
+import { inboxStamp, InboxInspection } from '../src/renderer/inbox';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -236,9 +252,11 @@ test('inspected immediate parent seeds known ancestors without inheriting the ol
 
 // Execute the actual App inspection, refresh callback, and dependency effects.
 // This harness models React state/effect delivery without DOM or Electron.
-function rendererRequests(realRefresh = false) {
+function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
   const source = parsed('../src/renderer/App.tsx');
   const names = new Set([
+    'receiveInboxGraphs',
+    'inboxInspection',
     'relationshipGraphs',
     'relationshipLoading',
     'relationshipRequests',
@@ -260,6 +278,7 @@ function rendererRequests(realRefresh = false) {
       [...names].some(
         (name) =>
           n.name.getText(source) === name ||
+          n.name.getText(source) === `[${name}]` ||
           n.name.getText(source).startsWith(`[${name},`),
       ),
   )
@@ -275,11 +294,13 @@ function rendererRequests(realRefresh = false) {
   )
     .map((n) => `${n.getText(source)};`)
     .join('\n');
-  const tabs = [
-    { id: 'a', connectionId: 'work', rootKey: 'A-1' },
-    { id: 'b', connectionId: 'work', rootKey: 'B-1' },
-    { id: 'other', connectionId: 'other', rootKey: 'A-1' },
-  ] as TabState[];
+  const tabs =
+    initialTabs ??
+    ([
+      { id: 'a', connectionId: 'work', rootKey: 'A-1' },
+      { id: 'b', connectionId: 'work', rootKey: 'B-1' },
+      { id: 'other', connectionId: 'other', rootKey: 'A-1' },
+    ] as TabState[]);
   const snapshots = Object.fromEntries(
     tabs.map((tab) => [
       tab.id,
@@ -315,9 +336,9 @@ function rendererRequests(realRefresh = false) {
     crypto: { randomUUID: () => `request-${pending.length}` },
     useState: (value: unknown) => {
       const index = stateIndex++;
-      states[index] = value;
+      states[index] = typeof value === 'function' ? value() : value;
       return [
-        value,
+        states[index],
         (next: any) => {
           states[index] =
             typeof next === 'function' ? next(states[index]) : next;
@@ -335,6 +356,22 @@ function rendererRequests(realRefresh = false) {
       }
     },
     snapshots,
+    confirmedSnapshots: snapshots,
+    inboxStamp,
+    InboxInspection,
+    inboxInspectionGraphs: {},
+    inboxInspectionBusy: false,
+    setInboxInspectionGraphs: (entries: Record<string, unknown>) => {
+      context.inboxInspectionGraphs = entries;
+    },
+    setInboxInspectionBusy: (busy: boolean) => {
+      context.inboxInspectionBusy = busy;
+    },
+    inboxGraphs: {},
+    setInboxGraphs: (next: any) => {
+      context.inboxGraphs =
+        typeof next === 'function' ? next(context.inboxGraphs) : next;
+    },
     snapshotsRef: { current: snapshots },
     activeTab: tabs[0],
     previewRoute: undefined,
@@ -395,6 +432,7 @@ function rendererRequests(realRefresh = false) {
     },
     window: {
       canopy: {
+        syncStatus: async () => ({ retryAt: null }),
         relationships: (_id: string, key: string) =>
           new Promise<IssueRelationships>((resolve, reject) =>
             pending.push({ key, resolve, reject }),
@@ -422,7 +460,7 @@ function rendererRequests(realRefresh = false) {
   assert.ok(publish, 'production mutation snapshot callback');
   runInNewContext(
     js(
-      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current], graphRef: () => relationshipGraphsRef.current };`,
+      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, receiveInbox: receiveInboxGraphs, inspection: typeof inboxInspection === 'undefined' ? undefined : inboxInspection, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current], graphRef: () => relationshipGraphsRef.current };`,
     ),
     context,
   );
@@ -527,8 +565,9 @@ function rendererRequests(realRefresh = false) {
     ) => {
       context.window.canopy.tree = read;
     },
+    inboxGraphs: () => context.inboxGraphs,
     graphs: () => states[0] as Record<string, IssueRelationships>,
-    loading: () => states[1],
+    loading: () => states[states[1] instanceof InboxInspection ? 2 : 1],
     refresh: async (tab: TabState, userRequested = true, explicit = true) => {
       await context.api.refresh(tab, true, explicit, userRequested);
       renderEffects();
@@ -583,6 +622,7 @@ for (const change of [
     else await api.refresh(api.tabs[change === 'other account' ? 2 : 1]);
     assert.equal(api.cancelled.length, 0);
     assert.equal(api.graphs()['["work","A-1"]']?.key, 'A-1');
+    assert.equal(api.inboxGraphs()['["work","A-1"]']?.graph.key, 'A-1');
     api.pending[1].resolve(graph('A-1'));
     await held;
     assert.equal(api.graphs()['["work","A-1"]']?.key, 'A-1');
@@ -1249,12 +1289,30 @@ for (const [checkpoint, name] of [
       source,
       (n) =>
         ts.isVariableDeclaration(n) &&
-        ['navigate', 'jumpToRelationship'].includes(n.name.getText(source)),
+        [
+          'navigate',
+          'jumpToRelationship',
+          'organize',
+          'openSavedResult',
+        ].includes(n.name.getText(source)),
     )
       .map((n) => `const ${n.getText(source)};`)
       .join('\n');
     const context: any = {
       relationshipDestination,
+      organizeSidebar,
+      ancestorPath,
+      buildIssueTree,
+      savedSources: initial.tabs.map((tab) => ({ ...tab, id: tab.id })),
+      viewSnapshots: Object.fromEntries(
+        initial.tabs.map((tab) => [
+          tab.id,
+          handlers.get('canopy:tree')!(null, tab.connectionId, tab.rootKey),
+        ]),
+      ),
+      sidebarSessionRef: { current: emptySidebarSession() },
+      setSidebarSession: () => {},
+      connectionsRef: { current: handlers.get('canopy:connections')!() },
       activateTab,
       rootView,
       sameRoot,
@@ -1265,12 +1323,18 @@ for (const [checkpoint, name] of [
       pendingScrollRestore: { current: null },
       navigationReveal: { current: null },
       setHistory: () => {},
+      setInboxOpen: (value: boolean) => {
+        context.inboxOpen = value;
+      },
       setNextTaskViews: () => {},
       setReveal: (value: unknown) => {
         context.reveal = value;
       },
-      setWorkspace: (update: (value: Workspace) => Workspace) => {
-        context.workspaceRef.current = update(context.workspaceRef.current);
+      setWorkspace: (update: Workspace | ((value: Workspace) => Workspace)) => {
+        context.workspaceRef.current =
+          typeof update === 'function'
+            ? update(context.workspaceRef.current)
+            : update;
       },
       snapshots: Object.fromEntries(
         initial.tabs.map((tab) => [
@@ -1287,7 +1351,7 @@ for (const [checkpoint, name] of [
     };
     runInNewContext(
       js(
-        `${declarations}\nglobalThis.api = { jump: jumpToRelationship, navigate };`,
+        `${declarations}\nglobalThis.api = { jump: jumpToRelationship, navigate, organize, openSavedResult };`,
       ),
       context,
     );
@@ -1351,6 +1415,47 @@ for (const [checkpoint, name] of [
     assert.equal(current().tabs.length, hierarchyWorkspace.tabs.length + 1);
     jump('work', 'team/b#5');
     assert.equal(active().id, outside.id);
+    const owner = current().tabs.find((tab) => tab.id === 'owner')!;
+    context.api.organize({ type: 'pin', root: owner });
+    const triage = changeTriage(
+      undefined,
+      'work',
+      'team/a#11',
+      'pin',
+      Date.now(),
+    );
+    context.workspaceRef.current = {
+      ...current(),
+      triage,
+      rootViews: {
+        '["work","TEAM/A#10"]': {
+          ...rootView(current(), owner),
+          filters: { status: 'Open' },
+        },
+      },
+    };
+    context.api.navigate(current().tabs.find((tab) => tab.id === 'wrong'));
+    context.inboxOpen = true;
+    context.api.openSavedResult({
+      issue: issue('team/a#11', 'team/a#10'),
+      source: owner,
+    });
+    assert.equal(
+      active().id,
+      'owner',
+      'Inbox selection resolves the exact owning account/root',
+    );
+    assert.equal(active().selectedKey, 'team/a#11');
+    assert.equal(context.inboxOpen, false);
+    assert.equal(context.reveal.tabId, 'owner');
+    assert.equal(context.navigationReveal.current.key, 'team/a#11');
+    const rootViews = current().rootViews;
+    context.api.organize({ type: 'undo' });
+    assert.equal(active().id, 'owner');
+    assert.equal(active().selectedKey, 'team/a#11');
+    assert.deepEqual(current().triage, triage);
+    assert.deepEqual(current().rootViews, rootViews);
+    assert.deepEqual(current().pinnedRoots, []);
     const checkpoints = [
       blockerWorkspace,
       outsideWorkspace,
@@ -1824,3 +1929,541 @@ test('demo related-work step inspects the lazy graph before highlighting CAN-200
   assert.equal(highlighted, true);
   assert.equal(inspected?.key, 'CAN-108');
 });
+
+test('inbox cache handoff preserves unrelated typed graphs and own refresh invalidates both caches', async () => {
+  const api = rendererRequests();
+  const first = api.inspect('work', 'A-1');
+  api.pending[0].resolve(graph('A-1'));
+  await first;
+  const other = api.inspect('other', 'A-1');
+  api.pending[1].resolve(graph('A-1'));
+  await other;
+  api.receiveInbox({
+    '["work","A-1"]': {
+      stamp: inboxStamp(api.context.snapshots['a'], issue('A-1')),
+      graph: graph('A-1'),
+    },
+  });
+  assert.equal(api.graphs()['["other","A-1"]']?.key, 'A-1');
+  assert.equal(api.inboxGraphs()['["other","A-1"]']?.graph.key, 'A-1');
+  await api.refresh(api.tabs[0]);
+  assert.equal(api.graphs()['["work","A-1"]'], undefined);
+  assert.equal(api.inboxGraphs()['["work","A-1"]'], undefined);
+  assert.equal(api.graphs()['["other","A-1"]']?.key, 'A-1');
+  assert.equal(api.inboxGraphs()['["other","A-1"]']?.graph.key, 'A-1');
+});
+
+test('actual Inbox handoff rejects stale provenance and invalidates referenced targets through the live graph ref', () => {
+  const api = rendererRequests();
+  const identity = '["work","A-1"]';
+  const stamped = inboxStamp(api.context.snapshots.a, issue('A-1'));
+  api.receiveInbox({
+    [identity]: { stamp: 'old', graph: blockerGraph('A-1', 'B-1', 'new') },
+  });
+  assert.equal(api.graphs()[identity], undefined);
+  api.receiveInbox({
+    [identity]: { stamp: stamped, graph: blockerGraph('wrong', 'B-1', 'new') },
+  });
+  assert.equal(api.graphs()[identity], undefined);
+  api.receiveInbox({
+    [identity]: { stamp: stamped, graph: blockerGraph('A-1', 'B-1', 'new') },
+  });
+  assert.equal(api.graphRef()[identity]?.key, 'A-1');
+  api.confirmed(api.tabs[1], [
+    { ...issue('B-1'), status: { id: 'done', name: 'Done', category: 'done' } },
+  ]);
+  assert.equal(
+    api.graphs()[identity],
+    undefined,
+    'a confirmed target change invalidates the handed-off typed graph',
+  );
+  assert.equal(api.inboxGraphs()[identity], undefined);
+  const fresh = treeSnapshot('A-1', [{ ...issue('A-1'), summary: 'fresh' }]);
+  api.confirmed(api.tabs[0], fresh.issues);
+  api.receiveInbox({ [identity]: { stamp: stamped, graph: graph('A-1') } });
+  assert.equal(
+    api.graphs()[identity],
+    undefined,
+    'a stale Inbox publication cannot restore invalidated data',
+  );
+});
+
+test('actual Inbox and saved-view refresh callbacks carry manual relationship intent', async () => {
+  const source = parsed('../src/renderer/App.tsx');
+  for (const name of ['InboxPanel', 'SavedViewsPanel']) {
+    const panel = nodes(
+      source,
+      (n) =>
+        ts.isJsxSelfClosingElement(n) && n.tagName.getText(source) === name,
+    )[0] as ts.JsxSelfClosingElement;
+    const attribute = panel.attributes.properties.find(
+      (n) => ts.isJsxAttribute(n) && n.name.getText(source) === 'onRefresh',
+    ) as ts.JsxAttribute;
+    const expression = (attribute.initializer as ts.JsxExpression).expression!;
+    const api = rendererRequests();
+    const first = api.inspect('work', 'A-1');
+    api.pending[0].resolve(graph('A-1'));
+    await first;
+    const context = {
+      setIdentityRetry: () => {},
+      savedSources: [api.tabs[0]],
+      allRefreshTabs: api.tabs,
+      sameRoot,
+      refreshTab: (...args: Parameters<typeof api.context.api.refresh>) =>
+        api.context.api.refresh(...args),
+    };
+    await runInNewContext(js(`(${expression.getText(source)})();`), context);
+    await api.settle();
+    assert.equal(
+      api.graphs()['["work","A-1"]'],
+      undefined,
+      `${name} refresh invalidates its cached inspection`,
+    );
+  }
+});
+
+// Use App's actual root paging/confirmed snapshot mapping. B is a real open root
+// after the first ten, not a fictitious total or an omitted loaded target.
+function outsideInboxTarget() {
+  const tabs = [
+    { id: 'a', connectionId: 'work', rootKey: 'org/repo#1' },
+    { id: 'other', connectionId: 'other', rootKey: 'org/repo#1' },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      id: `filler-${index}`,
+      connectionId: 'work',
+      rootKey: `org/repo#${index + 2}`,
+    })),
+    { id: 'outside', connectionId: 'work', rootKey: 'org/repo#99' },
+    { id: 'unrelated', connectionId: 'work', rootKey: 'org/repo#100' },
+  ] as TabState[];
+  const api = rendererRequests(false, tabs);
+  const source = parsed('../src/renderer/App.tsx');
+  const names = new Set([
+    'inboxView',
+    'activeSavedView',
+    'availableRoots',
+    'savedSources',
+    'sourceTabs',
+    'allRefreshTabs',
+    'sourceTabKeys',
+    'inboxSnapshots',
+  ]);
+  const declarations = nodes(
+    source,
+    (node) =>
+      ts.isVariableDeclaration(node) && names.has(node.name.getText(source)),
+  )
+    .map((node) => `const ${node.getText(source)};`)
+    .join('\n');
+  Object.assign(api.context, {
+    workspace: { tabs, activeTabId: 'other' },
+    connections: [
+      { id: 'work', provider: 'github' },
+      { id: 'other', provider: 'github' },
+    ],
+    inboxOpen: true,
+    inboxRootLimit: 10,
+    useMemo: (fn: () => unknown) => fn(),
+    configuredRoots,
+    viewSources,
+    sourceTabId,
+    sameRoot,
+  });
+  const page = () =>
+    runInNewContext(
+      js(
+        `(() => { ${declarations}; return { availableRoots, savedSources, allRefreshTabs, inboxSnapshots }; })()`,
+      ),
+      api.context,
+    );
+  const initial = page();
+  assert.equal(initial.availableRoots.length, 12);
+  assert.equal(initial.savedSources.length, 10);
+  assert.equal(initial.allRefreshTabs.length, 12);
+  assert.ok(
+    initial.allRefreshTabs.some((tab: TabState) => tab.id === 'outside'),
+  );
+  assert.ok(
+    !initial.savedSources.some(
+      (tab: TabState) => tab.rootKey === 'org/repo#99',
+    ),
+  );
+  const candidates = inboxCandidates(
+    initial.savedSources,
+    initial.inboxSnapshots,
+    api.context.connections,
+  );
+  const candidateKey = () =>
+    JSON.stringify(
+      inboxCandidates(
+        page().savedSources,
+        page().inboxSnapshots,
+        api.context.connections,
+      )
+        .map((item) => [item.source.connectionId, item.issue.key, item.stamp])
+        .sort(),
+    );
+  const initialKey = candidateKey();
+  const controller: InboxInspection =
+    api.inspection ??
+    new InboxInspection(api.context.window.canopy, (entries) => {
+      api.context.inboxInspectionGraphs = entries;
+      api.receiveInbox(entries);
+    });
+  const id = '["work","org/repo#1"]';
+  const sourceCandidate = candidates.find(
+    (item) =>
+      item.source.connectionId === 'work' && item.issue.key === 'org/repo#1',
+  )!;
+  const targetChanged = () => {
+    api.confirmed(tabs[10], [
+      {
+        ...issue('org/repo#99'),
+        status: { id: 'done', name: 'Done', category: 'done' },
+      },
+    ]);
+    assert.equal(
+      candidateKey(),
+      initialKey,
+      'the selected source and candidateKey stay unchanged',
+    );
+  };
+  return { api, controller, candidates, sourceCandidate, id, targetChanged };
+}
+
+for (const path of ['cache republish', 'held success', 'failed retry']) {
+  test(`outside-page confirmed target invalidation reaches local Inbox and handoff: ${path}`, async () => {
+    const { api, controller, candidates, sourceCandidate, id, targetChanged } =
+      outsideInboxTarget();
+    const oldGraph = blockerGraph('org/repo#1', 'org/repo#99', 'new');
+    oldGraph.groups[0].state = 'partial';
+    const entry = { stamp: sourceCandidate.stamp, graph: oldGraph };
+    let release!: (graph: IssueRelationships) => void;
+    let reject!: (error: Error) => void;
+    api.context.window.canopy.relationships = () =>
+      new Promise((resolve, fail) => {
+        release = resolve;
+        reject = fail;
+      });
+    controller.reset(
+      candidates,
+      path === 'held success' ? {} : { [id]: entry },
+    );
+    let held: Promise<void> | undefined;
+    if (path !== 'cache republish') {
+      held = controller.load(candidates, path === 'failed retry');
+      await api.settle();
+    }
+    targetChanged();
+    assert.equal(
+      api.graphRef()[id],
+      undefined,
+      'main initially evicts the outside-page target reference',
+    );
+    assert.equal(
+      api.context.inboxInspectionGraphs[id]?.graph,
+      undefined,
+      'local display cache is evicted without candidate reset or republication',
+    );
+    if (path === 'cache republish') {
+      api.receiveInbox({ [id]: entry });
+      controller.reset(candidates, { [id]: entry });
+    } else if (path === 'held success') release(oldGraph);
+    else reject(new Error('fake held failure'));
+    // Other selected issues complete immediately, keeping the batch bounded.
+    api.context.window.canopy.relationships = async (
+      _connection: string,
+      key: string,
+    ) => graph(key);
+    await held;
+    assert.notEqual(
+      api.context.inboxInspectionGraphs[id]?.graph?.groups[0].items[0]
+        ?.statusCategory,
+      'new',
+    );
+    assert.notEqual(
+      api.graphRef()[id]?.groups[0].items[0]?.statusCategory,
+      'new',
+    );
+    if (path === 'failed retry')
+      assert.equal(api.context.inboxInspectionGraphs[id]?.graph, undefined);
+    // A real new inspection after B changed can regain authority on unchanged A.
+    api.context.window.canopy.relationships = async (
+      _connection: string,
+      key: string,
+    ) =>
+      key === 'org/repo#1'
+        ? blockerGraph(key, 'org/repo#99', 'done')
+        : graph(key);
+    await controller.load(candidates, true);
+    assert.equal(
+      api.context.inboxInspectionGraphs[id]?.graph?.groups[0].items[0]
+        ?.statusCategory,
+      'done',
+    );
+    assert.equal(
+      api.graphRef()[id]?.groups[0].items[0]?.statusCategory,
+      'done',
+    );
+    api.receiveInbox({ [id]: entry });
+    assert.equal(
+      api.graphRef()[id]?.groups[0].items[0]?.statusCategory,
+      'done',
+      'stale republication cannot overwrite fresh inspection',
+    );
+  });
+}
+
+test('outside-page invalidation preserves other-account keys, unrelated roots and manual target intent', async () => {
+  const { api, controller, candidates, sourceCandidate, id } =
+    outsideInboxTarget();
+  const entry = {
+    stamp: sourceCandidate.stamp,
+    graph: blockerGraph('org/repo#1', 'org/repo#99', 'new'),
+  };
+  controller.reset(candidates, { [id]: entry });
+  api.confirmed(api.tabs[1], [
+    { ...issue('org/repo#99'), summary: 'Other account changed' },
+  ]);
+  api.confirmed(api.tabs[11], [
+    { ...issue('org/repo#100'), summary: 'Unrelated root changed' },
+  ]);
+  assert.equal(
+    api.context.inboxInspectionGraphs[id]?.graph?.groups[0].items[0]
+      .statusCategory,
+    'new',
+  );
+  assert.equal(api.graphRef()[id]?.groups[0].items[0].statusCategory, 'new');
+  await api.refresh(api.tabs[10]);
+  assert.equal(
+    api.graphRef()[id]?.groups[0].items[0].statusCategory,
+    'new',
+    'manual B inspection invalidation alone is not a changed-target signal',
+  );
+  api.receiveInbox({ [id]: entry });
+  assert.equal(api.graphRef()[id]?.groups[0].items[0].statusCategory, 'new');
+  api.receiveInbox({ [id]: { ...entry, stamp: 'wrong' } });
+  api.receiveInbox({ [id]: { ...entry, graph: graph('wrong') } });
+  assert.equal(api.graphRef()[id]?.groups[0].items[0].statusCategory, 'new');
+  api.confirmed(api.tabs[0], [
+    { ...issue('org/repo#1'), summary: 'Source changed' },
+  ]);
+  api.receiveInbox({ [id]: entry });
+  assert.equal(api.graphRef()[id], undefined);
+});
+
+// Execute the actual panel's candidate/effect block with persistent hook slots.
+// App's real mutation publication, inspection controller and handoff run alongside it.
+function inboxPanelEffects(inspection: InboxInspection) {
+  const source = parsed('../src/renderer/InboxPanel.tsx');
+  const component = nodes(
+    source,
+    (node) =>
+      ts.isFunctionDeclaration(node) && node.name?.text === 'InboxPanel',
+  )[0] as ts.FunctionDeclaration;
+  const block = component.body!.getText(source);
+  const prefix = block.slice(1, block.indexOf('  const items ='));
+  const effects: { deps: unknown[]; cleanup?: () => void }[] = [];
+  const refs: { current: unknown }[] = [];
+  return (props: React.ComponentProps<typeof InboxPanel>) => {
+    let effectIndex = 0;
+    let refIndex = 0;
+    return runInNewContext(js(`(() => { ${prefix}; return candidates; })()`), {
+      props: { ...props, inspection },
+      inboxCandidates,
+      queueMicrotask,
+      useMemo: (fn: () => unknown) => fn(),
+      useState: (value: unknown) => [value, () => {}],
+      useRef: (value: unknown) => (refs[refIndex++] ??= { current: value }),
+      useEffect: (fn: () => (() => void) | void, deps: unknown[]) => {
+        const index = effectIndex++;
+        const previous = effects[index];
+        if (!previous || deps.some((value, i) => value !== previous.deps[i])) {
+          previous?.cleanup?.();
+          effects[index] = { deps, cleanup: fn() || undefined };
+        }
+      },
+    });
+  };
+}
+
+for (const path of ['completed', 'pending']) {
+  test(`quiet confirmed fetch preserves ${path} Inbox inspection and updates confirmation display`, async () => {
+    const api = rendererRequests(true);
+    const controller: InboxInspection = api.inspection;
+    const panel = inboxPanelEffects(controller);
+    const connections = [
+      {
+        id: 'work',
+        name: 'Work',
+        provider: 'github' as const,
+        url: 'https://sample.invalid',
+      },
+    ];
+    const id = '["work","A-1"]';
+    let release!: (result: IssueRelationships) => void;
+    let reads = 0;
+    api.context.window.canopy.relationships = async () => {
+      reads++;
+      return path === 'completed'
+        ? blockerGraph('A-1')
+        : new Promise<IssueRelationships>((resolve) => {
+            release = resolve;
+          });
+    };
+    const props = (): React.ComponentProps<typeof InboxPanel> => ({
+      workspace: {
+        tabs: [],
+        activeTabId: null,
+        shortcuts: {},
+        theme: 'system',
+        sidebarCollapsed: false,
+      },
+      inspection: controller,
+      graphs: api.context.inboxInspectionGraphs,
+      busy: controller.busy,
+      connections,
+      sources: [api.tabs[0]],
+      snapshots: api.context.snapshotsRef.current,
+      totalRoots: 1,
+      errors: {},
+      identityErrors: {},
+      users: {},
+      loading: new Set(),
+      now: 0,
+      onChange: () => {},
+      onSeen: () => {},
+      onOpen: () => {},
+      onRefresh: () => {},
+      onMoreRoots: () => {},
+    });
+    panel(props());
+    await api.settle();
+    assert.equal(reads, 1);
+    const initialStamp = inboxCandidates(
+      [api.tabs[0]],
+      props().snapshots,
+      connections,
+    )[0].stamp;
+    const updatedFetch = 1_800_000_000_000;
+    api.next({
+      rootKey: 'A-1',
+      issues: [issue('A-1')],
+      fetchedAt: updatedFetch,
+      warnings: [],
+    });
+    await api.refresh(api.tabs[0], false, true);
+    const fresh = panel(props());
+    await api.settle();
+    assert.equal(
+      fresh[0].stamp,
+      initialStamp,
+      'poll time is separate from issue content identity',
+    );
+    assert.equal(
+      api.cancelled.length,
+      0,
+      'quiet publication/reset preserves active ownership',
+    );
+    assert.equal(
+      reads,
+      1,
+      'quiet publication adds no inspection or discovery work',
+    );
+    if (path === 'pending') {
+      assert.equal(controller.busy, true);
+      release(blockerGraph('A-1'));
+      await api.settle();
+    }
+    assert.equal(controller.busy, false);
+    assert.equal(
+      api.context.inboxInspectionGraphs[id].graph.groups[0].items[0]
+        .statusCategory,
+      'new',
+    );
+    assert.equal(
+      api.graphRef()[id].groups[0].items[0].statusCategory,
+      'new',
+      'actual App handoff admits the original read after the newer quiet fetch',
+    );
+    const markup = renderToStaticMarkup(
+      React.createElement(InboxPanel, props()),
+    );
+    assert.match(markup, /Blocked by B-2/);
+    assert.ok(
+      markup.includes(new Date(updatedFetch).toLocaleString()),
+      'latest confirmation display remains fresh',
+    );
+    assert.match(markup, /0<!-- --> unfinished|0 unfinished/);
+
+    // A real source change still invalidates the local result and App authority.
+    api.confirmed(api.tabs[0], [
+      { ...issue('A-1'), summary: 'Source changed' },
+    ]);
+    panel(props());
+    await api.settle();
+    assert.equal(api.context.inboxInspectionGraphs[id], undefined);
+    assert.equal(api.graphRef()[id], undefined);
+    assert.equal(
+      reads,
+      1,
+      'changed content waits for explicit bounded inspection',
+    );
+  });
+}
+
+for (const change of ['source content', 'tree coverage']) {
+  test(`quiet Inbox refresh keeps pending read guarded against later ${change} changes`, async () => {
+    const api = rendererRequests(true);
+    const controller: InboxInspection = api.inspection;
+    const sources = [api.tabs[0]];
+    const connections = [
+      {
+        id: 'work',
+        name: 'Work',
+        provider: 'github' as const,
+        url: 'https://sample.invalid',
+      },
+    ];
+    const candidates = () =>
+      inboxCandidates(sources, api.context.snapshotsRef.current, connections);
+    let release!: (result: IssueRelationships) => void;
+    api.context.window.canopy.relationships = async () =>
+      new Promise<IssueRelationships>((resolve) => {
+        release = resolve;
+      });
+    controller.reset(candidates());
+    const held = controller.load(candidates());
+    await api.settle();
+    api.next({
+      rootKey: 'A-1',
+      issues: [issue('A-1')],
+      fetchedAt: 300,
+      warnings: [],
+    });
+    await api.refresh(api.tabs[0], false, true);
+    controller.reset(candidates());
+    assert.equal(api.cancelled.length, 0);
+    if (change === 'source content')
+      api.confirmed(api.tabs[0], [{ ...issue('A-1'), summary: 'Real change' }]);
+    else {
+      // Relationship authority also includes coverage, independently of issue content.
+      api.next({
+        rootKey: 'A-1',
+        issues: [issue('A-1')],
+        fetchedAt: 400,
+        warnings: ['Incomplete hierarchy'],
+      });
+      await api.refresh(api.tabs[0], false, true);
+    }
+    controller.reset(candidates());
+    assert.equal(api.cancelled.length, 1);
+    release(blockerGraph('A-1'));
+    await held;
+    assert.equal(
+      api.context.inboxInspectionGraphs['["work","A-1"]'],
+      undefined,
+    );
+    assert.equal(api.graphRef()['["work","A-1"]'], undefined);
+  });
+}

@@ -3103,3 +3103,33 @@ kbd {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+
+.triage-inbox {
+  overflow: auto;
+}
+.inbox-coverage {
+  padding-left: 20px;
+}
+.inbox-items {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+.inbox-item {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.inbox-item p {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.inbox-open {
+  font-weight: 600;
+  text-align: left;
+}
+.triage-inbox fieldset label {
+  display: inline-flex;
+  gap: 6px;
+  margin: 6px 12px 6px 0;
+}

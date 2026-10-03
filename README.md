@@ -95,3 +95,5 @@ npx pnpm@10.22.0 install --frozen-lockfile
 Dependency install scripts are disabled. Use the Bazel launcher to obtain Electron. To update dependencies, update `package.json`, regenerate `pnpm-lock.yaml` with pnpm 10.22.0, and run the Bazel checks. `npm run format` formats TypeScript, CSS, JSON, YAML, and documentation; Bazel files use standard Starlark formatting.
 
 Editing descriptions and comments, attachments, issue deletion, creating issues outside Jira child rows, project moves, and reparenting are not supported in this version.
+
+The sidebar Triage inbox collects unread changes, assigned work, confirmed blockers and selected review statuses across known workspace roots and providers. Local pins, snoozes and bounded action history save with the workspace; coverage limits and partial failures remain visible. See [workspace controls](docs/workspace.md#triage-inbox).

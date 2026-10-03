@@ -63,30 +63,40 @@ export function configuredRoots(
   connections: Connection[],
 ): RootReference[] {
   const result = new Map<string, RootReference>();
+  const remember = (root: RootReference) => {
+    const provider = connections.find(
+      (connection) => connection.id === root.connectionId,
+    )?.provider;
+    const rootKey =
+      provider === 'github'
+        ? root.rootKey.toLowerCase()
+        : provider
+          ? root.rootKey.toUpperCase()
+          : root.rootKey;
+    const key = JSON.stringify([root.connectionId, rootKey]);
+    const previous = result.get(key);
+    result.set(key, {
+      connectionId: root.connectionId,
+      rootKey,
+      summary: root.summary ?? previous?.summary,
+    });
+  };
   for (const root of [
     ...workspace.tabs,
     ...(workspace.closedTabs ?? []),
     ...(workspace.pinnedRoots ?? []),
     ...(workspace.recentRoots ?? []),
+    ...(workspace.savedViews ?? []).flatMap((view) => view.roots),
   ])
-    result.set(JSON.stringify([root.connectionId, root.rootKey]), {
-      connectionId: root.connectionId,
-      rootKey: root.rootKey,
-      summary: root.summary,
-    });
+    remember(root);
   for (const connection of connections)
-    for (const rootKey of connection.repositories ?? []) {
-      const key = JSON.stringify([connection.id, rootKey]);
-      if (!result.has(key))
-        result.set(key, { connectionId: connection.id, rootKey });
-    }
+    for (const rootKey of connection.repositories ?? [])
+      remember({ connectionId: connection.id, rootKey });
   for (const key of Object.keys(workspace.rootViews ?? {})) {
     try {
       const [connectionId, rootKey] = JSON.parse(key);
-      if (typeof connectionId !== 'string' || typeof rootKey !== 'string')
-        continue;
-      const id = JSON.stringify([connectionId, rootKey]);
-      if (!result.has(id)) result.set(id, { connectionId, rootKey });
+      if (typeof connectionId === 'string' && typeof rootKey === 'string')
+        remember({ connectionId, rootKey });
     } catch {
       /* Ignore hand-edited keys. */
     }

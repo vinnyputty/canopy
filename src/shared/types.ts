@@ -211,6 +211,7 @@ export type TabState = {
   scrollTop: number;
 };
 export type Workspace = {
+  triage?: import('./triage').TriageState;
   reading?: ReadingSettings;
   tabs: TabState[];
   activeTabId: string | null;

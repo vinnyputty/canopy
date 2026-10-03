@@ -1,3 +1,4 @@
+import { removeTriageConnection } from '../shared/triage';
 import type { RootReference, TabState, Workspace } from '../shared/types';
 import { rootView, setRootView } from './table-view';
 
@@ -139,6 +140,7 @@ export function removeConnection(workspace: Workspace, id: string): Workspace {
     activeTabId: tabs.some((tab) => tab.id === workspace.activeTabId)
       ? workspace.activeTabId
       : (tabs[0]?.id ?? null),
+    triage: removeTriageConnection(workspace.triage, id),
     pinnedRoots: workspace.pinnedRoots?.filter(keep),
     recentRoots: workspace.recentRoots?.filter(keep),
     closedTabs: workspace.closedTabs?.filter(keep),
