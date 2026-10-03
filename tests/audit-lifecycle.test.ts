@@ -85,6 +85,8 @@ async function fixture(
   };
   try {
     // Same POSIX group as Playwright's detached launcher; Windows uses its tree.
+    // A Windows descendant gets its own console to survive root exit. The
+    // test-only watchdog bounds a leaked hold without extending audit budgets.
     await owner.launch(async () => {
       child = childProcess.spawn(
         process.execPath,
@@ -92,13 +94,28 @@ async function fixture(
           '-e',
           `
       const {spawn}=require('node:child_process');
-      const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'], {stdio:'ignore', detached: ${escaped && process.platform !== 'win32'}});
+      const child=spawn(process.execPath,['-e',\`
+        setInterval(()=>{},1000);
+        setTimeout(()=>process.exit(72),180000).unref();
+        process.on('message',(message)=> {
+          if(message==='hold') process.send('held');
+        });
+        process.send('ready');
+      \`], {stdio:['ignore','ignore','ignore','ipc'], windowsHide:true, detached: ${process.platform === 'win32' || escaped}});
       console.log(child.pid);
+      child.once('message',(message)=> {
+        if(message==='ready') process.send('descendant-ready');
+      });
       process.on('message',(message)=> {
         if(message==='normal') { child.once('exit',()=>process.exit(0)); child.kill(); }
         if(message==='abnormal') process.exit(9);
         if(message==='abnormal-reaped') { child.once('exit',()=>process.exit(9)); child.kill(); }
-        if(message==='orphan') process.exit(0);
+        if(message==='orphan') {
+          child.once('message',(reply)=> {
+            if(reply==='held') process.send('orphan-held',()=>process.exit(0));
+          });
+          child.send('hold');
+        }
       });
       setInterval(()=>{},1000);
     `,
@@ -109,9 +126,24 @@ async function fixture(
           stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
         },
       );
-      const [data] = await once(child.stdout!, 'data');
+      // Retain the direct PID before waiting for readiness, so failed startup
+      // still disposes the observed descendant.
+      const ready = once(child, 'message');
+      // Keep initialization failures handled until their cleanup can run.
+      ready.catch(() => {});
+      const [data] = await deadline(
+        () => once(child.stdout!, 'data'),
+        processBudgets.operationMs,
+        'Owned descendant PID',
+      );
       descendant = Number(String(data).trim());
       assert.ok(descendant > 1 && alive(descendant));
+      const [message] = await deadline(
+        () => ready,
+        processBudgets.operationMs,
+        'Owned descendant readiness',
+      );
+      assert.equal(message, 'descendant-ready');
       return child;
     });
     owner.confirm(child);
@@ -231,20 +263,47 @@ for (const mode of ['reject', 'hang'] as const) {
 for (const mode of ['abnormal', 'orphan'] as const) {
   test(`resolved close with ${mode} root exit still cleans retained descendants and fails`, async () => {
     const f = await fixture();
+    let orphanSurvived = false;
+    let orphanAcknowledged = false;
     try {
       await assert.rejects(
         finishAudit({
           owner: f.owner,
           close: async () => {
             const exit = once(f.child, 'exit');
+            f.child.once('message', (message) => {
+              orphanAcknowledged = message === 'orphan-held';
+            });
             f.child.send(mode);
             await exit;
+            if (mode === 'orphan') orphanSurvived = alive(f.descendant);
           },
           removeProfile: () => f.remove(),
           writeEvidence: noop,
         }),
-        AggregateError,
+        (error: AggregateError) => {
+          assert.ok(error instanceof AggregateError);
+          if (mode === 'orphan')
+            assert.ok(
+              error.errors.some((e: Error) =>
+                /required forced shutdown/.test(e.message),
+              ),
+            );
+          return true;
+        },
       );
+      if (mode === 'orphan') {
+        assert.equal(
+          orphanAcknowledged,
+          true,
+          'descendant must acknowledge its hold before root exit',
+        );
+        assert.equal(
+          orphanSurvived,
+          true,
+          'acknowledged orphan must survive root exit',
+        );
+      }
       assert.equal(alive(f.descendant), false);
       await assert.rejects(access(f.profile));
     } finally {
