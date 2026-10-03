@@ -222,6 +222,7 @@ async function smoke(executablePath, directory, artifact, identity) {
           ? await observeAppImageLaunch(
               {
                 artifact: identity.appImage,
+                artifactSha256: identity.artifactSha256,
                 executableSha256: identity.executableSha256,
                 appAsarSha256: identity.appAsarSha256,
                 output: join(
@@ -498,6 +499,7 @@ for (const format of platform.formats) {
           ).toBe(await readFile(join(root, 'tools', 'AppRun'), 'utf8'));
           launchExecutable = artifact;
           identity.appImage = artifact;
+          identity.artifactSha256 = await hash(artifact);
         }
       }
       launches = await smoke(launchExecutable, directory, name, identity);

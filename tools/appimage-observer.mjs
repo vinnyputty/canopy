@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { ChildProcess, spawn } from 'node:child_process';
+import { channel } from 'node:diagnostics_channel';
+import { randomBytes, createHash } from 'node:crypto';
 import {
   mkdir,
   open,
@@ -146,7 +147,10 @@ export async function runtimeIdentity(pid, config, effects = io) {
     throw new Error('Foreign launch parent');
   if ((await effects.link(proc(pid, 'exe'))) !== config.artifact)
     throw new Error('Original runtime identity was not observed');
-  if ((await effects.stat(proc(pid, 'exe'))).uid !== config.uid)
+  if (
+    (await effects.stat(proc(pid, 'exe'))).uid !==
+    (config.fileUid ?? config.uid)
+  )
     throw new Error('Runtime ownership mismatch');
   await retained(pid, identity, effects);
   return identity;
@@ -186,6 +190,232 @@ export async function mountedEvidence(pid, identity, config, effects = io) {
       uid: metadata.uid,
       gid: metadata.gid,
       mode: (metadata.mode & 0o7777).toString(8),
+    },
+  };
+}
+
+// The managed fast-exec contract requires an immutable root-owned original.
+// Ordinary owned downloads retain the stricter native pre-exec observation.
+export async function originalArtifact(config, effects = io) {
+  if (!Number.isSafeInteger(config.uid) || config.uid <= 0)
+    throw new Error('Ordinary launch user required');
+  const parents = [];
+  if ((await effects.canonical(config.artifact)) !== config.artifact)
+    throw new Error('Original artifact path changed');
+  const before = await effects.stat(config.artifact);
+  if (
+    !before.isFile() ||
+    before.mode & 0o022 ||
+    before.mode & 0o6000 ||
+    !(before.mode & 0o111)
+  )
+    throw new Error('Original artifact is not protected');
+  const managed =
+    config.artifact === '/opt/Canopy/Canopy.AppImage' && before.uid === 0;
+  if (!managed && before.uid !== config.uid)
+    throw new Error('Original file owner differs from owned download contract');
+  if (managed) {
+    if (before.mode & 0o222) throw new Error('Managed original is writable');
+    for (const path of ['/', '/opt', '/opt/Canopy']) {
+      const parent = await effects.stat(path);
+      if (
+        (await effects.canonical(path)) !== path ||
+        !parent.isDirectory() ||
+        parent.uid !== 0 ||
+        parent.mode & 0o022
+      )
+        throw new Error('Managed original parent is not protected');
+      const fields = ['dev', 'ino', 'uid', 'gid', 'mode'];
+      if (fields.some((key) => !Number.isFinite(parent[key])))
+        throw new Error('Managed parent identity unavailable');
+      parents.push({
+        path,
+        ...Object.fromEntries(fields.map((key) => [key, parent[key]])),
+      });
+    }
+  }
+  const hash = await effects.hash(config.artifact);
+  const after = await effects.stat(config.artifact);
+  const keys = [
+    'dev',
+    'ino',
+    'uid',
+    'gid',
+    'mode',
+    'size',
+    'mtimeMs',
+    'ctimeMs',
+  ];
+  if (
+    hash !== config.artifactSha256 ||
+    keys.some(
+      (key) => !Number.isFinite(before[key]) || before[key] !== after[key],
+    )
+  )
+    throw new Error('Original artifact identity changed');
+  return {
+    managed,
+    hash,
+    parents,
+    metadata: Object.fromEntries(keys.map((key) => [key, after[key]])),
+  };
+}
+export async function retainedSpawnIdentity(
+  value,
+  config,
+  original,
+  effects = io,
+) {
+  if (
+    !value ||
+    value.nonce !== config.nonce ||
+    value.type !== 'offer' ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid <= 0 ||
+    config.baseline.includes(value.pid) ||
+    JSON.stringify(value.args) !==
+      JSON.stringify([
+        config.artifact,
+        '--inspect=0',
+        '--remote-debugging-port=0',
+      ])
+  )
+    throw new Error('Invalid retained launch offer');
+  const parent = processIdentity(
+    await effects.read(proc(config.parent, 'stat')),
+  );
+  if (
+    parent.birth !== config.parentBirth ||
+    (await effects.stat(proc(config.parent, ''))).uid !== config.uid
+  )
+    throw new Error('Launch parent changed');
+  const identity = processIdentity(await effects.read(proc(value.pid, 'stat')));
+  if (
+    identity.parent !== config.parent ||
+    (await effects.stat(proc(value.pid, ''))).uid !== config.uid
+  )
+    throw new Error('Retained launch process owner or parent mismatch');
+  if (!original.managed)
+    await runtimeIdentity(
+      value.pid,
+      { ...config, fileUid: original.metadata.uid },
+      effects,
+    );
+  const current = await originalArtifact(config, effects);
+  if (JSON.stringify(current) !== JSON.stringify(original))
+    throw new Error('Retained original changed');
+  await retained(value.pid, identity, effects);
+  const afterParent = processIdentity(
+    await effects.read(proc(config.parent, 'stat')),
+  );
+  if (
+    afterParent.birth !== config.parentBirth ||
+    (await effects.stat(proc(config.parent, ''))).uid !== config.uid
+  )
+    throw new Error('Retained parent changed during handoff');
+  return identity;
+}
+
+// This scoped subscription observes only Node's genuine returned ChildProcess.
+// Constructor notifications cannot bind anything; the successful spawn event is
+// checked against the exact pinned Electron direct-launch arguments.
+export function captureAppImageSpawn(
+  config,
+  send,
+  { diagnostics = channel('child_process') } = {},
+) {
+  let active = true;
+  let target;
+  let matches = 0;
+  let confirmed = false;
+  const pending = new Map();
+  const alive = () =>
+    active &&
+    Date.now() < config.deadline &&
+    target &&
+    target.exitCode === null &&
+    target.signalCode === null;
+  const transmit = (value) => {
+    if (!active) return;
+    try {
+      send({ ...value, nonce: config.nonce });
+    } catch {
+      close();
+    }
+  };
+  const invalidate = () => {
+    transmit({ type: 'revoke' });
+    close();
+  };
+  const onConstruct = ({ process: child } = {}) => {
+    if (!active || !(child instanceof ChildProcess)) return;
+    if (pending.size >= 8) return invalidate();
+    const cleanup = () => {
+      child.removeListener('spawn', onSpawn);
+      child.removeListener('close', cleanup);
+      pending.delete(child);
+    };
+    const onSpawn = () => {
+      cleanup();
+      if (!active || child.spawnfile !== config.artifact) return;
+      if (
+        ++matches !== 1 ||
+        !Number.isSafeInteger(child.pid) ||
+        child.pid <= 0 ||
+        child.exitCode !== null ||
+        child.signalCode !== null ||
+        JSON.stringify(child.spawnargs) !==
+          JSON.stringify([
+            config.artifact,
+            '--inspect=0',
+            '--remote-debugging-port=0',
+          ])
+      )
+        return invalidate();
+      target = child;
+      child.once('exit', invalidate);
+      child.once('error', invalidate);
+      transmit({ type: 'offer', pid: child.pid, args: [...child.spawnargs] });
+    };
+    pending.set(child, cleanup);
+    child.once('spawn', onSpawn);
+    child.once('close', cleanup);
+  };
+  const timer = setTimeout(
+    () => invalidate(),
+    Math.max(1, config.deadline - Date.now()),
+  );
+  const close = () => {
+    if (!active) return;
+    active = false;
+    clearTimeout(timer);
+    diagnostics.unsubscribe(onConstruct);
+    for (const cleanup of [...pending.values()]) cleanup();
+    target?.removeListener('exit', invalidate);
+    target?.removeListener('error', invalidate);
+  };
+  diagnostics.subscribe(onConstruct);
+  return {
+    close,
+    confirm(value) {
+      if (
+        confirmed ||
+        !/^\d+$/.test(value?.birth ?? '') ||
+        !alive() ||
+        value.nonce !== config.nonce ||
+        value.pid !== target.pid ||
+        value.type !== 'confirm-request' ||
+        JSON.stringify(target.spawnargs) !==
+          JSON.stringify([
+            config.artifact,
+            '--inspect=0',
+            '--remote-debugging-port=0',
+          ]) ||
+        target.spawnfile !== config.artifact
+      )
+        return invalidate();
+      confirmed = true;
+      transmit({ type: 'confirm', pid: target.pid, birth: value.birth });
     },
   };
 }
@@ -312,13 +542,39 @@ async function worker(config) {
   const save = () =>
     writeFile(config.output, JSON.stringify(evidence, null, 2));
   let stopped = false;
+  let offer;
+  let confirmed;
+  let requested;
+  let original;
+  let revoked = false;
   // IPC failures are secondary diagnostics, including parent-disconnect races.
   process.on('error', note);
   process.on('message', (value) => {
     if (value === 'stop') stopped = true;
+    else if (config.nonce) {
+      if (
+        !value ||
+        value.nonce !== config.nonce ||
+        JSON.stringify(value).length > 2048
+      )
+        revoked = true;
+      else if (value.type === 'offer' && !offer) offer = value;
+      else if (
+        value.type === 'confirm' &&
+        requested &&
+        !confirmed &&
+        Date.now() < requested.expires &&
+        Date.now() < deadline - 750 &&
+        value.pid === requested.pid &&
+        value.birth === requested.birth
+      )
+        confirmed = value;
+      else revoked = true;
+    }
   });
   process.on('disconnect', () => {
     stopped = true;
+    revoked = true;
   });
   // An abort of the smoke parent still leaves this private observer its bounded
   // chance to persist evidence. A hard deadline also bounds slow filesystem IO.
@@ -331,12 +587,61 @@ async function worker(config) {
   try {
     await mkdir(dirname(config.output), { recursive: true });
     await save();
+    if (config.nonce) original = await originalArtifact(config);
     if (process.connected)
       process.send('ready', (error) => {
         if (error) note(error);
       });
     while (!stopped && Date.now() < deadline - 750) {
       try {
+        if (revoked) throw new Error('Retained launch authority revoked');
+        if (offer && !requested) {
+          const identity = await retainedSpawnIdentity(offer, config, original);
+          if (!process.connected || revoked || stopped)
+            throw new Error('Retained launch handoff disconnected');
+          requested = {
+            pid: offer.pid,
+            ...identity,
+            expires: Date.now() + 500,
+          };
+          process.send(
+            {
+              type: 'confirm-request',
+              nonce: config.nonce,
+              pid: offer.pid,
+              birth: identity.birth,
+            },
+            (error) => {
+              if (error) {
+                note(error);
+                revoked = true;
+              }
+            },
+          );
+        }
+        if (requested && !confirmed && Date.now() >= requested.expires)
+          revoked = true;
+        if (confirmed && !roots.has(confirmed.pid)) {
+          const identity = await retainedSpawnIdentity(offer, config, original);
+          if (
+            Date.now() >= requested.expires ||
+            Date.now() >= deadline - 750 ||
+            identity.birth !== confirmed.birth ||
+            !process.connected ||
+            revoked ||
+            stopped ||
+            roots.size
+          )
+            throw new Error('Retained launch handoff changed or ambiguous');
+          roots.set(confirmed.pid, identity);
+          evidence.authority = {
+            kind: 'retained-spawn',
+            pid: confirmed.pid,
+            birth: identity.birth,
+            originalSha256: original.hash,
+            managed: original.managed,
+          };
+        }
         const parent = processIdentity(
           await io.read(proc(config.parent, 'stat')),
         );
@@ -352,13 +657,23 @@ async function worker(config) {
           if (identity.parent !== config.parent)
             throw new Error('Foreign launch parent');
           if (!roots.has(pid)) {
+            if (offer) {
+              if (pid !== offer.pid) revoked = true;
+              continue;
+            }
             if (roots.size)
               throw new Error(
                 'A different runtime PID appeared in this launch',
               );
             // Bind the real runtime before it execs the mounted binary. Missing
             // this transient event is explicitly unknown, never a hash-only bind.
-            roots.set(pid, await runtimeIdentity(pid, config));
+            roots.set(
+              pid,
+              await runtimeIdentity(pid, {
+                ...config,
+                fileUid: original?.metadata.uid ?? config.uid,
+              }),
+            );
           }
         }
         for (const [root, identity] of roots) {
@@ -385,6 +700,8 @@ async function worker(config) {
               config,
             );
             await retained(root, identity, io);
+            if (revoked || !process.connected || stopped)
+              throw new Error('Retained launch ended during observation');
             evidence.samples.push(sample);
             seen.add(key);
             evidence.status = 'observed';
@@ -398,8 +715,10 @@ async function worker(config) {
     }
     // Kernel output is filtered at the reader, never copied wholesale. Include
     // only this invocation's observed PIDs and exact validated mount paths.
-    const targets = [...roots.keys()].map((pid) => `pid=${pid}([^0-9]|$)`);
-    for (const sample of evidence.samples) {
+    const targets = (revoked ? [] : [...roots.keys()]).map(
+      (pid) => `pid=${pid}([^0-9]|$)`,
+    );
+    for (const sample of revoked ? [] : evidence.samples) {
       targets.push(`pid=${sample.pid}([^0-9]|$)`);
       targets.push(sample.mount.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     }
@@ -431,6 +750,12 @@ async function worker(config) {
       evidence.kernelAudit = {
         unavailable: 'No retained launch identity or remaining audit budget',
       };
+    if (revoked) {
+      evidence.status = 'unknown';
+      evidence.samples = [];
+      delete evidence.authority;
+      note(new Error('Retained launch authority revoked'));
+    }
     evidence.completed = true;
     evidence.elapsedMs = Date.now() - started;
     await save();
@@ -446,6 +771,8 @@ async function worker(config) {
 
 async function startObserver(config) {
   const parent = process.pid;
+  const nonce = randomBytes(16).toString('hex');
+  const deadline = Date.now() + LIMIT;
   const [parentStat, children, artifact] = await waitWithin(
     Promise.all([
       io.read(proc(parent, 'stat')),
@@ -465,17 +792,21 @@ async function startObserver(config) {
       '--appimage-observer',
       JSON.stringify({
         ...config,
+        nonce,
         artifact,
         parent,
         parentBirth,
         baseline,
         uid: process.getuid(),
-        deadline: Date.now() + LIMIT,
+        deadline,
       }),
     ],
     { stdio: ['ignore', 'ignore', 'inherit', 'ipc'], detached: false },
   );
-  const lifetime = setTimeout(() => child.kill('SIGKILL'), LIMIT);
+  const lifetime = setTimeout(
+    () => child.kill('SIGKILL'),
+    Math.max(1, deadline - Date.now()),
+  );
   lifetime.unref();
   child.once('exit', () => clearTimeout(lifetime));
   child.once('error', () => clearTimeout(lifetime));
@@ -490,8 +821,30 @@ async function startObserver(config) {
       resolve();
     });
   });
+  const capture = captureAppImageSpawn(
+    { ...config, artifact, nonce, deadline },
+    (value) => {
+      if (
+        !child.connected ||
+        child.exitCode !== null ||
+        child.signalCode !== null
+      )
+        throw new Error('Observer disconnected');
+      child.send(value, (error) => {
+        if (error) capture.close();
+      });
+    },
+  );
+  const onMessage = (value) => {
+    if (value?.type === 'confirm-request') capture.confirm(value);
+  };
+  child.on('message', onMessage);
+  child.once('exit', () => capture.close());
+  child.once('disconnect', () => capture.close());
   return () =>
     new Promise((resolve) => {
+      capture.close();
+      child.removeListener('message', onMessage);
       if (child.exitCode !== null || child.signalCode !== null)
         return resolve();
       const timer = setTimeout(() => {

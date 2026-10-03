@@ -1,6 +1,6 @@
 # Managed AppImage installation design
 
-This design is **unimplemented and unqualified**. CI continues to launch the original download directly with the existing strict sandbox and identity checks. A managed installation is a candidate for restricted-user-namespace Ubuntu hosts; it does not establish support for unmanaged portable execution or satisfy native acceptance.
+Managed installation and policy preparation are **unimplemented and unqualified**. CI continues to launch the original download directly with the existing strict sandbox and identity checks. A managed installation is a candidate for restricted-user-namespace Ubuntu hosts; it does not establish support for unmanaged portable execution or satisfy native acceptance.
 
 ## Policy contract and its limits
 
@@ -37,6 +37,8 @@ Privileged preparation would be confined to an explicitly guarded disposable Git
 
 ## Unresolved prerequisites
 
-The retained-spawn proposal has not implemented the bounded parent-to-observer identity handoff. The current observer requires seeing the original runtime before exec; a transient runtime can be missed. A managed root-owned artifact would also require separating executable-file ownership from the ordinary launch user's process ownership in that binding, with fresh fail-closed controls. Neither an installed-path string nor a change to the expected UID supplies that proof.
+The source now implements a scoped retained-spawn handshake for the sole existing first launch. Node's constructor notification supplies no PID authority; the successful event on the actual returned `ChildProcess` must match the exact direct-launch executable and arguments. A private nonce-bound observer checks parent/process birth and ordinary-user UID, then requests confirmation while the parent still retains that live handle. Duplicate, late, foreign, exited or disconnected handoffs remain unknown. The ten-second total observer budget and existing launch/restart budgets are unchanged.
 
-Until this authority and effective inherited-label verification are implemented and independently reviewed, adding a policy-install step would leave the essential provenance gap unresolved. No managed-policy preparation has been added to CI. Actual secure managed launch, unmanaged portability, native clean installation, upgrade/removal, desktop integration, unlocked keyring and signing trust remain pending.
+Fast-exec acceptance requires the original at the fixed root-owned, non-writable managed path with protected parents, matching original SHA-256 and stable file identity. It records `retained-spawn` authority, not a claim that `/proc` showed the original ELF before exec. Executable-file ownership is separate from the launch user's process ownership. Ordinary owned downloads still require seeing the native original before exec and can remain unknown when that observation is missed. Mounted ELF/ASAR hashes, FUSE identity, helper containment and effective context checks remain required.
+
+This is source-only implementation, with Node child/IPC and controlled Linux I/O fixtures. No managed installer, root-owned artifact receipt or policy preparation has been implemented or executed. The policy attachment, inherited context and actual secure managed launch require fresh independent source/security review and genuine hosted evidence. Unmanaged portability, native clean installation, upgrade/removal, desktop integration, unlocked keyring and signing trust remain pending.
