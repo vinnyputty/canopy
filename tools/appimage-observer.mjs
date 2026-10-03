@@ -312,6 +312,8 @@ async function worker(config) {
   const save = () =>
     writeFile(config.output, JSON.stringify(evidence, null, 2));
   let stopped = false;
+  // IPC failures are secondary diagnostics, including parent-disconnect races.
+  process.on('error', note);
   process.on('message', (value) => {
     if (value === 'stop') stopped = true;
   });
@@ -329,7 +331,10 @@ async function worker(config) {
   try {
     await mkdir(dirname(config.output), { recursive: true });
     await save();
-    process.send?.('ready');
+    if (process.connected)
+      process.send('ready', (error) => {
+        if (error) note(error);
+      });
     while (!stopped && Date.now() < deadline - 750) {
       try {
         const parent = processIdentity(
@@ -435,7 +440,7 @@ async function worker(config) {
     await save().catch(() => {});
   } finally {
     clearTimeout(hardStop);
-    process.disconnect?.();
+    if (process.connected) process.disconnect();
   }
 }
 

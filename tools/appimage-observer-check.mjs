@@ -1,7 +1,8 @@
+import { fork } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, open, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import {
@@ -379,6 +380,90 @@ export async function checkAppImageObserver() {
     join(dirname(fileURLToPath(import.meta.url)), 'packaged-smoke.mjs'),
     'utf8',
   );
+  const observerSource = await readFile(
+    join(dirname(fileURLToPath(import.meta.url)), 'appimage-observer.mjs'),
+    'utf8',
+  );
+  const workerBegin = observerSource.indexOf('async function worker(config) {');
+  const workerEnd = observerSource.indexOf(
+    '\nasync function startObserver',
+    workerBegin,
+  );
+  assert(workerBegin >= 0 && workerEnd > workerBegin);
+  const ipcDirectory = await mkdtemp(join(tmpdir(), 'canopy-observer-ipc-'));
+  try {
+    const fixture = join(ipcDirectory, 'worker.mjs');
+    await writeFile(
+      fixture,
+      `
+      import { mkdir, writeFile } from 'node:fs/promises';
+      import { dirname } from 'node:path';
+      const LIMIT = 10000;
+      const message = error => ({error: error?.code ?? error?.message ?? String(error)});
+      const io = {read: async () => {throw new Error('fixture proc unavailable')}};
+      ${observerSource.slice(workerBegin, workerEnd)}
+      const [mode, output] = process.argv.slice(2);
+      if (mode === 'already-disconnected') process.disconnect();
+      if (mode === 'ready-send-race') {
+        const send = process.send.bind(process);
+        process.send = (...args) => {process.disconnect(); return send(...args)};
+      }
+      await worker({artifact: '/fixture/Canopy.AppImage', parent: process.ppid,
+        parentBirth: 'fixture', baseline: [], output, deadline: Date.now() + 2000});
+    `,
+    );
+    for (const mode of [
+      'already-disconnected',
+      'parent-disconnect',
+      'ready-send-race',
+      'completion',
+    ]) {
+      const output = join(ipcDirectory, `${mode}.json`);
+      const child = fork(fixture, [mode, output], {
+        execPath: process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+        execArgv: [],
+      });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      const deadline = setTimeout(() => child.kill('SIGKILL'), 4000);
+      try {
+        child.on('message', (value) => {
+          assert.equal(value, 'ready');
+          if (mode === 'parent-disconnect') child.disconnect();
+          if (mode === 'completion') child.send('stop', () => {});
+        });
+        const result = await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('exit', (code, signal) => resolve({ code, signal }));
+        });
+        assert.deepEqual(result, { code: 0, signal: null }, stderr);
+        assert.doesNotMatch(stderr, /ERR_IPC_DISCONNECTED|Unhandled/);
+        const retained = JSON.parse(await readFile(output, 'utf8'));
+        assert.equal(retained.completed, true);
+        assert.equal(retained.status, 'unknown');
+        assert.deepEqual(retained.samples, []);
+        if (mode === 'ready-send-race')
+          assert(
+            retained.limitations.some(
+              (item) => item.error === 'ERR_IPC_CHANNEL_CLOSED',
+            ),
+          );
+        assert.match(
+          retained.kernelAudit.unavailable,
+          /No retained launch identity/,
+        );
+      } finally {
+        clearTimeout(deadline);
+        if (child.exitCode === null && child.signalCode === null)
+          child.kill('SIGKILL');
+      }
+    }
+  } finally {
+    await rm(ipcDirectory, { recursive: true, force: true });
+  }
   const begin = source.indexOf('      const createApplication =');
   const end = source.indexOf('      page = await app.firstWindow();', begin);
   assert(begin >= 0 && end > begin);
@@ -387,55 +472,63 @@ export async function checkAppImageObserver() {
     'dependencies',
     `const {electron, executablePath, env, identity, restart, workspace, artifact, join, observeAppImageLaunch} = dependencies; let app; ${source.slice(begin, end)} return app;`,
   );
-  for (const identity of [undefined, { ...config, appImage: artifact }]) {
-    for (const restart of [false, true]) {
-      let launches = 0;
-      let observers = 0;
-      const original = new Error('renderer exited before application handle');
-      for (const failure of [false, true]) {
-        launches = 0;
-        observers = 0;
-        const invoke = () =>
-          executeLaunch({
-            electron: {
-              launch: async (options) => {
-                launches++;
-                assert.deepEqual(options, {
-                  executablePath: artifact,
-                  env: hosted,
-                  chromiumSandbox: true,
-                  timeout: 30000,
-                });
-                if (failure) throw original;
-                return 'production result';
+  for (const paths of [posix, win32, { join }]) {
+    for (const identity of [undefined, { ...config, appImage: artifact }]) {
+      for (const restart of [false, true]) {
+        let launches = 0;
+        let observers = 0;
+        const original = new Error('renderer exited before application handle');
+        for (const failure of [false, true]) {
+          launches = 0;
+          observers = 0;
+          const invoke = () =>
+            executeLaunch({
+              electron: {
+                launch: async (options) => {
+                  launches++;
+                  assert.deepEqual(options, {
+                    executablePath: artifact,
+                    env: hosted,
+                    chromiumSandbox: true,
+                    timeout: 30000,
+                  });
+                  if (failure) throw original;
+                  return 'production result';
+                },
               },
-            },
-            executablePath: artifact,
-            env: hosted,
-            identity,
-            restart,
-            workspace: '/workspace',
-            artifact: 'Canopy.AppImage',
-            join,
-            observeAppImageLaunch: async (options, launch) => {
-              observers++;
-              assert.equal(options.artifact, artifact);
-              assert.equal(
-                options.output,
-                '/workspace/.cache/smoke-failure/Canopy.AppImage/mounted-launch.json',
-              );
-              return observeAppImageLaunch(options, launch, {
-                env: hosted,
-                platform: 'linux',
-                start: async () => async () => {},
-              });
-            },
-          });
-        if (failure)
-          await assert.rejects(invoke(), (error) => error === original);
-        else assert.equal(await invoke(), 'production result');
-        assert.equal(launches, 1);
-        assert.equal(observers, identity && !restart ? 1 : 0);
+              executablePath: artifact,
+              env: hosted,
+              identity,
+              restart,
+              workspace: '/workspace',
+              artifact: 'Canopy.AppImage',
+              join: paths.join,
+              observeAppImageLaunch: async (options, launch) => {
+                observers++;
+                assert.equal(options.artifact, artifact);
+                assert.equal(
+                  options.output,
+                  paths.join(
+                    '/workspace',
+                    '.cache',
+                    'smoke-failure',
+                    'Canopy.AppImage',
+                    'mounted-launch.json',
+                  ),
+                );
+                return observeAppImageLaunch(options, launch, {
+                  env: hosted,
+                  platform: 'linux',
+                  start: async () => async () => {},
+                });
+              },
+            });
+          if (failure)
+            await assert.rejects(invoke(), (error) => error === original);
+          else assert.equal(await invoke(), 'production result');
+          assert.equal(launches, 1);
+          assert.equal(observers, identity && !restart ? 1 : 0);
+        }
       }
     }
   }
