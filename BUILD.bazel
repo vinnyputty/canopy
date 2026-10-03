@@ -25,7 +25,7 @@ js_test(
     name = "test",
     timeout = "long",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-refresh.mjs", "tools/portable-check.mjs", "tools/ci.mjs", "tools/perf-desktop.mjs", "tools/audit-lifecycle.mjs", "tools/prepare-perf-desktop.mjs"],
+    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-refresh.mjs", "tools/portable-check.mjs", "tools/ci.mjs", "tools/perf-desktop.mjs", "tools/audit-lifecycle.mjs", "tools/prepare-perf-desktop.mjs", "tools/demo-check.mjs"],
 )
 
 js_test(
