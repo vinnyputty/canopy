@@ -90,7 +90,8 @@ function model(failure) {
   };
   for (const path of [
     '/',
-    '/opt',
+    '/var',
+    '/var/lib',
     '/etc',
     '/etc/apparmor.d',
     '/workspace',
@@ -265,7 +266,7 @@ function model(failure) {
 export async function checkManagedAppImage() {
   assert.equal(
     managedPolicy,
-    'abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /opt/Canopy/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n',
+    'abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /var/lib/canopy-appimage-ci/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n',
   );
   for (const change of [
     { platform: 'darwin' },
@@ -320,6 +321,105 @@ export async function checkManagedAppImage() {
   assert.equal(installed.receipt.source.sha256, base.sha256);
   assert.equal(installed.receipt.profile.content, managedPolicy);
   assert.equal(installed.receipt.resources.length, 3);
+  assert.deepEqual(
+    installed.receipt.parents.map((parent) => parent.path),
+    ['/', '/var', '/var/lib', '/etc', '/etc/apparmor.d'],
+  );
+  assert.deepEqual(
+    installed.receipt.original.parents.map((parent) => parent.path),
+    ['/', '/var', '/var/lib', paths.directory],
+  );
+  // Every new ancestor is required before creation and pinned for later use.
+  for (const path of ['/var', '/var/lib']) {
+    for (const alter of [
+      (m) => {
+        m.files.get(path).meta.uid = 1001;
+      },
+      (m) => {
+        m.files.get(path).meta.gid = 1001;
+      },
+      (m) => {
+        m.files.get(path).directory = false;
+      },
+      (m) => {
+        m.files.get(path).symlink = true;
+      },
+      (m) => {
+        m.files.get(path).meta.mode |= 0o020;
+      },
+      (m) => {
+        m.files.get(path).meta.mode |= 0o002;
+      },
+      (m) => {
+        m.files.get(path).meta.mode |= 0o4000;
+      },
+      (m) => {
+        m.files.get(path).meta.mode |= 0o2000;
+      },
+      (m) => {
+        m.io.canonical = async (p) => (p === path ? '/foreign' : p);
+      },
+    ]) {
+      const bad = model();
+      alter(bad);
+      await assert.rejects(
+        managedOperation({ ...base, operation: 'prepare' }, bad.io, ctx),
+      );
+      assert.deepEqual(
+        bad.calls,
+        [],
+        'unprotected ancestor must not be repaired',
+      );
+    }
+    for (const operation of ['check', 'cleanup']) {
+      const changed = model();
+      await managedOperation(
+        { ...base, operation: 'prepare' },
+        changed.io,
+        ctx,
+      );
+      const before = [...changed.calls];
+      changed.files.get(path).meta.ino++;
+      await assert.rejects(
+        managedOperation({ ...base, operation }, changed.io, ctx),
+      );
+      assert.deepEqual(
+        changed.calls,
+        before,
+        'changed ancestor must retain resources',
+      );
+    }
+  }
+  // Former resources supply no current authority and are never swept.
+  const stale = model();
+  stale.make('/opt', '', 0o777, 0, true);
+  stale.make('/opt/Canopy', '', 0o755, 0, true);
+  stale.make('/opt/Canopy/Canopy.AppImage', 'original', 0o555);
+  stale.make(
+    '/opt/.canopy-appimage-ci.json',
+    JSON.stringify(installed.receipt),
+    0o600,
+  );
+  await assert.rejects(
+    managedOperation({ ...base, operation: 'check' }, stale.io, ctx),
+  );
+  const oldFiles = [...stale.files].filter(([path]) => path.startsWith('/opt'));
+  await managedOperation({ ...base, operation: 'prepare' }, stale.io, ctx);
+  await managedOperation({ ...base, operation: 'cleanup' }, stale.io, ctx);
+  assert.deepEqual(
+    [...stale.files].filter(([path]) => path.startsWith('/opt')),
+    oldFiles,
+  );
+  const stalePolicy = model();
+  stalePolicy.make(
+    paths.policy,
+    managedPolicy.replace(paths.original, '/opt/Canopy/Canopy.AppImage'),
+    0o444,
+  );
+  await assert.rejects(
+    managedOperation({ ...base, operation: 'prepare' }, stalePolicy.io, ctx),
+  );
+  assert.deepEqual(stalePolicy.calls, []);
   assert.equal(m.calls.filter((call) => call === 'parser:add').length, 1);
   assert.equal(
     (await managedOperation({ ...base, operation: 'check' }, m.io, ctx))
@@ -530,13 +630,13 @@ export async function checkManagedAppImage() {
   assert.deepEqual(collision.calls, []);
   for (const mutation of [
     (model) => {
-      model.files.get('/opt').meta.uid = 1001;
+      model.files.get('/var/lib').meta.uid = 1001;
     },
     (model) => {
       model.files.get('/etc/apparmor.d').symlink = true;
     },
     (model) => {
-      model.files.get('/opt').meta.mode |= 0o002;
+      model.files.get('/var/lib').meta.mode |= 0o002;
     },
     (model) => {
       model.files.get(base.source).symlink = true;
@@ -1077,17 +1177,24 @@ export async function checkManagedAppImage() {
       },
     );
   }
-  for (const path of [
-    '/',
-    '/opt',
-    '/etc',
-    '/etc/apparmor.d',
-    ...Object.values(paths),
+  for (const [path, label] of [
+    ['/', 'root'],
+    ['/var', 'var'],
+    ['/var/lib', 'var-lib'],
+    ['/etc', 'etc'],
+    ['/etc/apparmor.d', 'apparmor-dir'],
+    [paths.directory, 'managed-directory'],
+    [paths.original, 'managed-original'],
+    [paths.receipt, 'managed-receipt'],
+    [paths.policy, 'managed-policy'],
   ]) {
     await assert.rejects(
       protect(protectedIO({ ...safeMetadata, uid: 1001 }, path), path),
       (error) => {
         assert(error.message.includes('; protected '));
+        const detail = error.message.split('; protected ')[1];
+        assert.equal(JSON.parse(detail).path, label);
+        assert(Buffer.byteLength(detail) <= 512);
         return true;
       },
     );
@@ -1285,6 +1392,9 @@ export async function checkManagedAppImage() {
   await checkManagedLifecycle();
   await checkManagedNodeExecutable(source);
   await checkManagedTransport(source);
+  checkManagedResponseSchema(installed, { ...base, operation: 'prepare' });
+  checkManagedResponseSchema(installed, { ...base, operation: 'check' });
+  checkManagedResponseSchema(proof, { ...base, operation: 'launch', launch });
   await checkManagedSuccessTransport(source, proof, launch);
   const refused = spawnSync(
     process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
@@ -2252,6 +2362,107 @@ async function checkManagedTransport(source) {
 
 // Complete success transport controls use source-produced values and actual
 // owned Node IPC. Kernel/file/process identities remain models, never native proof.
+function checkManagedResponseSchema(value, request) {
+  const response = { ok: true, value };
+  assert(validManagedResponse(response, request));
+  const fields = [];
+  const visit = (object, path = []) => {
+    if (object === null || typeof object !== 'object') return;
+    for (const key of Object.keys(object)) {
+      const current = [...path, key];
+      fields.push([current, object[key]]);
+      visit(object[key], current);
+    }
+  };
+  visit(response);
+  let omissions = 0,
+    numbers = 0;
+  const reject = (path, mutate) => {
+    const changed = structuredClone(response);
+    const parent = path
+      .slice(0, -1)
+      .reduce((object, key) => object[key], changed);
+    mutate(parent, path.at(-1));
+    // Rehash mutated receipts so hash mismatch cannot mask schema refusal.
+    if (
+      changed.value?.receipt &&
+      path.join('.') !== 'value.receiptSha256' &&
+      Object.hasOwn(changed.value, 'receiptSha256')
+    )
+      changed.value.receiptSha256 = hash(JSON.stringify(changed.value.receipt));
+    assert(!validManagedResponse(changed, request), path.join('.'));
+  };
+  for (const [path, value] of fields) {
+    reject(path, (parent, key) => {
+      delete parent[key];
+    });
+    omissions++;
+    if (typeof value === 'number')
+      for (const invalid of [null, undefined, '0', NaN, Infinity, -Infinity]) {
+        reject(path, (parent, key) => {
+          parent[key] = invalid;
+        });
+        numbers++;
+      }
+  }
+  for (const index of [1, 2]) {
+    for (const key of ['dev', 'ino', 'uid', 'gid', 'mode'])
+      for (const invalid of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1])
+        reject(
+          ['value', 'receipt', 'parents', String(index), 'identity', key],
+          (parent, key) => {
+            parent[key] = invalid;
+          },
+        );
+    for (const [key, invalid] of [
+      ['uid', 1001],
+      ['gid', 1001],
+      ['mode', 0o40777],
+      ['mode', 0o44755],
+      ['mode', 0o42755],
+      ['mode', 0o100755],
+      ['ino', 0],
+      ['nlink', 2],
+    ])
+      reject(
+        ['value', 'receipt', 'parents', String(index), 'identity', key],
+        (parent, key) => {
+          parent[key] = invalid;
+        },
+      );
+    reject(
+      ['value', 'receipt', 'parents', String(index), 'path'],
+      (parent, key) => {
+        parent[key] = '/opt';
+      },
+    );
+    reject(
+      ['value', 'receipt', 'original', 'parents', String(index), 'ino'],
+      (parent, key) => {
+        parent[key]++;
+      },
+    );
+  }
+  reject(['value', 'receipt', 'parents'], (parent, key) => {
+    parent[key].splice(2, 1);
+  });
+  reject(['value', 'receipt', 'original', 'parents'], (parent, key) => {
+    parent[key].splice(2, 1);
+  });
+  reject(['value', 'receipt', 'resources', '1', 'path'], (parent, key) => {
+    parent[key] = '/opt/Canopy/Canopy.AppImage';
+  });
+  reject(['value', 'receipt', 'profile', 'content'], (parent, key) => {
+    parent[key] = managedPolicy.replace(
+      paths.original,
+      '/opt/Canopy/Canopy.AppImage',
+    );
+  });
+  console.log(
+    `Managed ${request.operation} schema: ${omissions} omissions, ${numbers} numeric refusals PASS (modeled)`,
+  );
+}
+
 async function checkManagedSuccessTransport(source, launchProof, launchInput) {
   const begin = source.indexOf('async function rootInvoke('),
     end = source.indexOf('function nativeEffects(', begin);
@@ -2271,7 +2482,7 @@ async function checkManagedSuccessTransport(source, launchProof, launchInput) {
       'null-resource-identities',
       (r) => {
         r.resources = [null, null, null];
-        r.parents = [null, null, null, null];
+        r.parents = [null, null, null, null, null];
         r.self = {};
         r.source.identity = {};
         r.loaded.identity = {};

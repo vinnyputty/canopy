@@ -25,13 +25,13 @@ import {
 } from './appimage-observer.mjs';
 
 export const managedPaths = Object.freeze({
-  directory: '/opt/Canopy',
-  original: '/opt/Canopy/Canopy.AppImage',
-  receipt: '/opt/.canopy-appimage-ci.json',
+  directory: '/var/lib/canopy-appimage-ci',
+  original: '/var/lib/canopy-appimage-ci/Canopy.AppImage',
+  receipt: '/var/lib/.canopy-appimage-ci.json',
   policy: '/etc/apparmor.d/canopy-appimage',
 });
 export const managedProfile = 'canopy-appimage';
-export const managedPolicy = `abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /opt/Canopy/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n`;
+export const managedPolicy = `abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /var/lib/canopy-appimage-ci/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n`;
 const digest = (text) => createHash('sha256').update(text).digest('hex');
 const ownFile = fileURLToPath(import.meta.url);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -126,9 +126,10 @@ function protectedPathRefusal(path, metadata, directory, mode, canonical) {
   try {
     const labels = new Map([
       ['/', 'root'],
-      ['/opt', 'opt'],
+      ['/var', 'var'],
+      ['/var/lib', 'var-lib'],
       ['/etc', 'etc'],
-      ['/etc/apparmor.d', 'apparmor-directory'],
+      ['/etc/apparmor.d', 'apparmor-dir'],
       [managedPaths.directory, 'managed-directory'],
       [managedPaths.original, 'managed-original'],
       [managedPaths.receipt, 'managed-receipt'],
@@ -189,7 +190,7 @@ async function protectedPath(io, path, directory = false, mode) {
 }
 async function parents(io) {
   const result = [];
-  for (const path of ['/', '/opt', '/etc', '/etc/apparmor.d'])
+  for (const path of ['/', '/var', '/var/lib', '/etc', '/etc/apparmor.d'])
     result.push({ path, identity: await protectedPath(io, path, true) });
   return result;
 }
@@ -1394,8 +1395,8 @@ export function validManagedResponse(response, request, onRefusal = () => {}) {
     r.profile.content !== managedPolicy ||
     r.profile.sha256 !== digest(managedPolicy) ||
     !Array.isArray(r.parents) ||
-    r.parents.length !== 4 ||
-    !['/', '/opt', '/etc', '/etc/apparmor.d'].every(
+    r.parents.length !== 5 ||
+    !['/', '/var', '/var/lib', '/etc', '/etc/apparmor.d'].every(
       (path, index) =>
         keys(r.parents[index], ['path', 'identity']) &&
         r.parents[index].path === path &&
@@ -1447,10 +1448,10 @@ export function validManagedResponse(response, request, onRefusal = () => {}) {
       (key) => o.metadata[key] === original.identity[key],
     ) ||
     !Array.isArray(o.parents) ||
-    o.parents.length !== 3 ||
-    !['/', '/opt', managedPaths.directory].every((path, index) => {
+    o.parents.length !== 4 ||
+    !['/', '/var', '/var/lib', managedPaths.directory].every((path, index) => {
       const parent = o.parents[index],
-        expected = index < 2 ? r.parents[index].identity : dir.identity;
+        expected = index < 3 ? r.parents[index].identity : dir.identity;
       return (
         keys(parent, ['path', ...directory]) &&
         parent.path === path &&

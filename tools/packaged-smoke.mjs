@@ -646,7 +646,7 @@ for (const format of platform.formats) {
             ),
         );
         managedFinished = true;
-        launchExecutable = '/opt/Canopy/Canopy.AppImage';
+        launchExecutable = '/var/lib/canopy-appimage-ci/Canopy.AppImage';
       } else
         launches = await smoke(launchExecutable, directory, name, identity);
     } catch (error) {

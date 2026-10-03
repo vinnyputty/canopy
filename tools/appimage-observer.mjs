@@ -224,18 +224,25 @@ export async function originalArtifact(config, effects = io) {
   )
     throw new Error('Original artifact is not protected');
   const managed =
-    config.artifact === '/opt/Canopy/Canopy.AppImage' && before.uid === 0;
+    config.artifact === '/var/lib/canopy-appimage-ci/Canopy.AppImage' &&
+    before.uid === 0;
   if (!managed && before.uid !== config.uid)
     throw new Error('Original file owner differs from owned download contract');
   if (managed) {
     if (before.mode & 0o222) throw new Error('Managed original is writable');
-    for (const path of ['/', '/opt', '/opt/Canopy']) {
+    for (const path of [
+      '/',
+      '/var',
+      '/var/lib',
+      '/var/lib/canopy-appimage-ci',
+    ]) {
       const parent = await effects.stat(path);
       if (
         (await effects.canonical(path)) !== path ||
         !parent.isDirectory() ||
         parent.uid !== 0 ||
-        parent.mode & 0o022
+        parent.gid !== 0 ||
+        parent.mode & 0o6022
       )
         throw new Error('Managed original parent is not protected');
       const fields = ['dev', 'ino', 'uid', 'gid', 'mode'];

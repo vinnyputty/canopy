@@ -13,7 +13,7 @@ import {
   retainedSpawnIdentity,
   runtimeIdentity,
 } from './appimage-observer.mjs';
-const artifact = '/opt/Canopy/Canopy.AppImage';
+const artifact = '/var/lib/canopy-appimage-ci/Canopy.AppImage';
 const statText = (parent, birth) =>
   `70 (fixture) S ${parent} ${Array(17).fill('0').join(' ')} ${birth}`;
 export async function checkRetainedAppImage() {
@@ -66,6 +66,44 @@ export async function checkRetainedAppImage() {
     link: async () => '/tmp/.mount_CanopyABC/canopy',
   };
   const original = await originalArtifact(config, effects);
+  assert.deepEqual(
+    original.parents.map((parent) => parent.path),
+    ['/', '/var', '/var/lib', '/var/lib/canopy-appimage-ci'],
+  );
+  await assert.rejects(
+    originalArtifact(
+      { ...config, artifact: '/opt/Canopy/Canopy.AppImage' },
+      { ...effects, stat: async () => ({ ...metadata }) },
+    ),
+    /owned download contract/,
+  );
+  for (const path of ['/var', '/var/lib']) {
+    for (const patch of [
+      { uid: 1001 },
+      { gid: 1001 },
+      { mode: 0o40777 },
+      { mode: 0o44755 },
+      { mode: 0o42755 },
+      { isDirectory: () => false },
+    ])
+      await assert.rejects(
+        originalArtifact(config, {
+          ...effects,
+          stat: async (p) =>
+            p === path
+              ? { ...(await effects.stat(p)), ...patch }
+              : effects.stat(p),
+        }),
+        /parent is not protected/,
+      );
+    await assert.rejects(
+      originalArtifact(config, {
+        ...effects,
+        canonical: async (p) => (p === path ? '/foreign' : p),
+      }),
+      /parent is not protected/,
+    );
+  }
   await assert.rejects(
     originalArtifact({ ...config, uid: 0 }, effects),
     /Ordinary launch user/,
@@ -86,6 +124,17 @@ export async function checkRetainedAppImage() {
     await retainedSpawnIdentity(offer, config, original, effects),
     { parent: 50, birth: '123' },
   );
+  for (const path of ['/var', '/var/lib'])
+    await assert.rejects(
+      retainedSpawnIdentity(offer, config, original, {
+        ...effects,
+        stat: async (p) =>
+          p === path
+            ? { ...(await effects.stat(p)), ino: 11 }
+            : effects.stat(p),
+      }),
+      /original changed/,
+    );
   for (const value of [
     undefined,
     { ...offer, nonce: 'foreign' },
@@ -120,13 +169,13 @@ export async function checkRetainedAppImage() {
     },
     {
       stat: async (path) =>
-        path === '/opt'
+        path === '/var/lib'
           ? { uid: 0, mode: 0o40777, isDirectory: () => true }
           : effects.stat(path),
     },
     {
       stat: async (path) =>
-        path === '/opt/Canopy'
+        path === '/var/lib/canopy-appimage-ci'
           ? { uid: 1001, mode: 0o40755, isDirectory: () => true }
           : effects.stat(path),
     },
@@ -159,7 +208,7 @@ export async function checkRetainedAppImage() {
     retainedSpawnIdentity(offer, config, original, {
       ...effects,
       stat: async (path) =>
-        path === '/opt'
+        path === '/var/lib'
           ? { ...(await effects.stat(path)), ino: 11 }
           : effects.stat(path),
     }),
@@ -432,7 +481,7 @@ async function checkWorkerHandoff() {
       const proc = (pid, suffix) => '/proc/' + pid + '/' + suffix;
       const message = error => ({error:error?.code ?? error?.message ?? String(error)});
       const text = (parent,birth) => '70 (fixture) S ' + parent + ' ' + Array(17).fill('0').join(' ') + ' ' + birth;
-      const artifact = '/opt/Canopy/Canopy.AppImage';
+      const artifact = '/var/lib/canopy-appimage-ci/Canopy.AppImage';
       const mount = '/tmp/.mount_CanopyFIXTURE';
       const io = {
         canonical: async path => path,
