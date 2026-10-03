@@ -5287,6 +5287,7 @@ export function App() {
             if (target.type === 'Open root' || target.type === 'Recent root') {
               openTab(target.root.connectionId, target.root.rootKey);
             } else if (target.type === 'Saved view') {
+              setInboxOpen(false);
               setSelectedViewIssue(null);
               setWorkspace((current) => ({
                 ...current,

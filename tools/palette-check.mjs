@@ -395,6 +395,19 @@ async function audit() {
     page.getByRole('region', { name: 'Fixture Source View saved view' }),
   ).toBeVisible();
   record('PASS recent root and saved view activation');
+
+  await page.getByRole('button', { name: 'Triage inbox', exact: true }).click();
+  const inbox = page.getByRole('region', { name: 'Triage inbox', exact: true });
+  await expect(inbox).toBeVisible();
+  await choose('Fixture Source View', 'Saved view');
+  await expect(
+    page.getByRole('region', { name: 'Fixture Source View saved view' }),
+  ).toBeVisible();
+  await expect(inbox).toBeHidden();
+  await expect(palette).toBeHidden();
+  record(
+    'PASS Inbox-to-saved-view palette handoff displays the requested view',
+  );
   await choose('SHARED-1', 'Open root', 'Fixture Alpha');
   await origin.focus();
   await choose('Find in tree', 'Action');
