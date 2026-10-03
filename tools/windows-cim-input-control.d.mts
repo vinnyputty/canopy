@@ -26,3 +26,26 @@ export function runCimInputControls(options?: {
   timeoutMs?: number;
   report?: (record: CimInputControlRecord) => void;
 }): Promise<CimInputControlRecord[]>;
+
+export function runCimContextControls(options?: {
+  command?: string;
+  argsFor?: (script: string) => string[];
+  env?: NodeJS.ProcessEnv;
+  report?: (record: {
+    mode: string;
+    ok: boolean;
+    error?: string;
+    closed: boolean;
+    metadata?: Record<string, unknown>;
+    childPid?: number | null;
+  }) => void;
+}): Promise<
+  {
+    mode: string;
+    ok: boolean;
+    error?: string;
+    closed: boolean;
+    metadata?: Record<string, unknown>;
+    childPid?: number | null;
+  }[]
+>;

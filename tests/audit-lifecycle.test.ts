@@ -14,7 +14,10 @@ import {
 
 import { disposeProcess, withCleanup } from './fixtures/owned-process.js';
 
-import { runCimInputControls } from '../tools/windows-cim-input-control.mjs';
+import {
+  runCimInputControls,
+  runCimContextControls,
+} from '../tools/windows-cim-input-control.mjs';
 
 // These comparisons execute in the same Bazel/Node worker as the required
 // lifecycle fixtures. Diagnostic failures never replace their assertions.
@@ -29,6 +32,11 @@ const processBudgets =
   process.platform === 'win32'
     ? { operationMs: 15000, killMs: 60000 }
     : { operationMs: 1000, killMs: 1500 };
+if (process.platform === 'win32') {
+  before(async () => {
+    await runCimContextControls();
+  });
+}
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number) => {
   try {

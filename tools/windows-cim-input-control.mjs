@@ -313,7 +313,7 @@ function asyncControl(command, args, options, mode) {
     listen(child, 'close', (status, signal) => done(status, signal, true));
     listen(child.stdout, 'data', (chunk) => {
       stdoutBytes += Buffer.byteLength(chunk);
-      if (stdoutBytes <= limit) stdout += chunk;
+      if (stdoutBytes <= options.maxBuffer) stdout += chunk;
       else
         stop(
           Object.assign(new Error('CIM control stdout exceeded maxBuffer'), {
@@ -331,7 +331,7 @@ function asyncControl(command, args, options, mode) {
           elapsedMs: Date.now() - started,
           bytes: Buffer.byteLength(chunk),
         });
-      if (stderrBytes > limit)
+      if (stderrBytes > options.maxBuffer)
         stop(
           Object.assign(new Error('CIM control stderr exceeded maxBuffer'), {
             code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
@@ -360,3 +360,240 @@ function asyncControl(command, args, options, mode) {
     }
   });
 }
+
+// Read-only module-load comparisons, separate from required identity snapshots.
+// Child-local context changes never become production settings or kill authority.
+export async function runCimContextControls({
+  command = 'powershell.exe',
+  argsFor = (script) => [
+    '-NoProfile',
+    '-NonInteractive',
+    '-EncodedCommand',
+    Buffer.from(script, 'utf16le').toString('base64'),
+  ],
+  env = process.env,
+  report = (record) =>
+    console.log('Windows CIM context control:', JSON.stringify(record)),
+} = {}) {
+  const started = Date.now();
+  const results = [];
+  const inherited = powershellEnvironment(env);
+  const value = (key) =>
+    Object.entries(inherited).find(
+      ([name]) => name.toUpperCase() === key.toUpperCase(),
+    )?.[1];
+  const changed = (keys, additions) => ({
+    ...Object.fromEntries(
+      Object.entries(inherited).filter(
+        ([key]) => !keys.includes(key.toUpperCase()),
+      ),
+    ),
+    ...additions,
+  });
+  const contexts = [
+    ['inherited', inherited, undefined, true],
+    [
+      'system-cwd',
+      inherited,
+      value('SystemRoot'),
+      Boolean(value('SystemRoot')),
+    ],
+    [
+      'cache-disabled',
+      changed(['PSMODULEANALYSISCACHEPATH'], {
+        PSModuleAnalysisCachePath: 'NUL',
+      }),
+      undefined,
+      true,
+    ],
+    [
+      'runner-temp',
+      changed(['TEMP', 'TMP'], {
+        TEMP: value('RUNNER_TEMP'),
+        TMP: value('RUNNER_TEMP'),
+      }),
+      undefined,
+      Boolean(value('RUNNER_TEMP')),
+    ],
+  ];
+  for (const [mode, childEnv, cwd, available] of contexts) {
+    // Four 10s operations plus four 2s close allowances fit below 60s.
+    // Reserve close observation within the remaining overall allowance.
+    const timeout = Math.min(10000, 58000 - (Date.now() - started));
+    if (!available || timeout <= 0) {
+      const record = {
+        mode,
+        ok: false,
+        error: available ? 'CONTEXT_BUDGET_EXHAUSTED' : 'CONTEXT_UNAVAILABLE',
+        closed: true,
+      };
+      results.push(record);
+      report(record);
+      continue;
+    }
+    const result = await asyncControl(
+      command,
+      argsFor(contextScript),
+      {
+        env: childEnv,
+        cwd,
+        timeout,
+        windowsHide: true,
+        maxBuffer: 16384,
+        encoding: 'utf8',
+      },
+      'spawn-ignore',
+    );
+    let metadata;
+    let complete = false;
+    let schemaError = false;
+    try {
+      const lines = result.stdout.trim().split(/\r?\n/);
+      const parsed = JSON.parse(lines[0]);
+      const keys = [
+        'imageHash',
+        'psHomeHash',
+        'cwdHash',
+        'tempHash',
+        'cacheHash',
+        'manifestHash',
+        'manifestReadable',
+        'tempExists',
+        'cacheParentExists',
+        'version',
+        'edition',
+        'is64Bit',
+        'dllArchitecture',
+      ];
+      if (
+        Object.keys(parsed).sort().join(',') !== keys.sort().join(',') ||
+        [
+          'imageHash',
+          'psHomeHash',
+          'cwdHash',
+          'tempHash',
+          'cacheHash',
+          'manifestHash',
+        ].some(
+          (key) =>
+            !(
+              parsed[key] === null ||
+              (typeof parsed[key] === 'string' &&
+                /^[a-f0-9]{64}$/.test(parsed[key]))
+            ),
+        ) ||
+        ['manifestReadable', 'tempExists', 'cacheParentExists', 'is64Bit'].some(
+          (key) => typeof parsed[key] !== 'boolean',
+        ) ||
+        typeof parsed.version !== 'string' ||
+        !/^\d{1,10}(\.\d{1,10}){1,3}$/.test(parsed.version) ||
+        !['Desktop', 'Core'].includes(parsed.edition) ||
+        !['None', 'MSIL', 'X86', 'Amd64', 'Arm', 'unknown'].includes(
+          parsed.dllArchitecture,
+        ) ||
+        lines.length > 2 ||
+        (lines.length === 2 && lines[1] !== 'canopy-context complete')
+      )
+        throw new Error();
+      metadata = parsed;
+      complete = lines.length === 2;
+    } catch {
+      schemaError = true;
+    }
+    const record = {
+      mode,
+      childPid: result.pid,
+      observerPid: process.pid,
+      bazelTest: Boolean(env.TEST_TARGET),
+      nodeTest: Boolean(env.NODE_TEST_CONTEXT),
+      ok:
+        result.closed &&
+        !result.hasError &&
+        result.status === 0 &&
+        complete &&
+        !schemaError,
+      status: result.status,
+      signal: result.signal,
+      closed: result.closed,
+      error: result.hasError
+        ? 'CONTEXT_OPERATION_FAILED'
+        : schemaError
+          ? 'CONTEXT_SCHEMA_FAILED'
+          : !complete || result.status !== 0
+            ? 'CONTEXT_INCOMPLETE'
+            : undefined,
+      code: result.hasError
+        ? codes.has(result.error?.code)
+          ? result.error.code
+          : 'CHILD_ERROR'
+        : null,
+      elapsedMs: Date.now() - started,
+      timeoutMs: timeout,
+      stdoutBytes: result.stdoutBytes,
+      stderrBytes: result.stderrBytes,
+      metadata,
+      phase: result.phase ?? 'startup-or-script-entry',
+    };
+    results.push(record);
+    if (!result.closed) {
+      const failure = new Error('CIM context control closure unconfirmed');
+      Object.defineProperties(failure, {
+        child: { value: result.child },
+        primary: { value: result.error },
+        cleanupErrors: { value: result.cleanupErrors },
+        record: { value: record },
+      });
+      try {
+        report(record);
+      } catch (secondary) {
+        Object.defineProperty(failure, 'reportError', { value: secondary });
+      }
+      throw failure;
+    }
+    report(record);
+  }
+  return results;
+}
+
+const contextScript = String.raw`
+$ErrorActionPreference = 'Stop';
+[Console]::Error.WriteLine('canopy-cim phase=script-entry'); [Console]::Error.Flush();
+function Hash($text) {
+  if ([string]::IsNullOrEmpty($text)) { return $null }
+  $sha = [System.Security.Cryptography.SHA256]::Create();
+  try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+$manifest = $PSHOME + '\Modules\CimCmdlets\CimCmdlets.psd1';
+$dll = $PSHOME + '\Modules\CimCmdlets\Microsoft.Management.Infrastructure.CimCmdlets.dll';
+$readable = $false; $manifestHash = $null; $architecture = 'unknown';
+try { $stream = [IO.File]::OpenRead($manifest); try { $sha = [Security.Cryptography.SHA256]::Create(); try { $manifestHash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant(); $readable = $true } finally { $sha.Dispose() } } finally { $stream.Dispose() } } catch {}
+try { $architecture = [Reflection.AssemblyName]::GetAssemblyName($dll).ProcessorArchitecture.ToString() } catch {}
+$cache = $env:PSModuleAnalysisCachePath;
+if ([string]::IsNullOrEmpty($cache)) { $cache = [IO.Path]::Combine([Environment]::GetFolderPath('LocalApplicationData'), 'Microsoft\Windows\PowerShell\ModuleAnalysisCache') }
+$temp = [IO.Path]::GetTempPath();
+$metadata = @{
+ imageHash = Hash ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName);
+ psHomeHash = Hash $PSHOME; cwdHash = Hash ([Environment]::CurrentDirectory);
+ tempHash = Hash $temp; cacheHash = Hash $cache; manifestHash = $manifestHash;
+ manifestReadable = $readable; tempExists = [IO.Directory]::Exists($temp);
+ cacheParentExists = [IO.Directory]::Exists([IO.Path]::GetDirectoryName($cache));
+ version = $PSVersionTable.PSVersion.ToString(); edition = $PSVersionTable.PSEdition;
+ is64Bit = [Environment]::Is64BitProcess; dllArchitecture = $architecture;
+};
+# Serialize the fixed scalar schema without autoloading the Utility module.
+function Quote($text) {
+  if ($null -eq $text) { return 'null' }
+  return '"' + $text.Replace('\','\\').Replace('"','\"').Replace([string][char]13,'\r').Replace([string][char]10,'\n') + '"'
+}
+$items = @();
+foreach ($key in $metadata.Keys) {
+  $value = $metadata[$key];
+  if ($value -is [bool]) { $encoded = $value.ToString().ToLowerInvariant() }
+  else { $encoded = Quote $value }
+  $items += (Quote $key) + ':' + $encoded;
+}
+[Console]::Out.WriteLine('{' + [string]::Join(',', $items) + '}'); [Console]::Out.Flush();
+[Console]::Error.WriteLine('canopy-cim phase=module-load'); [Console]::Error.Flush();
+Import-Module CimCmdlets;
+[Console]::Out.WriteLine('canopy-context complete'); [Console]::Out.Flush();
+`;
