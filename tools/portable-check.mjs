@@ -20,8 +20,12 @@ try {
       {
         cwd,
         stdio: 'inherit',
-        // Node lifecycle probes repeatedly start PowerShell/CIM on Windows.
-        timeout: process.platform === 'win32' ? 600_000 : 60_000,
+        // The aggregate source suite shares the Windows allowance; individual
+        // probes retain their own deadlines. Other checks keep their limits.
+        timeout:
+          script === 'test.mjs' || process.platform === 'win32'
+            ? 600_000
+            : 60_000,
       },
     );
     if (result.error) throw result.error;
