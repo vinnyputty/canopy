@@ -1017,19 +1017,26 @@ export async function withManagedAppImage(
   }
 }
 export function boundedManagedClose(app, { deadline = 5000 } = {}) {
+  const expires = performance.now() + deadline;
   return new Promise((resolve, reject) => {
+    const late = () =>
+      Object.assign(new Error('Managed application closure unproved'), {
+        managedUncertain: true,
+      });
     const timer = setTimeout(
-      () =>
-        reject(
-          Object.assign(new Error('Managed application closure unproved'), {
-            managedUncertain: true,
-          }),
-        ),
-      deadline,
+      () => reject(late()),
+      Math.max(0, expires - performance.now()),
     );
     Promise.resolve()
-      .then(() => app.close())
-      .then(resolve, reject)
+      .then(() => {
+        if (!Number.isFinite(expires) || performance.now() >= expires)
+          throw late();
+        return app.close();
+      })
+      .then((value) => {
+        if (performance.now() >= expires) reject(late());
+        else resolve(value);
+      }, reject)
       .finally(() => clearTimeout(timer));
   });
 }
@@ -1038,7 +1045,13 @@ export function boundedManagedClose(app, { deadline = 5000 } = {}) {
 // keep this promise pending; this neither kills nor proves descendant absence.
 export function waitManagedChild(
   child,
-  { deadline, onSpawn, killOwned = false },
+  {
+    deadline,
+    expires = performance.now() + deadline,
+    onSpawn,
+    killOwned = false,
+    input,
+  },
 ) {
   return new Promise((resolve, reject) => {
     let settled = false,
@@ -1054,9 +1067,13 @@ export function waitManagedChild(
     const uncertain = (message) =>
       Object.assign(new Error(message), { managedUncertain: true });
     const detach = () => {
-      child.stdin?.destroy();
-      child.stdout?.destroy();
-      child.stderr?.destroy();
+      for (const stream of [child.stdin, child.stdout, child.stderr]) {
+        try {
+          stream?.destroy();
+        } catch {
+          /* Still uncertain; keep child observers. */
+        }
+      }
     };
     const refuse = (error) => {
       if (settled) return;
@@ -1066,7 +1083,12 @@ export function waitManagedChild(
       reject(error);
     };
     const finish = () => {
-      if (settled || !closed || !ready) return;
+      if (settled) return;
+      if (!Number.isFinite(expires) || performance.now() >= expires)
+        return refuse(
+          uncertain('Managed command elapsed deadline/closure unproved'),
+        );
+      if (!closed || !ready) return;
       if (
         !spawned ||
         !exited ||
@@ -1090,30 +1112,35 @@ export function waitManagedChild(
         stderr,
       });
     };
-    const timer = setTimeout(() => {
-      // Native root parser only: the actual child handle, never an arbitrary
-      // PID/group or an ordinary-user attempt to kill a root helper.
-      if (
-        killOwned &&
-        ready &&
-        !exited &&
-        child.exitCode === null &&
-        child.signalCode === null
-      ) {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* Uncertain; never proof. */
+    const timer = setTimeout(
+      () => {
+        // Native root parser only: the actual child handle, never an arbitrary
+        // PID/group or an ordinary-user attempt to kill a root helper.
+        if (
+          killOwned &&
+          ready &&
+          !exited &&
+          child.exitCode === null &&
+          child.signalCode === null
+        ) {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* Uncertain; never proof. */
+          }
         }
-      }
-      refuse(uncertain('Managed command deadline/closure unproved'));
-    }, deadline);
+        refuse(uncertain('Managed command deadline/closure unproved'));
+      },
+      Math.max(0, expires - performance.now()),
+    );
     for (const [stream, kind] of [
       [child.stdout, 'out'],
       [child.stderr, 'err'],
     ]) {
       stream?.on('data', (chunk) => {
         if (settled) return;
+        if (performance.now() >= expires)
+          return refuse(uncertain('Managed command elapsed deadline'));
         if (
           Buffer.byteLength(output) + Buffer.byteLength(stderr) + chunk.length >
           65536
@@ -1126,13 +1153,17 @@ export function waitManagedChild(
         refuse(uncertain('Managed command stream failed')),
       );
     }
-    child.stdin?.on('error', () => {
-      /* Closure/deadline still required. */
-    });
+    child.stdin?.on('error', () =>
+      refuse(uncertain('Managed request stream failed')),
+    );
     child.once('spawn', () => {
       spawned = true;
       Promise.resolve()
-        .then(() => onSpawn(child))
+        .then(() => {
+          if (settled || performance.now() >= expires)
+            throw uncertain('Managed command elapsed deadline');
+          return onSpawn(child);
+        })
         .then(
           (value) => {
             if (settled) return;
@@ -1155,11 +1186,120 @@ export function waitManagedChild(
       closed = true;
       finish();
     });
+    if (input) {
+      try {
+        const text = input();
+        if (typeof text !== 'string' || Buffer.byteLength(text) > 16384)
+          throw new Error('Managed request exceeds transport bound');
+        if (!Number.isFinite(expires) || performance.now() >= expires)
+          throw new Error('Managed request elapsed deadline');
+        child.stdin.end(text, (error) => {
+          if (error) refuse(uncertain('Managed request write callback failed'));
+        });
+      } catch {
+        refuse(uncertain('Managed request serialization/write failed'));
+      }
+    }
   });
 }
+export function validManagedResponse(response, request) {
+  const object = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!object(response) || typeof response.ok !== 'boolean') return false;
+  if (!response.ok)
+    return (
+      Object.keys(response).length === 3 &&
+      typeof response.error === 'string' &&
+      response.error.length <= 4096 &&
+      typeof response.uncertain === 'boolean'
+    );
+  if (Object.keys(response).length !== 2 || !object(response.value))
+    return false;
+  const value = response.value;
+  if (request.operation === 'cleanup')
+    return (
+      Object.keys(value).length === 1 &&
+      (value.removed === true || value.empty === true)
+    );
+  if (
+    !['prepare', 'check', 'launch'].includes(request.operation) ||
+    !hex(value.receiptSha256) ||
+    !object(value.receipt)
+  )
+    return false;
+  const r = value.receipt;
+  if (
+    r.schema !== 1 ||
+    r.token !== request.token ||
+    r.run !== request.run ||
+    r.attempt !== request.attempt ||
+    r.uid !== request.uid ||
+    !same(r.parent, request.parent) ||
+    !object(r.self) ||
+    !object(r.source?.identity) ||
+    r.source.path !== request.source ||
+    r.source.sha256 !== request.sha256 ||
+    !object(r.expected) ||
+    r.expected.executableSha256 !== request.executableSha256 ||
+    r.expected.appAsarSha256 !== request.appAsarSha256 ||
+    r.expected.helperSha256 !== request.helperSha256 ||
+    r.expected.helperMode !== request.helperMode ||
+    r.profile?.name !== managedProfile ||
+    r.profile.content !== managedPolicy ||
+    r.profile.sha256 !== digest(managedPolicy) ||
+    !Array.isArray(r.parents) ||
+    r.parents.length !== 4 ||
+    !Array.isArray(r.resources) ||
+    r.resources.length !== 3 ||
+    !object(r.original) ||
+    r.original.managed !== true ||
+    r.original.hash !== request.sha256 ||
+    !object(r.original.metadata) ||
+    !Array.isArray(r.original.parents) ||
+    !object(r.loaded?.identity) ||
+    !hex(r.loaded.sha256) ||
+    r.loaded.attach !== managedPaths.original ||
+    r.loaded.mode !== 'unconfined' ||
+    !Number.isSafeInteger(r.writer?.pid) ||
+    r.writer.pid <= 0 ||
+    !/^\d+$/.test(r.writer.birth ?? '') ||
+    r.writer.uid !== 0 ||
+    r.mutation?.state !== 'closed' ||
+    !object(r.mutation.proof) ||
+    r.mutation.proof.spawned !== true ||
+    r.mutation.proof.closed !== true ||
+    r.mutation.proof.timedOut !== false
+  )
+    return false;
+  if (request.operation !== 'launch') return Object.keys(value).length === 2;
+  const launch = value.launch,
+    expected = request.launch;
+  return (
+    Object.keys(value).length === 3 &&
+    object(launch) &&
+    object(expected) &&
+    launch.rootPid === expected.rootPid &&
+    launch.rootBirth === expected.rootBirth &&
+    launch.rendererPid === expected.rendererPid &&
+    launch.profile === managedProfile &&
+    object(launch.sample) &&
+    launch.sample.pid === expected.pid &&
+    launch.sample.birth === expected.mainBirth &&
+    launch.sample.uid === request.uid &&
+    launch.sample.executableSha256 === request.executableSha256 &&
+    launch.sample.appAsarSha256 === request.appAsarSha256 &&
+    launch.sample.sandboxHelper?.sha256 === request.helperSha256 &&
+    launch.sample.mount?.source === managedPaths.original &&
+    launch.sample.apparmorContext === `${managedProfile} (unconfined)`
+  );
+}
 async function rootInvoke(request) {
+  const expires = performance.now() + 12000;
   await managedHostedContext();
-  const started = performance.now();
+  if (performance.now() >= expires)
+    throw Object.assign(new Error('Managed helper setup deadline'), {
+      managedUncertain: true,
+    });
   const child = spawn(
     '/usr/bin/sudo',
     [
@@ -1180,18 +1320,23 @@ async function rootInvoke(request) {
     },
   );
   const pending = waitManagedChild(child, {
-    deadline: Math.max(0, 12000 - (performance.now() - started)),
+    expires,
+    input: () => JSON.stringify(request),
     onSpawn: async (actual) => ({
       pid: actual.pid,
       birth: processIdentity(await boundedRead(`/proc/${actual.pid}/stat`))
         .birth,
     }),
   });
-  child.stdin.end(JSON.stringify(request));
   const proof = await pending;
   let response;
   try {
     response = JSON.parse(proof.output);
+    if (
+      performance.now() >= expires ||
+      !validManagedResponse(response, request)
+    )
+      throw new Error('Incomplete response');
   } catch {
     throw Object.assign(new Error('Managed helper response unknown'), {
       managedUncertain: true,
@@ -1320,10 +1465,14 @@ function nativeEffects() {
       birth: processIdentity(await boundedRead('/proc/self/stat')).birth,
     }),
     parser: async (operation, record) => {
+      const expires = performance.now() + 5000;
       authorize();
       if (!['add', 'remove'].includes(operation))
         fail('Unscoped parser command');
-      const started = performance.now();
+      if (performance.now() >= expires)
+        throw Object.assign(new Error('Managed parser setup deadline'), {
+          managedUncertain: true,
+        });
       const child = spawn(
         '/usr/sbin/apparmor_parser',
         [
@@ -1340,7 +1489,7 @@ function nativeEffects() {
         },
       );
       return waitManagedChild(child, {
-        deadline: Math.max(0, 5000 - (performance.now() - started)),
+        expires,
         killOwned: true,
         onSpawn: async (actual) => {
           const current = processIdentity(
@@ -1376,7 +1525,11 @@ if (
   basename(process.argv[1] ?? '') === 'managed-appimage.mjs' &&
   process.argv[2] === '--managed-appimage-private'
 ) {
-  const timer = setTimeout(() => process.exit(1), 10000);
+  const expires = performance.now() + 10000;
+  const timer = setTimeout(
+    () => process.exit(1),
+    Math.max(0, expires - performance.now()),
+  );
   try {
     const context = {
       env: process.env,
@@ -1397,14 +1550,19 @@ if (
       nativeEffects(),
       context,
     );
+    if (performance.now() >= expires)
+      throw Object.assign(new Error('Managed helper elapsed deadline'), {
+        managedUncertain: true,
+      });
     process.stdout.write(JSON.stringify({ ok: true, value: result }));
   } catch (error) {
     console.error(String(error));
     process.stdout.write(
       JSON.stringify({
         ok: false,
-        error: String(error),
-        uncertain: error?.managedUncertain === true,
+        error: String(error).slice(0, 4096),
+        uncertain:
+          error?.managedUncertain === true || performance.now() >= expires,
       }),
     );
     process.exitCode = 1;

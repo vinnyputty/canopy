@@ -477,10 +477,14 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
         ),
       );
     } catch (secondary) {
-      console.error(
-        'Packaged failure diagnostics unavailable:',
-        String(secondary),
-      );
+      try {
+        console.error(
+          'Packaged failure diagnostics unavailable:',
+          String(secondary),
+        );
+      } catch {
+        /* Secondary formatting/reporting cannot replace the primary. */
+      }
     }
     throw error;
   } finally {
@@ -489,12 +493,22 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
         if (managed) await managed.close(app);
         else await app.close();
       } catch (secondary) {
-        if (managed && secondary?.managedUncertain) managed.refuseCleanup();
+        if (managed) {
+          try {
+            managed.refuseCleanup();
+          } catch {
+            /* Preserve the primary; session.close records uncertainty. */
+          }
+        }
         if (!smokeFailed) throw secondary;
-        console.error(
-          'Packaged application close also failed:',
-          String(secondary),
-        );
+        try {
+          console.error(
+            'Packaged application close also failed:',
+            String(secondary),
+          );
+        } catch {
+          /* Preserve even a falsy primary. */
+        }
       }
     }
   }

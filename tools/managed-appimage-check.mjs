@@ -16,6 +16,7 @@ import {
   noManagedOccupants,
   waitManagedChild,
   boundedManagedClose,
+  validManagedResponse,
 } from './managed-appimage.mjs';
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const ctx = {
@@ -425,6 +426,12 @@ export async function checkManagedAppImage() {
     live.io,
     ctx,
   );
+  assert(
+    validManagedResponse(
+      { ok: true, value: proof },
+      { ...base, operation: 'launch', launch },
+    ),
+  );
   assert.equal(
     proof.launch.sample.apparmorContext,
     managedProfile + ' (unconfined)',
@@ -806,7 +813,7 @@ export async function checkManagedAppImage() {
   assert(smokeBegin >= 0 && smokeEnd > smokeBegin);
   const smokeControl = new Function(
     'd',
-    `const {process,electron,mkdir,join,workspace,writeFile,console}=d; ${caller.slice(smokeBegin, smokeEnd)} return smoke('/unused','/owned','fixture',undefined);`,
+    `const {process,electron,mkdir,join,workspace,writeFile,console,managedChild}=d; ${caller.slice(smokeBegin, smokeEnd)} return smoke('/unused','/owned','fixture',undefined,d.managed);`,
   );
   for (const primary of [undefined, null, false, 0, '', new Error('launch')]) {
     for (const closeFailure of [false, true]) {
@@ -849,6 +856,91 @@ export async function checkManagedAppImage() {
       assert.equal(closed, closeFailure);
     }
   }
+  // Full production consumer, deliberately failing firstWindow. Managed
+  // closure is the real wrapper session; renderer/IO inputs remain models.
+  for (const primary of [
+    undefined,
+    null,
+    false,
+    0,
+    '',
+    new Error('smoke primary'),
+  ]) {
+    for (const phase of [
+      'diagnostic-log',
+      'diagnostic-format',
+      'close-log',
+      'close-format',
+    ]) {
+      for (const managed of [false, true]) {
+        const formattingFault = {
+          toString() {
+            throw new Error('secondary formatting fault');
+          },
+        };
+        const operations = [];
+        let closes = 0,
+          caught = false,
+          value;
+        const app = {
+          firstWindow: async () => {
+            throw primary;
+          },
+          close: async () => {
+            closes++;
+            if (phase.startsWith('close'))
+              throw phase === 'close-format'
+                ? formattingFault
+                : new Error('secondary close');
+          },
+        };
+        const run = (session) =>
+          smokeControl({
+            process: { env: {}, platform: 'darwin' },
+            electron: { launch: async () => app },
+            managed: session,
+            managedChild: () => ({ pid: 70 }),
+            mkdir: async () => {},
+            join: (...parts) => parts.join('/'),
+            workspace: '/owned',
+            writeFile: async () => {
+              if (phase.startsWith('diagnostic'))
+                throw phase === 'diagnostic-format'
+                  ? formattingFault
+                  : new Error('secondary diagnostic');
+            },
+            console: {
+              error: () => {
+                throw new Error('secondary logger fault');
+              },
+            },
+          });
+        try {
+          if (managed)
+            await withManagedAppImage(base, (_, session) => run(session), {
+              context: ctx,
+              parent: base.parent,
+              secondary: () => {
+                throw new Error('wrapper logger fault');
+              },
+              invoke: async (request) => {
+                operations.push(request.operation);
+                return installed;
+              },
+            });
+          else await run(undefined);
+        } catch (error) {
+          caught = true;
+          value = error;
+        }
+        assert(caught);
+        assert.equal(value, primary);
+        assert.equal(closes, 1);
+        if (managed && phase.startsWith('close'))
+          assert(!operations.includes('cleanup'));
+      }
+    }
+  }
   const source = await readFile(
     new URL('./managed-appimage.mjs', import.meta.url),
     'utf8',
@@ -875,7 +967,10 @@ export async function checkManagedAppImage() {
       return {};
     },
     waitManagedChild: async (_, options) => {
-      assert(options.deadline > 0 && options.deadline <= 5000);
+      assert(
+        options.expires > performance.now() &&
+          options.expires <= performance.now() + 5000,
+      );
       assert.equal(options.killOwned, true);
     },
     fail: (message) => {
@@ -901,6 +996,7 @@ export async function checkManagedAppImage() {
   await assert.rejects(native.parser('replace', async () => {}));
   assert.equal(commands.length, 2);
   await checkManagedLifecycle();
+  await checkManagedTransport(source);
   const refused = spawnSync(
     process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
     [
@@ -992,6 +1088,42 @@ async function checkManagedLifecycle() {
     );
     await exit(unproved);
 
+    const delayed = launch('setTimeout(() => {}, 20)');
+    delayed.on('close', () => {
+      const until = performance.now() + 180;
+      while (performance.now() < until) {}
+    });
+    await assert.rejects(
+      waitManagedChild(delayed, { deadline: 150, onSpawn }),
+      (error) => error.managedUncertain === true,
+    );
+    await exit(delayed);
+    await assert.rejects(
+      boundedManagedClose(
+        {
+          close: () => {
+            const until = performance.now() + 80;
+            while (performance.now() < until) {}
+            return Promise.resolve();
+          },
+        },
+        { deadline: 20 },
+      ),
+      (error) => error.managedUncertain === true,
+    );
+    const readiness = launch('setTimeout(() => {}, 20)');
+    await assert.rejects(
+      waitManagedChild(readiness, {
+        deadline: 20,
+        onSpawn: async (child) => {
+          const until = performance.now() + 80;
+          while (performance.now() < until) {}
+          return { pid: child.pid, birth: '1' };
+        },
+      }),
+      (error) => error.managedUncertain === true,
+    );
+    await exit(readiness);
     const signals = new EventEmitter(),
       operations = [];
     let finish, session;
@@ -1103,5 +1235,208 @@ async function checkManagedLifecycle() {
     }
     // Pipe-holder worker has its own finite lifetime; never target an arbitrary
     // PID. Its inherited local pipes were detached by the actual tracker.
+  }
+}
+
+// Exact private transport body with sudo/proc replaced by owned Node/model IO.
+// No parser/root entry is executed. Both transport and real wrapper participate.
+async function checkManagedTransport(source) {
+  const begin = source.indexOf('async function rootInvoke(');
+  const end = source.indexOf('function nativeEffects(', begin);
+  assert(begin >= 0 && end > begin);
+  const node = process.env.JS_BINARY__NODE_BINARY ?? process.execPath;
+  const children = [];
+  try {
+    for (const [name, envelope, expectedUncertain] of [
+      ['invalid-json', '{', true],
+      ['null', null, true],
+      ['array', [], true],
+      ['missing-ok', {}, true],
+      ['string-ok', { ok: 'true', value: {} }, true],
+      ['missing-failure-uncertainty', { ok: false, error: 'failure' }, true],
+      [
+        'string-uncertainty',
+        { ok: false, error: 'failure', uncertain: 'false' },
+        true,
+      ],
+      ['missing-error', { ok: false, uncertain: false }, true],
+      ['number-error', { ok: false, error: 0, uncertain: false }, true],
+      [
+        'large-error',
+        { ok: false, error: 'x'.repeat(4097), uncertain: false },
+        true,
+      ],
+      ['missing-success', { ok: true }, true],
+      ['null-success', { ok: true, value: null }, true],
+      ['incomplete-success', { ok: true, value: {} }, true],
+      [
+        'known-failure',
+        { ok: false, error: 'fixture known failure', uncertain: false },
+        false,
+      ],
+      [
+        'uncertain-failure',
+        { ok: false, error: 'fixture uncertain failure', uncertain: true },
+        true,
+      ],
+      ['valid-success', undefined, false],
+      ['stdin-error', undefined, true],
+      ['write-throw', undefined, true],
+      ['write-callback-fault', undefined, true],
+      ['serialization-throw', undefined, true],
+    ]) {
+      const operations = [],
+        kernel = model();
+      let current;
+      const invoke = new Function(
+        'd',
+        `const {managedHostedContext,process,spawn,preserved,ownFile,waitManagedChild,boundedRead,processIdentity,validManagedResponse}=d; ${source.slice(begin, end)};return rootInvoke;`,
+      )({
+        managedHostedContext: async () => ctx,
+        process,
+        preserved: [],
+        ownFile: '/unused',
+        boundedRead: async () => '',
+        processIdentity: () => ({ birth: '1' }),
+        validManagedResponse,
+        waitManagedChild,
+        spawn: () => {
+          let reply,
+            code = 0;
+          if (current.operation === 'cleanup')
+            reply = { ok: true, value: current.cleaned };
+          else if (envelope === undefined)
+            reply = { ok: true, value: current.prepared };
+          else {
+            reply = envelope;
+            code =
+              typeof envelope === 'object' && envelope?.ok === true ? 0 : 1;
+          }
+          const text = name === 'invalid-json' ? '{' : JSON.stringify(reply);
+          const child = spawn(
+            node,
+            [
+              '-e',
+              `const timer=setTimeout(()=>process.exit(0),500);process.stdin.resume();process.stdin.on('end',()=>{clearTimeout(timer);process.stdout.write(${JSON.stringify(text)});process.exitCode=${code};});`,
+            ],
+            { stdio: ['pipe', 'pipe', 'pipe'] },
+          );
+          children.push(child);
+          if (current.operation === 'prepare' && name === 'stdin-error') {
+            const end = child.stdin.end;
+            child.stdin.end = function (...args) {
+              this.emit('error', new Error('fixture input fault'));
+              return end.apply(this, args);
+            };
+          }
+          if (
+            current.operation === 'prepare' &&
+            name === 'write-callback-fault'
+          ) {
+            const end = child.stdin.end;
+            child.stdin.end = function (text, callback) {
+              callback(new Error('fixture write callback fault'));
+              return end.call(this, text);
+            };
+          }
+          if (current.operation === 'prepare' && name === 'write-throw')
+            child.stdin.end = () => {
+              throw new Error('fixture write fault');
+            };
+          return child;
+        },
+      });
+      let caught = false,
+        failure;
+      try {
+        await withManagedAppImage(base, async () => true, {
+          context: ctx,
+          parent: base.parent,
+          secondary: () => {},
+          invoke: async (request) => {
+            operations.push(request.operation);
+            current = { ...request };
+            if (request.operation === 'cleanup')
+              current.cleaned = await managedOperation(request, kernel.io, ctx);
+            if (request.operation === 'prepare' && envelope === undefined)
+              current.prepared = await managedOperation(
+                request,
+                kernel.io,
+                ctx,
+              );
+            // The actual request serializes only core fields, not the modeled reply.
+            if (
+              name === 'serialization-throw' &&
+              request.operation === 'prepare'
+            )
+              request.toJSON = () => {
+                throw new Error('fixture serialization fault');
+              };
+            return invoke(request);
+          },
+        });
+      } catch (error) {
+        caught = true;
+        failure = error;
+      }
+      if (name === 'valid-success') assert(!caught);
+      else {
+        assert(caught, name);
+        assert.equal(
+          failure.managedUncertain === true,
+          expectedUncertain,
+          name,
+        );
+      }
+      assert.equal(operations.includes('cleanup'), !expectedUncertain, name);
+    }
+    // Successful reply shape is operation-specific; malformed cleanup/launch
+    // cannot borrow a valid preparation state as a terminal success.
+    const kernel = model();
+    const prepared = await managedOperation(
+      { ...base, operation: 'prepare' },
+      kernel.io,
+      ctx,
+    );
+    assert(
+      validManagedResponse(
+        { ok: true, value: prepared },
+        { ...base, operation: 'check' },
+      ),
+    );
+    for (const value of [
+      null,
+      {},
+      { removed: 'true' },
+      { empty: 1 },
+      { removed: true, empty: true },
+      prepared,
+    ])
+      assert(
+        !validManagedResponse(
+          { ok: true, value },
+          { ...base, operation: 'cleanup' },
+        ),
+      );
+    assert(
+      validManagedResponse(
+        { ok: true, value: { removed: true } },
+        { ...base, operation: 'cleanup' },
+      ),
+    );
+    assert(
+      !validManagedResponse(
+        { ok: true, value: prepared },
+        { ...base, operation: 'launch' },
+      ),
+    );
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const ended = once(child, 'exit');
+        child.kill('SIGKILL');
+        await ended;
+      }
+    }
   }
 }
