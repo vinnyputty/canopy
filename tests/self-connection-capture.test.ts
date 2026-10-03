@@ -22,7 +22,11 @@ const workspace = (keys: string[]) => ({
 async function capture(
   load: () => unknown,
   roots: string[],
-  options: { writerFailure?: boolean; domFailure?: boolean } = {},
+  options: {
+    writerFailure?: boolean;
+    domFailure?: boolean;
+    selected?: string;
+  } = {},
 ) {
   let loads = 0;
   let evaluations = 0;
@@ -57,7 +61,7 @@ async function capture(
             },
             getAttribute: (name: string) => {
               assert.equal(name, 'aria-selected');
-              return index === 0 ? 'true' : 'false';
+              return options.selected ?? (index === 0 ? 'true' : 'false');
             },
           }));
         },
@@ -177,37 +181,52 @@ test('self-connection diagnostic DOM and output failures preserve the capture', 
 });
 
 test('self-connection capture caps samples, strings and recentOutput message size', async () => {
-  const key = '"\\\u0000'.repeat(1000);
-  const saved = workspace(Array(100).fill(key));
-  saved.activeTabId = key;
-  for (const item of saved.tabs) {
-    item.id = key;
-    item.connectionId = key;
-  }
-  // Reading beyond the sample would turn this observation into a failure.
-  Object.defineProperty(saved.tabs, 4, {
-    get: () => {
-      throw new Error('sample limit exceeded');
-    },
-  });
-  const result = await capture(() => saved, Array(100).fill(key));
-  assert.equal(result.error, result.stop);
-  assert.equal(result.passed, saved);
-  assert.equal(result.messages.length, 1);
-  const message = result.messages[0];
-  assert.ok(message.startsWith(prefix));
-  assert.ok(message.length < 2000);
-  const observation = JSON.parse(message.slice(prefix.length));
-  assert.equal(observation.tabCount, 100);
-  assert.equal(observation.renderedTabCount, 100);
-  assert.equal(observation.tabs.length, 4);
-  assert.equal(observation.renderedTabs.length, 4);
-  assert.equal(observation.activeTabId.length, 32);
-  for (const item of observation.tabs) {
-    for (const value of Object.values(item)) {
-      assert.equal((value as string).length, 32);
-      assert.ok(!(value as string).includes('\u0000'));
+  for (const [key, expected] of [
+    ['"\\\u0000'.repeat(1000), '"\\?'.repeat(10) + '"\\'],
+    ['\ud800'.repeat(1000), '\ufffd'.repeat(32)],
+    ['\udc00'.repeat(1000), '\ufffd'.repeat(32)],
+    ['\ud800😀\udc00'.repeat(1000), '\ufffd😀\ufffd'.repeat(8)],
+    ['😀'.repeat(1000), '😀'.repeat(16)],
+    ['A'.repeat(31) + '😀', 'A'.repeat(31) + '\ufffd'],
+    ['\\'.repeat(1000), '\\'.repeat(32)],
+  ]) {
+    const saved = workspace(Array(100).fill(key));
+    saved.activeTabId = key;
+    for (const item of saved.tabs) {
+      item.id = key;
+      item.connectionId = key;
     }
+    // Reading beyond the sample would turn this observation into a failure.
+    Object.defineProperty(saved.tabs, 4, {
+      get: () => {
+        throw new Error('sample limit exceeded');
+      },
+    });
+    const result = await capture(() => saved, Array(100).fill(key), {
+      selected: key,
+    });
+    assert.equal(result.error, result.stop);
+    assert.equal(result.passed, saved);
+    assert.equal(result.queries, 1);
+    assert.equal(result.writes, 1);
+    assert.equal(result.messages.length, 1);
+    const message = result.messages[0];
+    assert.ok(message.startsWith(prefix));
+    assert.ok(message.length <= 1935);
+    const body = message.slice(prefix.length);
+    assert.ok(body.length <= 1900);
+    const observation = JSON.parse(body);
+    assert.equal(observation.tabCount, 100);
+    assert.equal(observation.renderedTabCount, 100);
+    assert.equal(observation.tabs.length, 4);
+    assert.equal(observation.renderedTabs.length, 4);
+    assert.equal(observation.activeTabId, expected);
+    for (const item of [...observation.tabs, ...observation.renderedTabs]) {
+      for (const value of Object.values(item)) {
+        assert.equal(value, expected);
+        assert.equal((value as string).length, 32);
+      }
+    }
+    assert.ok(!message.includes('PRIVATE_WORKSPACE_PAYLOAD'));
   }
-  assert.ok(!message.includes('PRIVATE_WORKSPACE_PAYLOAD'));
 });

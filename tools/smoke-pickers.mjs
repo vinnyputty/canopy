@@ -390,7 +390,10 @@ export async function auditSelfConnections(app, page) {
     try {
       const text = (value) =>
         typeof value === 'string'
-          ? value.slice(0, 32).replace(/[\u0000-\u001f]/g, '?')
+          ? value
+              .slice(0, 32)
+              .toWellFormed()
+              .replace(/[\u0000-\u001f]/g, '?')
           : null;
       const tabs = Array.isArray(saved?.tabs) ? saved.tabs : [];
       const rendered = document.querySelectorAll('[role="tab"]');
@@ -402,6 +405,8 @@ export async function auditSelfConnections(app, page) {
           selected: text(tab.getAttribute('aria-selected')),
         });
       }
+      // At most 21 strings, each escaping to at most 64 characters; with
+      // keys, structure and counts, the complete JSON stays below 1900.
       console.log(
         'Self-connection workspace capture: ' +
           JSON.stringify({
@@ -414,7 +419,7 @@ export async function auditSelfConnections(app, page) {
             })),
             renderedTabCount: rendered.length,
             renderedTabs,
-          }).slice(0, 1900),
+          }),
       );
     } catch {
       // Diagnostics must preserve the original load result and fixture behavior.
