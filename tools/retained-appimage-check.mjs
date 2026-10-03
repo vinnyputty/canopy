@@ -392,12 +392,27 @@ async function checkWorkerHandoff() {
     await writeFile(
       fixture,
       `
-      import {mkdir, writeFile} from 'node:fs/promises';
+      import {mkdir, writeFile as actualWrite} from 'node:fs/promises';
       import {dirname} from 'node:path';
       import {originalArtifact as realOriginal, retainedSpawnIdentity as realSpawn,
         runtimeIdentity as realRuntime, mountedEvidence as realMounted,
         processIdentity, childPids} from ${JSON.stringify(moduleUrl.href)};
       const [mode, output] = process.argv.slice(2);
+      let sampled = false;
+      let nativeOriginalSeen = false;
+      const writeFile = async (path, data) => {
+        const value = JSON.parse(data);
+        if (value.completed && mode.startsWith('final-')) {
+          process.send({type:'final-write', finalizedAt:value.finalizedAt});
+          if(mode==='final-hung') return new Promise(()=>{});
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        await actualWrite(path, data);
+        if (value.samples.length && !value.completed) {
+          sampled = true;
+          process.send('sample-saved');
+        }
+      };
       const LIMIT = 10000;
       const proc = (pid, suffix) => '/proc/' + pid + '/' + suffix;
       const message = error => ({error:error?.code ?? error?.message ?? String(error)});
@@ -407,18 +422,27 @@ async function checkWorkerHandoff() {
       const io = {
         canonical: async path => path,
         stat: async path => path === artifact ? {uid:0,gid:0,mode:0o100555,dev:1,ino:2,size:21,mtimeMs:1,ctimeMs:1,isFile:()=>true} :
-          path.startsWith('/proc/') ? {uid:1001} : path.endsWith('chrome-sandbox') ? {uid:0,gid:0,mode:0o100755} : {uid:0,gid:0,dev:1,ino:10,mode:0o40755,isDirectory:()=>true},
-        hash: async path => {if (mode === 'hung') return new Promise(()=>{});return path===artifact?'original':path.endsWith('app.asar')?'asar':'binary'},
-        link: async () => mount + '/canopy',
-        read: async path => path.endsWith('/children') ? (path.startsWith('/proc/'+process.ppid+'/')?'70':'') :
+          path.endsWith('/exe') ? {uid:0} : path.startsWith('/proc/') ? {uid:mode==='owner-change' && sampled ? 1002 : 1001} : path.endsWith('chrome-sandbox') ? {uid:0,gid:0,mode:0o100755} : {uid:0,gid:0,dev:1,ino:10,mode:0o40755,isDirectory:()=>true},
+        hash: async path => {if (mode === 'hung') return new Promise(()=>{});if(mode==='late-sample' && path.endsWith('/canopy')) await new Promise(resolve=>setTimeout(resolve,800));return path===artifact?'original':path.endsWith('app.asar')?'asar':'binary'},
+        link: async () => {if(mode==='native-no-offer' && !nativeOriginalSeen){nativeOriginalSeen=true;return artifact;}return mount+'/canopy'},
+        read: async path => {
+          if(sampled && mode==='hung-after-sample') return new Promise(()=>{});
+          if(sampled && mode==='parent-read-fail' && path===proc(process.ppid,'stat')) throw new Error('fixture parent read failed');
+          return path.endsWith('/children') ? (path.startsWith('/proc/'+process.ppid+'/')?(sampled && mode==='ambiguity'?'70 71':'70'):'') :
           path.endsWith('mountinfo') ? '25 1 0:100 / '+mount+' ro,nosuid,nodev - fuse.Canopy '+artifact+' ro' :
-          path.endsWith('attr/current') ? 'fixture-profile (unconfined)' : text(path.startsWith('/proc/'+process.ppid+'/')?1:process.ppid,path.startsWith('/proc/'+process.ppid+'/')?'321':'123'),
+          path.endsWith('attr/current') ? 'fixture-profile (unconfined)' : text(path.startsWith('/proc/'+process.ppid+'/')?1:process.ppid,path.startsWith('/proc/'+process.ppid+'/')?(sampled && mode==='parent-change'?'322':'321'):(sampled && mode==='birth-change'?'124':'123'));},
       };
       const originalArtifact = config => realOriginal(config,io);
       const retainedSpawnIdentity = (value,config,original) => realSpawn(value,config,original,io);
       const runtimeIdentity = (pid,config) => realRuntime(pid,config,io);
       const mountedEvidence = (pid,identity,config) => realMounted(pid,identity,config,io);
-      const diagnosticCommand = async () => ({error:'fixture audit unavailable'});
+      const diagnosticCommand = async () => {
+        if(mode==='pre-final-revoke') {
+          process.send('pre-finalize');
+          await new Promise(resolve=>setTimeout(resolve,100));
+        }
+        return {error:'fixture audit unavailable'};
+      };
       ${source.slice(retainedBegin, retainedEnd)}
       ${source.slice(begin, end)}
       await worker({artifact,artifactSha256:'original',parent:process.ppid,parentBirth:'321',uid:1001,
@@ -435,6 +459,18 @@ async function checkWorkerHandoff() {
       'expired-confirm',
       'disconnect',
       'hung',
+      'ambiguity',
+      'parent-read-fail',
+      'parent-change',
+      'birth-change',
+      'owner-change',
+      'pre-final-revoke',
+      'final-revoke',
+      'final-disconnect',
+      'final-hung',
+      'late-sample',
+      'hung-after-sample',
+      'native-no-offer',
     ]) {
       const output = join(dir, mode + '.json');
       const child = fork(fixture, [mode, output], {
@@ -448,8 +484,32 @@ async function checkWorkerHandoff() {
       });
       const timers = [];
       const timer = setTimeout(() => child.kill('SIGKILL'), 3000);
+      let savedPositive = false;
+      let boundary;
       child.on('message', (value) => {
+        if (value === 'sample-saved') {
+          savedPositive = true;
+          return;
+        }
+        if (value === 'pre-finalize') {
+          child.send(
+            { type: 'revoke', nonce: 'fixture-private-nonce' },
+            () => {},
+          );
+          return;
+        }
+        if (value?.type === 'final-write') {
+          boundary = value.finalizedAt;
+          if (mode === 'final-disconnect') child.disconnect();
+          else
+            child.send(
+              { type: 'revoke', nonce: 'fixture-private-nonce' },
+              () => {},
+            );
+          return;
+        }
         if (value === 'ready') {
+          if (mode === 'native-no-offer') return;
           const offer = {
             type: 'offer',
             nonce: mode === 'bad-nonce' ? 'foreign' : 'fixture-private-nonce',
@@ -494,11 +554,12 @@ async function checkWorkerHandoff() {
           if (mode === 'late-confirm') child.send('stop', () => {});
           child.send(confirm, () => {});
           if (mode === 'duplicate-confirm') child.send(confirm, () => {});
-          timers.push(
-            setTimeout(() => {
-              if (child.connected) child.send('stop', () => {});
-            }, 80),
-          );
+          if (['success', 'duplicate-confirm', 'late-confirm'].includes(mode))
+            timers.push(
+              setTimeout(() => {
+                if (child.connected) child.send('stop', () => {});
+              }, 80),
+            );
         }
       });
       try {
@@ -508,9 +569,20 @@ async function checkWorkerHandoff() {
         });
         assert.deepEqual(result, { code: 0, signal: null }, stderr);
         const report = JSON.parse(await readFile(output, 'utf8'));
-        if (mode === 'success') {
+        if (
+          [
+            'success',
+            'final-revoke',
+            'final-disconnect',
+            'final-hung',
+            'hung-after-sample',
+            'native-no-offer',
+          ].includes(mode)
+        ) {
           assert.equal(report.status, 'observed');
-          assert.equal(report.authority.kind, 'retained-spawn');
+          if (mode === 'native-no-offer')
+            assert.equal(report.authority, undefined);
+          else assert.equal(report.authority.kind, 'retained-spawn');
           assert.equal(report.samples.length, 1);
           assert.equal(
             report.samples[0].apparmorContext,
@@ -520,7 +592,36 @@ async function checkWorkerHandoff() {
           assert.equal(report.status, 'unknown');
           assert.deepEqual(report.samples, []);
         }
-        assert.equal(report.completed, mode !== 'hung');
+        assert.equal(
+          report.completed,
+          !['hung', 'hung-after-sample', 'final-hung'].includes(mode),
+        );
+        if (
+          [
+            'ambiguity',
+            'parent-read-fail',
+            'parent-change',
+            'birth-change',
+            'owner-change',
+            'pre-final-revoke',
+          ].includes(mode)
+        ) {
+          assert(
+            savedPositive,
+            mode + ' must invalidate a previously persisted positive sample',
+          );
+          assert.equal(report.authority, undefined);
+        }
+        if (mode.startsWith('final-')) {
+          assert(savedPositive);
+          assert(
+            Number.isFinite(boundary),
+            'protocol must close before final serialization',
+          );
+          if (mode !== 'final-hung') assert.equal(report.finalizedAt, boundary);
+        }
+        if (report.completed) assert(Number.isFinite(report.finalizedAt));
+        else assert.equal(report.finalizedAt, undefined);
       } finally {
         clearTimeout(timer);
         timers.forEach(clearTimeout);

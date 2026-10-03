@@ -318,7 +318,9 @@ export async function retainedSpawnIdentity(
 
 // This scoped subscription observes only Node's genuine returned ChildProcess.
 // Constructor notifications cannot bind anything; the successful spawn event is
-// checked against the exact pinned Electron direct-launch arguments.
+// checked against the exact pinned Electron direct-launch arguments. Association
+// relies on the audited caller having no concurrent identical command; the
+// helper does not receive a product-object token from Playwright.
 export function captureAppImageSpawn(
   config,
   send,
@@ -547,9 +549,44 @@ async function worker(config) {
   let requested;
   let original;
   let revoked = false;
+  let closed = false;
+  const invalidate = (error) => {
+    revoked = true;
+    roots.clear();
+    seen.clear();
+    evidence.status = 'unknown';
+    evidence.samples = [];
+    delete evidence.authority;
+    note(error);
+  };
+  const requiredIdentity = async () => {
+    const parent = processIdentity(await io.read(proc(config.parent, 'stat')));
+    if (
+      parent.birth !== config.parentBirth ||
+      (await io.stat(proc(config.parent, ''))).uid !== config.uid
+    )
+      throw new Error('Launch parent identity changed or exited');
+    const children = childPids(
+      await io.read(proc(config.parent, `task/${config.parent}/children`)),
+    ).filter((pid) => pid !== process.pid && !baseline.has(pid));
+    if (
+      children.length > 1 ||
+      (roots.size && children.some((pid) => !roots.has(pid)))
+    )
+      throw new Error('Ambiguous launch children; identity unavailable');
+    for (const [pid, identity] of roots) {
+      await retained(pid, identity, io);
+      if ((await io.stat(proc(pid, ''))).uid !== config.uid)
+        throw new Error('Launch process owner changed');
+    }
+    return children;
+  };
   // IPC failures are secondary diagnostics, including parent-disconnect races.
-  process.on('error', note);
+  process.on('error', (error) => {
+    if (!closed) note(error);
+  });
   process.on('message', (value) => {
+    if (closed) return;
     if (value === 'stop') stopped = true;
     else if (config.nonce) {
       if (
@@ -573,6 +610,7 @@ async function worker(config) {
     }
   });
   process.on('disconnect', () => {
+    if (closed) return;
     stopped = true;
     revoked = true;
   });
@@ -592,7 +630,7 @@ async function worker(config) {
       process.send('ready', (error) => {
         if (error) note(error);
       });
-    while (!stopped && Date.now() < deadline - 750) {
+    while (!stopped && !revoked && Date.now() < deadline - 750) {
       try {
         if (revoked) throw new Error('Retained launch authority revoked');
         if (offer && !requested) {
@@ -642,16 +680,7 @@ async function worker(config) {
             managed: original.managed,
           };
         }
-        const parent = processIdentity(
-          await io.read(proc(config.parent, 'stat')),
-        );
-        if (parent.birth !== config.parentBirth)
-          throw new Error('Launch parent identity changed or exited');
-        const children = childPids(
-          await io.read(proc(config.parent, `task/${config.parent}/children`)),
-        ).filter((pid) => pid !== process.pid && !baseline.has(pid));
-        if (children.length > 1)
-          throw new Error('Ambiguous launch children; identity unavailable');
+        const children = await requiredIdentity();
         for (const pid of children) {
           const identity = processIdentity(await io.read(proc(pid, 'stat')));
           if (identity.parent !== config.parent)
@@ -667,13 +696,19 @@ async function worker(config) {
               );
             // Bind the real runtime before it execs the mounted binary. Missing
             // this transient event is explicitly unknown, never a hash-only bind.
-            roots.set(
-              pid,
-              await runtimeIdentity(pid, {
-                ...config,
-                fileUid: original?.metadata.uid ?? config.uid,
-              }),
-            );
+            try {
+              roots.set(
+                pid,
+                await runtimeIdentity(pid, {
+                  ...config,
+                  fileUid: original?.metadata.uid ?? config.uid,
+                }),
+              );
+            } catch (error) {
+              // A missed transient original can be retried before any binding;
+              // it grants no evidence and does not invalidate an accepted root.
+              note(error);
+            }
           }
         }
         for (const [root, identity] of roots) {
@@ -702,6 +737,8 @@ async function worker(config) {
             await retained(root, identity, io);
             if (revoked || !process.connected || stopped)
               throw new Error('Retained launch ended during observation');
+            // Async payload reads may finish after the sampling cutoff.
+            if (Date.now() >= deadline - 750) break;
             evidence.samples.push(sample);
             seen.add(key);
             evidence.status = 'observed';
@@ -709,7 +746,7 @@ async function worker(config) {
           }
         }
       } catch (error) {
-        note(error);
+        invalidate(error);
       }
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -750,17 +787,34 @@ async function worker(config) {
       evidence.kernelAudit = {
         unavailable: 'No retained launch identity or remaining audit budget',
       };
-    if (revoked) {
-      evidence.status = 'unknown';
-      evidence.samples = [];
-      delete evidence.authority;
-      note(new Error('Retained launch authority revoked'));
+    if (!revoked && roots.size) {
+      try {
+        await requiredIdentity();
+        if (
+          offer &&
+          original.managed &&
+          JSON.stringify(await originalArtifact(config)) !==
+            JSON.stringify(original)
+        )
+          throw new Error('Retained original changed before finalization');
+      } catch (error) {
+        invalidate(error);
+      }
     }
+    if (revoked) invalidate(new Error('Retained launch authority revoked'));
+    // Seal the protocol synchronously before serializing the final snapshot.
+    // This report describes evidence through this boundary, not a live process
+    // claim during/after asynchronous persistence. No later IPC is accepted.
+    if (Date.now() >= deadline)
+      throw new Error('Observer finalization deadline');
+    closed = true;
+    evidence.finalizedAt = Date.now();
     evidence.completed = true;
     evidence.elapsedMs = Date.now() - started;
     await save();
   } catch (error) {
-    note(error);
+    evidence.completed = false;
+    invalidate(error);
     console.error('AppImage observer diagnostics unavailable:', message(error));
     await save().catch(() => {});
   } finally {
