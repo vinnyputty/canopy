@@ -4467,7 +4467,9 @@ export function App() {
                 <div className="error-banner" role="status">
                   Unread tracking covers only retained baselines (up to 12
                   roots, 1,000 issues per root and 2 MB). Existing unread
-                  baselines are kept; other issues have no change baseline.
+                  baselines are kept; other issues have no change baseline. Once
+                  a limit is reached, new roots or issues cannot be tracked.
+                  Closing tabs or marking issues seen does not release space.
                 </div>
               )}
             {(loading.has(activeTab.id) ||

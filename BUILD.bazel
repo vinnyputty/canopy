@@ -24,7 +24,7 @@ js_run_binary(
 js_test(
     name = "test",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/perf-desktop.mjs", "tools/audit-lifecycle.mjs", "tools/prepare-perf-desktop.mjs", "tools/demo-check.mjs", "tools/portable-check.mjs"],
+    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/perf-desktop.mjs", "tools/audit-lifecycle.mjs", "tools/prepare-perf-desktop.mjs", "tools/demo-check.mjs", "tools/portable-check.mjs", "tools/benchmark-large-trees.mjs"],
 )
 
 js_test(
