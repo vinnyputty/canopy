@@ -2916,10 +2916,23 @@ export function App() {
         sessionStorage.setItem('canopy-demo-paused', String(keepPaused));
         await window.canopy.resetDemo();
       } catch (error) {
-        navigating = false;
         demoResetting.current = false;
+        if (workspaceSaveTimer.current !== null) {
+          window.clearTimeout(workspaceSaveTimer.current);
+          workspaceSaveTimer.current = null;
+        }
         sessionStorage.removeItem('canopy-demo-step');
         sessionStorage.removeItem('canopy-demo-paused');
+        try {
+          await saveWorkspace(workspaceRef.current);
+        } catch (saveError) {
+          setErrors((value) => ({
+            ...value,
+            workspace: `Couldn’t save workspace: ${saveError instanceof Error ? saveError.message : String(saveError)}`,
+          }));
+        } finally {
+          navigating = false;
+        }
         throw error;
       }
     };

@@ -22,7 +22,7 @@ const saveEffect = findNode(
     node.getText().includes('Couldn’t save workspace:'),
 ).arguments[0].getText();
 
-function harness() {
+function harness({ demo = true, saveGate = false } = {}) {
   const initial = { tabs: [{ expanded: [], selectedKey: undefined }] };
   const explored = {
     tabs: [{ expanded: ['CAN-100', 'CAN-110'], selectedKey: 'CAN-111' }],
@@ -31,30 +31,52 @@ function harness() {
   let nextTimer = 0;
   let resets = 0;
   let rejectReset = false;
+  let resetFault: unknown = new Error('fixture reset rejected');
+  let rejectReload = false;
+  let reloadFault: unknown;
+  let rejectSave = false;
+  let saveFault: unknown;
+  let errors: Record<string, string> = {};
+  const writes: unknown[] = [];
+  const workspaceRef = { current: explored };
   let inflight: (() => void) | undefined;
   let restored: (() => void) | undefined;
   const workspaceSaveTimer = { current: null as number | null };
   const pendingWorkspaceSave = { current: Promise.resolve() };
   const demoResetting = { current: false };
+  let stored: unknown = structuredClone(initial);
   const backend = execute(
     `function() {
-    let fixture; const demoMode = true;
+    let fixture; const demoMode = demo;
     const demoWorkspace = initial;
-    let demoWorkspaceState = structuredClone(explored);
+    let demoWorkspaceState = structuredClone(initial);
     return {load: ${handler('loadWorkspace')}, save: ${handler('saveWorkspace')}, reset: ${handler('resetDemo')}};
   }`,
     {
       initial,
       explored,
+      demo,
       structuredClone,
       workspace: (value: unknown) => value,
+      recoverWorkspaceViews: (value: unknown) => value,
       createFixture: async () => {
         resets++;
-        if (rejectReset) throw new Error('fixture reset rejected');
+        if (rejectReset) throw resetFault;
         return {};
       },
-      storage: {},
-      window: { webContents: { reload: () => {} } },
+      storage: {
+        read: async () => stored,
+        write: (_name: string, value: unknown) => {
+          stored = structuredClone(value);
+        },
+      },
+      window: {
+        webContents: {
+          reload: () => {
+            if (rejectReload) throw reloadFault;
+          },
+        },
+      },
     },
   )();
   const window = {
@@ -66,10 +88,13 @@ function harness() {
     },
     canopy: {
       saveWorkspace: async (value: unknown) => {
-        await new Promise<void>((resolve) => {
-          inflight = resolve;
-        });
-        backend.save(value);
+        writes.push(structuredClone(value));
+        if (saveGate)
+          await new Promise<void>((resolve) => {
+            inflight = resolve;
+          });
+        if (rejectSave) throw saveFault;
+        await backend.save(value);
       },
       resetDemo: backend.reset,
     },
@@ -79,6 +104,12 @@ function harness() {
     pendingWorkspaceSave,
     workspaceSaveTimer,
     demoResetting,
+    workspaceRef,
+    setErrors: (
+      update: (value: Record<string, string>) => Record<string, string>,
+    ) => {
+      errors = update(errors);
+    },
     useCallback: (fn: unknown) => fn,
     sessionStorage: { setItem: () => {}, removeItem: () => {} },
   };
@@ -98,14 +129,17 @@ function harness() {
       },
     },
   )();
-  const schedule = () =>
-    execute(saveEffect, {
+  let cleanup: (() => void) | undefined;
+  const schedule = (value = workspaceRef.current) => {
+    workspaceRef.current = value;
+    cleanup?.();
+    cleanup = execute(saveEffect, {
       ...context,
       ready: true,
-      workspace: explored,
+      workspace: value,
       saveWorkspace: functions.saveWorkspace,
-      setErrors: () => {},
     })();
+  };
   return {
     initial,
     explored,
@@ -113,10 +147,28 @@ function harness() {
     functions,
     schedule,
     timers,
+    writes,
+    workspaceRef,
     demoResetting,
+    errors: () => errors,
+    dispatchTimers: () => {
+      for (const [id, run] of timers) {
+        timers.delete(id);
+        run();
+      }
+    },
     resets: () => resets,
-    rejectReset: () => {
+    rejectReset: (fault: unknown) => {
       rejectReset = true;
+      resetFault = fault;
+    },
+    rejectReload: (fault: unknown) => {
+      rejectReload = true;
+      reloadFault = fault;
+    },
+    rejectSave: (fault: unknown) => {
+      rejectSave = true;
+      saveFault = fault;
     },
     finishSave: () => {
       assert.ok(inflight);
@@ -153,7 +205,7 @@ test('demo reset cancels the pending production autosave and refuses late old-do
 });
 
 test('demo reset waits for an already dispatched IPC save before installing its fresh workspace', async () => {
-  const h = harness();
+  const h = harness({ saveGate: true });
   const saving = h.functions.saveWorkspace(h.explored);
   await tick();
   const reset = h.functions.seek(0, false);
@@ -166,19 +218,89 @@ test('demo reset waits for an already dispatched IPC save before installing its 
   assert.deepEqual(await h.backend.load(), h.initial);
 });
 
-test('failed fixture reset releases the save barrier and permits ordinary subsequent saves', async () => {
+for (const stage of ['fixture', 'reload']) {
+  for (const primary of [undefined, null, false, new Error('reset fault')]) {
+    test(`failed ${stage} reset automatically persists the canceled autosave: ${String(primary)}`, async () => {
+      const h = harness();
+      if (stage === 'fixture') h.rejectReset(primary);
+      else h.rejectReload(primary);
+      h.schedule();
+      const reset = h.functions.seek(0, false);
+      h.finishRestore();
+      let rejected = false;
+      try {
+        await reset;
+      } catch (error) {
+        rejected = true;
+        assert.equal(error, primary);
+      }
+      assert.equal(rejected, true);
+      assert.equal(h.demoResetting.current, false);
+      await tick();
+      h.dispatchTimers();
+      await tick();
+      assert.deepEqual(
+        await h.backend.load(),
+        h.explored,
+        'recovery must not need another user action or saveWorkspace call',
+      );
+      assert.deepEqual(h.writes, [h.explored]);
+    });
+  }
+}
+
+test('failed reset recovers the latest visible edits after queued and restoration-time saves were consumed', async () => {
   const h = harness();
-  h.rejectReset();
+  const primary = new Error('fixture reset rejected');
+  h.rejectReset(primary);
+  const queued = h.functions.saveWorkspace(h.explored);
   const reset = h.functions.seek(0, false);
-  h.finishRestore();
-  await assert.rejects(reset, /fixture reset rejected/);
-  assert.equal(h.demoResetting.current, false);
-  const saving = h.functions.saveWorkspace(h.explored);
+  await queued;
+  const latest = {
+    tabs: [
+      ...h.explored.tabs,
+      { expanded: ['CAN-200'], selectedKey: 'CAN-201' },
+    ],
+  };
+  h.schedule(latest);
+  h.dispatchTimers();
   await tick();
-  h.finishSave();
-  await saving;
-  assert.deepEqual(await h.backend.load(), h.explored);
+  assert.equal(h.writes.length, 0, 'restoration-time writes remain suppressed');
+  const visible = { ...latest, theme: 'dark' };
+  h.schedule(visible); // This newest render still has an outstanding debounce.
+  h.finishRestore();
+  await assert.rejects(reset, (error) => error === primary);
+  await tick();
+  assert.deepEqual(await h.backend.load(), visible);
+  assert.deepEqual(h.writes, [visible]);
+  assert.equal(h.timers.size, 0);
 });
+
+for (const secondary of [
+  undefined,
+  null,
+  false,
+  new Error('recovery save failed'),
+]) {
+  test(`automatic recovery save failure preserves the reset primary: ${String(secondary)}`, async () => {
+    const h = harness();
+    const primary = new Error('original reset rejected');
+    h.rejectReload(primary);
+    h.rejectSave(secondary);
+    h.schedule();
+    const reset = h.functions.seek(0, false);
+    h.finishRestore();
+    await assert.rejects(reset, (error) => error === primary);
+    await tick();
+    assert.deepEqual(
+      h.writes,
+      [h.explored],
+      'the failure path must actually attempt persistence',
+    );
+    assert.match(h.errors().workspace, /Couldn’t save workspace:/);
+    assert.equal(h.demoResetting.current, false);
+  });
+}
 
 test('demo reset suppresses queued saves and autosaves scheduled while priority restoration is pending', async () => {
   const h = harness();
@@ -195,12 +317,47 @@ test('demo reset suppresses queued saves and autosaves scheduled while priority 
 });
 
 test('ordinary workspace saves still reach the production main handler', async () => {
-  const h = harness();
-  const saving = h.functions.saveWorkspace(h.initial);
+  const h = harness({ saveGate: true });
+  const saving = h.functions.saveWorkspace(h.explored);
   await tick();
   h.finishSave();
   await saving;
-  assert.deepEqual(await h.backend.load(), h.initial);
+  assert.deepEqual(await h.backend.load(), h.explored);
   assert.equal(h.resets(), 0);
   assert.equal(h.demoResetting.current, false);
 });
+
+test('ordinary non-demo persistence stays active and demo reset remains unavailable', async () => {
+  const h = harness({ demo: false });
+  h.schedule();
+  h.dispatchTimers();
+  await tick();
+  assert.deepEqual(await h.backend.load(), h.explored);
+  assert.deepEqual(h.writes, [h.explored]);
+  assert.equal(h.demoResetting.current, false);
+  await assert.rejects(
+    h.backend.reset(),
+    /Reset is available in the demo workspace/,
+  );
+});
+
+for (const primary of [undefined, null, false]) {
+  test(`falsy reset failure stays primary when automatic recovery also rejects: ${String(primary)}`, async () => {
+    const h = harness();
+    h.rejectReset(primary);
+    h.rejectSave(false);
+    h.schedule();
+    const reset = h.functions.seek(0, false);
+    h.finishRestore();
+    let rejected = false;
+    try {
+      await reset;
+    } catch (error) {
+      rejected = true;
+      assert.equal(error, primary);
+    }
+    assert.equal(rejected, true);
+    assert.deepEqual(h.writes, [h.explored]);
+    assert.match(h.errors().workspace, /false$/);
+  });
+}
