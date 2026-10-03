@@ -383,11 +383,82 @@ async function checkLoadedProfileRefusals() {
     'Loaded profile bounded diagnostics and unchanged prepare/check/cleanup refusals PASS (modeled)',
   );
 }
+async function checkLiteralProfileIdentity() {
+  assert.equal(managedProfile, paths.original);
+  for (const inventory of [
+    'canopy-appimage (unconfined)\n',
+    'canopy-appimage//child (unconfined)\n',
+    `${managedProfile} (unconfined)\ncanopy-appimage (unconfined)\n`,
+    `${managedProfile}//child (unconfined)\n`,
+    `${managedProfile} (enforce)\n`,
+  ]) {
+    const m = model(),
+      read = m.io.read;
+    m.io.read = async (path) =>
+      path === '/sys/kernel/security/apparmor/profiles'
+        ? inventory
+        : read(path);
+    await assert.rejects(
+      managedOperation({ ...base, operation: 'prepare' }, m.io, ctx),
+      /(?:Legacy managed|Unexpected managed) loaded profile/,
+    );
+    assert.deepEqual(m.calls, []);
+    assert(!m.files.has(paths.receipt));
+  }
+  for (const change of [
+    'legacy-loaded',
+    'wrong-name',
+    'old-receipt',
+    'old-policy',
+    'schema',
+  ]) {
+    const m = model();
+    await managedOperation({ ...base, operation: 'prepare' }, m.io, ctx);
+    const read = m.io.read;
+    if (change === 'legacy-loaded' || change === 'wrong-name') {
+      m.io.read = async (path) => {
+        if (
+          change === 'legacy-loaded' &&
+          path === '/sys/kernel/security/apparmor/profiles'
+        )
+          return `${managedProfile} (unconfined)\ncanopy-appimage (unconfined)\n`;
+        if (change === 'wrong-name' && path.endsWith('/name'))
+          return 'canopy-appimage\n';
+        return read(path);
+      };
+    } else {
+      const file = m.files.get(paths.receipt),
+        receipt = JSON.parse(file.content);
+      if (change === 'old-receipt') receipt.profile.name = 'canopy-appimage';
+      if (change === 'old-policy') {
+        receipt.profile.content = managedPolicy.replace(
+          `profile ${managedProfile}`,
+          `profile canopy-appimage ${managedProfile}`,
+        );
+        receipt.profile.sha256 = hash(receipt.profile.content);
+      }
+      if (change === 'schema') receipt.schema = 2;
+      file.content = JSON.stringify(receipt);
+      file.meta.size = file.content.length;
+    }
+    const before = [...m.calls];
+    for (const operation of ['check', 'cleanup']) {
+      await assert.rejects(managedOperation({ ...base, operation }, m.io, ctx));
+      assert.deepEqual(m.calls, before);
+      for (const path of [paths.receipt, paths.original, paths.policy])
+        assert(m.files.has(path));
+    }
+  }
+  console.log(
+    'Fixed literal profile, legacy overlap/name/receipt/policy/schema refusal and retention PASS (modeled)',
+  );
+}
 export async function checkManagedAppImage() {
+  await checkLiteralProfileIdentity();
   await checkLoadedProfileRefusals();
   assert.equal(
     managedPolicy,
-    'abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /var/lib/canopy-appimage-ci/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n',
+    'abi <abi/4.0>,\ninclude <tunables/global>\nprofile /var/lib/canopy-appimage-ci/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n',
   );
   for (const change of [
     { platform: 'darwin' },

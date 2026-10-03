@@ -30,8 +30,8 @@ export const managedPaths = Object.freeze({
   receipt: '/var/lib/.canopy-appimage-ci.json',
   policy: '/etc/apparmor.d/canopy-appimage',
 });
-export const managedProfile = 'canopy-appimage';
-export const managedPolicy = `abi <abi/4.0>,\ninclude <tunables/global>\nprofile canopy-appimage /var/lib/canopy-appimage-ci/Canopy.AppImage flags=(unconfined) {\n  userns,\n}\n`;
+export const managedProfile = managedPaths.original;
+export const managedPolicy = `abi <abi/4.0>,\ninclude <tunables/global>\nprofile ${managedProfile} flags=(unconfined) {\n  userns,\n}\n`;
 const digest = (text) => createHash('sha256').update(text).digest('hex');
 const ownFile = fileURLToPath(import.meta.url);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -251,8 +251,12 @@ async function loadedProfile(io) {
   const lines = (await io.read('/sys/kernel/security/apparmor/profiles'))
     .trim()
     .split('\n');
-  const matches = lines.filter((line) =>
-    /^canopy-appimage(?:\s|\/\/|$)/.test(line),
+  if (lines.some((line) => /^canopy-appimage(?:\s|\/\/|$)/.test(line)))
+    fail('Legacy managed loaded profile');
+  const matches = lines.filter(
+    (line) =>
+      line.startsWith(managedProfile) &&
+      /^(?:\s|\/\/|$)/.test(line.slice(managedProfile.length)),
   );
   if (!matches.length) return null;
   if (matches.length !== 1 || matches[0] !== `${managedProfile} (unconfined)`)
