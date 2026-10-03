@@ -1,9 +1,17 @@
-import { finishBackupAudit } from './backup-audit-cleanup.mjs';
+import { AuditOwner, deadline } from './audit-lifecycle.mjs';
+import {
+  finishBackupAudit,
+  trackBackupOperation,
+} from './backup-audit-cleanup.mjs';
 // Exclusive desktop token required; stage-backup-smoke supplies forbidden keychain and fake providers.
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSearch } from './smoke-search.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readFile,
+  writeFile as writeProfileFile,
+} from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 const [sampleApp, runtime] = process.argv.slice(2);
@@ -18,6 +26,14 @@ const exportedFile = join(directory, 'exported.json');
 const env = { ...process.env, CANOPY_USER_DATA: profile };
 delete env.ELECTRON_RUN_AS_NODE;
 let app, page;
+const owner = new AuditOwner({
+  profile: profile,
+  executable: resolve(runtime),
+});
+const pending = new Set();
+const writeFile = (...args) =>
+  trackBackupOperation(pending, () => writeProfileFile(...args));
+let confirmed = false;
 let failure;
 let failed = false;
 const errors = [];
@@ -25,11 +41,23 @@ const mark = (label) => {
   console.log(`PASS ${label}`);
 };
 try {
-  app = await electron.launch({
-    args: [resolve(sampleApp)],
-    executablePath: resolve(runtime),
-    env,
-  });
+  await deadline(
+    () =>
+      trackBackupOperation(pending, () =>
+        owner.launch(async () => {
+          app = await electron.launch({
+            args: [resolve(sampleApp)],
+            executablePath: resolve(runtime),
+            env,
+          });
+          return app;
+        }),
+      ),
+    30000,
+    'Backup audit launch',
+  );
+  owner.confirm(app.process());
+  confirmed = true;
   expect(
     await app.evaluate(() => globalThis.canopyBackupKeychainForbidden),
   ).toBe(true);
@@ -525,6 +553,9 @@ try {
   failed = true;
 } finally {
   await finishBackupAudit({
+    owner,
+    confirmed,
+    pending,
     app,
     directory,
     failure,

@@ -77,7 +77,7 @@ import {migrateViews} from '${root}/src/renderer/table-view';
 import {backupWorkspace,backupConnections} from '${root}/tests/fixtures/workspace-backup';
 const storage=new Storage(${JSON.stringify(directory)}),transfer=new WorkspaceTransfer(storage,()=>backupConnections);
 const baseline=migrateViews(recoverWorkspaceViews(structuredClone(backupWorkspace)));
-const workspaceRef={current:baseline},pendingWorkspaceSave={current:Promise.resolve()},workspaceSaveTimer={current:null},workspaceTransferBusy={current:false},appearanceSaving={current:false};
+const workspaceRef={current:baseline},pendingWorkspaceSave={current:Promise.resolve()},workspaceSaveTimer={current:null},workspaceTransferBusy={current:false},appearanceSaving={current:false},demoResetting={current:false};
 let active=false,dialog='backup',reload;
 const setWorkspaceTransferActive=value=>active=value, setDialog=value=>dialog=typeof value==='function'?value(dialog):value;
 const setAppearancePreview=()=>{},setWorkspace=value=>workspaceRef.current=typeof value==='function'?value(workspaceRef.current):value;

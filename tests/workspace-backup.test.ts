@@ -413,3 +413,24 @@ test('timestamps require an exact valid calendar round trip', () => {
   leap.createdAt = '2028-02-29T00:00:00.000Z';
   assert.equal(parseBackup(JSON.stringify(leap)).createdAt, leap.createdAt);
 });
+
+test('portable imports preserve destination triage and validate local inbox preferences', () => {
+  const current = empty();
+  current.triage = { version: 1, items: [], reviewStatuses: {}, history: [] };
+  validateWorkspace(current);
+  const backup = fixture();
+  assert.ok(!Object.hasOwn(backup.workspace, 'triage'));
+  for (const mode of ['merge', 'replace'] as const)
+    assert.deepEqual(
+      planImport(backup, current, destinations, mapping, mode).workspace.triage,
+      current.triage,
+    );
+  assert.throws(
+    () =>
+      validateWorkspace({
+        ...current,
+        triage: { ...current.triage!, version: 2 },
+      } as unknown as Workspace),
+    /Invalid inbox preferences/,
+  );
+});

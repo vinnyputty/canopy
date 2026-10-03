@@ -1,4 +1,3 @@
-import { validTriage } from '../shared/triage';
 import {
   issueRelationships,
   relationshipKinds,

@@ -1,27 +1,20 @@
-// Backup audits own one Playwright process tree and one disposable directory.
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+// Lifecycle authority stays in the shared AuditOwner; this adapter retains work
+// that a bounded wait cannot cancel before allowing disposable-profile removal.
+import { finishAudit } from './audit-lifecycle.mjs';
 import { rm } from 'node:fs/promises';
-const execute = promisify(execFile);
 
-async function bounded(label, operation, timeoutMs) {
-  let timer;
-  try {
-    return await Promise.race([
-      Promise.resolve().then(operation),
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`${label} timed out`)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
+export function trackBackupOperation(pending, operation) {
+  const promise = Promise.resolve().then(operation);
+  pending.add(promise);
+  const settled = () => pending.delete(promise);
+  promise.then(settled, settled);
+  return promise;
 }
 
 export async function finishBackupAudit({
+  owner,
+  confirmed = false,
+  pending = new Set(),
   app,
   directory,
   failure,
@@ -29,71 +22,65 @@ export async function finishBackupAudit({
   diagnostics,
   timeoutMs = 5000,
 }) {
-  const errors = [];
-  const attempt = async (label, operation) => {
-    try {
-      await bounded(label, operation, timeoutMs);
-      return true;
-    } catch (error) {
-      errors.push(error);
-      console.error(`${label}:`, error);
-      return false;
-    }
-  };
-  // Collect only descendants of the exact process returned by this launch.
-  let owned;
-  await attempt('Owned process handle', () => {
-    owned = app?.process?.();
+  if (!owner) {
+    const error = new Error('Missing audit owner; profile retained');
+    throw new AggregateError(
+      failed ? [failure, error] : [error],
+      error.message,
+      {
+        cause: failed ? failure : error,
+      },
+    );
+  }
+  await finishAudit({
+    owner,
+    close:
+      confirmed && app
+        ? () => trackBackupOperation(pending, () => app.close())
+        : undefined,
+    primary: failure,
+    primaryFailed: failed,
+    diagnostics:
+      failed && confirmed && diagnostics
+        ? [
+            {
+              label: 'Sample diagnostics',
+              run: () => trackBackupOperation(pending, diagnostics),
+            },
+          ]
+        : [],
+    removeProfile: async () => {
+      if (!confirmed || !owner.child || pending.size)
+        throw new Error(
+          'Unconfirmed launch or unsettled audit operations; profile retained',
+        );
+      // Re-establish absence after all acquisitions/diagnostics/writers settle.
+      // A prior timeout or parent exit cannot authorize directory deletion.
+      const fresh = await owner.shutdown();
+      if (!fresh.terminated || pending.size)
+        throw new AggregateError(
+          fresh.errors,
+          'Owned scope uncertain; profile retained',
+        );
+      try {
+        await rm(directory, { recursive: true, force: true });
+      } catch (error) {
+        if (fresh.errors.length)
+          throw new AggregateError(
+            [error, ...fresh.errors],
+            'Profile removal and fresh shutdown failed',
+            { cause: error },
+          );
+        throw error;
+      }
+      if (fresh.errors.length)
+        throw new AggregateError(
+          fresh.errors,
+          'Fresh audit shutdown failed after verified profile removal',
+        );
+    },
+    writeEvidence: async () => {},
+    secondary: (error) => console.error('Backup audit cleanup:', error),
+    operationMs: timeoutMs,
   });
-  let descendants = [];
-  const live = () =>
-    owned?.pid && owned.exitCode === null && owned.signalCode === null;
-  if (live() && process.platform !== 'win32')
-    await attempt('Owned process discovery', async () => {
-      const { stdout } = await execute('ps', ['-eo', 'pid=,ppid='], {
-        timeout: timeoutMs,
-      });
-      const rows = stdout
-        .trim()
-        .split('\n')
-        .map((row) => row.trim().split(/\s+/).map(Number));
-      const parents = new Set([owned.pid]);
-      for (let changed = true; changed;) {
-        changed = false;
-        for (const [pid, parent] of rows)
-          if (parents.has(parent) && !parents.has(pid)) {
-            parents.add(pid);
-            descendants.push(pid);
-            changed = true;
-          }
-      }
-    });
-  if (failed && diagnostics) await attempt('Sample diagnostics', diagnostics);
-  const closed =
-    !app || (await attempt('Owned Electron close', () => app.close()));
-  if (!closed && live())
-    await attempt('Owned process termination', async () => {
-      if (process.platform === 'win32') {
-        await execute('taskkill', ['/PID', String(owned.pid), '/T', '/F'], {
-          timeout: timeoutMs,
-        });
-      } else {
-        for (const pid of descendants.reverse()) {
-          try {
-            process.kill(pid, 'SIGKILL');
-          } catch (error) {
-            if (error.code !== 'ESRCH') throw error;
-          }
-        }
-        owned.kill('SIGKILL');
-      }
-      if (owned.exitCode === null && owned.signalCode === null)
-        await new Promise((resolve) => owned.once('exit', resolve));
-    });
-  await attempt('Owned profile removal', () =>
-    rm(directory, { recursive: true, force: true }),
-  );
-  if (failed) throw failure;
-  if (errors.length)
-    throw new AggregateError(errors, 'Backup audit cleanup failed');
 }

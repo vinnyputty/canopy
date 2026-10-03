@@ -1,4 +1,5 @@
 import type { Workspace } from './types';
+import { validTriage } from './triage';
 import {
   validSavedViews,
   validViewMap,
@@ -30,6 +31,8 @@ export function validateWorkspace(value: Workspace) {
     throw new Error('Invalid table view.');
   if (value.reading !== undefined && !validReading(value.reading))
     throw new Error('Invalid reading settings.');
+  if (value.triage !== undefined && !validTriage(value.triage))
+    throw new Error('Invalid inbox preferences.');
   if (value.savedViews !== undefined && !validSavedViews(value.savedViews))
     throw new Error('Invalid saved issue view.');
   for (const [name, minimum, maximum] of [

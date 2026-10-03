@@ -452,6 +452,7 @@ export function planImport(
     result = {
       ...incoming,
       ...(current.seenRoots ? { seenRoots: current.seenRoots } : {}),
+      ...(current.triage ? { triage: current.triage } : {}),
     };
     conflicts.push(
       'Replace removes existing roots, favorites, saved views, appearance, and shortcuts from workspace.json.',
