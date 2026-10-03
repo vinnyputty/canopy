@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { before, test } from 'node:test';
+import ts from 'typescript';
 import childProcess, { type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
@@ -696,9 +697,20 @@ test('exact palette audit catch/finally preserves assertion plus filesystem faul
     join(process.cwd(), 'tools/palette-check.mjs'),
     'utf8',
   );
-  const tail = source.slice(
-    source.indexOf('} catch (error) {\n  failure = error;') + 1,
+  const parsed = ts.createSourceFile(
+    'palette-check.mjs',
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
   );
+  const audit = parsed.statements.find(
+    (node): node is ts.TryStatement =>
+      ts.isTryStatement(node) && node.getText().includes('Palette audit'),
+  );
+  assert.ok(audit?.catchClause && audit.finallyBlock);
+  const tail =
+    audit.catchClause.getText() + '\nfinally ' + audit.finallyBlock.getText();
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const run = new AsyncFunction(
     'app',
@@ -714,7 +726,8 @@ test('exact palette audit catch/finally preserves assertion plus filesystem faul
     'join',
     'deadline',
     'injected',
-    'let failure; const log=[]; try { throw injected; }' + tail,
+    'let failure; let failed=false; const log=[]; try { throw injected; }' +
+      tail,
   );
   const f = await fixture();
   const primary = new Error('ORIGINAL ASSERTION');

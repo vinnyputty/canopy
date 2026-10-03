@@ -36,6 +36,7 @@ const record = (message) => {
 let app;
 let page;
 let failure;
+let failed = false;
 const errors = [];
 const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 async function audit() {
@@ -575,15 +576,17 @@ async function audit() {
 try {
   await deadline(audit, 180000, 'Palette audit');
 } catch (error) {
+  failed = true;
   failure = error;
-  record(`FAIL ${error.stack ?? error}`);
+  record(`FAIL ${String(error?.stack ?? error)}`);
 } finally {
   await finishAudit({
     owner,
     close: app ? () => app.close() : undefined,
     primary: failure,
+    primaryFailed: failed,
     diagnostics:
-      failure && page && !page.isClosed()
+      failed && page && !page.isClosed()
         ? [
             {
               label: 'Failure screenshot',
@@ -619,6 +622,6 @@ try {
       await mkdir(evidence, { recursive: true });
       await writeFile(join(evidence, 'checks.log'), log.join('\n') + '\n');
     },
-    secondary: (error) => record(`SECONDARY ${error.stack ?? error}`),
+    secondary: (error) => record(`SECONDARY ${String(error?.stack ?? error)}`),
   });
 }

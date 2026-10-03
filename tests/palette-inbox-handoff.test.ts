@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
-import type { TabState, Workspace } from '../src/shared/types';
+import type { TabState, TreeSnapshot, Workspace } from '../src/shared/types';
+import { demoSeeds } from '../src/main/demo-provider';
+import { viewSources } from '../src/renderer/saved-views';
+import { rootView } from '../src/renderer/table-view';
 import { paletteIssueTab } from '../src/renderer/navigation-palette';
 import { activateTab, sameRoot, visit } from '../src/renderer/workspace';
 import { callback, execute, findNode, sourceFile } from './source-probe';
@@ -29,7 +32,10 @@ function attribute(tag: string, name: string) {
   );
   return attr.initializer.expression.getText();
 }
-function harness(initialInbox = true) {
+function harness(
+  initialInbox = true,
+  options: { tabs?: TabState[]; snapshots?: Record<string, TreeSnapshot> } = {},
+) {
   const tab: TabState = {
     id: 'source',
     connectionId: 'fixture',
@@ -52,7 +58,7 @@ function harness(initialInbox = true) {
     sort: { column: 'key' as const, direction: 'asc' as const },
   };
   let workspace: Workspace = {
-    tabs: [tab],
+    tabs: options.tabs ?? [tab],
     activeTabId: tab.id,
     savedViews: [requested],
     activeSavedViewId: 'previous-view',
@@ -108,8 +114,10 @@ function harness(initialInbox = true) {
     openTab,
     navigate,
     paletteIssueTab,
+    workspaceRef,
+    sameRoot,
     snapshots: {},
-    viewSnapshots: {},
+    viewSnapshots: options.snapshots ?? {},
     navigationReveal,
     setReveal: (value: unknown) => {
       reveal = value;
@@ -122,7 +130,24 @@ function harness(initialInbox = true) {
       inboxView: { id: 'triage-inbox' },
       workspace,
     });
+  let persisted: Workspace | undefined;
+  const save = execute(callback(source, 'saveWorkspace'), {
+    useCallback: (fn: unknown) => fn,
+    demoResetting: { current: false },
+    pendingWorkspaceSave: { current: Promise.resolve() },
+    window: {
+      canopy: {
+        saveWorkspace: async (value: Workspace) => {
+          persisted = JSON.parse(JSON.stringify(value));
+        },
+      },
+    },
+  });
   return {
+    persist: async () => {
+      await save(workspace);
+      return persisted!;
+    },
     tab,
     requested,
     palette,
@@ -190,3 +215,94 @@ test('actual palette loaded-issue handoff exits Inbox and retains reveal and scr
   assert.equal(h.state().pendingScrollRestore, h.tab.id);
   assert.equal(h.state().dialog, null);
 });
+
+for (const provider of ['jira', 'github'] as const) {
+  for (const existing of [false, true]) {
+    test(`actual palette persists a real ${provider} tab for saved-only loaded issue, existing root=${existing}`, async () => {
+      const rootKey = provider === 'github' ? 'owner/repo#1' : 'CAN-1';
+      const key = provider === 'github' ? 'owner/repo#3' : 'CAN-3';
+      const parentKey = provider === 'github' ? 'owner/repo#2' : 'CAN-2';
+      const root = { connectionId: `selected-${provider}`, rootKey };
+      const view = {
+        id: 'saved',
+        name: 'Saved',
+        roots: [root],
+        connectionIds: [],
+        filters: {
+          assignee: 'any' as const,
+          statuses: [],
+          priority: '',
+          hideDone: false,
+        },
+        sort: { column: 'key' as const, direction: 'asc' as const },
+      };
+      const source = viewSources(view, [])[0];
+      const sourceTab: TabState = {
+        ...source,
+        expanded: [rootKey],
+        hideDone: false,
+        scrollTop: 19,
+      };
+      const foreign = {
+        ...sourceTab,
+        id: 'foreign-tab',
+        connectionId: 'other-account',
+      };
+      const opened = { ...sourceTab, id: 'opened-tab', scrollTop: 39 };
+      const snapshot: TreeSnapshot = {
+        rootKey,
+        fetchedAt: 1,
+        warnings: [],
+        issues: [
+          { ...demoSeeds[0], key: rootKey, parentKey: undefined },
+          { ...demoSeeds[0], key: parentKey, parentKey: rootKey },
+          { ...demoSeeds[0], key, parentKey },
+        ],
+      };
+      const h = harness(true, {
+        tabs: existing ? [foreign, opened] : [foreign],
+        snapshots: { [source.id]: snapshot },
+      });
+      const before = JSON.parse(JSON.stringify(h.state().workspace));
+      h.palette({ target: { type: 'Loaded issue', tab: sourceTab, key } });
+      const persisted = await h.persist();
+      const active = persisted.tabs.find(
+        (tab) => tab.id === persisted.activeTabId,
+      )!;
+      assert.ok(active && !active.id.startsWith('saved-view:'));
+      if (existing) assert.equal(active.id, opened.id);
+      assert.equal(active.connectionId, root.connectionId);
+      assert.equal(active.rootKey, rootKey);
+      assert.equal(active.selectedKey, key);
+      assert.equal(
+        active.scrollTop,
+        existing ? opened.scrollTop : sourceTab.scrollTop,
+      );
+      assert.equal(active.focusKey, undefined);
+      assert.deepEqual(active.expanded, [rootKey, parentKey, key]);
+      assert.deepEqual(
+        persisted.tabs.find((tab) => tab.id === foreign.id),
+        foreign,
+      );
+      assert.equal(
+        persisted.tabs.length,
+        before.tabs.length + (existing ? 0 : 1),
+      );
+      assert.deepEqual(
+        rootView(persisted, active),
+        rootView(before, sourceTab),
+      );
+      assert.equal(h.state().inboxOpen, false);
+      assert.equal(persisted.activeSavedViewId, null);
+      assert.equal(h.state().dialog, null);
+      assert.deepEqual(h.state().reveal, { tabId: active.id, key });
+      assert.deepEqual(h.state().navigationReveal, h.state().reveal);
+      assert.equal(h.state().pendingScrollRestore, active.id);
+      assert.equal(
+        sourceTab.id,
+        source.id,
+        'local snapshot lookup identity stays virtual',
+      );
+    });
+  }
+}

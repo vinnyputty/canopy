@@ -31,6 +31,8 @@ export function finishAudit(options: {
   owner: AuditOwner;
   close?: () => Promise<unknown>;
   primary?: unknown;
+  /** Explicit caught-failure state, including thrown undefined. Defaults to primary !== undefined. */
+  primaryFailed?: boolean;
   diagnostics?: { label: string; run: () => Promise<unknown> }[];
   removeProfile: () => Promise<unknown>;
   writeEvidence: () => Promise<unknown>;

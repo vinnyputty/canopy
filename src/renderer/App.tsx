@@ -5295,8 +5295,17 @@ export function App() {
               }));
               setDialog(null);
             } else if (target.type === 'Loaded issue') {
+              const source = target.tab;
+              const existing = workspaceRef.current.tabs.find((item) =>
+                sameRoot(item, source),
+              );
               const tab = paletteIssueTab(
-                target.tab,
+                existing ?? {
+                  ...source,
+                  id: source.id.startsWith('saved-view:')
+                    ? crypto.randomUUID()
+                    : source.id,
+                },
                 target.key,
                 snapshots[target.tab.id] ?? viewSnapshots[target.tab.id],
               );

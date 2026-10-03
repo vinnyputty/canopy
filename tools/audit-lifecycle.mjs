@@ -656,11 +656,16 @@ export class AuditOwner {
   }
 }
 
-/** Keep the assertion/launch error first; diagnostic and cleanup faults are secondary. */
+/**
+ * Keep the assertion/launch failure first, including falsy thrown values.
+ * Set primaryFailed for a caught undefined; without it, undefined means success.
+ * Diagnostic and cleanup faults remain secondary.
+ */
 export async function finishAudit({
   owner,
   close,
   primary,
+  primaryFailed = primary !== undefined,
   diagnostics = [],
   removeProfile,
   writeEvidence,
@@ -671,7 +676,11 @@ export async function finishAudit({
   const report = (error) => {
     errors.push(error);
     try {
-      secondary(error);
+      secondary(
+        error instanceof Error
+          ? error
+          : new Error(String(error), { cause: error }),
+      );
     } catch (reportError) {
       errors.push(
         new Error('Secondary error reporting failed', { cause: reportError }),
@@ -682,7 +691,7 @@ export async function finishAudit({
     try {
       await deadline(operation, operationMs, label);
     } catch (error) {
-      const detail = new Error(`${label}: ${error.message ?? error}`, {
+      const detail = new Error(`${label}: ${String(error?.message ?? error)}`, {
         cause: error,
       });
       report(detail);
@@ -699,12 +708,12 @@ export async function finishAudit({
   if (shutdown.terminated) await attempt('Profile removal', removeProfile);
   else report(new Error(`Profile retained: ${owner.profile}`));
   await attempt('Evidence write', writeEvidence);
-  if (primary && !errors.length) throw primary;
-  if (primary || errors.length) {
-    const first = primary ?? errors[0];
+  if (primaryFailed && !errors.length) throw primary;
+  if (primaryFailed || errors.length) {
+    const first = primaryFailed ? primary : errors[0];
     throw new AggregateError(
-      primary ? [primary, ...errors] : errors,
-      `${first.message ?? first}; ${errors.length} diagnostic/cleanup error(s)`,
+      primaryFailed ? [primary, ...errors] : errors,
+      `${String(first?.message ?? first)}; ${errors.length} diagnostic/cleanup error(s)`,
       { cause: first },
     );
   }
