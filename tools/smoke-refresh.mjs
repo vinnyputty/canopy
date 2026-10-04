@@ -56,6 +56,8 @@ export async function auditRefresh(app, page, resizeWindow) {
 
   await page.clock.install();
   await page.reload();
+  // Search leaves CAN-100 active; its debounced save may settle before reload.
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
   ).toBeVisible();
