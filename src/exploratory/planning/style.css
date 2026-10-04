@@ -1,0 +1,77 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #172338;
+  background: #f5f7fa;
+}
+main {
+  max-width: 950px;
+  margin: 2rem auto;
+  padding: 1rem;
+}
+p {
+  line-height: 1.5;
+}
+section,
+aside {
+  padding: 1rem;
+  margin-top: 1rem;
+  background: white;
+  border: 1px solid #c1cbd8;
+  border-radius: 8px;
+}
+button,
+select {
+  font: inherit;
+  color: inherit;
+  background: white;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid #778499;
+  border-radius: 4px;
+  margin: 0.25rem;
+}
+button {
+  cursor: pointer;
+}
+button[aria-pressed='true'] {
+  background: #d9eaff;
+  border-color: #1b55a0;
+}
+:focus-visible {
+  outline: 3px solid #1b55a0;
+  outline-offset: 3px;
+}
+li {
+  margin: 0.5rem 0;
+}
+.child {
+  margin-left: 2rem;
+}
+svg {
+  width: 100%;
+  max-width: 750px;
+}
+svg line {
+  stroke-width: 2;
+}
+.blocker {
+  stroke: #1b55a0;
+}
+.hierarchy {
+  stroke: #526174;
+  stroke-dasharray: 8 5;
+}
+.related {
+  stroke: #794ca5;
+  stroke-dasharray: 2 6;
+}
+.cycle {
+  stroke: #b42432;
+  stroke-width: 3;
+}
+svg rect {
+  fill: white;
+  stroke: #526174;
+}
+svg .unknown {
+  stroke-dasharray: 4 3;
+}
