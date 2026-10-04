@@ -374,10 +374,13 @@ export async function auditAuthoring(
     app = undefined;
     await launch('restart');
     page.on('pageerror', (error) => errors.push(error));
-    // Startup awaits loadFile; fixture reload must follow the completed load.
-    await audit.run('restart:initial-load', () =>
-      page.waitForLoadState('load', { timeout: 30_000 }),
-    );
+    // Match the initial launch: browser load can precede renderer startup IPC.
+    await audit.run('restart:initial-load', async () => {
+      await page.waitForLoadState('load', { timeout: 30_000 });
+      await page
+        .getByRole('heading', { name: 'See the whole tree.' })
+        .waitFor({ timeout: 30_000 });
+    });
     await audit.run('restart:install-fixtures', installGithubHandlers);
     await audit.run('restart:fixture-reload', () =>
       page.reload({ timeout: 30_000 }),

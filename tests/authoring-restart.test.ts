@@ -6,9 +6,24 @@ import { before, test } from 'node:test';
 import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { createRequire } from 'node:module';
 
 let authoringAuditLifecycle: any;
+let restartBundle: string;
 before(async () => {
+  // Bundle in a bounded compiler process, independent of the test worker loader.
+  restartBundle = (
+    await promisify(execFile)(
+      process.execPath,
+      [
+        '-e',
+        "process.stdout.write(require(process.argv[1]).buildSync({entryPoints:[process.argv[2]],bundle:true,platform:'node',format:'cjs',external:['@playwright/test'],write:false}).outputFiles[0].text)",
+        createRequire(import.meta.url).resolve('esbuild'),
+        new URL('../tools/smoke-authoring.mjs', import.meta.url).pathname,
+      ],
+      { timeout: 10_000, maxBuffer: 1_000_000 },
+    )
+  ).stdout;
   ({ authoringAuditLifecycle } = await import(
     new URL('../tools/authoring-audit.mjs', import.meta.url).href
   ));
@@ -649,10 +664,7 @@ for (const mode of ['normal', 'reject', 'hang', 'failed-launch'] as const) {
 // Electron/page boundaries and fixture installation are controlled here; this
 // proves sequencing and failure propagation, not Chromium or native rendering.
 function restartReadiness() {
-  const source = readFileSync(
-    new URL('../tools/smoke-authoring.mjs', import.meta.url),
-    'utf8',
-  );
+  const source = restartBundle;
   const ast = ts.createSourceFile(
     'smoke-authoring.mjs',
     source,
@@ -674,13 +686,16 @@ function restartReadiness() {
   )!;
   const attempt = statements.find(ts.isTryStatement)!;
   const body = attempt.tryBlock.statements;
-  const first = body.findIndex(
-    (node) => node.getText(ast) === "await launch('restart');",
+  const first = body.findIndex((node) =>
+    /^await launch\(["']restart["']\);$/.test(node.getText(ast)),
   );
   const last = body.findIndex((node) =>
-    node.getText(ast).includes("audit.run('restart:fixture-reload'"),
+    /audit\.run\(\s*["']restart:fixture-reload["']/.test(node.getText(ast)),
   );
-  assert.ok(first >= 0 && last > first);
+  assert.ok(
+    first >= 0 && last > first,
+    `restart statements: first=${first}, last=${last}`,
+  );
   const fixture = protocol();
   const calls: string[] = [];
   let resolveLoad!: () => void;
@@ -693,6 +708,16 @@ function restartReadiness() {
   const waiting = new Promise<void>((resolve) => {
     reachedLoad = resolve;
   });
+  let resolveReady!: () => void;
+  let rejectReady!: (error: unknown) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  let reachedReady!: () => void;
+  const waitingReady = new Promise<void>((resolve) => {
+    reachedReady = resolve;
+  });
   const page = {
     on: () => {},
     waitForLoadState: (state: string, options: { timeout: number }) => {
@@ -701,6 +726,18 @@ function restartReadiness() {
       calls.push('load');
       reachedLoad();
       return loaded;
+    },
+    getByRole: (role: string, options: { name: string }) => {
+      assert.equal(role, 'heading');
+      assert.equal(options.name, 'See the whole tree.');
+      return {
+        waitFor: (options: { timeout: number }) => {
+          assert.equal(options.timeout, 30_000);
+          calls.push('ready');
+          reachedReady();
+          return ready;
+        },
+      };
     },
     reload: async (options: { timeout: number }) => {
       assert.equal(options.timeout, 30_000);
@@ -722,7 +759,7 @@ function restartReadiness() {
   })`,
     {
       audit: fixture.audit,
-      electron: { launch: async () => app },
+      import_test: { _electron: { launch: async () => app } },
       appPath: 'sample',
       executablePath: 'fixture',
       env: {},
@@ -730,20 +767,34 @@ function restartReadiness() {
         calls.push('install');
       },
       userData: 'disposable',
-      rm: async () => {},
+      import_promises: { rm: async () => {} },
     },
   );
-  return { run, calls, waiting, resolveLoad, rejectLoad, fixture };
+  return {
+    run,
+    calls,
+    waiting,
+    resolveLoad,
+    rejectLoad,
+    waitingReady,
+    resolveReady,
+    rejectReady,
+    fixture,
+  };
 }
 
 test('actual restart holds fixture installation and reload until initial full load completes', async () => {
   const h = restartReadiness();
   const result = h.run();
-  await h.waiting;
+  await Promise.race([
+    h.waiting,
+    result.then(() => assert.fail('restart completed before load boundary')),
+  ]);
   assert.deepEqual(h.calls, ['load']);
+  h.resolveReady();
   h.resolveLoad();
   await result;
-  assert.deepEqual(h.calls, ['load', 'install', 'reload']);
+  assert.deepEqual(h.calls, ['load', 'ready', 'install', 'reload']);
   assert.equal(h.fixture.cleanup().primaryFailed, false);
   assert.equal(h.fixture.calls.filter((call) => call === 'confirm').length, 1);
 });
@@ -751,8 +802,9 @@ test('actual restart holds fixture installation and reload until initial full lo
 test('actual restart proceeds when initial full load is already complete', async () => {
   const h = restartReadiness();
   h.resolveLoad();
+  h.resolveReady();
   await h.run();
-  assert.deepEqual(h.calls, ['load', 'install', 'reload']);
+  assert.deepEqual(h.calls, ['load', 'ready', 'install', 'reload']);
 });
 
 for (const primary of [
@@ -766,10 +818,66 @@ for (const primary of [
   test(`actual restart retains initial-load rejection (${String(primary)}) without installing fixtures or reloading`, async () => {
     const h = restartReadiness();
     const result = h.run();
-    await h.waiting;
+    await Promise.race([
+      h.waiting,
+      result.then(() => assert.fail('restart completed before load boundary')),
+    ]);
     h.rejectLoad(primary);
     await result;
     assert.deepEqual(h.calls, ['load']);
+    assert.equal(h.fixture.cleanup().primary, primary);
+    assert.equal(h.fixture.cleanup().primaryFailed, true);
+    assert.equal(h.fixture.records.at(-1).status, 'primary');
+    assert.equal(h.fixture.records.at(-1).stage, 'restart:initial-load');
+    assert.equal(typeof h.fixture.cleanup().close, 'function');
+  });
+}
+
+test('actual bundled restart waits for the welcome scene after browser load before replacing IPC fixtures or reloading', async () => {
+  const h = restartReadiness();
+  h.resolveLoad();
+  const result = h.run();
+  await Promise.race([
+    h.waitingReady,
+    result.then(() => assert.fail('restart completed before welcome boundary')),
+  ]);
+  assert.deepEqual(h.calls, ['load', 'ready']);
+  assert.equal(h.fixture.records.at(-1).stage, 'restart:initial-load');
+  assert.equal(h.fixture.records.at(-1).status, 'start');
+  h.resolveReady();
+  await result;
+  assert.deepEqual(h.calls, ['load', 'ready', 'install', 'reload']);
+  assert.equal(
+    h.fixture.records.filter(
+      (record: any) =>
+        record.stage === 'restart:initial-load' && record.status === 'start',
+    ).length,
+    1,
+  );
+  assert.equal(h.fixture.cleanup().primaryFailed, false);
+});
+
+for (const primary of [
+  new Error('renderer readiness failed'),
+  undefined,
+  null,
+  false,
+  0,
+  '',
+]) {
+  test(`actual bundled restart retains welcome readiness rejection (${String(primary)}) before fixture installation`, async () => {
+    const h = restartReadiness();
+    h.resolveLoad();
+    const result = h.run();
+    await Promise.race([
+      h.waitingReady,
+      result.then(() =>
+        assert.fail('restart completed before welcome boundary'),
+      ),
+    ]);
+    h.rejectReady(primary);
+    await result;
+    assert.deepEqual(h.calls, ['load', 'ready']);
     assert.equal(h.fixture.cleanup().primary, primary);
     assert.equal(h.fixture.cleanup().primaryFailed, true);
     assert.equal(h.fixture.records.at(-1).status, 'primary');
