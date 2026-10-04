@@ -1017,3 +1017,141 @@ for (const keepMatching of [false, true]) {
     reopened.unmount();
   });
 }
+
+for (const escaped of [false, true]) {
+  test(`actual RichAuthoring incrementally shortens a saved draft beyond the current serialized union limit (escaped=${escaped})`, async () => {
+    const f = richAuthoringFixture();
+    const document = {
+      type: 'doc',
+      version: 1,
+      content: [
+        {
+          type: 'paragraph',
+          content: Array.from({ length: 5 }, (_, i) => ({
+            type: 'text',
+            text: `Original ${i}`,
+            marks: [{ type: 'strong' }],
+          })),
+        },
+      ],
+    };
+    const jira = new JiraAuthoring(async (path) =>
+      path.includes('/mypermissions?')
+        ? { permissions: { EDIT_ISSUES: { havePermission: true } } }
+        : path.endsWith('/editmeta')
+          ? { fields: { description: { operations: ['set'] } } }
+          : { fields: { description: structuredClone(document) } },
+    );
+    f.options.description = (await jira.options('ABC-1')).description;
+    const pane = f.mount('account', 'ABC-1', 'jira');
+    await pane.open();
+    const character = escaped ? '\u0001' : 'x';
+    const length = escaped ? 15_000 : 90_000;
+    for (let i = 1; i <= 5; i++)
+      pane.change(`Description text run ${i}`, character.repeat(length));
+    pane.change('Comment draft', 'Unrelated comment');
+    pane.change('Sub-issue title', 'Unrelated child');
+    const before = JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!);
+    assert.equal(before.fragments.length, 450_121);
+    document.content[0].content.push({
+      type: 'text',
+      text: (escaped ? '\u0002' : 'y').repeat(escaped ? 10_000 : 60_000),
+      marks: [{ type: 'strong' }],
+    });
+    f.options.description = (await jira.options('ABC-1')).description;
+    await refreshDescription(f, pane);
+    const overlay = [
+      ...JSON.parse(before.fragments),
+      f.options.description.fragments!.at(-1),
+    ];
+    assert.ok(JSON.stringify(overlay).length > 500_000);
+    if (escaped)
+      assert.doesNotThrow(() =>
+        authoringAction({
+          kind: 'description',
+          value: '',
+          revision: f.options.description.revision,
+          fragments: overlay,
+        }),
+      );
+    else
+      assert.throws(() =>
+        authoringAction({
+          kind: 'description',
+          value: '',
+          revision: f.options.description.revision,
+          fragments: overlay,
+        }),
+      );
+    pane.button(acceptDescription).onClick();
+    pane.render();
+    assert.equal(
+      f.storage.get(f.key('account', 'ABC-1')),
+      JSON.stringify(before),
+    );
+    // A genuinely oversized added-run edit cannot replace or erase saved text.
+    pane.change('Description text run 6', 'z'.repeat(100_000));
+    assert.equal(
+      f.storage.get(f.key('account', 'ABC-1')),
+      JSON.stringify(before),
+    );
+    for (let amount = 1; amount <= 2; amount++) {
+      pane.change('Description text run 1', character.repeat(length - amount));
+      const saved = JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!);
+      assert.equal(
+        JSON.parse(saved.fragments)[0].value,
+        character.repeat(length - amount),
+      );
+      assert.equal(JSON.parse(saved.fragments).length, 5);
+      assert.deepEqual(
+        JSON.parse(saved.fragments).slice(1),
+        JSON.parse(before.fragments).slice(1),
+      );
+      assert.notEqual(
+        saved.editVersions.description,
+        before.editVersions.description,
+      );
+      assert.equal(saved.revision, before.revision);
+      assert.equal(saved.comment, before.comment);
+      assert.equal(saved.childSummary, before.childSummary);
+      assert.equal(saved.editVersions.comment, before.editVersions.comment);
+      assert.equal(saved.editVersions.child, before.editVersions.child);
+    }
+    assert.equal(pane.button('Save description').disabled, true);
+    assert.equal(f.requests.length, 0);
+    pane.unmount();
+    const reopened = f.mount('account', 'ABC-1', 'jira');
+    await reopened.open();
+    assert.equal(
+      reopened.input('Description text run 1').value,
+      character.repeat(length - 2),
+    );
+    reopened.button(acceptDescription).onClick();
+    reopened.render();
+    assert.equal(
+      JSON.parse(
+        JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!).fragments,
+      ).length,
+      5,
+    );
+    reopened.change(
+      'Description text run 1',
+      character.repeat(escaped ? 13_000 : 79_000),
+    );
+    const reduced = JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!);
+    assert.ok(reduced.fragments.length <= 500_000);
+    assert.equal(JSON.parse(reduced.fragments).length, 6);
+    assert.equal(reduced.revision, before.revision);
+    assert.equal(reopened.button('Save description').disabled, true);
+    reopened.button(acceptDescription).onClick();
+    reopened.render();
+    const reviewed = JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!);
+    assert.equal(reviewed.revision, f.options.description.revision);
+    assert.equal(reviewed.fragments, reduced.fragments);
+    assert.equal(reviewed.comment, before.comment);
+    assert.equal(reviewed.childSummary, before.childSummary);
+    assert.equal(reopened.button('Save description').disabled, false);
+    assert.equal(f.requests.length, 0);
+    reopened.unmount();
+  });
+}

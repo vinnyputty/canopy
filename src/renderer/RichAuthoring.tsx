@@ -429,7 +429,10 @@ export function RichAuthoring({
                                   ),
                                   ...edits!,
                                 ]);
-                                if (next.length > 500) {
+                                if (
+                                  next.length > 500 ||
+                                  JSON.stringify(next).length > 500_000
+                                ) {
                                   if (
                                     savedFragments.some(
                                       ({ id }) => id === fragment.id,
@@ -522,7 +525,7 @@ export function RichAuthoring({
                               : undefined;
                             if (fragments && fragments.length > 500_000) {
                               setError(
-                                'The current text runs exceed the saved draft limit. Keep your draft and edit this description in the browser.',
+                                'The current text runs exceed the saved draft limit. Shorten your saved text before reviewing again, or edit this description in the browser.',
                               );
                               return;
                             }
