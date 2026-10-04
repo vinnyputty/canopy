@@ -5,6 +5,7 @@ import childProcess, { type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, rm, access, readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -42,9 +43,19 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      // A killed orphan can await reaping while kill(0) still succeeds.
+      // Like AuditOwner's POSIX snapshot, count only live profile writers.
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+      return state !== 'Z' && state !== 'X';
+    }
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    if (
+      ['ESRCH', 'ENOENT'].includes((error as NodeJS.ErrnoException).code ?? '')
+    )
+      return false;
     throw error;
   }
 };
@@ -186,6 +197,50 @@ async function normalClose(child: ChildProcess) {
   child.send('normal');
   await exited;
 }
+
+test(
+  'Linux fixture distinguishes a dead unreaped descendant from a live process',
+  { skip: process.platform !== 'linux' },
+  async () => {
+    const f = await fixture();
+    await withCleanup(
+      async () => {
+        assert.equal(alive(f.child.pid!), true);
+        assert.equal(alive(f.descendant), true);
+        // Stop only this fixture's parent so it cannot reap its dead child.
+        process.kill(f.child.pid!, 'SIGSTOP');
+        await deadline(
+          async () => {
+            while (true) {
+              const stat = await readFile(`/proc/${f.child.pid!}/stat`, 'utf8');
+              if (stat.slice(stat.lastIndexOf(')') + 2).startsWith('T ')) break;
+              await sleep(20);
+            }
+          },
+          processBudgets.operationMs,
+          'Owned parent stopped',
+        );
+        assert.equal(alive(f.child.pid!), true);
+        process.kill(f.descendant, 'SIGKILL');
+        await deadline(
+          async () => {
+            while (alive(f.descendant)) await sleep(20);
+          },
+          processBudgets.operationMs,
+          'Owned descendant exited',
+        );
+        assert.doesNotThrow(() => process.kill(f.descendant, 0));
+        const stat = await readFile(`/proc/${f.descendant}/stat`, 'utf8');
+        assert.ok(stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z '));
+        assert.equal(alive(f.descendant), false);
+      },
+      async () => {
+        process.kill(f.child.pid!, 'SIGCONT');
+      },
+      () => f.dispose(),
+    );
+  },
+);
 
 // Sequential in this file: launch interception is deliberately scoped to one launch.
 test('normal shutdown reaps its real descendant before profile removal and leaves unrelated child alone', async () => {
