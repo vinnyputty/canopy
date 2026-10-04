@@ -1,5 +1,7 @@
-import { writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { Connection } from '../shared/types';
+import { replaceFile } from './replace-file';
 
 /** Allowlist only: never serialize connection objects, workspace data, or errors. */
 export function diagnosticReport(input: {
@@ -51,6 +53,13 @@ export async function exportDiagnosticReport(
     throw new Error('Review a fresh diagnostics report before exporting.');
   const path = await choosePath();
   if (!path) return false;
-  await writeFile(path, reviewed, { mode: 0o600 });
+  const staging = await mkdtemp(join(dirname(path), '.canopy-diagnostics-'));
+  try {
+    const temporary = join(staging, 'report.json');
+    await writeFile(temporary, reviewed, { mode: 0o600 });
+    await replaceFile(temporary, path);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
   return true;
 }
