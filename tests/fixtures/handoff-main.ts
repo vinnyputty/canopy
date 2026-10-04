@@ -51,8 +51,15 @@ launch(
     )
       throw new Error('Missing handoff audit marker.');
     if (!copySink) {
+      if (Object.getOwnPropertyDescriptor(globalThis, 'handoffAuditCopy'))
+        throw new Error('Sample copy inspection ownership changed.');
       copySink = installSampleCopySink(clipboard);
-      Object.assign(globalThis, { handoffAuditCopy: copySink });
+      Object.defineProperty(globalThis, 'handoffAuditCopy', {
+        value: Object.freeze({ inspect: copySink.inspect }),
+        writable: false,
+        configurable: false,
+        enumerable: true,
+      });
     }
     if (!externalIsolated) {
       denySampleExternalAccess(shell, globalThis);

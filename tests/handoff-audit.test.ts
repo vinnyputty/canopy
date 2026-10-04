@@ -498,6 +498,9 @@ for (const scenario of [
   'zero',
   'empty',
   'foreign',
+  'inspection-data',
+  'inspection-accessor',
+  'inspection-fixed',
 ]) {
   test(`actual live fixture recreation preserves sink: ${scenario}`, async (t) => {
     const profile = await mkdtemp(
@@ -527,8 +530,16 @@ for (const scenario of [
     );
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /"resetFailureIsolated":true/);
-    if (!['error', 'foreign'].includes(scenario))
+    if (scenario.startsWith('inspection-'))
+      assert.match(
+        result.stdout,
+        /PASS foreign inspection descriptor retained before UI/,
+      );
+    else assert.match(result.stdout, /"resetFailureIsolated":true/);
+    if (
+      !['error', 'foreign'].includes(scenario) &&
+      !scenario.startsWith('inspection-')
+    )
       assert.match(result.stdout, /PASS natural Node exit restoration/);
   });
 }

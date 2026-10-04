@@ -41,6 +41,32 @@ const ownedExit = process.listeners('exit').filter((fn) => !beforeExit.has(fn));
 assert.equal(ownedExit.length, 1);
 const state = () => (globalThis as any).handoffAuditCopy;
 (async () => {
+  if (scenario.startsWith('inspection-')) {
+    const foreign = Object.freeze({ inspect: () => 'foreign' });
+    const descriptor =
+      scenario === 'inspection-accessor'
+        ? { get: () => foreign, configurable: true }
+        : {
+            value: foreign,
+            writable: true,
+            configurable: scenario !== 'inspection-fixed',
+          };
+    Object.defineProperty(globalThis, 'handoffAuditCopy', descriptor);
+    const before = Object.getOwnPropertyDescriptor(
+      globalThis,
+      'handoffAuditCopy',
+    );
+    await assert.rejects(callback(), /inspection ownership changed/);
+    assert.deepEqual(Object.getOwnPropertyDescriptors(clipboard), original);
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(globalThis, 'handoffAuditCopy'),
+      before,
+    );
+    assert.equal(originalCalls, 0);
+    mockApp.emit('quit');
+    console.log('PASS foreign inspection descriptor retained before UI');
+    return;
+  }
   const first = await callback();
   assert.equal(first.connection.provider, 'jira');
   await assert.rejects(
@@ -61,6 +87,28 @@ const state = () => (globalThis as any).handoffAuditCopy;
   );
   const sink = state();
   const installed = Object.getOwnPropertyDescriptors(clipboard);
+  assert.deepEqual(Reflect.ownKeys(sink), ['inspect']);
+  assert.equal(Object.isFrozen(sink), true);
+  assert.equal(sink.restore, undefined);
+  assert.throws(() => sink.restore(), TypeError);
+  assert.equal(
+    Reflect.set(sink, 'restore', () => {}),
+    false,
+  );
+  assert.equal(
+    Reflect.set(sink, 'inspect', () => {}),
+    false,
+  );
+  assert.equal(Reflect.set(globalThis, 'handoffAuditCopy', {}), false);
+  assert.equal(Reflect.deleteProperty(globalThis, 'handoffAuditCopy'), false);
+  assert.throws(
+    () => Object.defineProperty(globalThis, 'handoffAuditCopy', { value: {} }),
+    TypeError,
+  );
+  assert.deepEqual(Object.getOwnPropertyDescriptors(clipboard), installed);
+  const receipt = sink.inspect();
+  receipt.count = 100;
+  assert.deepEqual(sink.inspect(), { count: 0, text: undefined });
   assert.throws(() => clipboard.readText(), /denied/);
   const failures: Record<string, unknown> = {
     error: new Error('RESET_FIXTURE_FAILURE'),
@@ -133,6 +181,13 @@ const state = () => (globalThis as any).handoffAuditCopy;
     assert.deepEqual(Object.getOwnPropertyDescriptors(clipboard), original);
     assert.equal(mockApp.listenerCount('quit'), 0);
     assert(!process.listeners('exit').includes(ownedExit[0]));
+    // The retained callback is inert after its first terminal invocation.
+    const foreign = () => {};
+    clipboard.writeText = foreign;
+    ownedExit[0](0);
+    mockApp.emit('quit');
+    assert.equal(clipboard.writeText, foreign);
+    assert.throws(() => sink.inspect(), /isolation changed/);
   } else {
     // A real natural Node exit calls the retained fixture listener first. This
     // observer then checks exact restoration and listener cleanup without ever
