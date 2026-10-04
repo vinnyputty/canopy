@@ -519,6 +519,8 @@ export async function auditPreview(app, page, restart) {
     'https://second.example.invalid/browse/TEST-1',
   );
   await page.keyboard.press('Tab');
+  await expect(brief.getByLabel('Copy format')).toBeFocused();
+  await page.keyboard.press('Tab');
   await expect(brief.getByLabel('Work brief Markdown')).toBeFocused();
   await brief.getByRole('button', { name: 'Copy work brief' }).click();
   await expect(brief.getByText('Copied', { exact: true })).toBeVisible();
