@@ -248,6 +248,10 @@ export function RichAuthoring({
   const savedFragments: { id: string; value: string }[] = draft.fragments
     ? JSON.parse(draft.fragments)
     : [];
+  const fragmentTextLength = savedFragments.reduce(
+    (total, fragment) => total + fragment.value.length,
+    0,
+  );
   const currentFragments = options?.description.fragments;
   const edits = currentFragments?.map(
     (fragment) =>
@@ -454,6 +458,21 @@ export function RichAuthoring({
                                     return;
                                   }
                                 }
+                                if (
+                                  next.reduce(
+                                    (total, edit) => total + edit.value.length,
+                                    0,
+                                  ) > 100_000 &&
+                                  event.target.value.length >
+                                    (edits!.find(
+                                      (edit) => edit.id === fragment.id,
+                                    )?.value.length ?? 0)
+                                ) {
+                                  setError(
+                                    'Description text runs exceed 100,000 characters in total. Shorten the text before saving. Your saved draft is retained.',
+                                  );
+                                  return;
+                                }
                                 const fragments = JSON.stringify(next);
                                 if (fragments.length > 500_000) {
                                   setError(
@@ -547,6 +566,7 @@ export function RichAuthoring({
                   <button
                     disabled={
                       disabled ||
+                      fragmentTextLength > 100_000 ||
                       (draft.description === undefined &&
                         draft.fragments === undefined) ||
                       (draft.revision !== undefined &&

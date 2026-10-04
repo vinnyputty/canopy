@@ -1043,12 +1043,24 @@ for (const escaped of [false, true]) {
           : { fields: { description: structuredClone(document) } },
     );
     f.options.description = (await jira.options('ABC-1')).description;
-    const pane = f.mount('account', 'ABC-1', 'jira');
-    await pane.open();
     const character = escaped ? '\u0001' : 'x';
     const length = escaped ? 15_000 : 90_000;
-    for (let i = 1; i <= 5; i++)
-      pane.change(`Description text run ${i}`, character.repeat(length));
+    // Restore a legacy draft: current editing enforces the aggregate text limit.
+    f.storage.set(
+      f.key('account', 'ABC-1'),
+      JSON.stringify({
+        revision: f.options.description.revision,
+        fragments: JSON.stringify(
+          f.options.description.fragments!.map(({ id }) => ({
+            id,
+            value: character.repeat(length),
+          })),
+        ),
+        editVersions: { description: 'legacy-description' },
+      }),
+    );
+    const pane = f.mount('account', 'ABC-1', 'jira');
+    await pane.open();
     pane.change('Comment draft', 'Unrelated comment');
     pane.change('Sub-issue title', 'Unrelated child');
     const before = JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!);
@@ -1150,8 +1162,113 @@ for (const escaped of [false, true]) {
     assert.equal(reviewed.fragments, reduced.fragments);
     assert.equal(reviewed.comment, before.comment);
     assert.equal(reviewed.childSummary, before.childSummary);
-    assert.equal(reopened.button('Save description').disabled, false);
+    assert.equal(reopened.button('Save description').disabled, !escaped);
     assert.equal(f.requests.length, 0);
     reopened.unmount();
   });
 }
+
+test('actual RichAuthoring enforces the aggregate text boundary before dispatch', async () => {
+  const f = richAuthoringFixture();
+  f.options.description.fragments = [
+    { id: '0.0', value: 'First' },
+    { id: '0.1', value: 'Second' },
+  ];
+  const pane = f.mount();
+  await pane.open();
+  pane.change('Description text run 1', 'a'.repeat(60_000));
+  pane.change('Description text run 2', 'b'.repeat(40_000));
+  const boundary = f.storage.get(f.key())!;
+  assert.equal(pane.button('Save description').disabled, false);
+  for (const size of [40_001, 60_000]) {
+    pane.change('Description text run 2', 'b'.repeat(size));
+    assert.equal(f.storage.get(f.key()), boundary);
+    assert.equal(pane.input('Description text run 2').value.length, 40_000);
+    assert.match(pane.text(), /100,000 characters in total/);
+    assert.equal(f.requests.length, 0);
+  }
+  pane.button('Save description').onClick();
+  assert.equal(f.requests.length, 1);
+  assert.doesNotThrow(() => authoringAction(f.requests[0].action));
+  f.requests[0].settle({ state: 'saved', message: 'Saved' });
+  await f.flush();
+  pane.unmount();
+});
+
+test('actual RichAuthoring reopens and shortens an over-limit draft while retaining incompatible runs until review', async () => {
+  const f = richAuthoringFixture();
+  f.options.description.fragments = [
+    { id: '0.0', value: 'First' },
+    { id: '0.1', value: 'Second' },
+  ];
+  const original = {
+    revision: 'old-native-revision',
+    fragments: JSON.stringify([
+      { id: '0.0', value: 'a'.repeat(60_000) },
+      { id: '0.1', value: 'b'.repeat(60_000) },
+      { id: 'removed', value: 'retained' },
+    ]),
+    comment: 'Unrelated comment',
+    childSummary: 'Unrelated child',
+    editVersions: {
+      description: 'old-description',
+      comment: 'old-comment',
+      child: 'old-child',
+    },
+  };
+  f.storage.set(f.key(), JSON.stringify(original));
+  const pane = f.mount();
+  await pane.open();
+  assert.equal(pane.button('Save description').disabled, true);
+  pane.change('Description text run 1', 'a'.repeat(60_001));
+  assert.equal(f.storage.get(f.key()), JSON.stringify(original));
+  pane.change('Description text run 1', 'a'.repeat(59_999));
+  const shortened = JSON.parse(f.storage.get(f.key())!);
+  const shortenedRuns = JSON.parse(shortened.fragments);
+  assert.equal(
+    shortenedRuns.find(({ id }: { id: string }) => id === '0.0').value.length,
+    59_999,
+  );
+  for (const retained of JSON.parse(original.fragments).slice(1))
+    assert.deepEqual(
+      shortenedRuns.find(({ id }: { id: string }) => id === retained.id),
+      retained,
+    );
+  assert.equal(shortened.revision, original.revision);
+  assert.equal(shortened.comment, original.comment);
+  assert.equal(shortened.childSummary, original.childSummary);
+  assert.equal(shortened.editVersions.comment, original.editVersions.comment);
+  assert.equal(shortened.editVersions.child, original.editVersions.child);
+  assert.notEqual(
+    shortened.editVersions.description,
+    original.editVersions.description,
+  );
+  pane.unmount();
+  const reopened = f.mount();
+  await reopened.open();
+  assert.equal(reopened.input('Description text run 1').value.length, 59_999);
+  reopened.button(acceptDescription).onClick();
+  reopened.render();
+  // Revision review alone cannot enable a 119,999-character write.
+  assert.equal(reopened.button('Save description').disabled, true);
+  reopened.change('Description text run 1', 'a'.repeat(40_000));
+  assert.equal(reopened.button('Save description').disabled, false);
+  reopened.button('Save description').onClick();
+  assert.equal(f.requests.length, 1);
+  assert.doesNotThrow(() => authoringAction(f.requests[0].action));
+  assert.ok(f.requests[0].action.kind === 'description');
+  assert.deepEqual(
+    Array.from(f.requests[0].action.fragments ?? [], ({ id }) => id),
+    ['0.0', '0.1'],
+  );
+  f.requests[0].settle({ state: 'unknown', message: 'Transport uncertain' });
+  await f.flush();
+  reopened.render();
+  assert.equal(reopened.button('Save description').disabled, true);
+  const uncertain = JSON.parse(f.storage.get(f.key())!);
+  assert.equal(uncertain.pending, 'description');
+  assert.equal(uncertain.result.state, 'unknown');
+  assert.equal(uncertain.comment, original.comment);
+  assert.equal(uncertain.childSummary, original.childSummary);
+  reopened.unmount();
+});
