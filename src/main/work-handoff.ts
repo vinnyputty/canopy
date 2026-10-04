@@ -16,7 +16,9 @@ export function launchArguments(
   platform: string,
 ): { demo: boolean; handoff: string[] } {
   const prefix = [
-    ...(platform === 'linux' ? ['--no-sandbox'] : []),
+    ...(platform === 'linux' && argv.at(-1) !== '--no-sandbox'
+      ? ['--no-sandbox']
+      : []),
     '--inspect=0',
     '--remote-debugging-port=0',
   ];

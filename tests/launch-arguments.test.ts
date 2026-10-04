@@ -5,7 +5,11 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
-import { WorkHandoffQueue } from '../src/main/work-handoff';
+import {
+  WorkHandoffQueue,
+  launchHandoffArguments,
+} from '../src/main/work-handoff';
+import { auditArguments } from './fixtures/handoff-audit-boundary';
 
 const require = createRequire(import.meta.url);
 const handoff = ['--canopy-open', 'canopy://handoff/view?view=triage'];
@@ -160,4 +164,69 @@ for (const platform of ['darwin', 'linux', 'win32']) {
       );
     });
   }
+}
+
+for (const packaged of [false, true]) {
+  test(`Linux pinned Playwright composes with final sandbox suffix: packaged=${packaged}`, () => {
+    for (const demo of [false, true]) {
+      for (const command of [[], handoff]) {
+        const appArgs = [
+          ...(packaged ? [] : ['/sample/app']),
+          ...(demo ? ['--canopy-demo'] : []),
+          ...command,
+          '--no-sandbox',
+        ];
+        const context: any = {
+          options: { args: appArgs },
+          import_os14: { default: { platform: () => 'linux' } },
+        };
+        runInNewContext(
+          playwrightPrefix + 'globalThis.argv=electronArguments;',
+          context,
+        );
+        const argv = ['/electron', ...context.argv];
+        assert.equal(argv[1], '--inspect=0');
+        const launched = startup(argv, packaged, 'linux');
+        assert.equal(launched.demo, demo);
+        assert.deepEqual(launched.args, command);
+        assert.equal(launched.state.rejected, undefined);
+        assert.equal(
+          launched.state.delivery?.intent.kind,
+          command.length ? 'view' : undefined,
+        );
+        if (packaged) {
+          // The synthetic audit requires its development app path.
+          assert.throws(() => auditArguments(argv, 'linux'));
+        } else {
+          assert.deepEqual(
+            launchHandoffArguments(
+              auditArguments(argv, 'linux'),
+              false,
+              'linux',
+            ),
+            command,
+          );
+        }
+        for (const prefix of [
+          ['--inspect=0'],
+          ['--inspect=1', '--remote-debugging-port=0'],
+          ['--remote-debugging-port=0', '--inspect=0'],
+          ['--no-sandbox', '--inspect=0', '--remote-debugging-port=0'],
+          [
+            '--inspect=0',
+            '--remote-debugging-port=0',
+            '--inspect=0',
+            '--remote-debugging-port=0',
+          ],
+        ]) {
+          const bad = ['/electron', ...prefix, ...appArgs];
+          const refused = startup(bad, packaged, 'linux');
+          assert.equal(refused.demo, false);
+          assert.equal(refused.state.rejected, true);
+          assert.equal(refused.state.delivery, undefined);
+          assert.throws(() => auditArguments(bad, 'linux'));
+        }
+      }
+    }
+  });
 }

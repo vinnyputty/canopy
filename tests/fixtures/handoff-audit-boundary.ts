@@ -1,7 +1,9 @@
 /** Verify the synthetic audit's exact Playwright prefix before the app path. */
 export function auditArguments(argv: string[], platform: string): string[] {
   const prefix = [
-    ...(platform === 'linux' ? ['--no-sandbox'] : []),
+    ...(platform === 'linux' && argv.at(-1) !== '--no-sandbox'
+      ? ['--no-sandbox']
+      : []),
     '--inspect=0',
     '--remote-debugging-port=0',
   ];
