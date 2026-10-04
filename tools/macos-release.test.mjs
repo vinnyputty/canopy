@@ -37,8 +37,31 @@ const id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 
 test('signing gate resolves a real tagged Git source and rejects unprotected runners and changed identities', async () => {
   const root = await mkdtemp(join(tmpdir(), 'canopy-tag-77-'));
+  const config = join(root, 'empty-config');
+  await writeFile(config, '');
   const git = (args) => {
-    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    const result = spawnSync(
+      'git',
+      [
+        '-c',
+        'commit.gpgSign=false',
+        '-c',
+        'tag.gpgSign=false',
+        '-c',
+        `core.hooksPath=${join(root, 'no-hooks')}`,
+        ...args,
+      ],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: config,
+          GIT_CONFIG_NOSYSTEM: '1',
+        },
+      },
+    );
+    if (result.error) throw result.error;
     if (result.status !== 0) throw new Error('fixture Git failed');
     return result.stdout;
   };
