@@ -52,6 +52,17 @@ test('saved filtering preserves tree context and labels filtered endpoints', () 
     ),
   );
   assert.equal(graph.edges.find((edge) => edge.to === 'PLAN-2')?.unknown, true);
+  assert.deepEqual(
+    graph.edges.find((edge) => edge.kind === 'related'),
+    {
+      from: 'PLAN-3',
+      to: 'PLAN-5',
+      kind: 'related',
+      unknown: true,
+      cycle: false,
+    },
+  );
+  assert.deepEqual(graph.unknown, []);
   assert.equal(graph.edges.filter((edge) => edge.cycle).length, 0);
   assert.deepEqual(
     fixtureMilestones(dates, new Set(graph.nodes.keys())).map(

@@ -53,9 +53,8 @@ export function planningGraph(
   for (const issue of snapshot.issues)
     if (issue.parentKey) add(issue.parentKey, issue.key, 'hierarchy');
   for (const graph of relationships) {
-    if (!nodes.has(graph.key)) continue;
     for (const group of graph.groups) {
-      if (group.state !== 'visible')
+      if (nodes.has(graph.key) && group.state !== 'visible')
         unknown.push(
           `${graph.key} ${group.kind}: ${group.reason ?? group.state}`,
         );
