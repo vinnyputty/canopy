@@ -44,12 +44,14 @@ function harness({ demo = true, saveGate = false } = {}) {
   const workspaceSaveTimer = { current: null as number | null };
   const pendingWorkspaceSave = { current: Promise.resolve() };
   const demoResetting = { current: false };
+  const workspaceLoaded = { current: true };
   let stored: unknown = structuredClone(initial);
   const backend = execute(
     `function() {
     let fixture; const demoMode = demo;
     const demoWorkspace = initial;
     let demoWorkspaceState = structuredClone(initial);
+    let savingWorkspace = Promise.resolve(), receivedWorkspace, retryUnavailableWorkspace = false;
     return {load: ${handler('loadWorkspace')}, save: ${handler('saveWorkspace')}, reset: ${handler('resetDemo')}};
   }`,
     {
@@ -104,6 +106,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     pendingWorkspaceSave,
     workspaceSaveTimer,
     demoResetting,
+    workspaceLoaded,
     workspaceRef,
     setErrors: (
       update: (value: Record<string, string>) => Record<string, string>,
@@ -150,6 +153,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     writes,
     workspaceRef,
     demoResetting,
+    workspaceLoaded,
     errors: () => errors,
     dispatchTimers: () => {
       for (const [id, run] of timers) {
@@ -182,6 +186,22 @@ function harness({ demo = true, saveGate = false } = {}) {
   };
 }
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test('autosave preserves stored workspace until workspace loading succeeds', async () => {
+  const h = harness({ demo: false });
+  h.workspaceLoaded.current = false;
+  h.schedule();
+  h.dispatchTimers();
+  await tick();
+  assert.equal(h.timers.size, 0);
+  assert.deepEqual(h.writes, []);
+  assert.deepEqual(await h.backend.load(), h.initial);
+  h.workspaceLoaded.current = true;
+  h.schedule();
+  h.dispatchTimers();
+  await tick();
+  assert.deepEqual(await h.backend.load(), h.explored);
+});
 
 test('demo reset cancels the pending production autosave and refuses late old-document writes', async () => {
   const h = harness();
