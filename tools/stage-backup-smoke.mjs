@@ -88,6 +88,7 @@ import {writeFile as write,rename as move,mkdir,rm,readFile,chmod,stat} from 'no
 import {basename,dirname} from 'node:path';
 function fault(contents) {const f=globalThis.canopyBackupFault;return f && JSON.parse(contents).theme===f.theme ? f : null;}
 export async function writeFile(file,contents,options) {
+  if(basename(file)==='workspace.json.tmp') await globalThis.canopyBackupStageGate?.(contents);
   const f=basename(file)==='workspace.json.tmp' ? fault(contents) : null;
   if(f?.mode!=='staging') return write(file,contents,options);
   globalThis.canopyBackupFault=null;

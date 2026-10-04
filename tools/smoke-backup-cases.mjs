@@ -468,11 +468,168 @@ try {
         }
       })
       .toBe(true);
+    await expect(
+      page.getByRole('button', { name: 'Settings', exact: true }),
+    ).toBeEnabled();
     await close();
     mark(
       `Actual macOS filesystem ${mode} failure preserves workspace bytes and removes staging file`,
     );
   }
+  // Hold the real Storage staging write, then the real reload IPC. Neither
+  // gate replaces the transfer handler or the renderer persistence callbacks.
+  const holdTransfer = async (theme) => {
+    await app.evaluate(({ ipcMain }, theme) => {
+      let releaseStage, releaseReload;
+      const stage = new Promise((resolve) => (releaseStage = resolve));
+      const reload = new Promise((resolve) => (releaseReload = resolve));
+      const state = {
+        staged: false,
+        reloading: false,
+        releaseStage,
+        releaseReload,
+      };
+      globalThis.canopyBackupHold = state;
+      globalThis.canopyBackupStageGate = async (contents) => {
+        if (JSON.parse(contents).theme !== theme) return;
+        delete globalThis.canopyBackupStageGate;
+        state.staged = true;
+        await stage;
+      };
+      const original = ipcMain._invokeHandlers.get('canopy:reloadWorkspace');
+      ipcMain.removeHandler('canopy:reloadWorkspace');
+      ipcMain.handle('canopy:reloadWorkspace', async (...args) => {
+        ipcMain.removeHandler('canopy:reloadWorkspace');
+        ipcMain.handle('canopy:reloadWorkspace', original);
+        state.reloading = true;
+        await reload;
+        return original(...args);
+      });
+    }, theme);
+  };
+  const heldDOM = async () => {
+    const panel = panelLocator();
+    const sidebarClass = await page
+      .getByRole('complementary', { name: 'Canopy sidebar' })
+      .evaluate((sidebar) => sidebar.parentElement.className);
+    const settings = page.getByRole('button', {
+      name: 'Settings',
+      exact: true,
+    });
+    await expect(panel).toBeVisible();
+    await expect(
+      panel.getByRole('button', { name: 'Close dialog', exact: true }),
+    ).toBeDisabled();
+    await expect(settings).toBeDisabled();
+    // Dispatch real DOM events on disabled controls without Playwright waiting
+    // for them to become enabled, and mouse down on the backdrop itself.
+    await panel
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .evaluate((button) => button.click());
+    await settings.evaluate((button) => button.click());
+    await page.locator('.dialog-backdrop').dispatchEvent('mousedown');
+    await page.keyboard.press('Escape');
+    for (const shortcut of [
+      'ControlOrMeta+k',
+      'ControlOrMeta+p',
+      'ControlOrMeta+b',
+      'ControlOrMeta+w',
+    ]) {
+      await page.keyboard.press(shortcut);
+    }
+    await expect(panel).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCount(1);
+    await expect(page.getByRole('tab')).toHaveCount(0);
+    expect(
+      await page
+        .getByRole('complementary', { name: 'Canopy sidebar' })
+        .evaluate((sidebar) => sidebar.parentElement.className),
+    ).toBe(sidebarClass);
+    for (const fieldset of await panel.locator('fieldset').all())
+      await expect(fieldset).toBeDisabled();
+  };
+  await seed({ ...baseline, closedTabs: [], seenRoots: {} });
+  panel = await open();
+  await choose(noRoots);
+  await map();
+  const heldReviewed = await preview('replace');
+  const beforeHeld = await readFile(join(profile, 'workspace.json'), 'utf8');
+  let heldFailure,
+    heldFailed = false;
+  try {
+    for (const undo of [false, true]) {
+      const before = await readFile(join(profile, 'workspace.json'), 'utf8');
+      await holdTransfer(undo ? 'system' : 'dark');
+      await page.evaluate(() => {
+        window.backupReloadSentinel = true;
+      });
+      await panelLocator()
+        .getByRole('button', {
+          name: undo ? 'Undo last import' : 'Apply reviewed replace',
+          exact: true,
+        })
+        .click();
+      await expect
+        .poll(() => app.evaluate(() => globalThis.canopyBackupHold.staged))
+        .toBe(true);
+      await heldDOM();
+      expect(await readFile(join(profile, 'workspace.json'), 'utf8')).toBe(
+        before,
+      );
+      await app.evaluate(() => globalThis.canopyBackupHold.releaseStage());
+      await expect
+        .poll(() => app.evaluate(() => globalThis.canopyBackupHold.reloading))
+        .toBe(true);
+      await heldDOM();
+      if (undo)
+        expect(await readFile(join(profile, 'workspace.json'), 'utf8')).toBe(
+          beforeHeld,
+        );
+      else expect(await saved()).toEqual(heldReviewed);
+      expect(await page.evaluate(() => window.backupReloadSentinel)).toBe(true);
+      await app.evaluate(() => globalThis.canopyBackupHold.releaseReload());
+      await expect(panelLocator()).toHaveCount(0);
+      await expect
+        .poll(() => page.evaluate(() => window.backupReloadSentinel))
+        .toBeUndefined();
+      panel = await open();
+    }
+  } catch (error) {
+    heldFailure = error;
+    heldFailed = true;
+    throw error;
+  } finally {
+    if (app && confirmed) {
+      try {
+        await deadline(
+          () =>
+            trackBackupOperation(pending, () =>
+              app.evaluate(() => {
+                delete globalThis.canopyBackupStageGate;
+                globalThis.canopyBackupHold?.releaseStage();
+                globalThis.canopyBackupHold?.releaseReload();
+              }),
+            ),
+          5000,
+          'Release controlled backup holds',
+        );
+      } catch (error) {
+        if (!heldFailed) {
+          throw error;
+        } else {
+          throw new AggregateError(
+            [heldFailure, error],
+            'Backup audit and controlled hold release failed',
+            { cause: heldFailure },
+          );
+        }
+      }
+    }
+  }
+  await close();
+  mark(
+    'Held actual Apply/Undo staging and reload block DOM dismissal, Settings and shortcuts; reviewed bytes and Undo survive reload',
+  );
   await seed({ ...baseline, closedTabs: [], seenRoots: {} });
   panel = await open();
   await choose(noRoots);
