@@ -442,9 +442,9 @@ export async function auditAuthoring(
     await editor
       .getByRole('button', { name: 'Save Milestone', exact: true })
       .click();
-    await expect(editor.getByRole('status')).toContainText(
-      'Saved and verified',
-    );
+    await expect(
+      editor.getByRole('status').filter({ hasText: 'Saved and verified' }),
+    ).toContainText('Saved and verified');
     await evaluate(() => {
       globalThis.authoringSmoke.mode = 'partial';
     });
