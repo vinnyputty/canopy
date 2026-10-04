@@ -507,7 +507,7 @@ try {
       });
     }, theme);
   };
-  const heldDOM = async () => {
+  const heldDOM = async (workspace) => {
     const panel = panelLocator();
     const sidebarClass = await page
       .getByRole('complementary', { name: 'Canopy sidebar' })
@@ -539,7 +539,17 @@ try {
     }
     await expect(panel).toBeVisible();
     await expect(page.getByRole('dialog')).toHaveCount(1);
-    await expect(page.getByRole('tab')).toHaveCount(0);
+    expect(
+      await page
+        .getByRole('tab')
+        .evaluateAll((tabs) =>
+          tabs.map((tab) => tab.getAttribute('data-tab-id')),
+        ),
+    ).toEqual(workspace.tabs.map((tab) => tab.id));
+    await expect(page.getByRole('tab', { selected: true })).toHaveAttribute(
+      'data-tab-id',
+      workspace.activeTabId,
+    );
     expect(
       await page
         .getByRole('complementary', { name: 'Canopy sidebar' })
@@ -548,17 +558,51 @@ try {
     for (const fieldset of await panel.locator('fieldset').all())
       await expect(fieldset).toBeDisabled();
   };
-  await seed({ ...baseline, closedTabs: [], seenRoots: {} });
+  const heldBaseline = {
+    ...baseline,
+    tabs: [tab('held-local-tab', 'demo')],
+    activeTabId: 'held-local-tab',
+    closedTabs: [],
+    seenRoots: {},
+  };
+  const heldIncoming = structuredClone(noRoots);
+  heldIncoming.workspace.tabs = [
+    tab('held-imported-tab', 'origin-a', 'CAN-200'),
+  ];
+  heldIncoming.workspace.activeTabId = 'held-imported-tab';
+  await seed(heldBaseline);
+  await expect(page.getByRole('tab', { selected: true })).toHaveAttribute(
+    'data-tab-id',
+    'held-local-tab',
+  );
+  await expect(
+    page.getByRole('tree', { name: 'CAN-100 issue tree' }),
+  ).toBeVisible();
   panel = await open();
-  await choose(noRoots);
+  await choose(heldIncoming);
   await map();
   const heldReviewed = await preview('replace');
+  expect(heldReviewed.tabs.map((tab) => tab.id)).toEqual(['held-imported-tab']);
+  expect(heldReviewed.activeTabId).toBe('held-imported-tab');
   const beforeHeld = await readFile(join(profile, 'workspace.json'), 'utf8');
   let heldFailure,
     heldFailed = false;
   try {
     for (const undo of [false, true]) {
       const before = await readFile(join(profile, 'workspace.json'), 'utf8');
+      // Keep initial tree hydration from creating a subsequent workspace edit
+      // before Undo; the fixture still has a real selected, closable tab.
+      const treeGate = undo ? 'held-undo-tree' : 'held-import-tree';
+      await app.evaluate(
+        (_electron, { treeGate, undo }) => {
+          globalThis.canopySmoke.hold(
+            treeGate,
+            'tree',
+            undo ? 'CAN-100' : 'CAN-200',
+          );
+        },
+        { treeGate, undo },
+      );
       await holdTransfer(undo ? 'system' : 'dark');
       await page.evaluate(() => {
         window.backupReloadSentinel = true;
@@ -572,7 +616,7 @@ try {
       await expect
         .poll(() => app.evaluate(() => globalThis.canopyBackupHold.staged))
         .toBe(true);
-      await heldDOM();
+      await heldDOM(JSON.parse(before));
       expect(await readFile(join(profile, 'workspace.json'), 'utf8')).toBe(
         before,
       );
@@ -580,7 +624,7 @@ try {
       await expect
         .poll(() => app.evaluate(() => globalThis.canopyBackupHold.reloading))
         .toBe(true);
-      await heldDOM();
+      await heldDOM(JSON.parse(before));
       if (undo)
         expect(await readFile(join(profile, 'workspace.json'), 'utf8')).toBe(
           beforeHeld,
@@ -592,6 +636,19 @@ try {
       await expect
         .poll(() => page.evaluate(() => window.backupReloadSentinel))
         .toBeUndefined();
+      await expect(page.getByRole('tab', { selected: true })).toHaveAttribute(
+        'data-tab-id',
+        undo ? 'held-local-tab' : 'held-imported-tab',
+      );
+      await expect(page.getByRole('tab')).toHaveCount(1);
+      await expect
+        .poll(() =>
+          app.evaluate(
+            (_electron, id) => globalThis.canopySmoke.started(id),
+            treeGate,
+          ),
+        )
+        .toBe(true);
       panel = await open();
     }
   } catch (error) {
@@ -608,6 +665,10 @@ try {
                 delete globalThis.canopyBackupStageGate;
                 globalThis.canopyBackupHold?.releaseStage();
                 globalThis.canopyBackupHold?.releaseReload();
+                for (const id of ['held-import-tree', 'held-undo-tree']) {
+                  if (globalThis.canopySmoke.started(id))
+                    globalThis.canopySmoke.release(id);
+                }
               }),
             ),
           5000,
@@ -628,7 +689,7 @@ try {
   }
   await close();
   mark(
-    'Held actual Apply/Undo staging and reload block DOM dismissal, Settings and shortcuts; reviewed bytes and Undo survive reload',
+    'Held actual Apply/Undo staging and reload block DOM dismissal, Settings and shortcuts with an active tab; reviewed bytes and Undo survive reload',
   );
   await seed({ ...baseline, closedTabs: [], seenRoots: {} });
   panel = await open();
