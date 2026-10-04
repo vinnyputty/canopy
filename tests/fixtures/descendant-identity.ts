@@ -37,6 +37,7 @@ export async function readDescendantSnapshot(
           .trim()
           .match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
         assert.ok(match, 'Unknown descendant identity: malformed ps snapshot');
+        birth(match[5].trim(), true);
         return {
           pid: Number(match[1]),
           ppid: Number(match[2]),
@@ -85,7 +86,7 @@ function rows(snapshot: unknown) {
   return result as { pid: number; ppid: number; start: unknown }[];
 }
 
-function birth(start: unknown): asserts start is string {
+function birth(start: unknown, posix = false): asserts start is string {
   if (typeof start === 'string') {
     const match = start.match(
       /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/,
@@ -113,7 +114,8 @@ function birth(start: unknown): asserts start is string {
     }
   }
   assert.ok(
-    typeof start === 'string' &&
+    !posix &&
+      typeof start === 'string' &&
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/.test(start) &&
       Number.isFinite(Date.parse(start)) &&
       new Date(start).toISOString().slice(0, 19) === start.slice(0, 19),

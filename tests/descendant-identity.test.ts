@@ -193,4 +193,17 @@ test('POSIX independent observation retains complete calendar births and rejects
   await assert.rejects(assertDescendantAbsent(original, snapshot));
   stdout = 'partial ps';
   await assert.rejects(assertDescendantAbsent(original, snapshot));
+  // Missing original PID proves absence only after every ps row is complete.
+  for (const birth of [
+    'Fri Oct',
+    'Fri Oct 32 12:00:00 2026',
+    'Fri Oct  2 25:00:00 2026',
+    'Sat Oct  2 12:00:00 2026',
+    start,
+  ]) {
+    stdout = `876543 1 876543 S ${birth}\n`;
+    await assert.rejects(assertDescendantAbsent(original, snapshot));
+  }
+  stdout = `876543 1 876543 S ${first}\n`;
+  await assertDescendantAbsent(original, snapshot);
 });
