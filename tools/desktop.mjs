@@ -13,6 +13,18 @@ import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
+const supported = { darwin: 'arm64', win32: 'x64', linux: 'x64' };
+if (
+  ['package', 'packaged-smoke'].includes(process.argv[2]) &&
+  supported[process.platform] !== process.arch
+)
+  throw new Error(
+    `Unexercised package platform: ${process.platform}/${process.arch}`,
+  );
+if (process.argv[2] === 'packaged-smoke') {
+  await import('./packaged-smoke.mjs');
+  process.exit(0);
+}
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 // Stage the hermetic bundle in a writable directory for Electron and packaging.
@@ -111,12 +123,21 @@ if (
     process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
   );
   process.env.PATH = `${dirname(nodeBinary)}${delimiter}${process.env.PATH ?? ''}`;
+  if (process.platform === 'linux') {
+    await mkdir(join(staging, 'tools'));
+    // Bazel runfiles are read-only. Materialize owned, writable launcher bytes
+    // so the builder can copy/replace them while generating package targets.
+    await writeFile(
+      join(staging, 'tools', 'AppRun'),
+      await readFile(join(root, 'tools', 'AppRun')),
+      { mode: 0o755 },
+    );
+  }
   const { build } = require('electron-builder');
   const { version } = require('electron/package.json');
   await build({
     projectDir: staging,
     config: {
-      ...manifest.build,
       electronVersion: version,
       npmRebuild: false,
       directories: { output: join(workspace, 'release') },
