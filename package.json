@@ -110,6 +110,17 @@
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "appImage": {
       "executableArgs": []
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "runAfterFinish": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Canopy",
+      "deleteAppDataOnUninstall": false
     }
   }
 }
