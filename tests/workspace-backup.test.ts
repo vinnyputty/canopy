@@ -8,6 +8,7 @@ import {
   parseBackup,
   planImport,
   BACKUP_LIMIT,
+  validateBackupWorkspace,
 } from '../src/shared/workspace-backup';
 import type { Connection, Workspace } from '../src/shared/types';
 import {
@@ -590,4 +591,241 @@ test('external backups retain strict closed, open, favorite and recent-root limi
       key,
     );
   }
+});
+
+const viewMap = (connectionId: string, start: number, count: number) =>
+  Object.fromEntries(
+    Array.from({ length: count }, (_, i) => [
+      JSON.stringify([connectionId, `SAMPLE-${start + i}`]),
+      structuredClone(DEFAULT_VIEW),
+    ]),
+  );
+
+test('merge rejects view map overflow after mapping without changing inputs', () => {
+  for (const key of ['rootViews', 'viewDefaults'] as const) {
+    const local = {
+      ...empty(),
+      [key]:
+        key === 'rootViews'
+          ? viewMap('destination-jira', 1, 1000)
+          : Object.fromEntries(
+              Array.from({ length: 1000 }, (_, i) => [
+                `local-${i}`,
+                structuredClone(DEFAULT_VIEW),
+              ]),
+            ),
+    };
+    validateWorkspace(local);
+    const backup = fixture();
+    if (key === 'rootViews')
+      backup.workspace.rootViews = viewMap('sample-jira', 1001, 1);
+    const before = structuredClone({ local, backup, destinations, mapping });
+    assert.throws(
+      () => planImport(backup, local, destinations, mapping, 'merge'),
+      key === 'rootViews'
+        ? /Merged Root view entries exceed the workspace limit; use replace or reduce the workspace\./
+        : /Merged Connection view entries exceed the workspace limit; use replace or reduce the workspace\./,
+    );
+    assert.deepEqual({ local, backup, destinations, mapping }, before);
+    const replaced = planImport(
+      backup,
+      local,
+      destinations,
+      mapping,
+      'replace',
+    );
+    assert.equal(Object.keys(replaced.workspace[key]!).length, 1);
+    assert.doesNotThrow(() => createBackup(replaced.workspace, destinations));
+  }
+});
+
+test('merge counts unique mapped root views at the export boundary and keeps local conflicts', () => {
+  const localView = { ...structuredClone(DEFAULT_VIEW), hideDone: false };
+  const local = { ...empty(), rootViews: viewMap('destination-jira', 1, 900) };
+  local.rootViews['["destination-jira","SAMPLE-1"]'] = localView;
+  const backup = fixture();
+  backup.workspace.rootViews = viewMap('sample-jira', 901, 100);
+  backup.workspace.rootViews['["sample-jira","sample-1"]'] =
+    structuredClone(DEFAULT_VIEW);
+  backup.workspace.rootViews['["sample-github","sample/repo#1"]'] =
+    structuredClone(DEFAULT_VIEW);
+  // A different mapped account remains unique, even at the same root key.
+  delete backup.workspace.rootViews['["sample-jira","SAMPLE-1000"]'];
+  const parsed = parseBackup(JSON.stringify(backup));
+  const before = structuredClone({ local, parsed, destinations, mapping });
+  const merged = planImport(parsed, local, destinations, mapping, 'merge');
+  assert.equal(Object.keys(merged.workspace.rootViews!).length, 1000);
+  assert.deepEqual(
+    merged.workspace.rootViews!['["destination-jira","SAMPLE-1"]'],
+    localView,
+  );
+  assert.deepEqual(
+    merged.conflicts.filter((c) => c.startsWith('Root view:')),
+    ['Root view: ["destination-jira","SAMPLE-1"] — keep existing'],
+  );
+  assert.ok(
+    merged.workspace.rootViews!['["destination-github","SAMPLE/REPO#1"]'],
+  );
+  const exported = createBackup(merged.workspace, destinations);
+  assert.deepEqual(parseBackup(JSON.stringify(exported)), exported);
+  assert.equal(Object.keys(exported.workspace.rootViews!).length, 1000);
+  assert.deepEqual({ local, parsed, destinations, mapping }, before);
+  parsed.workspace.rootViews!['["sample-jira","SAMPLE-1000"]'] =
+    structuredClone(DEFAULT_VIEW);
+  assert.throws(
+    () => planImport(parsed, local, destinations, mapping, 'merge'),
+    /Merged Root view entries exceed/,
+  );
+});
+
+test('merge counts exact connection view keys and rejects oversized valid local maps', () => {
+  for (const key of ['rootViews', 'viewDefaults'] as const) {
+    const local = {
+      ...empty(),
+      [key]:
+        key === 'rootViews'
+          ? viewMap('destination-jira', 1, 1000)
+          : Object.fromEntries(
+              Array.from({ length: 1000 }, (_, i) => [
+                i === 0 ? 'destination-github' : `local-${i}`,
+                structuredClone(DEFAULT_VIEW),
+              ]),
+            ),
+    };
+    const backup = fixture();
+    const merged = planImport(backup, local, destinations, mapping, 'merge');
+    assert.equal(Object.keys(merged.workspace[key]!).length, 1000);
+    assert.ok(
+      merged.conflicts.some((c) =>
+        c.startsWith(key === 'rootViews' ? 'Root view:' : 'Connection view:'),
+      ),
+    );
+    const extraKey =
+      key === 'rootViews' ? '["destination-jira","SAMPLE-1001"]' : 'local-1001';
+    local[key]![extraKey] = structuredClone(DEFAULT_VIEW);
+    validateWorkspace(local); // Ordinary workspace validation permits large maps.
+    const before = structuredClone(local);
+    assert.throws(
+      () => planImport(backup, local, destinations, mapping, 'merge'),
+      /Merged .* view entries exceed.*use replace or reduce/,
+    );
+    assert.deepEqual(local, before); // Reject rather than clip local entries.
+  }
+});
+
+test('merge counts saved views after ID and name conflicts and rejects unique overflow', () => {
+  const local = {
+    ...empty(),
+    savedViews: Array.from({ length: 99 }, (_, i) => ({
+      ...structuredClone(backupWorkspace.savedViews![0]),
+      id: `local-${i}`,
+      name: `Local ${i}`,
+      connectionIds: ['destination-jira'],
+      roots: [{ connectionId: 'destination-jira', rootKey: 'SAMPLE-1' }],
+    })),
+    activeSavedViewId: 'local-0',
+  };
+  const backup = fixture();
+  backup.workspace.savedViews = [
+    {
+      ...structuredClone(backup.workspace.savedViews![0]),
+      id: 'local-0',
+      name: 'ID conflict',
+    },
+    {
+      ...structuredClone(backup.workspace.savedViews![0]),
+      id: 'name-conflict',
+      name: 'Local 1',
+    },
+    {
+      ...structuredClone(backup.workspace.savedViews![0]),
+      id: 'unique',
+      name: 'Unique',
+    },
+  ];
+  backup.workspace.activeSavedViewId = 'unique';
+  const parsed = parseBackup(JSON.stringify(backup));
+  const before = structuredClone({ local, parsed, destinations, mapping });
+  const merged = planImport(parsed, local, destinations, mapping, 'merge');
+  assert.equal(merged.workspace.savedViews!.length, 100);
+  assert.deepEqual(merged.workspace.savedViews!.slice(0, 99), local.savedViews);
+  assert.equal(merged.workspace.activeSavedViewId, 'local-0');
+  assert.deepEqual(
+    merged.conflicts.filter((c) => c.startsWith('Saved view:')),
+    [
+      'Saved view: ID conflict (local-0) — keep existing',
+      'Saved view: Local 1 (name-conflict) — keep existing',
+    ],
+  );
+  const exported = createBackup(merged.workspace, destinations);
+  assert.equal(
+    parseBackup(JSON.stringify(exported)).workspace.savedViews!.length,
+    100,
+  );
+  assert.deepEqual({ local, parsed, destinations, mapping }, before);
+  parsed.workspace.savedViews!.push({
+    ...structuredClone(parsed.workspace.savedViews![2]),
+    id: 'overflow',
+    name: 'Overflow',
+  });
+  const overflowBefore = structuredClone({ local, parsed });
+  assert.throws(
+    () => planImport(parsed, local, destinations, mapping, 'merge'),
+    /Merged saved views exceed the workspace limit; use replace or reduce the workspace\./,
+  );
+  assert.deepEqual({ local, parsed }, overflowBefore);
+  assert.equal(
+    planImport(parsed, local, destinations, mapping, 'replace').workspace
+      .savedViews!.length,
+    4,
+  );
+});
+
+test('external backups enforce exact view map and saved-view limits', () => {
+  const backup = fixture();
+  backup.workspace.rootViews = viewMap('sample-jira', 1, 1000);
+  assert.doesNotThrow(() => parseBackup(JSON.stringify(backup)));
+  backup.workspace.rootViews['["sample-jira","SAMPLE-1001"]'] =
+    structuredClone(DEFAULT_VIEW);
+  assert.throws(
+    () => parseBackup(JSON.stringify(backup)),
+    /Too many table views/,
+  );
+  delete backup.workspace.rootViews;
+  backup.workspace.viewDefaults = Object.fromEntries(
+    Array.from({ length: 1000 }, (_, i) => [
+      `source-${i}`,
+      structuredClone(DEFAULT_VIEW),
+    ]),
+  );
+  assert.doesNotThrow(() =>
+    validateBackupWorkspace(structuredClone(backup.workspace)),
+  );
+  // Count is valid; reference validation still rejects unknown connections.
+  assert.throws(
+    () => parseBackup(JSON.stringify(backup)),
+    /Missing connection descriptor/,
+  );
+  backup.workspace.viewDefaults['source-1000'] = structuredClone(DEFAULT_VIEW);
+  assert.throws(
+    () => parseBackup(JSON.stringify(backup)),
+    /Too many table views/,
+  );
+  delete backup.workspace.viewDefaults;
+  backup.workspace.savedViews = Array.from({ length: 100 }, (_, i) => ({
+    ...structuredClone(backupWorkspace.savedViews![0]),
+    id: `saved-${i}`,
+    name: `Saved ${i}`,
+  }));
+  backup.workspace.activeSavedViewId = 'saved-0';
+  assert.doesNotThrow(() => parseBackup(JSON.stringify(backup)));
+  backup.workspace.savedViews.push({
+    ...structuredClone(backup.workspace.savedViews[0]),
+    id: 'saved-100',
+    name: 'Overflow',
+  });
+  assert.throws(
+    () => parseBackup(JSON.stringify(backup)),
+    /Invalid backup list/,
+  );
 });

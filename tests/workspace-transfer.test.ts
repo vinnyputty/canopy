@@ -303,3 +303,51 @@ exports.afterStage = async file => {
     assert.equal((await storage.read<Workspace>('workspace'))?.theme, 'light');
   });
 }
+
+test('merge capacity failures invalidate approval before any workspace write', async () => {
+  for (const key of ['rootViews', 'viewDefaults', 'savedViews'] as const) {
+    const original = structuredClone(backupWorkspace);
+    const view = original.rootViews!['["sample-jira","SAMPLE-1"]'];
+    if (key === 'savedViews') {
+      original.savedViews = Array.from({ length: 100 }, (_, i) => ({
+        ...structuredClone(original.savedViews![0]),
+        id: `local-${i}`,
+        name: `Local ${i}`,
+      }));
+      original.activeSavedViewId = 'local-0';
+    } else {
+      original[key] = Object.fromEntries(
+        Array.from({ length: 1000 }, (_, i) => [
+          key === 'rootViews'
+            ? JSON.stringify(['sample-jira', `SAMPLE-${i + 10}`])
+            : `local-${i}`,
+          structuredClone(view),
+        ]),
+      );
+    }
+    let writes = 0;
+    const before = structuredClone(original);
+    const transfer = new WorkspaceTransfer(
+      {
+        read: async <T>() => structuredClone(original) as T,
+        replaceWorkspace: async () => {
+          writes++;
+        },
+      },
+      () => backupConnections,
+    );
+    const backup = createBackup(backupWorkspace, backupConnections);
+    const mapping = Object.fromEntries(
+      backupConnections.map((c) => [c.id, c.id]),
+    );
+    const prior = await transfer.preview(backup, mapping, 'replace');
+    await assert.rejects(
+      transfer.preview(backup, mapping, 'merge'),
+      /Merged .* exceed the workspace limit; use replace or reduce the workspace\./,
+    );
+    await assert.rejects(transfer.apply(prior.token), /preview expired/);
+    assert.equal(writes, 0);
+    assert.equal(transfer.canUndo(), false);
+    assert.deepEqual(original, before);
+  }
+});

@@ -483,7 +483,12 @@ export function planImport(
       for (const key of Object.keys(imported))
         if (Object.hasOwn(local, key))
           conflicts.push(`${label}: ${key} — keep existing`);
-      return { ...imported, ...local };
+      const merged = { ...imported, ...local };
+      if (Object.keys(merged).length > 1000)
+        throw new Error(
+          `Merged ${label} entries exceed the workspace limit; use replace or reduce the workspace.`,
+        );
+      return merged;
     };
     const saved = [...(current.savedViews ?? [])];
     for (const v of incoming.savedViews ?? []) {
@@ -495,6 +500,10 @@ export function planImport(
         conflicts.push(`Saved view: ${v.name} (${v.id}) — keep existing`);
       else saved.push(v);
     }
+    if (saved.length > 100)
+      throw new Error(
+        'Merged saved views exceed the workspace limit; use replace or reduce the workspace.',
+      );
     result = {
       ...current,
       tabs: combine(
