@@ -2373,7 +2373,12 @@ try {
   await expect(page.locator('.issue-preview')).toHaveCount(0);
   await page.keyboard.press(`${modifier}+9`);
   await expect(tree).toBeVisible();
+  // The subtree audit opens CAN-106 before the linked CAN-200 tab.
   await page.keyboard.press(`${modifier}+2`);
+  await expect(
+    page.getByRole('tree', { name: 'CAN-106 issue tree' }),
+  ).toBeVisible();
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
   ).toBeVisible();

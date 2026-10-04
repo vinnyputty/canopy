@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
-import React from 'react';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { createRequire } from 'node:module';
 import { Mutations, type MutationView } from '../src/renderer/mutations';
 import { Pickers } from '../src/renderer/pickers';
 import { ControlledDemoProvider } from './fixtures/controlled';
@@ -65,7 +67,7 @@ const property = (ast: ts.SourceFile, name: string) =>
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 type Editor = { connectionId: string; key: string; field: string } | null;
-async function fixture() {
+async function fixture(dom?: Window, notify = () => {}) {
   const provider = new ControlledDemoProvider();
   const handlers = run(
     `${['text', 'key', 'issueKey', 'patch'].map((n) => declaration(main, n)).join('\n')}
@@ -102,7 +104,10 @@ async function fixture() {
   const errors: string[] = [];
   const mutations = new Mutations(
     api,
-    (next) => (view = next),
+    (next) => {
+      view = next;
+      notify();
+    },
     (e) => errors.push(e),
   );
   const tab: TabState = {
@@ -126,6 +131,7 @@ async function fixture() {
     editSession = { current: 1 };
   const setEditor = (value: (current: Editor) => Editor) => {
     editor = value(editor);
+    notify();
   };
   const save = run(`(${init(app, 'updateIssue')})`, {
     useCallback: (fn: unknown) => fn,
@@ -138,12 +144,17 @@ async function fixture() {
   }) as (key: string, patch: IssuePatch) => Promise<void>;
   const hooks = {
     React,
-    useRef: () => ({ current: null }),
-    useLayoutEffect: () => {},
+    useRef: dom ? React.useRef : () => ({ current: null }),
+    useLayoutEffect: dom ? React.useLayoutEffect : () => {},
+    window: dom,
+    document: dom?.document,
     cx: (...names: unknown[]) => names.filter(Boolean).join(' '),
     PickerFeedback: () => null,
   };
-  const status = run(`(${declaration(app, 'StatusEditor')})`, hooks);
+  const status = run(
+    `${declaration(app, 'navigateChoices')}\n(${declaration(app, 'StatusEditor')})`,
+    hooks,
+  );
   const cell = run(`(${declaration(app, 'FieldCell')})`, hooks);
   let flight: Promise<void> | undefined;
   const render = () => {
@@ -151,7 +162,11 @@ async function fixture() {
     return cell({
       active,
       label: 'Edit status for CAN-111',
-      onEdit: () => {},
+      onEdit: () => {
+        editSession.current++;
+        editor = { connectionId: 'demo', key: 'CAN-111', field: 'status' };
+        notify();
+      },
       children: status({
         active,
         issue: issue(),
@@ -259,4 +274,101 @@ for (const change of ['none', 'tab', 'session', 'new editor'] as const)
     } else if (change === 'new editor')
       assert.equal(f.editor()?.key, 'CAN-112');
     else assert.equal(f.editor(), null);
+  });
+
+// Real ReactDOM focus, keyboard propagation and the save callback are exercised;
+// geometry is deliberately excluded from this portable source regression.
+for (const activation of ['pointer', 'keyboard'] as const)
+  test(`status menu ${activation} activation closes the real field through the save pipeline`, async () => {
+    const { JSDOM } = createRequire(import.meta.url)('jsdom');
+    const dom = new JSDOM('<!doctype html><div id="host"></div>', {
+      pretendToBeVisual: true,
+    });
+    const prior = new Map<string, PropertyDescriptor | undefined>();
+    for (const [key, value] of Object.entries({
+      window: dom.window,
+      document: dom.window.document,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    })) {
+      prior.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+    }
+    const host = dom.window.document.querySelector('#host')!;
+    const root = createRoot(host);
+    let redraw = () => {};
+    const f = await fixture(dom.window, () => redraw());
+    function Field() {
+      const [, changed] = React.useReducer((value) => value + 1, 0);
+      redraw = changed;
+      return f.render();
+    }
+    try {
+      await act(async () => root.render(React.createElement(Field)));
+      const button = [...host.querySelectorAll('button')].find(
+        (element) => element.textContent === 'In Progress',
+      )!;
+      assert.ok(button);
+      if (activation === 'keyboard') {
+        const first = host.querySelector('button')!;
+        await act(async () => {
+          first.focus();
+          first.dispatchEvent(
+            new dom.window.KeyboardEvent('keydown', {
+              key: 'ArrowDown',
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+        });
+        assert.equal(dom.window.document.activeElement, button);
+      } else {
+        const focused = dom.window.document.activeElement;
+        const down = new dom.window.MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+        });
+        await act(async () => {
+          button.dispatchEvent(down);
+          // jsdom lacks the browser's mouse-focus default.
+          if (!down.defaultPrevented) button.focus();
+        });
+        assert.equal(dom.window.document.activeElement === focused, true);
+        assert.equal(down.defaultPrevented, true);
+      }
+      f.provider.hold('write', 'update', 'CAN-111');
+      await act(async () => {
+        if (activation === 'keyboard') {
+          const enter = new dom.window.KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+            cancelable: true,
+          });
+          button.dispatchEvent(enter);
+          assert.equal(enter.defaultPrevented, false);
+        }
+        // jsdom lacks native keyboard button activation; deliver that default.
+        button.click();
+        await tick();
+      });
+      assert.equal(f.provider.started('write'), true);
+      assert.equal(f.editor(), null);
+      assert.equal(host.querySelector('[role="menu"]'), null);
+      assert.equal(
+        host.querySelector('[aria-label="Edit status for CAN-111"]')
+          ?.textContent,
+        'In Progress',
+      );
+      await act(async () => {
+        f.provider.release('write');
+        await tick();
+      });
+      assert.equal(f.issue().status.name, 'In Progress');
+      assert.deepEqual(f.errors, []);
+    } finally {
+      await act(async () => root.unmount());
+      dom.window.close();
+      for (const [key, descriptor] of prior)
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+    }
   });

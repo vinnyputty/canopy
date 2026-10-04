@@ -217,3 +217,65 @@ for (const hold of [false, true]) {
     dom.window.close();
   });
 }
+
+// Execute the production ordinal callback and the actual smoke sequence against
+// the three tabs created by the subtree and linked-issue audits.
+test('smoke ordinal shortcut checks the second tab before selecting the linked root', async () => {
+  const tabs = ['CAN-100', 'CAN-106', 'CAN-200'].map((rootKey) => ({
+    rootKey,
+  }));
+  let active = tabs[0];
+  const callback = find(
+    app,
+    (node) =>
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(app) === 'selectTabAt',
+  ) as ts.VariableDeclaration;
+  const selectTabAt = vm.runInNewContext(
+    js(`(${callback.initializer!.getText(app)})`),
+    {
+      useCallback: (fn: unknown) => fn,
+      workspaceRef: { current: { tabs } },
+      navigate: (tab: (typeof tabs)[number]) => (active = tab),
+    },
+  );
+  const source = smoke.getFullText();
+  const start = source.indexOf('  // The subtree audit opens CAN-106');
+  const end = source.indexOf(
+    '  await page.keyboard.press(`${modifier}+b`)',
+    start,
+  );
+  assert.ok(start >= 0 && end > start);
+  const keys: string[] = [];
+  await vm.runInNewContext(
+    js(`(async () => {${source.slice(start, end)}})()`),
+    {
+      modifier: 'Control',
+      page: {
+        keyboard: {
+          press: async (key: string) => {
+            keys.push(key);
+            selectTabAt(Number(key.split('+')[1]) - 1);
+          },
+        },
+        getByRole: (role: string, options: { name: string | RegExp }) => ({
+          toBeVisible: async () => {
+            assert.equal(role, 'tree');
+            assert.equal(options.name, `${active.rootKey} issue tree`);
+          },
+          click: async () => {
+            assert.equal(role, 'tab');
+            const target = tabs.find((tab) =>
+              (options.name as RegExp).test(tab.rootKey),
+            );
+            assert.ok(target);
+            active = target;
+          },
+        }),
+      },
+      expect: (locator: unknown) => locator,
+    },
+  );
+  assert.deepEqual(keys, ['Control+2']);
+  assert.equal(active.rootKey, 'CAN-200');
+});

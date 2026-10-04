@@ -6789,6 +6789,7 @@ function StatusEditor({
                   ? 'This transition requires fields that Canopy does not edit yet.'
                   : undefined
               }
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => save(choice.id)}
             >
               <span className="status-transition-label">
@@ -6809,6 +6810,7 @@ function StatusEditor({
                   choices.every((value) => value.requiresFields)
                 }
                 aria-label={`Open ${issue.key} in Jira for ${choice.name}`}
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={openWorkflow}
               >
                 Open in Jira
@@ -6826,6 +6828,7 @@ function StatusEditor({
               )}
               role="menuitem"
               title="Each step is checked in Jira before it runs. Undo may stop if a reverse transition is unavailable."
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => savePath(path)}
             >
               <span>
