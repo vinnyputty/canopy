@@ -77,7 +77,11 @@ export async function auditAccessibility(app, page, evidence) {
   const commands = page.getByRole('button', { name: 'More commands' });
   await commands.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByLabel('Type a command')).toBeFocused();
+  await expect(
+    page
+      .getByRole('dialog', { name: 'Command palette' })
+      .getByRole('combobox', { name: 'Search workspace' }),
+  ).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(commands).toBeFocused();
   await open.focus();
