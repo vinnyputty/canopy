@@ -8,6 +8,11 @@ import childProcess, { type ChildProcess } from 'node:child_process';
 import { build } from 'esbuild';
 import type { AuditOwner } from '../tools/audit-lifecycle.mjs';
 import { disposeProcess } from './fixtures/owned-process';
+import {
+  assertDescendantAbsent,
+  captureDescendantIdentity,
+  readDescendantSnapshot,
+} from './fixtures/descendant-identity';
 
 // Match the shared owner's native Windows operation/kill allowances in these
 // disposable Node fixtures. Fresh removal needs three snapshots plus filesystem
@@ -36,6 +41,9 @@ const state = globalThis as typeof globalThis & {
     writer?: Promise<unknown>;
     write?: (...args: unknown[]) => Promise<unknown>;
     descendant?: number;
+    descendantIdentity?: Awaited<ReturnType<typeof captureDescendantIdentity>>;
+    captureDescendant: typeof captureDescendantIdentity;
+    descendantSnapshot: () => Promise<unknown>;
   };
 };
 for (const harness of ['smoke-backup', 'smoke-backup-cases'])
@@ -62,6 +70,8 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
       state.backupProbe = {
         primary: new Error('PRIMARY evidence failure'),
         closeCalls: 0,
+        captureDescendant: captureDescendantIdentity,
+        descendantSnapshot: () => readDescendantSnapshot(operationMs),
         signalCalls: [],
         refuse(pid, signal, ms) {
           const probe = state.backupProbe;
@@ -110,7 +120,7 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
                   ${scenario === 'missing-capture' ? 'throw s.primary;' : ''}
                   s.child=cp.spawn(options.executablePath,['-e',"process.on('message',(m)=>{if(m==='spawn-descendant'){const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});c.once('spawn',()=>process.send(c.pid));}else process.exit(0)});setInterval(()=>{},1000)"],{detached:process.platform!=='win32',env:options.env,stdio:['ignore','ignore','ignore','ipc']});
                   await once(s.child,'spawn');
-                  ${scenario === 'parent-exit' ? `s.child.send('spawn-descendant');[s.descendant]=await once(s.child,'message');` : ''}
+                  ${scenario === 'parent-exit' ? `s.child.send('spawn-descendant');[s.descendant]=await once(s.child,'message');s.descendantIdentity=await s.captureDescendant(s.child,s.descendant,s.descendantSnapshot);` : ''}
                   ${scenario === 'failed-launch' ? 'throw s.primary;' : scenario === 'pending-launch' ? 'return new Promise(r=>s.release=()=>r({process:()=>s.child}));' : ''}
                   return {process:()=>${scenario === 'mismatch' ? 's.unrelated' : 's.child'},evaluate:async()=>true,
                     firstWindow:async()=>{
@@ -251,10 +261,13 @@ for (const harness of ['smoke-backup', 'smoke-backup-cases'])
           await Promise.allSettled([...(probe.pending ?? [])]);
           await probe.writer;
         }
-        if (probe.descendant)
-          assert.throws(() => process.kill(probe.descendant!, 0), {
-            code: 'ESRCH',
-          });
+        if (probe.descendant) {
+          assert.ok(probe.descendantIdentity, 'Original descendant identity');
+          await assertDescendantAbsent(
+            probe.descendantIdentity,
+            probe.descendantSnapshot,
+          );
+        }
         if (scenario === 'pending-writer')
           assert.equal(
             await readFile(join(probe.directory!, 'late.txt'), 'utf8'),
