@@ -5,6 +5,7 @@ import type { TabState, TreeSnapshot, Workspace } from '../src/shared/types';
 import { demoSeeds } from '../src/main/demo-provider';
 import { viewSources } from '../src/renderer/saved-views';
 import { rootView } from '../src/renderer/table-view';
+import { withScrollPositions } from '../src/renderer/scroll-position';
 import { paletteIssueTab } from '../src/renderer/navigation-palette';
 import { activateTab, sameRoot, visit } from '../src/renderer/workspace';
 import { callback, execute, findNode, sourceFile } from './source-probe';
@@ -134,6 +135,8 @@ function harness(
   const save = execute(callback(source, 'saveWorkspace'), {
     useCallback: (fn: unknown) => fn,
     demoResetting: { current: false },
+    withScrollPositions,
+    scrollPositions: { current: new Map<string, number>() },
     pendingWorkspaceSave: { current: Promise.resolve() },
     window: {
       canopy: {

@@ -143,14 +143,19 @@ const initializer = (name: string) =>
       (n) => ts.isVariableDeclaration(n) && n.name.getText(app) === name,
     ) as ts.VariableDeclaration
   ).initializer!.getText(app);
-const install = (
-  find(
-    demo,
-    (n) =>
-      ts.isCallExpression(n) &&
-      n.expression.getText(demo) === 'first.page.addInitScript',
-  ) as ts.CallExpression
-).arguments[0].getText(demo);
+const installCall = find(
+  demo,
+  (n) =>
+    ts.isCallExpression(n) &&
+    n.expression.getText(demo) === 'page.addInitScript' &&
+    n.arguments[0]?.getText(demo) === 'installDemoHold',
+) as ts.CallExpression;
+const install = find(
+  demo,
+  (n) =>
+    ts.isFunctionDeclaration(n) &&
+    n.name?.getText(demo) === installCall.arguments[0].getText(demo),
+).getText(demo);
 
 for (const hold of [false, true]) {
   test(`actual demo callbacks ${hold ? 'hold step zero before audit work' : 'expose the old late-pause race'}`, async () => {

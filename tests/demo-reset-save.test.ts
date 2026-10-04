@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
+import { withScrollPositions } from '../src/renderer/scroll-position';
 import { callback, execute, findNode, sourceFile } from './source-probe';
 
 const renderer = sourceFile(
@@ -23,9 +24,13 @@ const saveEffect = findNode(
 ).arguments[0].getText();
 
 function harness({ demo = true, saveGate = false } = {}) {
-  const initial = { tabs: [{ expanded: [], selectedKey: undefined }] };
+  const initial = {
+    tabs: [{ expanded: [], selectedKey: undefined }],
+    closedTabs: undefined,
+  };
   const explored = {
     tabs: [{ expanded: ['CAN-100', 'CAN-110'], selectedKey: 'CAN-111' }],
+    closedTabs: undefined,
   };
   const timers = new Map<number, () => void>();
   let nextTimer = 0;
@@ -101,6 +106,8 @@ function harness({ demo = true, saveGate = false } = {}) {
   };
   const context = {
     window,
+    withScrollPositions,
+    scrollPositions: { current: new Map<string, number>() },
     pendingWorkspaceSave,
     workspaceSaveTimer,
     demoResetting,
@@ -257,6 +264,7 @@ test('failed reset recovers the latest visible edits after queued and restoratio
   const reset = h.functions.seek(0, false);
   await queued;
   const latest = {
+    ...h.explored,
     tabs: [
       ...h.explored.tabs,
       { expanded: ['CAN-200'], selectedKey: 'CAN-201' },
