@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { before, test } from 'node:test';
 import { promisify } from 'node:util';
@@ -17,7 +17,13 @@ before(async () => {
 // Protocol doubles validate the adapter, not shared ownership/reaping or native GUI.
 function protocol(reportError?: Error) {
   const calls: string[] = [];
-  const child = { exitCode: 0, signalCode: null };
+  const child = Object.assign(new EventEmitter(), {
+    pid: 123,
+    exitCode: 0,
+    signalCode: null,
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+  });
   let shutdown = { terminated: true, errors: [] as Error[] };
   let cleanup: any;
   const lifecycle = {
@@ -63,6 +69,7 @@ function protocol(reportError?: Error) {
   return {
     audit,
     app,
+    child,
     calls,
     records,
     failShutdown: (errors: Error[], terminated = false) => {
@@ -71,6 +78,70 @@ function protocol(reportError?: Error) {
     cleanup: () => cleanup,
   };
 }
+
+test('authoring failure evidence is bounded and belongs to the current launch', async () => {
+  const fixture = protocol();
+  await fixture.audit.launch('initial', async () => fixture.app);
+  const firstPage = new EventEmitter();
+  fixture.audit.observePage(firstPage);
+  fixture.child.stderr.emit('data', Buffer.from('previous launch'));
+  await fixture.audit.closeForRestart(fixture.app);
+  assert.equal(firstPage.listenerCount('pageerror'), 0);
+  assert.equal(fixture.child.stderr.listenerCount('data'), 0);
+  await fixture.audit.launch('restart', async () => fixture.app);
+  const page = new EventEmitter();
+  fixture.audit.observePage(page);
+  for (let index = 0; index < 45; index++)
+    fixture.child.stdout.emit(
+      'data',
+      Buffer.from(`${index}:` + 'x'.repeat(600)),
+    );
+  page.emit('framenavigated', { url: () => 'file:///authoring.html' });
+  page.emit('pageerror', new Error('failed authoring renderer'));
+  page.emit('crash');
+  fixture.audit.failure(null);
+  const primary = fixture.records.at(-1);
+  assert.equal(primary.phase, 'restart');
+  assert.equal(primary.pid, 123);
+  assert.equal(primary.message, 'null');
+  assert.equal(primary.evidence.length, 40);
+  assert.ok(primary.evidence.every((item: any) => item.message.length <= 500));
+  assert.ok(primary.evidence[0].message.startsWith('8:'));
+  assert.deepEqual(primary.evidence.slice(-3), [
+    { source: 'navigation', message: 'file:///authoring.html' },
+    { source: 'page error', message: 'failed authoring renderer' },
+    { source: 'page crash', message: 'Renderer crashed' },
+  ]);
+});
+
+test('authoring final evidence includes passive exit events without changing cleanup inputs', async () => {
+  const fixture = protocol();
+  await fixture.audit.launch('restart', async () => fixture.app);
+  const page = new EventEmitter();
+  fixture.audit.observePage(page);
+  fixture.audit.failure(false);
+  page.emit('close');
+  fixture.child.emit('exit', null, 'SIGKILL');
+  const removeProfile = async () => {};
+  await fixture.audit.finish({
+    app: fixture.app,
+    primary: false,
+    primaryFailed: true,
+    removeProfile,
+  });
+  const cleanup = fixture.cleanup();
+  assert.equal(cleanup.primary, false);
+  assert.equal(cleanup.primaryFailed, true);
+  assert.equal(cleanup.removeProfile, removeProfile);
+  assert.equal(cleanup.operationsSettled(), true);
+  await cleanup.writeEvidence();
+  assert.deepEqual(fixture.records.at(-1).evidence, [
+    { source: 'page close', message: 'Page closed' },
+    { source: 'main exit', message: '{"code":null,"signal":"SIGKILL"}' },
+  ]);
+  assert.equal(page.listenerCount('close'), 0);
+  assert.equal(fixture.child.listenerCount('exit'), 0);
+});
 
 test('authoring audit refuses absent shared primitives before native launch or profile creation', async () => {
   assert.throws(() => authoringAuditLifecycle(), /platform-qualified/);

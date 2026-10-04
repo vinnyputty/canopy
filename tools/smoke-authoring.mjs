@@ -35,6 +35,7 @@ export async function auditAuthoring(
     page = await audit.run(`${phase}:first-window`, () =>
       app.firstWindow({ timeout: 30_000 }),
     );
+    audit.observePage(page);
   };
   const evaluate = (callback, arg) =>
     audit.run('main:evaluate', () => app.evaluate(callback, arg));
