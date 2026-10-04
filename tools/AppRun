@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Keep Chromium's sandbox enabled. Unsupported hosts fail at startup.
+for arg in "$@"; do
+  case "$arg" in
+    -no-sandbox|-no-sandbox=*|--no-sandbox|--no-sandbox=*|-disable-*-sandbox|-disable-*-sandbox=*|--disable-*-sandbox|--disable-*-sandbox=*)
+      echo 'Canopy requires the Chromium sandbox.' >&2
+      exit 1
+      ;;
+  esac
+done
+APPDIR="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+export LD_LIBRARY_PATH="${APPDIR}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+exec "${APPDIR}/canopy" "$@"
