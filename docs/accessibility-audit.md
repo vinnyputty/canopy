@@ -44,6 +44,8 @@ The source integration preserves main’s Inbox initial ten-root coverage, scope
 
 ## Native qualification gate
 
+Platform CI runs the full Electron smoke and a separate focused accessibility invocation of `//:smoke`, followed by the guided demo and packaging. The focused invocation alone sets `CANOPY_SMOKE_ACCESSIBILITY_ONLY=1`; headless Linux uses `xvfb-run` for both smoke runs. Successful hosted execution qualifies the recorded sample Chromium checks on that commit and runner. Native AX/VoiceOver, UI Automation/Narrator and AT-SPI/Orca qualification remains pending.
+
 Use disposable sample data and record the reviewed commit, OS/build, Electron version, tool/version, accessibility backend, input method, path, expected behavior, observed behavior, screenshots or event traces, and spoken output. Mark each path pass/fail/pending with evidence. Enable or change user accessibility settings only under separately authorized native acceptance; this baseline authorization does not allow such changes.
 
 - **macOS:** Accessibility Inspector plus VoiceOver. Inspect the native AX hierarchy, focus changes, names/roles/values, modal boundaries, and live announcements. In the baseline environment, a read-only `AXIsProcessTrusted()` probe returned false and only Command Line Tools were selected; native inspection and spoken output were not qualified. No trust request or VoiceOver toggle was made.
