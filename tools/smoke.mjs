@@ -50,6 +50,49 @@ const pageErrors = [];
 const recentOutput = [];
 let smokeFailure;
 let cleanupFailure;
+async function auditOrdinalTabs(page, modifier) {
+  const tabs = page.getByRole('tab');
+  const roots = await tabs.locator('.tab-label b').allTextContents();
+  expect(roots).toContain('CAN-100');
+  expect(roots).toContain('CAN-200');
+  expect(roots.length).toBeLessThan(9);
+  for (const [shortcut, index] of [
+    [1, 0],
+    [9, 0],
+    [2, 1],
+  ]) {
+    await page.keyboard.press(`${modifier}+${shortcut}`);
+    await expect(tabs.locator('.tab-label b')).toHaveText(roots);
+    await expect(tabs.nth(index)).toHaveAttribute('aria-selected', 'true');
+    await expect(
+      page.getByRole('tree', {
+        name: `${roots[index]} issue tree`,
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.locator('.issue-preview')).toHaveCount(0);
+  }
+}
+
+async function retainAuditTabs(page) {
+  const labels = page.getByRole('tab').locator('.tab-label b');
+  const roots = await labels.allTextContents();
+  expect(roots.filter((root) => root === 'CAN-100')).toHaveLength(1);
+  expect(roots.filter((root) => root === 'CAN-200')).toHaveLength(1);
+  // Earlier subtree navigation can retain an incidental root. The close/reopen
+  // and reorder audit below explicitly starts with its two known roots.
+  for (const root of roots.filter(
+    (root) => !['CAN-100', 'CAN-200'].includes(root),
+  ))
+    await page
+      .getByRole('button', { name: `Close ${root}`, exact: true })
+      .click();
+  await expect(labels).toHaveText(
+    roots.filter((root) => ['CAN-100', 'CAN-200'].includes(root)),
+  );
+  await expect(page.getByRole('tab')).toHaveCount(2);
+}
+
 async function waitForSavedWorkspace(check) {
   await expect
     .poll(
@@ -2368,16 +2411,7 @@ try {
   );
   await page.keyboard.press('Escape');
   await expect(issue('CAN-200')).toBeFocused();
-  await page.keyboard.press(`${modifier}+1`);
-  await expect(tree).toBeVisible();
-  await expect(page.locator('.issue-preview')).toHaveCount(0);
-  await page.keyboard.press(`${modifier}+9`);
-  await expect(tree).toBeVisible();
-  // The subtree audit opens CAN-106 before the linked CAN-200 tab.
-  await page.keyboard.press(`${modifier}+2`);
-  await expect(
-    page.getByRole('tree', { name: 'CAN-106 issue tree' }),
-  ).toBeVisible();
+  await auditOrdinalTabs(page, modifier);
   await page.getByRole('tab', { name: /CAN-200/ }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
@@ -2418,6 +2452,7 @@ try {
   ).toBeHidden();
 
   // Favorites are independent from open tabs; reopening retains complete state.
+  await retainAuditTabs(page);
   const firstTab = page.getByRole('tab', { name: /CAN-100/ });
   const secondTab = page.getByRole('tab', { name: /CAN-200/ });
   await firstTab.click();
@@ -2430,9 +2465,16 @@ try {
   ).toBeVisible();
   await firstTab.click({ button: 'middle' });
   await expect(firstTab).toHaveCount(0);
+  await expect(page.getByRole('tab').locator('.tab-label b')).toHaveText([
+    'CAN-200',
+  ]);
   await expect(pinnedRoots).toBeVisible();
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(firstTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab').locator('.tab-label b')).toHaveText([
+    'CAN-200',
+    'CAN-100',
+  ]);
   await expect(issue('CAN-111')).toHaveAttribute('aria-selected', 'true');
   await expect(
     page.locator('.linked-panel').getByText('CAN-200'),
@@ -2443,6 +2485,10 @@ try {
 
   // Drag order is durable; keyboard reordering is also available.
   await firstTab.dragTo(secondTab);
+  await expect(page.getByRole('tab').locator('.tab-label b')).toHaveText([
+    'CAN-100',
+    'CAN-200',
+  ]);
   await expect(page.getByRole('tab').first()).toContainText('CAN-100');
   await firstTab.focus();
   await page.keyboard.press('Alt+Shift+ArrowRight');

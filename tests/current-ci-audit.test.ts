@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { closeTabs, reopenTab, reorderTab } from '../src/renderer/workspace';
+import type { Workspace } from '../src/shared/types';
 
 const require = createRequire(import.meta.url);
 const { JSDOM } = require('jsdom');
@@ -218,64 +220,193 @@ for (const hold of [false, true]) {
   });
 }
 
-// Execute the production ordinal callback and the actual smoke sequence against
-// the three tabs created by the subtree and linked-issue audits.
-test('smoke ordinal shortcut checks the second tab before selecting the linked root', async () => {
-  const tabs = ['CAN-100', 'CAN-106', 'CAN-200'].map((rootKey) => ({
-    rootKey,
-  }));
-  let active = tabs[0];
-  const callback = find(
-    app,
-    (node) =>
-      ts.isVariableDeclaration(node) &&
-      node.name.getText(app) === 'selectTabAt',
-  ) as ts.VariableDeclaration;
-  const selectTabAt = vm.runInNewContext(
-    js(`(${callback.initializer!.getText(app)})`),
-    {
-      useCallback: (fn: unknown) => fn,
-      workspaceRef: { current: { tabs } },
-      navigate: (tab: (typeof tabs)[number]) => (active = tab),
-    },
-  );
-  const source = smoke.getFullText();
-  const start = source.indexOf('  // The subtree audit opens CAN-106');
-  const end = source.indexOf(
-    '  await page.keyboard.press(`${modifier}+b`)',
-    start,
-  );
-  assert.ok(start >= 0 && end > start);
-  const keys: string[] = [];
-  await vm.runInNewContext(
-    js(`(async () => {${source.slice(start, end)}})()`),
-    {
-      modifier: 'Control',
-      page: {
-        keyboard: {
-          press: async (key: string) => {
-            keys.push(key);
-            selectTabAt(Number(key.split('+')[1]) - 1);
-          },
+// Run the actual bundled audit helpers and production workspace operations with
+// DOM-backed tab locators. The order matrix includes both captured CI layouts.
+for (const roots of [
+  ['CAN-100', 'CAN-200'],
+  ['CAN-100', 'CAN-106', 'CAN-200'],
+  ['CAN-200', 'CAN-100'],
+  ['CAN-106', 'CAN-200', 'CAN-100'],
+  ['CAN-200', 'CAN-106', 'CAN-100'],
+])
+  test(`tab audit preserves ordinal and reorder contracts: ${roots.join(',')}`, async () => {
+    const dom = new JSDOM('<main></main>');
+    let workspace: Workspace = {
+      tabs: roots.map((rootKey) => ({
+        id: rootKey,
+        rootKey,
+        connectionId: 'demo',
+        expanded: [],
+        hideDone: false,
+        scrollTop: 0,
+      })),
+      activeTabId: roots[0],
+      theme: 'system',
+      shortcuts: {},
+      sidebarCollapsed: false,
+    };
+    const redraw = () => {
+      dom.window.document.querySelector('main')!.innerHTML =
+        workspace.tabs
+          .map(
+            (tab) =>
+              `<div role="tab" aria-selected="${workspace.activeTabId === tab.id}"><span class="tab-label"><b>${tab.rootKey}</b></span><button aria-label="Close ${tab.rootKey}"></button></div>`,
+          )
+          .join('') +
+        `<div role="tree" aria-label="${workspace.activeTabId} issue tree"></div>`;
+    };
+    const callback = find(
+      app,
+      (node) =>
+        ts.isVariableDeclaration(node) &&
+        node.name.getText(app) === 'selectTabAt',
+    ) as ts.VariableDeclaration;
+    const workspaceRef = { current: workspace };
+    const selectTabAt = vm.runInNewContext(
+      js(`(${callback.initializer!.getText(app)})`),
+      {
+        useCallback: (fn: unknown) => fn,
+        workspaceRef,
+        navigate: (tab: Workspace['tabs'][number]) => {
+          workspace = { ...workspace, activeTabId: tab.id };
+          redraw();
         },
-        getByRole: (role: string, options: { name: string | RegExp }) => ({
-          toBeVisible: async () => {
-            assert.equal(role, 'tree');
-            assert.equal(options.name, `${active.rootKey} issue tree`);
-          },
-          click: async () => {
-            assert.equal(role, 'tab');
-            const target = tabs.find((tab) =>
-              (options.name as RegExp).test(tab.rootKey),
-            );
-            assert.ok(target);
-            active = target;
-          },
-        }),
       },
-      expect: (locator: unknown) => locator,
-    },
-  );
-  assert.deepEqual(keys, ['Control+2']);
-  assert.equal(active.rootKey, 'CAN-200');
-});
+    );
+    function locator(read: () => Element[]) {
+      return {
+        allTextContents: async () => read().map((node) => node.textContent),
+        locator: (selector: string) =>
+          locator(() =>
+            read().flatMap((node) => [...node.querySelectorAll(selector)]),
+          ),
+        nth: (index: number) => locator(() => read().slice(index, index + 1)),
+        toHaveText: async (expected: string[]) =>
+          assert.deepEqual(
+            read().map((node) => node.textContent),
+            Array.from(expected),
+          ),
+        toHaveCount: async (expected: number) =>
+          assert.equal(read().length, expected),
+        toHaveAttribute: async (name: string, value: string) => {
+          assert.equal(read().length, 1);
+          assert.equal(read()[0].getAttribute(name), value);
+        },
+        toBeVisible: async () => assert.equal(read().length, 1),
+      };
+    }
+    const keys: string[] = [];
+    const page = {
+      keyboard: {
+        press: async (key: string) => {
+          keys.push(key);
+          workspaceRef.current = workspace;
+          selectTabAt(Number(key.split('+')[1]) - 1);
+        },
+      },
+      locator: (selector: string) =>
+        locator(() => [...dom.window.document.querySelectorAll(selector)]),
+      getByRole: (
+        role: string,
+        options?: { name: string; exact: boolean },
+      ) => ({
+        ...locator(() =>
+          [...dom.window.document.querySelectorAll(`[role="${role}"]`)].filter(
+            (node) =>
+              !options || node.getAttribute('aria-label') === options.name,
+          ),
+        ),
+        click: async () => {
+          assert.equal(role, 'button');
+          assert.equal(options?.exact, true);
+          const root = options!.name.slice('Close '.length);
+          assert.ok(workspace.tabs.some((tab) => tab.rootKey === root));
+          workspace = closeTabs(workspace, [root]);
+          redraw();
+        },
+      }),
+    };
+    const expect = (value: any) => ({
+      ...value,
+      toContain: (root: string) => assert.ok(value.includes(root)),
+      toHaveLength: (length: number) => assert.equal(value.length, length),
+      toBeLessThan: (limit: number) => assert.ok(value < limit),
+    });
+    const helper = (name: string) => {
+      const declaration = find(
+        smoke,
+        (node) => ts.isFunctionDeclaration(node) && node.name?.text === name,
+      );
+      return vm.runInNewContext(js(`(${declaration.getText(smoke)})`), {
+        expect,
+      });
+    };
+    try {
+      redraw();
+      await helper('auditOrdinalTabs')(page, 'Control');
+      assert.deepEqual(keys, ['Control+1', 'Control+9', 'Control+2']);
+      assert.equal(workspace.activeTabId, roots[1]);
+      await assert.rejects(
+        helper('auditOrdinalTabs')(
+          {
+            ...page,
+            keyboard: {
+              press: async () => {
+                workspaceRef.current = workspace;
+                selectTabAt(0);
+              },
+            },
+          },
+          'Control',
+        ),
+        /false.*true/s,
+      );
+      if (roots.length === 3)
+        await assert.rejects(
+          helper('retainAuditTabs')({
+            ...page,
+            getByRole: (
+              role: string,
+              options?: { name: string; exact: boolean },
+            ) => ({
+              ...page.getByRole(role, options),
+              click: async () => {},
+            }),
+          }),
+        );
+      await helper('retainAuditTabs')(page);
+      assert.deepEqual(
+        workspace.tabs.map((tab) => tab.rootKey),
+        roots.filter((root) => ['CAN-100', 'CAN-200'].includes(root)),
+      );
+      workspace = closeTabs(workspace, ['CAN-100']);
+      assert.deepEqual(
+        workspace.tabs.map((tab) => tab.rootKey),
+        ['CAN-200'],
+      );
+      workspace = reopenTab(workspace);
+      assert.deepEqual(
+        workspace.tabs.map((tab) => tab.rootKey),
+        ['CAN-200', 'CAN-100'],
+      );
+      assert.equal(workspace.activeTabId, 'CAN-100');
+      workspace = reorderTab(workspace, 'CAN-100', 'CAN-200');
+      assert.deepEqual(
+        workspace.tabs.map((tab) => tab.rootKey),
+        ['CAN-100', 'CAN-200'],
+      );
+      workspace = reorderTab(workspace, 'CAN-100', 'CAN-200');
+      assert.deepEqual(
+        workspace.tabs.map((tab) => tab.rootKey),
+        ['CAN-200', 'CAN-100'],
+      );
+      workspace = reorderTab(workspace, 'CAN-100', 'CAN-200');
+      assert.deepEqual(
+        workspace.tabs.map((tab) => tab.rootKey),
+        ['CAN-100', 'CAN-200'],
+      );
+      assert.equal(workspace.activeTabId, 'CAN-100');
+    } finally {
+      dom.window.close();
+    }
+  });
