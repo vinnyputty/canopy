@@ -596,7 +596,10 @@ try {
     heldFailed = false;
   try {
     for (const undo of [false, true]) {
-      const before = await readFile(join(profile, 'workspace.json'), 'utf8');
+      const beforeFlush = await readFile(
+        join(profile, 'workspace.json'),
+        'utf8',
+      );
       // Keep initial tree hydration from creating a subsequent workspace edit
       // before Undo; the fixture still has a real selected, closable tab.
       const treeGate = undo ? 'held-undo-tree' : 'held-import-tree';
@@ -623,6 +626,10 @@ try {
       await expect
         .poll(() => app.evaluate(() => globalThis.canopyBackupHold.staged))
         .toBe(true);
+      // onApply flushes the hydrated renderer before transfer staging. Capture
+      // actual bytes at that boundary, before attempting any held DOM mutations.
+      const before = await readFile(join(profile, 'workspace.json'), 'utf8');
+      expect(JSON.parse(before)).toEqual(JSON.parse(beforeFlush));
       await heldDOM(JSON.parse(before));
       expect(await readFile(join(profile, 'workspace.json'), 'utf8')).toBe(
         before,
@@ -636,7 +643,10 @@ try {
         expect(await readFile(join(profile, 'workspace.json'), 'utf8')).toBe(
           beforeHeld,
         );
-      else expect(await saved()).toEqual(heldReviewed);
+      else
+        expect(await readFile(join(profile, 'workspace.json'), 'utf8')).toBe(
+          JSON.stringify(heldReviewed),
+        );
       expect(await page.evaluate(() => window.backupReloadSentinel)).toBe(true);
       await app.evaluate(() => globalThis.canopyBackupHold.releaseReload());
       await expect(panelLocator()).toHaveCount(0);
