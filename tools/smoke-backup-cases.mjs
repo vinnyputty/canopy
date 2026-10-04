@@ -555,8 +555,15 @@ try {
         .getByRole('complementary', { name: 'Canopy sidebar' })
         .evaluate((sidebar) => sidebar.parentElement.className),
     ).toBe(sidebarClass);
-    for (const fieldset of await panel.locator('fieldset').all())
-      await expect(fieldset).toBeDisabled();
+    await expect(panel.locator('fieldset')).toHaveCount(2);
+    for (const fieldset of await panel.locator('fieldset').all()) {
+      // Playwright checks disabled form controls, not the fieldset container.
+      await expect(fieldset).toHaveJSProperty('disabled', true);
+      const controls = fieldset.locator('button, input, select, textarea');
+      await expect(controls).not.toHaveCount(0);
+      for (const control of await controls.all())
+        await expect(control).toBeDisabled();
+    }
   };
   const heldBaseline = {
     ...baseline,
