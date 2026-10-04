@@ -96,9 +96,10 @@ for (const platform of ['darwin', 'linux', 'win32']) {
       context,
     );
     const argv = ['/electron', ...context.argv];
-    assert.deepEqual(launchHandoffArguments(argv, false, platform), [
-      '--invalid-canopy-command',
-    ]);
+    assert.deepEqual(
+      launchHandoffArguments(argv, false, platform),
+      command.slice(2),
+    );
     const normalized = auditArguments(argv, platform);
     const parsed = launchHandoffArguments(normalized, false, platform);
     assert.deepEqual(parsed, command.slice(2));
@@ -127,27 +128,17 @@ for (const platform of ['darwin', 'linux', 'win32']) {
     assert.deepEqual(launchHandoffArguments(bad, false, platform), [
       '--invalid-canopy-command',
     ]);
-    // A repeated valid prefix is not scanned away.
-    const qBad = new WorkHandoffQueue();
-    try {
-      qBad.receive(
-        launchHandoffArguments(
-          auditArguments(
-            [
-              '/electron',
-              ...context.argv.slice(0, context.argv.length - command.length),
-              ...context.argv,
-            ],
-            platform,
-          ),
-          false,
-          platform,
-        ),
-      );
-      assert.equal(qBad.ready(() => {}).rejected, true);
-    } finally {
-      qBad.stop();
-    }
+    // A repeated prefix is rejected before production normalization.
+    assert.throws(() =>
+      auditArguments(
+        [
+          '/electron',
+          ...context.argv.slice(0, context.argv.length - command.length),
+          ...context.argv,
+        ],
+        platform,
+      ),
+    );
   });
 }
 

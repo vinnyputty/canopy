@@ -9,19 +9,41 @@ export const HANDOFF_CAPACITY = 16;
 export const HANDOFF_WAIT_MS = 60_000;
 export const HANDOFF_ACK_MS = 10_000;
 
-/** Remove only the executable/app path and the documented mode/runtime suffix. */
+/** Consume only the pinned Playwright runtime prefix and documented mode/suffix. */
+export function launchArguments(
+  argv: string[],
+  packaged: boolean,
+  platform: string,
+): { demo: boolean; handoff: string[] } {
+  const prefix = [
+    ...(platform === 'linux' ? ['--no-sandbox'] : []),
+    '--inspect=0',
+    '--remote-debugging-port=0',
+  ];
+  const runtime = argv.slice(1);
+  if (prefix.every((arg, i) => runtime[i] === arg))
+    runtime.splice(0, prefix.length);
+  // A development app path must precede application arguments.
+  if (!packaged && (!runtime[0] || runtime[0].startsWith('--')))
+    return { demo: false, handoff: ['--invalid-canopy-command'] };
+  const args = runtime.slice(packaged ? 0 : 1);
+  if (platform === 'linux' && args.at(-1) === '--no-sandbox') args.pop();
+  const demo = args[0] === '--canopy-demo';
+  if (demo) args.shift();
+  // Bound additionalData before the lock IPC, including malformed invocations.
+  const handoff =
+    args.length > 2 || args.some((arg) => arg.length > 2048)
+      ? ['--invalid-canopy-command']
+      : args;
+  return { demo, handoff };
+}
+
 export function launchHandoffArguments(
   argv: string[],
   packaged: boolean,
   platform: string,
 ): string[] {
-  const args = argv.slice(packaged ? 1 : 2);
-  if (platform === 'linux' && args.at(-1) === '--no-sandbox') args.pop();
-  if (args[0] === '--canopy-demo') args.shift();
-  // Bound additionalData before the lock IPC, including malformed invocations.
-  if (args.length > 2 || args.some((arg) => arg.length > 2048))
-    return ['--invalid-canopy-command'];
-  return args;
+  return launchArguments(argv, packaged, platform).handoff;
 }
 
 type Pending = {

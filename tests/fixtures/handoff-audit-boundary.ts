@@ -1,4 +1,4 @@
-/** Only the synthetic audit entry accepts Playwright 1.63's exact prefix. */
+/** Verify the synthetic audit's exact Playwright prefix before the app path. */
 export function auditArguments(argv: string[], platform: string): string[] {
   const prefix = [
     ...(platform === 'linux' ? ['--no-sandbox'] : []),
@@ -9,7 +9,10 @@ export function auditArguments(argv: string[], platform: string): string[] {
   if (args[0] === prefix[0]) {
     if (!prefix.every((value, i) => args[i] === value))
       throw new Error('Unexpected audit launch prefix.');
-    return [argv[0], ...args.slice(prefix.length)];
+    const application = args.slice(prefix.length);
+    if (!application[0] || application[0].startsWith('--'))
+      throw new Error('Unexpected audit launch prefix.');
+    return [argv[0], ...application];
   }
   // Direct duplicate launches retain the ordinary production argument contract.
   if (args[0]?.startsWith('--'))
