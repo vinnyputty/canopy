@@ -245,6 +245,27 @@ export function RichAuthoring({
     busy || activeAttempt || Boolean(draft.pending) || Boolean(draftError);
   const editingDisabled =
     busy || Boolean(draftError) || (Boolean(draft.pending) && !activeAttempt);
+  const savedFragments: { id: string; value: string }[] = draft.fragments
+    ? JSON.parse(draft.fragments)
+    : [];
+  const currentFragments = options?.description.fragments;
+  const edits = currentFragments?.map(
+    (fragment) =>
+      savedFragments.find((edit) => edit.id === fragment.id) ?? fragment,
+  );
+  const needsFragmentReview =
+    savedFragments.length >= 500 &&
+    currentFragments?.some(
+      (fragment) => !savedFragments.some(({ id }) => id === fragment.id),
+    );
+  const incompatibleText = currentFragments
+    ? [
+        ...(draft.description !== undefined ? [draft.description] : []),
+        ...savedFragments
+          .filter((edit) => !currentFragments.some(({ id }) => id === edit.id))
+          .map((edit) => edit.value),
+      ]
+    : savedFragments.map((edit) => edit.value);
   if (provider === 'demo') return null;
   return (
     <section className="rich-authoring" aria-label={`Author ${issueKey}`}>
@@ -376,35 +397,74 @@ export function RichAuthoring({
                     <>
                       <p>{options.description.reason}</p>
                       {options.description.fragments.map((fragment, index) => {
-                        const edits: { id: string; value: string }[] =
-                          draft.fragments
-                            ? JSON.parse(draft.fragments)
-                            : options.description.fragments!;
                         return (
                           <label key={fragment.id}>
                             Text run {index + 1}
                             <textarea
                               maxLength={100_000}
                               aria-label={`Description text run ${index + 1}`}
-                              disabled={editingDisabled}
+                              disabled={
+                                editingDisabled ||
+                                (needsFragmentReview &&
+                                  !savedFragments.some(
+                                    ({ id }) => id === fragment.id,
+                                  ))
+                              }
                               value={
-                                edits.find((edit) => edit.id === fragment.id)
+                                edits!.find((edit) => edit.id === fragment.id)
                                   ?.value ?? fragment.value
                               }
-                              onChange={(event) =>
-                                change({
-                                  fragments: JSON.stringify(
-                                    edits.map((edit) =>
-                                      edit.id === fragment.id
-                                        ? { ...edit, value: event.target.value }
-                                        : edit,
-                                    ),
+                              onChange={(event) => {
+                                const update = (items: typeof savedFragments) =>
+                                  items.map((edit) =>
+                                    edit.id === fragment.id
+                                      ? { ...edit, value: event.target.value }
+                                      : edit,
+                                  );
+                                // Retain incompatible saved runs until explicit review.
+                                let next = update([
+                                  ...savedFragments.filter(
+                                    (edit) =>
+                                      !edits!.some(({ id }) => id === edit.id),
                                   ),
+                                  ...edits!,
+                                ]);
+                                if (next.length > 500) {
+                                  if (
+                                    savedFragments.some(
+                                      ({ id }) => id === fragment.id,
+                                    )
+                                  ) {
+                                    next = update(savedFragments);
+                                  } else if (savedFragments.length < 500) {
+                                    next = [
+                                      ...savedFragments,
+                                      {
+                                        id: fragment.id,
+                                        value: event.target.value,
+                                      },
+                                    ];
+                                  } else {
+                                    setError(
+                                      'Review the current description before editing added text runs. Your saved draft is retained.',
+                                    );
+                                    return;
+                                  }
+                                }
+                                const fragments = JSON.stringify(next);
+                                if (fragments.length > 500_000) {
+                                  setError(
+                                    'This edit exceeds the saved draft limit. Shorten the text or review the current description first. Your saved draft is retained.',
+                                  );
+                                  return;
+                                }
+                                change({
+                                  fragments,
                                   revision:
                                     draft.revision ??
                                     options.description.revision,
-                                })
-                              }
+                                });
+                              }}
                             />
                           </label>
                         );
@@ -435,11 +495,47 @@ export function RichAuthoring({
                           The provider description changed. Current description:
                         </p>
                         <pre>{options.description.value}</pre>
+                        {needsFragmentReview && (
+                          <p>
+                            Your saved draft reached the text-run limit. Review
+                            the current description before editing added runs.
+                            Matching saved runs remain editable.
+                          </p>
+                        )}
+                        {incompatibleText.length > 0 && (
+                          <>
+                            <p>
+                              These saved draft texts do not match the current
+                              editor format or text runs. Copy them before
+                              accepting; acceptance removes them from the draft.
+                              Matching text runs and edits in the current editor
+                              are kept.
+                            </p>
+                            <pre>{incompatibleText.join('\n\n')}</pre>
+                          </>
+                        )}
                         <button
                           disabled={editingDisabled}
-                          onClick={() =>
-                            change({ revision: options.description.revision })
-                          }
+                          onClick={() => {
+                            const fragments = edits
+                              ? JSON.stringify(edits)
+                              : undefined;
+                            if (fragments && fragments.length > 500_000) {
+                              setError(
+                                'The current text runs exceed the saved draft limit. Keep your draft and edit this description in the browser.',
+                              );
+                              return;
+                            }
+                            setError('');
+                            change({
+                              revision: options.description.revision,
+                              fragments,
+                              description: edits
+                                ? undefined
+                                : (draft.description ??
+                                  options.description.value),
+                            });
+                          }}
                         >
                           I reviewed the current description; keep my draft
                         </button>

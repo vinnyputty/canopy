@@ -143,7 +143,15 @@ function effects(
   ];
 }
 function revision(value: unknown) {
-  return JSON.stringify(value);
+  return JSON.stringify(value, (_key, child) =>
+    child && typeof child === 'object' && !Array.isArray(child)
+      ? Object.fromEntries(
+          Object.keys(child)
+            .sort()
+            .map((key) => [key, child[key]]),
+        )
+      : child,
+  );
 }
 function requireSamePlan(expected: ParentPlan, actual: ParentPlan) {
   if (

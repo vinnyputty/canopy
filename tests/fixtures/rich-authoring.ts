@@ -133,7 +133,11 @@ export function richAuthoringFixture() {
     if (Array.isArray(value)) return value.map(text).join('');
     return typeof value === 'object' ? text(value.children) : String(value);
   }
-  function mount(connectionId = 'account', issueKey = 'team/a#1') {
+  function mount(
+    connectionId = 'account',
+    issueKey = 'team/a#1',
+    provider: 'github' | 'jira' = 'github',
+  ) {
     const hook: Hook = { index: 0, slots: [], effects: [] };
     const pane = {
       render() {
@@ -142,7 +146,7 @@ export function richAuthoringFixture() {
         hook.tree = RichAuthoring({
           connectionId,
           issueKey,
-          provider: 'github',
+          provider,
           onRefresh() {},
           onPreview() {},
           onBrowser() {},
@@ -151,6 +155,9 @@ export function richAuthoringFixture() {
       },
       unmount() {
         for (const slot of hook.slots) slot?.cleanup?.();
+      },
+      text() {
+        return text(hook.tree);
       },
       button(name: string) {
         const node = nodes(hook.tree).find(

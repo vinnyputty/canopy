@@ -578,3 +578,442 @@ test('actual RichAuthoring requires provider acknowledgment after the running at
   assert.equal(next.button('Allow a new write after review').disabled, false);
   next.unmount();
 });
+
+function reorderedKeys(value: any): any {
+  return Array.isArray(value)
+    ? value.map(reorderedKeys)
+    : value && typeof value === 'object'
+      ? Object.fromEntries(
+          Object.entries(value)
+            .reverse()
+            .map(([key, child]) => [key, reorderedKeys(child)]),
+        )
+      : value;
+}
+
+function jiraDescriptionFixture(document: any) {
+  let current = structuredClone(document);
+  const writes: RequestInit[] = [];
+  let readback = (value: any) => value;
+  let writeError: Error | undefined;
+  const author = new JiraAuthoring(async (path, init) => {
+    if (path.includes('/mypermissions?'))
+      return {
+        permissions: {
+          EDIT_ISSUES: { havePermission: true },
+          ADD_COMMENTS: { havePermission: true },
+        },
+      };
+    if (path.endsWith('/editmeta'))
+      return { fields: { description: { operations: ['set'] } } };
+    if (init?.method === 'PUT' || init?.method === 'POST') {
+      writes.push(init);
+      if (writeError) throw writeError;
+      current = readback(JSON.parse(String(init.body)).fields.description);
+      return undefined;
+    }
+    return { fields: { description: structuredClone(current) } };
+  });
+  return {
+    author,
+    writes,
+    current: () => current,
+    replace: (value: any) => {
+      current = structuredClone(value);
+    },
+    readback: (fn: (value: any) => any) => {
+      readback = fn;
+    },
+    failWrite: () => {
+      writeError = new Error('Transport lost after sending');
+    },
+  };
+}
+
+function nativeDescription() {
+  return {
+    type: 'doc',
+    version: 1,
+    nativeFuture: { z: [null, false, 0, '  exact\n'], a: { z: 2, a: 1 } },
+    content: [
+      {
+        type: 'paragraph',
+        attrs: { z: 'native', a: 'paragraph' },
+        content: [
+          {
+            type: 'text',
+            text: 'A',
+            marks: [
+              {
+                type: 'link',
+                attrs: { href: 'https://example.test', title: 'A' },
+              },
+              { type: 'strong' },
+            ],
+          },
+          { type: 'text', text: 'B' },
+          { type: 'mention', attrs: { id: 'fixture', text: '@Fixture' } },
+          { type: 'media', attrs: { id: 'media', type: 'file' } },
+        ],
+      },
+    ],
+  };
+}
+
+for (const rich of [false, true]) {
+  test(`Jira ${rich ? 'rich' : 'plain'} descriptions ignore nested object key order on preflight and readback`, async () => {
+    const document = rich
+      ? nativeDescription()
+      : {
+          type: 'doc',
+          version: 1,
+          content: [
+            { type: 'paragraph', content: [{ type: 'text', text: 'A' }] },
+          ],
+        };
+    const f = jiraDescriptionFixture(document);
+    const options = await f.author.options('ABC-1');
+    f.replace(reorderedKeys(document));
+    assert.equal(
+      (await f.author.options('ABC-1')).description.revision,
+      options.description.revision,
+    );
+    f.readback(reorderedKeys);
+    const result = await f.author.write('ABC-1', {
+      kind: 'description',
+      value: '  Changed\nexact  ',
+      revision: options.description.revision,
+      ...(rich
+        ? {
+            fragments: options.description.fragments!.map((fragment) => ({
+              ...fragment,
+              value: `${fragment.value} edited`,
+            })),
+          }
+        : {}),
+    });
+    assert.equal(result.state, 'saved');
+    assert.equal(f.writes.length, 1);
+    if (rich) {
+      const expected = editDocumentFragments(
+        document,
+        options.description.fragments!.map((fragment) => ({
+          ...fragment,
+          value: `${fragment.value} edited`,
+        })),
+      );
+      assert.deepEqual(f.current(), expected);
+    }
+  });
+}
+
+const nativeDifferences: [string, (document: any) => void][] = [
+  [
+    'text whitespace',
+    (doc) => {
+      doc.content[0].content[0].text += ' ';
+    },
+  ],
+  [
+    'content array order',
+    (doc) => {
+      doc.content[0].content.reverse();
+    },
+  ],
+  [
+    'mark array order',
+    (doc) => {
+      doc.content[0].content[0].marks.reverse();
+    },
+  ],
+  [
+    'attrs',
+    (doc) => {
+      doc.content[0].attrs.z = 'changed';
+    },
+  ],
+  [
+    'unknown native values',
+    (doc) => {
+      doc.nativeFuture.z[1] = true;
+    },
+  ],
+];
+for (const [name, mutate] of nativeDifferences) {
+  test(`Jira description ${name} changes remain conflicts and partial readbacks`, async () => {
+    const document = nativeDescription();
+    const f = jiraDescriptionFixture(document);
+    const options = await f.author.options('ABC-1');
+    const action = {
+      kind: 'description' as const,
+      value: '',
+      revision: options.description.revision,
+      fragments: options.description.fragments!,
+    };
+    const changed = structuredClone(document);
+    mutate(changed);
+    f.replace(changed);
+    assert.equal((await f.author.write('ABC-1', action)).state, 'rejected');
+    assert.equal(f.writes.length, 0);
+    f.replace(document);
+    f.readback((value) => {
+      mutate(value);
+      return reorderedKeys(value);
+    });
+    assert.equal((await f.author.write('ABC-1', action)).state, 'partial');
+    assert.equal(f.writes.length, 1);
+  });
+}
+
+test('Jira uncertain description and comment transports perform one write without replay', async () => {
+  for (const kind of ['description', 'comment'] as const) {
+    const f = jiraDescriptionFixture(null);
+    const options = await f.author.options('ABC-1');
+    f.failWrite();
+    assert.equal(
+      (
+        await f.author.write('ABC-1', {
+          kind,
+          value: 'Uncertain',
+          revision: options.description.revision,
+        })
+      ).state,
+      'unknown',
+    );
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes[0].method, kind === 'comment' ? 'POST' : 'PUT');
+  }
+});
+
+async function refreshDescription(
+  f: ReturnType<typeof richAuthoringFixture>,
+  pane: ReturnType<ReturnType<typeof richAuthoringFixture>['mount']>,
+) {
+  pane.button('Refresh authoring options').onClick();
+  pane.render();
+  await f.flush();
+  pane.render();
+}
+
+const acceptDescription = 'I reviewed the current description; keep my draft';
+
+test('actual RichAuthoring edits added runs, retains removed drafts until review and submits current IDs to Jira after restart', async () => {
+  const jira = jiraDescriptionFixture(nativeDescription());
+  const f = richAuthoringFixture();
+  f.options.description = (await jira.author.options('ABC-1')).description;
+  const pane = f.mount('account', 'ABC-1', 'jira');
+  await pane.open();
+  pane.change('Description text run 1', 'Draft A');
+  pane.change('Description text run 2', 'Removed draft B');
+  pane.change('Comment draft', 'Other comment');
+  pane.change('Sub-issue title', 'Other child');
+  const changed = nativeDescription();
+  changed.content[0].content.splice(1, 1);
+  changed.content[0].content.push({ type: 'text', text: 'New run' } as any);
+  jira.replace(changed);
+  f.options.description = (await jira.author.options('ABC-1')).description;
+  await refreshDescription(f, pane);
+  assert.equal(pane.button('Save description').disabled, true);
+  assert.match(pane.text(), /Removed draft B/);
+  pane.change('Description text run 2', 'Draft new run');
+  assert.equal(pane.input('Description text run 2').value, 'Draft new run');
+  assert.equal(f.requests.length, 0);
+  assert.match(
+    JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!).fragments,
+    /Removed draft B/,
+  );
+  pane.unmount();
+  const reopened = f.mount('account', 'ABC-1', 'jira');
+  await reopened.open();
+  assert.equal(reopened.input('Description text run 1').value, 'Draft A');
+  assert.equal(reopened.input('Description text run 2').value, 'Draft new run');
+  assert.match(reopened.text(), /acceptance removes them/);
+  reopened.button(acceptDescription).onClick();
+  reopened.render();
+  assert.equal(f.requests.length, 0);
+  const draft = JSON.parse(f.storage.get(f.key('account', 'ABC-1'))!);
+  assert.equal(draft.comment, 'Other comment');
+  assert.equal(draft.childSummary, 'Other child');
+  assert.deepEqual(JSON.parse(draft.fragments), [
+    { id: '0.0', value: 'Draft A' },
+    { id: '0.3', value: 'Draft new run' },
+  ]);
+  assert.equal(reopened.button('Save description').disabled, false);
+  reopened.button('Save description').onClick();
+  assert.equal(f.requests.length, 1);
+  const result = await jira.author.write('ABC-1', f.requests[0].action);
+  assert.equal(result.state, 'saved');
+  f.requests[0].settle(result);
+  await f.flush();
+  reopened.render();
+  assert.equal(jira.writes.length, 1);
+  assert.deepEqual(jira.current().content[0].attrs, changed.content[0].attrs);
+  assert.deepEqual(
+    jira.current().content[0].content[1],
+    changed.content[0].content[1],
+  );
+  reopened.unmount();
+});
+
+test('actual RichAuthoring keeps matching drafts after same-ID native changes and old write settlement', async () => {
+  const jira = jiraDescriptionFixture(nativeDescription());
+  const f = richAuthoringFixture();
+  f.options.description = (await jira.author.options('ABC-1')).description;
+  const old = f.mount();
+  await old.open();
+  old.change('Description text run 1', 'Draft A');
+  old.button('Save description').onClick();
+  old.unmount();
+  const changed = nativeDescription();
+  changed.content[0].attrs.z = 'new native attribute';
+  jira.replace(changed);
+  f.options.description = (await jira.author.options('ABC-1')).description;
+  const pane = f.mount();
+  await pane.open();
+  assert.match(pane.text(), /provider description changed/);
+  assert.equal(pane.button('Save description').disabled, true);
+  pane.button(acceptDescription).onClick();
+  pane.render();
+  f.requests[0].settle({ state: 'saved', message: 'Old write saved' });
+  await f.flush();
+  pane.render();
+  assert.equal(pane.input('Description text run 1').value, 'Draft A');
+  assert.equal(
+    JSON.parse(f.storage.get(f.key())!).revision,
+    f.options.description.revision,
+  );
+  pane.unmount();
+  const reopened = f.mount();
+  await reopened.open();
+  assert.equal(reopened.input('Description text run 1').value, 'Draft A');
+  assert.equal(reopened.button('Save description').disabled, false);
+  reopened.unmount();
+});
+
+for (const toRich of [false, true]) {
+  test(`actual RichAuthoring recovers ${toRich ? 'plain to rich' : 'rich to plain'} transitions after explicit review without flattening native content`, async () => {
+    const plain = {
+      type: 'doc',
+      version: 1,
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'text', text: 'Plain current' }],
+        },
+      ],
+    };
+    const jira = jiraDescriptionFixture(toRich ? plain : nativeDescription());
+    const f = richAuthoringFixture();
+    f.options.description = (await jira.author.options('ABC-1')).description;
+    const pane = f.mount();
+    await pane.open();
+    pane.change(
+      toRich ? 'Draft description' : 'Description text run 1',
+      'Incompatible saved text',
+    );
+    const before = JSON.parse(f.storage.get(f.key())!);
+    jira.replace(toRich ? nativeDescription() : plain);
+    f.options.description = (await jira.author.options('ABC-1')).description;
+    await refreshDescription(f, pane);
+    assert.deepEqual(JSON.parse(f.storage.get(f.key())!), before);
+    assert.match(pane.text(), /Incompatible saved text/);
+    assert.match(pane.text(), /Copy them before accepting/);
+    assert.equal(pane.button('Save description').disabled, true);
+    pane.change(
+      toRich ? 'Description text run 1' : 'Draft description',
+      'Reviewed edit',
+    );
+    assert.equal(f.requests.length, 0);
+    pane.button(acceptDescription).onClick();
+    pane.render();
+    assert.equal(pane.button('Save description').disabled, false);
+    const draft = JSON.parse(f.storage.get(f.key())!);
+    assert.equal(toRich ? draft.description : draft.fragments, undefined);
+    pane.button('Save description').onClick();
+    const result = await jira.author.write('ABC-1', f.requests[0].action);
+    assert.equal(result.state, 'saved');
+    assert.equal(jira.writes.length, 1);
+    if (toRich)
+      assert.deepEqual(
+        jira.current().nativeFuture,
+        nativeDescription().nativeFuture,
+      );
+    f.requests[0].settle(result);
+    await f.flush();
+    pane.unmount();
+  });
+}
+
+for (const keepMatching of [false, true]) {
+  test(`actual RichAuthoring retains a bounded full draft and enables added runs after review (matching=${keepMatching})`, async () => {
+    const f = richAuthoringFixture();
+    f.options.description = {
+      editable: true,
+      value: 'Old 500 runs',
+      revision: '"old"',
+      fragments: Array.from({ length: 500 }, (_, i) => ({
+        id: `0.${i}`,
+        value: `Old ${i}`,
+      })),
+    };
+    const pane = f.mount();
+    await pane.open();
+    pane.change('Description text run 1', 'Saved first run');
+    f.options.description = {
+      editable: true,
+      value: 'Current runs',
+      revision: '"current"',
+      fragments: [
+        ...(keepMatching ? [{ id: '0.0', value: 'Current first' }] : []),
+        { id: '1.0', value: 'Added run' },
+      ],
+    };
+    await refreshDescription(f, pane);
+    const newLabel = `Description text run ${keepMatching ? 2 : 1}`;
+    assert.equal(pane.input(newLabel).disabled, true);
+    assert.match(
+      pane.text(),
+      /Review the current description before editing added runs/,
+    );
+    const before = f.storage.get(f.key());
+    // The handler also refuses an over-limit edit if called outside DOM disabling.
+    pane.change(newLabel, 'Attempted added edit');
+    assert.equal(f.storage.get(f.key()), before);
+    assert.equal(pane.button(acceptDescription).disabled, false);
+    if (keepMatching) {
+      assert.equal(pane.input('Description text run 1').disabled, false);
+      pane.change('Description text run 1', 'Matching edit');
+      assert.equal(
+        JSON.parse(JSON.parse(f.storage.get(f.key())!).fragments).length,
+        500,
+      );
+    }
+    assert.equal(f.requests.length, 0);
+    pane.unmount();
+    const reopened = f.mount();
+    await reopened.open();
+    assert.equal(reopened.button(acceptDescription).disabled, false);
+    assert.match(reopened.text(), /Old 499/);
+    reopened.button(acceptDescription).onClick();
+    reopened.render();
+    assert.equal(reopened.input(newLabel).disabled, false);
+    reopened.change(newLabel, 'Reviewed added edit');
+    const draft = JSON.parse(f.storage.get(f.key())!);
+    assert.deepEqual(JSON.parse(draft.fragments), [
+      ...(keepMatching ? [{ id: '0.0', value: 'Matching edit' }] : []),
+      { id: '1.0', value: 'Reviewed added edit' },
+    ]);
+    assert.equal(reopened.button('Save description').disabled, false);
+    reopened.button('Save description').onClick();
+    assert.equal(f.requests.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.requests[0].action)), {
+      kind: 'description',
+      value: '',
+      revision: '"current"',
+      fragments: JSON.parse(draft.fragments),
+    });
+    f.requests[0].settle({ state: 'rejected', message: 'Controlled end' });
+    await f.flush();
+    reopened.unmount();
+  });
+}
