@@ -301,7 +301,7 @@ async function loadedProfile(io) {
   return found[0];
 }
 async function previousWriterAbsent(io, receipt) {
-  await previousReaderAbsent(io, receipt);
+  const reader = await previousReaderAbsent(io, receipt);
 
   const writer = receipt.writer;
   if (
@@ -332,8 +332,10 @@ async function previousWriterAbsent(io, receipt) {
     )
       fail('Uncertain in-flight policy mutation; retain resources');
   }
+  let observedBirth;
   try {
     const current = processIdentity(await io.read(`/proc/${writer.pid}/stat`));
+    observedBirth = current.birth;
     if (current.birth === writer.birth)
       fail('Prior managed writer remains live; retain resources');
     if (!/^\d+$/.test(current.birth)) fail('Unknown managed writer state');
@@ -341,17 +343,30 @@ async function previousWriterAbsent(io, receipt) {
     try {
       await io.lstat(`/proc/${writer.pid}`);
     } catch (gone) {
-      if (gone?.code === 'ENOENT') return;
+      if (gone?.code === 'ENOENT')
+        return {
+          reader,
+          writer: {
+            ...writer,
+            observation: 'proc-absent',
+            observedBirth: null,
+          },
+        };
       throw gone;
     }
     throw error;
   }
+  return {
+    reader,
+    writer: { ...writer, observation: 'birth-different', observedBirth },
+  };
 }
 async function previousReaderAbsent(io, receipt) {
   if (!Object.hasOwn(receipt, 'reader') || !validReaderState(receipt.reader))
     fail('Unknown mounted reader ownership; retain resources');
   const r = receipt.reader;
-  if (r === null) return;
+  if (r === null) return [];
+  const observations = [];
   if (!validReaderState(r, true))
     fail('Unsettled mounted reader; retain resources');
   for (const expected of [r.writer, r.child]) {
@@ -361,16 +376,29 @@ async function previousReaderAbsent(io, receipt) {
       );
       if (current.birth === expected.birth)
         fail('Prior mounted reader or writer remains live; retain resources');
+      observations.push({
+        ...expected,
+        observation: 'birth-different',
+        observedBirth: current.birth,
+      });
     } catch (error) {
       try {
         await io.lstat(`/proc/${expected.pid}`);
       } catch (gone) {
-        if (gone?.code === 'ENOENT') continue;
+        if (gone?.code === 'ENOENT') {
+          observations.push({
+            ...expected,
+            observation: 'proc-absent',
+            observedBirth: null,
+          });
+          continue;
+        }
         throw gone;
       }
       throw error;
     }
   }
+  return observations;
 }
 async function mutatePolicy(io, receipt, save, operation) {
   // Persist uncertainty BEFORE any child can read or apply the policy. Failure
@@ -559,6 +587,7 @@ export async function noManagedOccupants(io) {
       throw error;
     }
   }
+  return { processes: pids.length, threads };
 }
 function validateRequest(request, host) {
   if (
@@ -746,8 +775,8 @@ export async function managedOperation(request, io, context) {
         fail('Profile without owned receipt retained');
       return { empty: true };
     }
-    const { receipt } = await receiptState(io, request);
-    await previousWriterAbsent(io, receipt);
+    const { receipt, receiptSha256 } = await receiptState(io, request);
+    const prior = await previousWriterAbsent(io, receipt);
     const loaded = await loadedProfile(io);
     if (loaded && (!receipt.loaded || !same(loaded, receipt.loaded)))
       fail('Unknown loaded policy ownership; retain resources');
@@ -755,8 +784,8 @@ export async function managedOperation(request, io, context) {
     await receiptState(io, request);
     if (!same(await loadedProfile(io), loaded))
       fail('Policy changed before absence check');
-    await noManagedOccupants(io);
-    await previousReaderAbsent(io, receipt);
+    const inventory = await noManagedOccupants(io);
+    prior.reader = await previousReaderAbsent(io, receipt);
     await parentIdentity(io, request);
     receipt.writer = await io.writer();
     const save = () => io.receipt(JSON.stringify(receipt), receipt.self);
@@ -767,10 +796,31 @@ export async function managedOperation(request, io, context) {
     }
     for (const item of [...receipt.resources].reverse())
       await io.remove(item.path, item.kind);
-    if (!same(receipt.global, await globalState(io)))
+    const globalAfter = await globalState(io);
+    if (!same(receipt.global, globalAfter))
       fail('Global policy changed during cleanup');
     await io.remove(managedPaths.receipt, 'file');
-    return { removed: true };
+    return {
+      removed: true,
+      audit: {
+        schema: 1,
+        correlationSha256: managedCorrelation(request),
+        receiptSha256,
+        prior,
+        inventory,
+        globalAfter: globalFiles.map((path) => globalAfter[path].trim()),
+        parserRemoval: loaded ? receipt.mutation : null,
+        resourcesRemoved: receipt.resources.map((item) => item.path),
+        sourceGated: {
+          resourceIdentityAndDirectoryInventory: true,
+          loadedPolicyIdentity: true,
+          parentIdentity: true,
+          globalStateUnchanged: true,
+          loadedPolicyAbsent: true,
+          receiptRemoved: true,
+        },
+      },
+    };
   }
   const installed = await validateInstallation(io, request);
   await previousWriterAbsent(io, installed.receipt);
@@ -1060,6 +1110,7 @@ export async function withManagedAppImage(
     context,
     invoke,
     parent: injectedParent,
+    recordCleanup = () => {},
     signals = process,
     secondary = (error) =>
       console.error('Managed cleanup also failed:', String(error)),
@@ -1183,7 +1234,9 @@ export async function withManagedAppImage(
       }
     } else {
       try {
-        await call('cleanup');
+        const cleanup = await call('cleanup');
+        // The callback owns its write until drained; failure blocks acceptance.
+        await recordCleanup(cleanup, { ...request, operation: 'cleanup' });
       } catch (error) {
         if (!failed) throw error;
         try {
@@ -1389,6 +1442,133 @@ export function waitManagedChild(
     }
   });
 }
+export const managedCorrelation = (request) =>
+  digest(JSON.stringify([request.token, request.run, request.attempt]));
+
+// Only existing successful cleanup observations cross the helper boundary.
+// Predicate summaries remain source-gated; they are not raw OS transcripts.
+export function validManagedCleanup(a, request) {
+  const keys = (v, names) =>
+    v !== null &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    Object.keys(v).length === names.length &&
+    names.every((k) => Object.hasOwn(v, k));
+  const pid = (v) => Number.isSafeInteger(v) && v > 0;
+  const birth = (v) => typeof v === 'string' && /^\d{1,32}$/.test(v);
+  const writer = (v) =>
+    keys(v, ['pid', 'birth', 'uid']) &&
+    pid(v.pid) &&
+    birth(v.birth) &&
+    v.uid === 0;
+  const child = (v, parent, uid) =>
+    keys(v, ['pid', 'birth', 'uid', 'parent']) &&
+    pid(v.pid) &&
+    birth(v.birth) &&
+    v.uid === uid &&
+    v.parent === parent &&
+    v.pid !== parent;
+  const observation = (v, isChild) => {
+    if (
+      !keys(
+        v,
+        isChild
+          ? ['pid', 'birth', 'uid', 'parent', 'observation', 'observedBirth']
+          : ['pid', 'birth', 'uid', 'observation', 'observedBirth'],
+      )
+    )
+      return false;
+    const { observation, observedBirth, ...identity } = v;
+    return (
+      ((observation === 'proc-absent' && observedBirth === null) ||
+        (observation === 'birth-different' &&
+          birth(observedBirth) &&
+          observedBirth !== identity.birth)) &&
+      (isChild
+        ? child(identity, a.prior.reader[0].pid, request.uid)
+        : writer(identity))
+    );
+  };
+  if (
+    !keys(a, [
+      'schema',
+      'correlationSha256',
+      'receiptSha256',
+      'prior',
+      'inventory',
+      'globalAfter',
+      'parserRemoval',
+      'resourcesRemoved',
+      'sourceGated',
+    ]) ||
+    a.schema !== 1 ||
+    a.correlationSha256 !== managedCorrelation(request) ||
+    typeof a.receiptSha256 !== 'string' ||
+    !hex(a.receiptSha256) ||
+    !keys(a.prior, ['reader', 'writer']) ||
+    !Array.isArray(a.prior.reader) ||
+    ![0, 2].includes(a.prior.reader.length) ||
+    !observation(a.prior.writer, false) ||
+    !a.prior.reader.every((v, i) => observation(v, i === 1)) ||
+    !same(a.globalAfter, ['Y', '1', '1']) ||
+    !keys(a.inventory, ['processes', 'threads']) ||
+    !Number.isSafeInteger(a.inventory.processes) ||
+    a.inventory.processes < 0 ||
+    a.inventory.processes > 4096 ||
+    !Number.isSafeInteger(a.inventory.threads) ||
+    a.inventory.threads < 0 ||
+    a.inventory.threads > 8192 ||
+    !Array.isArray(a.resourcesRemoved) ||
+    a.resourcesRemoved.length > 3 ||
+    new Set(a.resourcesRemoved).size !== a.resourcesRemoved.length ||
+    !a.resourcesRemoved.every((v) =>
+      [
+        managedPaths.directory,
+        managedPaths.original,
+        managedPaths.policy,
+      ].includes(v),
+    ) ||
+    !keys(a.sourceGated, [
+      'resourceIdentityAndDirectoryInventory',
+      'loadedPolicyIdentity',
+      'parentIdentity',
+      'globalStateUnchanged',
+      'loadedPolicyAbsent',
+      'receiptRemoved',
+    ]) ||
+    !Object.values(a.sourceGated).every((v) => v === true)
+  )
+    return false;
+  const m = a.parserRemoval;
+  if (m === null) return true;
+  const p = m?.proof;
+  return (
+    keys(m, ['operation', 'state', 'writer', 'child', 'proof']) &&
+    m.operation === 'remove' &&
+    m.state === 'closed' &&
+    writer(m.writer) &&
+    child(m.child, m.writer.pid, 0) &&
+    keys(p, [
+      'spawned',
+      'closed',
+      'timedOut',
+      'pid',
+      'birth',
+      'identity',
+      'code',
+      'signal',
+    ]) &&
+    p.spawned === true &&
+    p.closed === true &&
+    p.timedOut === false &&
+    p.pid === m.child.pid &&
+    p.birth === m.child.birth &&
+    same(p.identity, m.child) &&
+    p.code === 0 &&
+    p.signal === null
+  );
+}
+
 export function validManagedResponse(response, request, onRefusal = () => {}) {
   const refuse = (reason) => {
     onRefusal(reason);
@@ -1454,7 +1634,9 @@ export function validManagedResponse(response, request, onRefusal = () => {}) {
   const value = response.value;
   if (request.operation === 'cleanup')
     return (
-      (keys(value, ['removed']) && value.removed === true) ||
+      (keys(value, ['removed', 'audit']) &&
+        value.removed === true &&
+        validManagedCleanup(value.audit, request)) ||
       (keys(value, ['empty']) && value.empty === true) ||
       refuse('cleanup-envelope')
     );

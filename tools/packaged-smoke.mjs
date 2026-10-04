@@ -1,3 +1,4 @@
+import { managedEvidenceLog } from './managed-success-evidence.mjs';
 import {
   withManagedAppImage,
   recordManagedProtocol,
@@ -355,8 +356,9 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
             managedInstallationSha256(managed.installed)
           )
             throw new Error('Managed receipt changed between launches');
+          let observation;
           if (!restart) {
-            const observation = JSON.parse(
+            observation = JSON.parse(
               await boundedRead(
                 join(
                   workspace,
@@ -380,7 +382,13 @@ async function smoke(executablePath, directory, artifact, identity, managed) {
               profile: installed.launch.profile,
               ...installed.launch,
             };
-          managedChild(app); // Refuse exit/error or object changes during validation.
+          if (managedChild(app) !== actualChild)
+            throw new Error('Managed launch object changed during validation');
+          managed.recordLaunch(
+            installed,
+            { ...managed.request, operation: 'launch', launch: bound },
+            observation,
+          );
         }
         Object.assign(launches.at(-1), actual);
       }
@@ -543,6 +551,7 @@ for (const format of platform.formats) {
   );
   let managedAttempted = false;
   let managedFinished = false;
+  let managedEvidence;
   try {
     await access(artifact);
     const executable = await extract(artifact, format, directory);
@@ -631,6 +640,16 @@ for (const format of platform.formats) {
         process.env.CANOPY_MANAGED_APPIMAGE === '1'
       ) {
         managedAttempted = true;
+        const evidenceDirectory = join(
+          workspace,
+          '.cache',
+          'smoke-failure',
+          name,
+        );
+        await mkdir(evidenceDirectory, { recursive: true });
+        const evidence = managedEvidenceLog(
+          join(evidenceDirectory, 'managed-success.json'),
+        );
         launches = await withManagedAppImage(
           {
             source: artifact,
@@ -646,9 +665,11 @@ for (const format of platform.formats) {
               directory,
               name,
               { ...identity, appImage: installedPath },
-              managed,
+              { ...managed, recordLaunch: evidence.launch },
             ),
+          { recordCleanup: evidence.cleanup },
         );
+        managedEvidence = evidence.result();
         managedFinished = true;
         launchExecutable = '/var/lib/canopy-appimage-ci/Canopy.AppImage';
       } else
@@ -701,6 +722,7 @@ for (const format of platform.formats) {
       artifact: name,
       launchExecutable,
       launches,
+      ...(managedEvidence ? { managedEvidence } : {}),
       sha256: artifactSha256,
     });
     console.log(`Packaged first-run and restart passed: ${name}`);

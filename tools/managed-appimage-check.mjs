@@ -1,3 +1,7 @@
+import {
+  managedEvidenceLog,
+  managedLaunchEvidence,
+} from './managed-success-evidence.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
@@ -1641,6 +1645,7 @@ export async function checkManagedAppImage() {
   checkManagedResponseSchema(installed, { ...base, operation: 'check' });
   checkManagedResponseSchema(proof, { ...base, operation: 'launch', launch });
   await checkManagedSuccessTransport(source, proof, launch);
+  await checkManagedSuccessEvidence(proof, launch);
   const refused = spawnSync(
     process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
     [
@@ -2570,6 +2575,7 @@ async function checkManagedTransport(source) {
       null,
       {},
       { removed: 'true' },
+      { removed: true },
       { empty: 1 },
       { removed: true, empty: true },
       prepared,
@@ -2582,7 +2588,14 @@ async function checkManagedTransport(source) {
       );
     assert(
       validManagedResponse(
-        { ok: true, value: { removed: true } },
+        {
+          ok: true,
+          value: await managedOperation(
+            { ...base, operation: 'cleanup' },
+            kernel.io,
+            ctx,
+          ),
+        },
         { ...base, operation: 'cleanup' },
       ),
     );
@@ -3015,5 +3028,315 @@ async function checkManagedSuccessTransport(source, launchProof, launchInput) {
         child.kill('SIGKILL');
         await ended;
       }
+  }
+}
+
+async function checkManagedSuccessEvidence(proof, launch) {
+  const request = { ...base, operation: 'launch', launch };
+  const observation = {
+    completed: true,
+    status: 'observed',
+    finalizedAt: Date.now(),
+    artifact: paths.original,
+    parent: base.parent.pid,
+    parentBirth: base.parent.birth,
+    managedReceipt: base.token,
+    original: proof.receipt.original,
+    authority: {
+      kind: 'retained-spawn',
+      pid: launch.rootPid,
+      birth: launch.rootBirth,
+      originalSha256: base.sha256,
+      managed: true,
+    },
+    samples: [proof.launch.sample],
+    kernelAudit: { output: 'private audit text excluded' },
+    arbitraryField: 'private observation text excluded',
+  };
+  const directory = await mkdtemp(join(tmpdir(), 'canopy-success-evidence-'));
+  const path = join(directory, 'managed-success.json');
+  const cleanupRequest = { ...base, operation: 'cleanup' };
+  const kernel = async () => {
+    const m = model();
+    await managedOperation({ ...base, operation: 'prepare' }, m.io, ctx);
+    // Reuse actual production-qualified launch output, not a handcrafted receipt.
+    await m.io.receipt(JSON.stringify(proof.receipt), proof.receipt.self);
+    return m;
+  };
+  try {
+    const log = managedEvidenceLog(path);
+    const first = log.launch(proof, request, observation);
+    assert.equal(first.original.sha256, base.sha256);
+    assert.equal(
+      first.original.metadata.ino,
+      proof.receipt.original.metadata.ino,
+    );
+    assert.deepEqual(
+      first.reader.namespaces,
+      proof.receipt.reader.scope.namespaces,
+    );
+    assert.equal(first.reader.node.programSha256, readerSource.programSha256);
+    assert.equal(first.observer.authority.kind, 'retained-spawn');
+    assert.equal(first.sourceGated.readerChildAssociation, true);
+    assert(first.unknown.includes('rawCredentialTranscript'));
+    assert.throws(() => log.result()); // No completed cleanup or restart.
+    // result refusal poisons this instance; use a fresh complete journal.
+    const complete = managedEvidenceLog(path);
+    complete.launch(proof, request, observation);
+    complete.launch(proof, request);
+    const before = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(before.launches.length, 2);
+    assert.equal(before.cleanup, null);
+    const m = await kernel();
+    const cleaned = await managedOperation(cleanupRequest, m.io, ctx);
+    assert.equal(cleaned.audit.inventory.processes, 1);
+    assert.equal(cleaned.audit.inventory.threads, 1);
+    assert.deepEqual(
+      cleaned.audit.prior.reader.map((v) => v.observation),
+      ['proc-absent', 'proc-absent'],
+    );
+    assert.equal(cleaned.audit.parserRemoval.proof.code, 0);
+    for (const p of Object.values(paths)) assert(!m.files.has(p));
+    complete.cleanup(cleaned, cleanupRequest);
+    const final = complete.result();
+    assert.deepEqual(final, JSON.parse(await readFile(path, 'utf8')));
+    const serialized = JSON.stringify(final);
+    assert(Buffer.byteLength(serialized) <= 65536);
+    for (const secret of [
+      base.token,
+      proof.receipt.reader.nonce,
+      base.source,
+      proof.receipt.profile.content,
+      proof.receipt.loaded.path,
+      proof.receipt.reader.node.path,
+      readerSource.path,
+      observation.kernelAudit.output,
+      observation.arbitraryField,
+    ])
+      assert(!serialized.includes(secret), secret);
+    assert.throws(() => complete.cleanup(cleaned, cleanupRequest));
+    assert.throws(() => complete.result());
+    const reused = await kernel();
+    const reuseRead = reused.io.read;
+    reused.io.read = async (p) =>
+      ['/proc/90/stat', '/proc/92/stat'].includes(p)
+        ? text(1, '999')
+        : reuseRead(p);
+    const reusedCleanup = await managedOperation(
+      cleanupRequest,
+      reused.io,
+      ctx,
+    );
+    assert.equal(
+      reusedCleanup.audit.prior.reader[1].observation,
+      'birth-different',
+    );
+    assert.equal(reusedCleanup.audit.prior.reader[1].observedBirth, '999');
+    assert(
+      validManagedResponse({ ok: true, value: reusedCleanup }, cleanupRequest),
+    );
+    for (const omitted of [0, 1]) {
+      const dropped = managedEvidenceLog(path);
+      if (omitted === 1) dropped.launch(proof, request, observation);
+      dropped.cleanup(cleaned, cleanupRequest);
+      assert.throws(() => dropped.result());
+    }
+    const cleanupWriteFailure = managedEvidenceLog(path, () => {
+      throw new Error('cleanup write failed');
+    });
+    assert.throws(
+      () => cleanupWriteFailure.cleanup(cleaned, cleanupRequest),
+      /cleanup write failed/,
+    );
+    assert.throws(() => cleanupWriteFailure.result());
+    for (const change of [
+      (v) => {
+        delete v.audit;
+      },
+      (v) => {
+        v.audit.sourceGated.globalStateUnchanged = false;
+      },
+      (v) => {
+        v.audit.prior.reader[1].observation = 'timeout';
+      },
+      (v) => {
+        v.audit.prior.reader[1].observedBirth = v.audit.prior.reader[1].birth;
+        v.audit.prior.reader[1].observation = 'birth-different';
+      },
+      (v) => {
+        v.audit.parserRemoval.proof.closed = false;
+      },
+      (v) => {
+        v.audit.parserRemoval.proof.code = 1;
+      },
+      (v) => {
+        v.audit.token = base.token;
+      },
+      (v) => {
+        v.audit.inventory.processes = 4097;
+      },
+      (v) => {
+        v.audit.globalAfter[1] = '0';
+      },
+      (v) => {
+        v.audit.correlationSha256 = 'f'.repeat(64);
+      },
+    ]) {
+      const bad = structuredClone(cleaned);
+      change(bad);
+      assert(!validManagedResponse({ ok: true, value: bad }, cleanupRequest));
+      let writes = 0;
+      const refused = managedEvidenceLog(path, () => {
+        writes++;
+      });
+      assert.throws(() => refused.cleanup(bad, cleanupRequest));
+      assert.equal(writes, 0);
+      assert.throws(() => refused.result());
+    }
+    for (const field of ['original', 'reader', 'mutation', 'loaded']) {
+      const bad = structuredClone(proof);
+      delete bad.receipt[field];
+      let writes = 0;
+      const refused = managedEvidenceLog(path, () => {
+        writes++;
+      });
+      assert.throws(() => refused.launch(bad, request, observation));
+      assert.equal(writes, 0);
+      assert.throws(() => refused.result());
+    }
+    for (const change of [
+      (v) => {
+        v.audit.receiptSha256 = 'e'.repeat(64);
+      },
+      (v) => {
+        v.audit.prior.reader[1].birth = '999';
+      },
+      (v) => {
+        v.audit.prior.writer.birth = '999';
+      },
+    ]) {
+      const foreign = structuredClone(cleaned);
+      change(foreign);
+      const log = managedEvidenceLog(path);
+      log.launch(proof, request, observation);
+      log.launch(proof, request);
+      log.cleanup(foreign, cleanupRequest);
+      assert.throws(() => log.result());
+    }
+    const oversized = structuredClone(proof);
+    oversized.receipt.reader.scope.namespaces.user =
+      'user:[' + '1'.repeat(65536) + ']';
+    oversized.receiptSha256 = hash(JSON.stringify(oversized.receipt));
+    let oversizedWrites = 0;
+    const bounded = managedEvidenceLog(path, () => {
+      oversizedWrites++;
+    });
+    assert.throws(
+      () => bounded.launch(oversized, request, observation),
+      /evidence incomplete/,
+    );
+    assert.equal(oversizedWrites, 0);
+    assert.throws(() => bounded.result());
+    const refusedReport = { ...observation, completed: false };
+    assert.throws(() => managedLaunchEvidence(proof, request, refusedReport));
+    let writes = 0;
+    const failed = managedEvidenceLog(path, () => {
+      writes++;
+      throw new Error('write failed');
+    });
+    assert.throws(
+      () => failed.launch(proof, request, observation),
+      /write failed/,
+    );
+    assert.throws(() => failed.launch(proof, request, observation));
+    assert.equal(writes, 1);
+    assert.throws(() => failed.result());
+    // Partial deletion, removal refusal, unreadable/global state and live reader
+    // produce no cleanup receipt even when a previous launch was qualified.
+    for (const mode of [
+      'partial-remove',
+      'parser-refusal',
+      'global-change',
+      'reader-live',
+    ]) {
+      const m = await kernel();
+      const remove = m.io.remove,
+        read = m.io.read;
+      let deleted = false;
+      if (mode === 'partial-remove')
+        m.io.remove = async (p, kind) => {
+          if (deleted) throw new Error('partial cleanup');
+          await remove(p, kind);
+          deleted = true;
+        };
+      if (mode === 'parser-refusal')
+        m.io.parser = async () => {
+          throw new Error('parser refusal');
+        };
+      if (mode === 'global-change')
+        m.io.remove = async (p, kind) => {
+          await remove(p, kind);
+          m.io.read = async (p) =>
+            p.startsWith('/proc/sys/') ? '0\n' : read(p);
+        };
+      if (mode === 'reader-live') {
+        m.io.read = async (p) =>
+          p === '/proc/92/stat' ? text(90, '113') : read(p);
+        const lstat = m.io.lstat;
+        m.io.lstat = async (p) => (p === '/proc/92' ? { uid: 1001 } : lstat(p));
+      }
+      let delivered = false;
+      await assert.rejects(
+        (async () => {
+          await managedOperation(cleanupRequest, m.io, ctx);
+          delivered = true;
+        })(),
+      );
+      assert.equal(delivered, false);
+      assert(m.files.has(paths.receipt));
+    }
+    let releaseWrite,
+      delivered = 0;
+    const heldWrite = new Promise((resolve) => {
+      releaseWrite = resolve;
+    });
+    const pending = withManagedAppImage(base, async () => 'passed', {
+      context: ctx,
+      parent: base.parent,
+      signals: new EventEmitter(),
+      invoke: async (r) =>
+        r.operation === 'cleanup' ? cleaned : { fixture: true },
+      recordCleanup: async () => {
+        delivered++;
+        await heldWrite;
+      },
+    });
+    let returned = false;
+    pending.then(() => {
+      returned = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(delivered, 1);
+    assert.equal(returned, false);
+    releaseWrite();
+    assert.equal(await pending, 'passed');
+    assert.equal(delivered, 1);
+    await assert.rejects(
+      withManagedAppImage(base, async () => 'passed', {
+        context: ctx,
+        parent: base.parent,
+        signals: new EventEmitter(),
+        invoke: async () => cleaned,
+        recordCleanup: () => {
+          throw new Error('cleanup log write failed');
+        },
+      }),
+      /cleanup log write failed/,
+    );
+    console.log(
+      'Bounded success evidence, privacy, refusal, partial cleanup, write failure and owned once drain PASS (modeled Linux)',
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 }
