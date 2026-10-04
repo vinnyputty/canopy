@@ -83,9 +83,14 @@ export async function auditAccessibility(app, page, evidence) {
       .getByRole('combobox', { name: 'Search workspace' }),
   ).toBeFocused();
   await page.keyboard.press('Escape');
+  await expect(
+    page.getByRole('dialog', { name: 'Command palette' }),
+  ).toHaveCount(0);
+  await afterRestoration();
   await expect(commands).toBeFocused();
   await open.focus();
   await page.keyboard.press('Enter');
+  await expect(picker.getByRole('combobox')).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(open).toBeFocused();
 
@@ -126,7 +131,7 @@ export async function auditAccessibility(app, page, evidence) {
   await commands.click();
   await page
     .getByRole('dialog', { name: 'Command palette' })
-    .getByRole('button', { name: /Find in tree/ })
+    .getByRole('option', { name: /Find in tree/ })
     .click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await afterRestoration();
@@ -543,7 +548,7 @@ export async function auditAccessibility(app, page, evidence) {
   await page.getByRole('button', { name: 'More commands' }).click();
   await page
     .getByRole('dialog', { name: 'Command palette' })
-    .getByRole('button', { name: /Refresh current tree/ })
+    .getByRole('option', { name: /Refresh current tree/ })
     .click();
   expect(await fixture('started', 'a11y-overlap-manual')).toBe(false);
   await fixture('release', 'a11y-overlap-poll');
