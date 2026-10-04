@@ -46,7 +46,7 @@ before(async () => {
           b.onLoad({ filter: /.*/, namespace: 'inert' }, (x) => ({
             contents:
               x.path === 'electron'
-                ? 'export const app=globalThis.handoffRecreationBoundary.app; export const clipboard=globalThis.handoffRecreationBoundary.clipboard;'
+                ? 'export const app=globalThis.handoffRecreationBoundary.app; export const clipboard=globalThis.handoffRecreationBoundary.clipboard; export const shell=globalThis.handoffRecreationBoundary.shell;'
                 : 'export const launch=globalThis.handoffRecreationBoundary.launch;',
             loader: 'js',
           }));
@@ -485,10 +485,7 @@ test('native entry and desktop launcher stop before staging, launch, profile or 
     );
     assert.equal(result.error, undefined);
     assert.notEqual(result.status, 0);
-    assert.match(
-      result.stderr,
-      /integrate and review the shared issue 85 ownership helper/,
-    );
+    assert.match(result.stderr, /Pass one freshly reviewed exact head/);
     assert.deepEqual(await readdir(cwd), []);
   }
 });

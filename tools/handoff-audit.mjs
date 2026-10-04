@@ -1,9 +1,11 @@
-// No process helper is forked here. Native launch is blocked until the shared
-// ownership transport is integrated and qualified for this target/platform.
-export function requireHandoffLifecycle() {
-  throw new Error(
-    'handoff_check is blocked: integrate and review the shared issue 85 ownership helper; Windows qualification remains pending. No native launch or clipboard acceptance is authorized by this target.',
-  );
+// This label is a required operator input, not proof of review/native approval.
+// Both entrypoints validate it before staging, profiles, imports or downloads.
+export function requireHandoffLifecycle(args) {
+  if (args?.length !== 1 || !/^[a-f0-9]{40}$/.test(args[0]))
+    throw new Error(
+      'Pass one freshly reviewed exact head. Run only with the exclusive native token.',
+    );
+  return args[0];
 }
 
 // Testable sample workflow. The future shared adapter must retain each owned

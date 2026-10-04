@@ -105,3 +105,29 @@ export function installSampleCopySink(clipboard: object) {
     restore,
   };
 }
+
+/** Permanent process-local refusals in the disposable manual fixture. */
+export function denySampleExternalAccess(shell: object, target: object) {
+  const methods = [
+    { object: shell, key: 'openExternal' },
+    { object: target, key: 'fetch' },
+  ];
+  const descriptors = methods.map(({ object, key }) =>
+    Object.getOwnPropertyDescriptor(object, key),
+  );
+  if (
+    descriptors.some(
+      (d) =>
+        !d?.configurable || d.get || d.set || typeof d.value !== 'function',
+    )
+  )
+    throw new Error('Sample external access cannot be isolated.');
+  for (const [index, { object, key }] of methods.entries())
+    Object.defineProperty(object, key, {
+      value: () =>
+        Promise.reject(new Error('External access denied in sample audit.')),
+      writable: false,
+      configurable: false,
+      enumerable: descriptors[index]!.enumerable,
+    });
+}

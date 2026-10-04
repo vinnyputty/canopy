@@ -11,12 +11,19 @@ const native = () => {
   originalCalls++;
 };
 const clipboard = { writeText: native, readText: native };
+const shell = { openExternal: native };
+Object.defineProperty(globalThis, 'fetch', {
+  value: native,
+  configurable: true,
+  writable: true,
+});
 const original = Object.getOwnPropertyDescriptors(clipboard);
 const beforeExit = new Set(process.listeners('exit'));
 Object.assign(globalThis, {
   handoffRecreationBoundary: {
     app: mockApp,
     clipboard,
+    shell,
     launch(fn: typeof callback) {
       callback = fn;
     },
@@ -36,6 +43,22 @@ const state = () => (globalThis as any).handoffAuditCopy;
 (async () => {
   const first = await callback();
   assert.equal(first.connection.provider, 'jira');
+  await assert.rejects(
+    (shell.openExternal as any)('https://example.invalid'),
+    /External access denied/,
+  );
+  await assert.rejects(
+    fetch('https://example.invalid'),
+    /External access denied/,
+  );
+  assert.equal(
+    Object.getOwnPropertyDescriptor(shell, 'openExternal')!.configurable,
+    false,
+  );
+  assert.equal(
+    Object.getOwnPropertyDescriptor(globalThis, 'fetch')!.configurable,
+    false,
+  );
   const sink = state();
   const installed = Object.getOwnPropertyDescriptors(clipboard);
   assert.throws(() => clipboard.readText(), /denied/);

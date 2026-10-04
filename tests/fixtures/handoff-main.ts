@@ -1,5 +1,5 @@
 // Manual desktop audit only. The lock loser never enters this profile guard.
-import { app, clipboard } from 'electron';
+import { app, clipboard, shell } from 'electron';
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,9 +9,11 @@ import { createDemoFixture } from '../../src/main/demo';
 import {
   auditArguments,
   installSampleCopySink,
+  denySampleExternalAccess,
 } from './handoff-audit-boundary';
 
 let copySink: ReturnType<typeof installSampleCopySink> | undefined;
+let externalIsolated = false;
 const restoreCopy = () => {
   app.removeListener('quit', restoreCopy);
   process.removeListener('exit', restoreCopy);
@@ -51,6 +53,10 @@ launch(
     if (!copySink) {
       copySink = installSampleCopySink(clipboard);
       Object.assign(globalThis, { handoffAuditCopy: copySink });
+    }
+    if (!externalIsolated) {
+      denySampleExternalAccess(shell, globalThis);
+      externalIsolated = true;
     }
     // resetDemo reuses this callback while its window and copy IPC remain live.
     // Keep isolation installed on every failure; initial startup quits through
