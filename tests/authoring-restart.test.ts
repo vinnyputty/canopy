@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 let authoringAuditLifecycle: any;
 let restartBundle: string;
@@ -19,7 +20,7 @@ before(async () => {
         '-e',
         "process.stdout.write(require(process.argv[1]).buildSync({entryPoints:[process.argv[2]],bundle:true,platform:'node',format:'cjs',external:['@playwright/test'],write:false}).outputFiles[0].text)",
         createRequire(import.meta.url).resolve('esbuild'),
-        new URL('../tools/smoke-authoring.mjs', import.meta.url).pathname,
+        fileURLToPath(new URL('../tools/smoke-authoring.mjs', import.meta.url)),
       ],
       { timeout: 10_000, maxBuffer: 1_000_000 },
     )
