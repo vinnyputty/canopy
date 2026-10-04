@@ -15,6 +15,7 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import { WorkspaceBackupPanel } from './WorkspaceBackupPanel';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -262,6 +263,7 @@ export function App() {
     | 'shortcuts'
     | 'appearance'
     | 'settings'
+    | 'backup'
     | 'connect'
     | null
   >(null);
@@ -300,6 +302,8 @@ export function App() {
   const [history, setHistory] = useState<Navigation>({ back: [], forward: [] });
   const historyRef = useRef(history);
   const workspaceRef = useRef(workspace);
+  const workspaceTransferBusy = useRef(false);
+  const [workspaceTransferActive, setWorkspaceTransferActive] = useState(false);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
   const demoResetting = useRef(false);
@@ -1285,21 +1289,37 @@ export function App() {
       appearancePreview?.palette ?? workspace.palette ?? 'default';
   }, [workspace.theme, workspace.palette, appearancePreview]);
 
-  const saveWorkspace = useCallback((value: Workspace) => {
-    if (demoResetting.current) return Promise.resolve();
-    const save = pendingWorkspaceSave.current
-      .catch(() => {})
-      .then(() => {
-        if (!demoResetting.current) return window.canopy.saveWorkspace(value);
-      });
-    pendingWorkspaceSave.current = save;
-    return save;
-  }, []);
+  const saveWorkspace = useCallback(
+    (value: Workspace, transferFlush = false) => {
+      if (demoResetting.current) return Promise.resolve();
+      const allowed = () => {
+        if (workspaceTransferBusy.current && !transferFlush)
+          throw new Error(
+            'Workspace transfer is in progress; wait for reload.',
+          );
+      };
+      try {
+        allowed();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      const save = pendingWorkspaceSave.current
+        .catch(() => {})
+        .then(() => {
+          allowed();
+          if (!demoResetting.current) return window.canopy.saveWorkspace(value);
+        });
+      pendingWorkspaceSave.current = save;
+      return save;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!ready) return;
     const timer = window.setTimeout(() => {
       workspaceSaveTimer.current = null;
+      if (workspaceTransferBusy.current) return;
       void saveWorkspace(workspace).catch((error) => {
         setErrors((value) => ({
           ...value,
@@ -2215,6 +2235,10 @@ export function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
+      if (workspaceTransferBusy.current) {
+        event.preventDefault();
+        return;
+      }
       if (workBrief) return;
       const command = Object.keys(workspace.shortcuts).find((id) =>
         matchesShortcut(event, workspace.shortcuts[id]),
@@ -3511,7 +3535,9 @@ export function App() {
         <button
           className="sidebar-settings"
           ref={settingsTrigger}
+          disabled={workspaceTransferActive}
           onClick={() => {
+            if (workspaceTransferBusy.current) return;
             settingsFlow.current = true;
             setDialog('settings');
           }}
@@ -5345,6 +5371,7 @@ export function App() {
             }
             onAppearance={() => setDialog('appearance')}
             onShortcuts={() => setDialog('shortcuts')}
+            onBackup={() => setDialog('backup')}
             onConnect={() => setDialog('connect')}
           />
           <div className="dialog-footer">
@@ -5352,6 +5379,58 @@ export function App() {
               Done
             </button>
           </div>
+        </Dialog>
+      )}
+      {dialog === 'backup' && (
+        <Dialog
+          title="Workspace backup and transfer"
+          dismissible={!workspaceTransferActive}
+          onClose={() => {
+            if (!workspaceTransferBusy.current) setDialog(null);
+          }}
+          initialFocus
+          wide
+        >
+          <WorkspaceBackupPanel
+            connections={connections}
+            flush={async () => {
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+              }
+              await saveWorkspace(workspaceRef.current);
+            }}
+            onApply={async (operation) => {
+              if (workspaceTransferBusy.current)
+                throw new Error(
+                  'Workspace transfer is in progress; wait for reload.',
+                );
+              workspaceTransferBusy.current = true;
+              setWorkspaceTransferActive(true);
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+              }
+              let transferred = false;
+              try {
+                // This is the only save admitted after the persistence barrier closes.
+                await saveWorkspace(workspaceRef.current, true);
+                await operation();
+                transferred = true;
+                await window.canopy.reloadWorkspace();
+              } catch (error) {
+                if (!transferred) {
+                  workspaceTransferBusy.current = false;
+                  setWorkspaceTransferActive(false);
+                  throw error;
+                }
+                throw new Error(
+                  'Workspace transferred, but reload failed. Restart Canopy before editing.',
+                  { cause: error },
+                );
+              }
+            }}
+          />
         </Dialog>
       )}
       {dialog === 'appearance' && (
@@ -7849,6 +7928,7 @@ function Dialog({
   compact,
   wide,
   initialFocus,
+  dismissible = true,
 }: {
   title: string;
   onClose: () => void;
@@ -7856,13 +7936,14 @@ function Dialog({
   compact?: boolean;
   wide?: boolean;
   initialFocus?: boolean;
+  dismissible?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const panel = panelRef.current;
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        onClose();
+        if (dismissible) onClose();
         return;
       }
       if (event.key !== 'Tab' || !panel) return;
@@ -7884,7 +7965,7 @@ function Dialog({
     };
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
-  }, [onClose]);
+  }, [onClose, dismissible]);
   return (
     <div
       className="dialog-backdrop"
@@ -7892,7 +7973,7 @@ function Dialog({
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           event.preventDefault();
-          onClose();
+          if (dismissible) onClose();
         }
       }}
     >
@@ -7909,6 +7990,7 @@ function Dialog({
             className="icon-button"
             onClick={onClose}
             aria-label="Close dialog"
+            disabled={!dismissible}
             autoFocus={initialFocus}
           >
             <X size={16} />

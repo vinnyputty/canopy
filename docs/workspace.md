@@ -69,3 +69,7 @@ Each item shows its inclusion reasons, provider, connection identifier, loaded r
 Preferences save through the existing atomic workspace save path. Action history contains only connection and issue identifiers, action names and timestamps; it keeps at most one hundred entries for ninety days. **Clear local triage history** removes it. Expired snoozes and old history are pruned on load, action and expiry. Existing workspaces start with empty inbox preferences; unsupported or corrupt inbox state resets just those preferences. Disconnecting a connection removes its preferences, review choices and history. Workspace save failures remain visible in the inbox. Issue content and relationship graphs are derived from current snapshots and are not persisted as inbox truth.
 
 The local `workspace.json` contains private root/issue identifiers, review choices, pins, snoozes and triage history alongside existing last-seen values. Protect it as private data when copying or backing up a profile. No credentials, issue summaries, comments or relationship content are added to triage preference/history storage.
+
+## Backup and transfer
+
+Use **Settings → Workspace backup and transfer** to review a private setup export or preview a mapped merge/replace import. See [workspace backup format, privacy, and recovery](workspace-backup.md).

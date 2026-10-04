@@ -57,7 +57,7 @@ function harness({ demo = true, saveGate = false } = {}) {
       explored,
       demo,
       structuredClone,
-      workspace: (value: unknown) => value,
+      validateWorkspace: (value: unknown) => value,
       recoverWorkspaceViews: (value: unknown) => value,
       createFixture: async () => {
         resets++;
@@ -104,6 +104,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     pendingWorkspaceSave,
     workspaceSaveTimer,
     demoResetting,
+    workspaceTransferBusy: { current: false },
     workspaceRef,
     setErrors: (
       update: (value: Record<string, string>) => Record<string, string>,

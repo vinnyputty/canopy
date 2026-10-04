@@ -25,7 +25,7 @@ js_test(
     name = "test",
     timeout = "long",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/portable-check.mjs", "tools/ci.mjs"],
+    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/portable-check.mjs", "tools/ci.mjs"] + glob(["tools/smoke-backup*.mjs", "tools/backup-audit-cleanup.mjs", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts"]),
 )
 
 js_test(
@@ -122,6 +122,30 @@ js_binary(
     name = "palette_check",
     entry_point = "tools/palette-check.mjs",
     data = [":build", ":node_modules", "package.json", "tools/audit-lifecycle.mjs"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "stage_backup_smoke",
+    entry_point = "tools/stage-backup-smoke.mjs",
+    data = [":build", ":node_modules", ":sources"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "backup_cases",
+    entry_point = "tools/smoke-backup-cases.mjs",
+    data = [":node_modules", "tools/smoke-search.mjs", "tools/smoke-refresh.mjs", "tools/backup-audit-cleanup.mjs", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "backup_smoke",
+    entry_point = "tools/smoke-backup.mjs",
+    data = [":node_modules", "tools/backup-audit-cleanup.mjs", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts"],
     patch_node_fs = False,
     tags = ["manual"],
 )

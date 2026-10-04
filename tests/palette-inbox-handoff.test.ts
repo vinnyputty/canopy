@@ -134,6 +134,7 @@ function harness(
   const save = execute(callback(source, 'saveWorkspace'), {
     useCallback: (fn: unknown) => fn,
     demoResetting: { current: false },
+    workspaceTransferBusy: { current: false },
     pendingWorkspaceSave: { current: Promise.resolve() },
     window: {
       canopy: {
