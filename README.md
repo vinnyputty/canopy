@@ -1,6 +1,6 @@
 # Canopy
 
-A focused Electron desktop workspace for Jira and GitHub issue trees, with one root issue per tab. Expand the provider's parent/child hierarchy and open linked issues in their own tabs. Jira supports inline summaries, priorities, assignees, status, and sibling ranking. GitHub supports title, assignee, labels, and open/closed state.
+A focused Electron desktop workspace for Jira and GitHub issue trees, with one root issue per tab. Expand the provider's parent/child hierarchy and open linked issues in their own tabs. Jira supports inline summaries, priorities, assignees, status, and sibling ranking. GitHub supports title, assignee, labels, and open/closed state. The preview offers description and comment authoring, eligible parent changes, GitHub sub-issue creation, provider fields, and attachment access.
 
 Canopy targets macOS, Windows, and Linux. Its provider boundary keeps the tree UI independent of Jira and GitHub REST payloads.
 
@@ -98,7 +98,9 @@ npx pnpm@10.22.0 install --frozen-lockfile
 
 Dependency install scripts are disabled. Use the Bazel launcher to obtain Electron. To update dependencies, update `package.json`, regenerate `pnpm-lock.yaml` with pnpm 10.22.0, and run the Bazel checks. `npm run format` formats TypeScript, CSS, JSON, YAML, and documentation; Bazel files use standard Starlark formatting.
 
-Editing descriptions and comments, attachments, issue deletion, creating issues outside Jira child rows, project moves, and reparenting are not supported in this version.
+The preview’s **Edit and discuss** panel saves description and comment drafts locally by account and issue. GitHub Markdown is sent verbatim. Jira uses plain paragraphs for new text and preserves native formatting when editing existing rich text runs. Parent changes require a hierarchy effects preview and fresh eligibility checks. GitHub sub-issue creation preserves the created key if linking fails. Uncertain or partial writes block retries until the provider is checked; running requests must settle before retry acknowledgment. Newer drafts survive completion of an earlier request. Canopy never automatically replays writes.
+
+Attachment uploads, repository transfers, Jira project moves and issue type conversions, structural Jira document changes, and unsupported custom fields offer an explicit browser handoff. Issue deletion remains outside this scope.
 
 The sidebar Triage inbox collects unread changes, assigned work, confirmed blockers and selected review statuses across known workspace roots and providers. Local pins, snoozes and bounded action history save with the workspace; coverage limits and partial failures remain visible. See [workspace controls](docs/workspace.md#triage-inbox).
 

@@ -1,4 +1,5 @@
 import { relationshipFailure } from '../shared/relationships';
+import { GithubAuthoring } from './authoring';
 import type {
   AssigneePage,
   Choice,
@@ -141,11 +142,18 @@ function pageToken(value?: string): { repo: number; page: number } {
 }
 export class GithubProvider {
   private selected: Set<string>;
+  readonly authoring: GithubAuthoring;
   constructor(
     private connection: Connection,
     private request: GithubRequest,
   ) {
     this.selected = new Set(connection.repositories ?? []);
+    this.authoring = new GithubAuthoring(
+      request,
+      (key, suffix) => this.path(key, suffix),
+      githubKey,
+      connection.accountName,
+    );
   }
   private assertSelected(key: string) {
     const { repo } = parts(key);

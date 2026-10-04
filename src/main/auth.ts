@@ -179,10 +179,23 @@ export class Auth {
     );
     if (!account)
       throw new Error('This GitHub connection is unavailable. Connect again.');
+    // Authoring only needs these read endpoints, within this account's selection.
+    const authoringRead = path.match(
+      /^\/repos\/([a-z0-9_.-]+\/[a-z0-9_.-]+)(?:\/milestones\?state=all&per_page=100)?$/i,
+    );
+    const selectedRead = Boolean(
+      authoringRead &&
+      (init.method ?? 'GET').toUpperCase() === 'GET' &&
+      !init.body &&
+      account.connection.repositories?.some(
+        (repo) => repo.toLowerCase() === authoringRead[1].toLowerCase(),
+      ),
+    );
     if (
       !path.startsWith('/') ||
       path.includes('..') ||
       !(
+        selectedRead ||
         path === '/graphql' ||
         /^\/(repos\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(issues|labels|assignees)|search\/issues|user)([/?].*)?$/i.test(
           path,
@@ -246,8 +259,11 @@ export class Auth {
           'GitHub authorization expired or was revoked. Reconnect this account.',
         );
       if (response.status === 403 || response.status === 404)
-        throw new Error(
-          `GitHub denied access to ${path}. Check that the repository is selected and the token has Issues permission.${detail ? ` ${detail}` : ''}`,
+        throw Object.assign(
+          new Error(
+            `GitHub denied access to ${path}. Check that the repository is selected and the token has Issues permission.${detail ? ` ${detail}` : ''}`,
+          ),
+          { status: response.status },
         );
       throw new Error(
         `GitHub returned ${response.status} for ${path}.${detail ? ` ${detail}` : ''}`,
@@ -515,8 +531,11 @@ export class Auth {
         } catch {}
         assertCurrent();
         if (response.status === 403)
-          throw new Error(
-            `Jira denied access. Check issue permissions and your organization’s app-access policy. ${details}`,
+          throw Object.assign(
+            new Error(
+              `Jira denied access. Check issue permissions and your organization’s app-access policy. ${details}`,
+            ),
+            { status: response.status },
           );
         if (response.status === 401)
           throw new Error(
