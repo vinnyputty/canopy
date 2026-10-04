@@ -565,7 +565,8 @@ for (const mode of ['normal', 'reject', 'hang', 'failed-launch'] as const) {
               ? error === primary
               : error instanceof AggregateError,
           );
-        await assert.rejects(access(profile));
+        if (mode === 'hang') await access(profile);
+        else await assert.rejects(access(profile));
       },
       () => disposeProcess(child),
       () => rm(profile, { recursive: true, force: true }),

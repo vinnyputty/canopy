@@ -22,6 +22,8 @@ export function authoringAuditLifecycle(lifecycle) {
     let closeAttempted = false;
     let stage = 'created';
     const reportErrors = [];
+    const pending = new Set();
+    let retained = false;
     const record = (status, fields = {}) => {
       try {
         report(
@@ -36,11 +38,20 @@ export function authoringAuditLifecycle(lifecycle) {
       const started = Date.now();
       record('start');
       try {
-        const value = await lifecycle.deadline(operation, 30_000, label);
+        const value = await lifecycle.deadline(
+          () => {
+            const original = Promise.resolve().then(operation);
+            pending.add(original);
+            return original.finally(() => pending.delete(original));
+          },
+          30_000,
+          label,
+        );
         stage = label;
         record('done', { elapsedMs: Date.now() - started });
         return value;
       } catch (error) {
+        if (pending.size) retained = true;
         stage = label;
         record('failed', {
           elapsedMs: Date.now() - started,
@@ -65,7 +76,12 @@ export function authoringAuditLifecycle(lifecycle) {
         record('start');
         closeAttempted = true;
         const result = await owner.shutdown(() => app.close());
-        if (!result.terminated || result.errors.length)
+        if (
+          !result.terminated ||
+          result.errors.length ||
+          retained ||
+          pending.size
+        )
           throw new AggregateError(
             result.errors,
             'Authoring restart refused: previous owned scope did not close cleanly',
@@ -88,12 +104,13 @@ export function authoringAuditLifecycle(lifecycle) {
         removeProfile,
       }) {
         // Failed launch ownership is still owned by the shared helper. A timed
-        // out close is not repeated; shutdown establishes absence or retains data.
+        // out close is not repeated; settlement and scope absence gate removal.
         await lifecycle.finishAudit({
           owner,
           close: app && !closeAttempted ? () => app.close() : undefined,
           primary,
           primaryFailed,
+          operationsSettled: () => !retained && !pending.size,
           removeProfile,
           diagnostics: reportErrors.map((error) => ({
             label: 'Progress reporting',

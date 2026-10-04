@@ -18,11 +18,14 @@ export class AuditOwner {
     signalGroup?: (pid: number, signal?: string | number) => boolean;
     killPid?: (pid: number, timeoutMs: number) => Promise<unknown>;
   });
+  readonly operationsSettled: boolean;
+  readonly retained: boolean;
   readonly child: ChildProcess | undefined;
   profile: string;
   launch<T>(operation: () => Promise<T>): Promise<T>;
   confirm(child: ChildProcess): void;
   restore(): void;
+  retainProfile(): void;
   shutdown(
     close?: () => Promise<unknown>,
   ): Promise<{ terminated: boolean; errors: Error[] }>;
@@ -38,4 +41,5 @@ export function finishAudit(options: {
   writeEvidence: () => Promise<unknown>;
   secondary?: (error: Error) => void;
   operationMs?: number;
+  operationsSettled?: () => boolean;
 }): Promise<void>;

@@ -37,6 +37,8 @@ let app;
 let page;
 let failure;
 let failed = false;
+let auditSettled = false;
+let auditRetained = false;
 const errors = [];
 const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 async function audit() {
@@ -574,8 +576,18 @@ async function audit() {
   await page.keyboard.press('Escape');
 }
 try {
-  await deadline(audit, 180000, 'Palette audit');
+  await deadline(
+    () =>
+      Promise.resolve()
+        .then(audit)
+        .finally(() => {
+          auditSettled = true;
+        }),
+    180000,
+    'Palette audit',
+  );
 } catch (error) {
+  if (!auditSettled) auditRetained = true;
   failed = true;
   failure = error;
   record(`FAIL ${String(error?.stack ?? error)}`);
@@ -585,6 +597,7 @@ try {
     close: app ? () => app.close() : undefined,
     primary: failure,
     primaryFailed: failed,
+    operationsSettled: () => auditSettled && !auditRetained,
     diagnostics:
       failed && page && !page.isClosed()
         ? [
@@ -602,11 +615,9 @@ try {
               label: 'Failure DOM',
               run: async () => {
                 await mkdir(evidence, { recursive: true });
-                const content = await deadline(
-                  () => page.locator('body').innerText({ timeout: 3000 }),
-                  3000,
-                  'Failure DOM read',
-                );
+                const content = await page
+                  .locator('body')
+                  .innerText({ timeout: 3000 });
                 await writeFile(join(evidence, 'failure-dom.txt'), content);
               },
             },
