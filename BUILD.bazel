@@ -142,3 +142,9 @@ js_binary(
     patch_node_fs = False,
     tags = ["manual"],
 )
+
+js_test(
+    name = "release_checks",
+    entry_point = "tools/release.test.mjs",
+    data = ["tools/release.mjs", ".github/workflows/publish.yml"],
+)
