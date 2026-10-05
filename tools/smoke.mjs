@@ -1,6 +1,8 @@
 import { auditInbox } from './smoke-inbox.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditSidebar } from './smoke-sidebar.mjs';
+import { auditCloseLifecycle } from './smoke-close-lifecycle.mjs';
+import { auditWorkspaceClose } from './smoke-close.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPalette } from './smoke-palette.mjs';
@@ -160,7 +162,18 @@ async function launch(production = false, fixtureEnv = {}) {
 
 async function close() {
   if (!app) return;
-  await app.close();
+  if (smokeFailure) {
+    // Failed fixtures may retain a crashed/hung renderer or a native close
+    // warning. Preserve the assertion failure and terminate only this launch.
+    const process = app.process();
+    if (process.exitCode === null && process.signalCode === null)
+      process.kill('SIGKILL');
+    await expect
+      .poll(() => process.exitCode !== null || process.signalCode !== null, {
+        timeout: 5000,
+      })
+      .toBe(true);
+  } else await app.close();
   app = undefined;
   page = undefined;
 }
@@ -3449,6 +3462,19 @@ try {
   await launch();
   await auditPalette(app, page);
   await auditSearch(app, page);
+  // Search ends on a missing root. Persist the refresh fixture's active tab
+  // before its reload rather than relying on an unfinished debounce.
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.evaluate(() => window.canopy.flushWorkspace());
+  await waitForSavedWorkspace((saved) =>
+    saved.tabs.some(
+      (tab) => tab.id === saved.activeTabId && tab.rootKey === 'CAN-200',
+    ),
+  );
   await auditRefresh(app, page, resizeWindow);
 
   await page.getByTitle('Disconnect Canopy demo').click();
@@ -3544,6 +3570,19 @@ try {
   await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
+  await auditWorkspaceClose({
+    launch,
+    close,
+    current: () => ({ app, page }),
+    userData,
+  });
+
+  await auditCloseLifecycle({
+    launch,
+    close,
+    current: () => ({ app, page }),
+    userData,
+  });
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(
