@@ -1,4 +1,6 @@
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
+import type { Workspace } from '../shared/types';
+import { readFile, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { safeStorage } from 'electron';
 import { linuxCredentialStorageError } from './credentials';
@@ -19,15 +21,46 @@ export class Storage {
       );
     }
   }
+  private async persist(name: string, contents: string, validate?: () => void) {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const file = join(this.directory, `${name}.json`);
+    try {
+      await writeFile(`${file}.tmp`, contents, { mode: 0o600 });
+      await replaceFile(
+        `${file}.tmp`,
+        file,
+        process.platform,
+        undefined,
+        validate,
+      );
+    } finally {
+      await rm(`${file}.tmp`, { force: true }).catch(() => {});
+    }
+  }
   write(name: string, value: unknown): Promise<void> {
     const contents = JSON.stringify(value);
     const task = this.pending
       .catch(() => {})
+      .then(() => this.persist(name, contents));
+    this.pending = task;
+    return task;
+  }
+  replaceWorkspace(
+    expected: Workspace,
+    next: Workspace,
+    validate?: () => void,
+  ): Promise<void> {
+    const contents = JSON.stringify(next);
+    const task = this.pending
+      .catch(() => {})
       .then(async () => {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
-        const file = join(this.directory, `${name}.json`);
-        await writeFile(`${file}.tmp`, contents, { mode: 0o600 });
-        await replaceFile(`${file}.tmp`, file);
+        validate?.();
+        const current = await this.read<Workspace>('workspace');
+        if (!isDeepStrictEqual(current, JSON.parse(JSON.stringify(expected))))
+          throw new Error(
+            'Workspace changed after preview; review the import again.',
+          );
+        await this.persist('workspace', contents, validate);
       });
     this.pending = task;
     return task;

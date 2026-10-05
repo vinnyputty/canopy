@@ -63,6 +63,21 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:rank', id, key, before, position),
   priorityOrder: (id, keys) =>
     ipcRenderer.invoke('canopy:priorityOrder', id, keys),
+  prepareWorkspaceExport: () =>
+    ipcRenderer.invoke('canopy:prepareWorkspaceExport'),
+  exportWorkspace: (token) =>
+    ipcRenderer.invoke('canopy:exportWorkspace', token),
+  chooseWorkspaceBackup: () =>
+    ipcRenderer.invoke('canopy:chooseWorkspaceBackup'),
+  previewWorkspaceImport: (backup, mapping, mode) =>
+    ipcRenderer.invoke('canopy:previewWorkspaceImport', backup, mapping, mode),
+  applyWorkspaceImport: (token) =>
+    ipcRenderer.invoke('canopy:applyWorkspaceImport', token),
+  canUndoWorkspaceImport: () =>
+    ipcRenderer.invoke('canopy:canUndoWorkspaceImport'),
+  rollbackWorkspaceImport: () =>
+    ipcRenderer.invoke('canopy:rollbackWorkspaceImport'),
+  reloadWorkspace: () => ipcRenderer.invoke('canopy:reloadWorkspace'),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
   saveWorkspace: (workspace) =>
     ipcRenderer.invoke('canopy:saveWorkspace', workspace),
