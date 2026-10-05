@@ -146,13 +146,13 @@ export async function auditSavedFeedback({
   await expect(live).toContainText('Sample saved-view partial result');
   await fixture('release', 'a11y-view-failed-100', 'Sample saved-view failure');
   await expect(live).toContainText('refreshed 1 of 2 roots');
-  await expect(live).toContainText('1 roots failed');
+  await expect(live).toContainText('1 root failed');
   await expect(live).toContainText('Sample saved-view failure');
   await expect(live).not.toContainText(
     "Error invoking remote method 'canopy:tree'",
   );
   await expect(live).toContainText('issues retained, last updated at');
-  await expect(live).toContainText('1 roots returned partial results');
+  await expect(live).toContainText('1 root returned partial results');
   expect((await latestTree('CAN-100')).fetchedAt).toBe(retained100.fetchedAt);
   await checkLive('saved-view-partial-and-retained-failure', [
     retained100,
@@ -174,7 +174,7 @@ export async function auditSavedFeedback({
   await fixture('hold', 'a11y-view-B-shared', 'tree', 'CAN-100');
   await refresh('Accessibility B');
   await expect(live).toHaveText(
-    'Waiting to refresh Accessibility B: 1 of 1 roots pending; 1 waiting to start.',
+    'Waiting to refresh Accessibility B: 1 of 1 root pending; 1 waiting to start.',
   );
   await fixture('release', 'a11y-view-A-virtual', 'Late unrelated A failure');
   await expect(live).not.toContainText('Late unrelated A failure');
@@ -183,11 +183,11 @@ export async function auditSavedFeedback({
   await page.clock.runFor(2000);
   await started('a11y-view-B-shared');
   await expect(live).toHaveText(
-    'Refreshing Accessibility B: 1 of 1 roots pending.',
+    'Refreshing Accessibility B: 1 of 1 root pending.',
   );
   await fixture('release', 'a11y-view-B-shared');
   await completed('a11y-view-B-shared');
-  await expect(live).toHaveText('Accessibility B: refreshed 1 of 1 roots.');
+  await expect(live).toHaveText('Accessibility B: refreshed 1 of 1 root.');
   await select('Accessibility A');
   await expect(live).not.toContainText('Accessibility B');
   await expect(live).not.toContainText('Late unrelated A failure');
@@ -429,7 +429,7 @@ export async function auditSavedFeedback({
       region('Accessibility A').getByText(summary, { exact: true }),
     ).toBeVisible();
     await expect(live).toContainText(
-      'Changes found across 1 roots. Last updated at',
+      'Changes found across 1 root. Last updated at',
     );
     await expect(live).not.toHaveText(beforeText);
     await expect

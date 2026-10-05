@@ -402,6 +402,7 @@ export class RefreshAnnouncements {
 
   private reportView() {
     if (!this.view || this.activeTabId === null) return;
+    const rootNoun = (count: number) => (count === 1 ? 'root' : 'roots');
     let text: string;
     if (this.batch) {
       const pending = [...this.batch.values()].filter((root) => !root.settled);
@@ -417,12 +418,12 @@ export class RefreshAnnouncements {
         this.batch.size === 0
           ? `${this.view.name}: no roots selected to refresh.`
           : pending.length
-            ? `${waiting === pending.length ? 'Waiting to refresh' : 'Refreshing'} ${this.view.name}: ${pending.length} of ${this.batch.size} roots pending${waiting ? `; ${waiting} waiting to start` : ''}.`
-            : `${this.view.name}: refreshed ${this.batch.size - errors.length} of ${this.batch.size} roots.`;
+            ? `${waiting === pending.length ? 'Waiting to refresh' : 'Refreshing'} ${this.view.name}: ${pending.length} of ${this.batch.size} ${rootNoun(this.batch.size)} pending${waiting ? `; ${waiting} waiting to start` : ''}.`
+            : `${this.view.name}: refreshed ${this.batch.size - errors.length} of ${this.batch.size} ${rootNoun(this.batch.size)}.`;
       if (errors.length)
-        text += ` ${errors.length} roots failed. ${errors.join('; ')}`;
+        text += ` ${errors.length} ${rootNoun(errors.length)} failed. ${errors.join('; ')}`;
       if (partial.length)
-        text += ` ${partial.length} roots returned partial results. ${partial.join('; ')}`;
+        text += ` ${partial.length} ${rootNoun(partial.length)} returned partial results. ${partial.join('; ')}`;
       if (!pending.length) {
         this.batch = undefined;
         this.affected.clear();
@@ -449,7 +450,7 @@ export class RefreshAnnouncements {
           : errors.length
             ? 'Refresh failed'
             : 'Roots updated';
-      text = `${this.view.name}: ${reason} across ${this.affected.size} roots.`;
+      text = `${this.view.name}: ${reason} across ${this.affected.size} ${rootNoun(this.affected.size)}.`;
       if (this.changed) {
         text += ` Last updated at ${new Date(this.changedAt).toLocaleString(
           undefined,
@@ -465,9 +466,9 @@ export class RefreshAnnouncements {
         )}.`;
       }
       if (errors.length)
-        text += ` ${errors.length} roots failed. ${errors.join('; ')}`;
+        text += ` ${errors.length} ${rootNoun(errors.length)} failed. ${errors.join('; ')}`;
       if (partial.length)
-        text += ` ${partial.length} roots returned partial results. ${partial.join('; ')}`;
+        text += ` ${partial.length} ${rootNoun(partial.length)} returned partial results. ${partial.join('; ')}`;
       this.affected.clear();
       this.changed = this.recovered = false;
       this.changedAt = 0;

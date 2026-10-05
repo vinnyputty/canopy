@@ -97,9 +97,9 @@ it('exposes held progress then aggregate success/partial failure through the act
   f.fail(b, 'CAN-200', 'Offline');
   assert.match(
     markup(),
-    /refreshed 1 of 2 roots.*1 roots failed.*Offline.*issues retained/,
+    /refreshed 1 of 2 roots.*1 root failed.*Offline.*issues retained/,
   );
-  assert.match(markup(), /1 roots returned partial results/);
+  assert.match(markup(), /1 root returned partial results/);
   assert.equal(messages.at(-1)?.tabId, owner);
   const saved = starterViews()[0];
   const panel = renderToStaticMarkup(
@@ -181,7 +181,7 @@ it('batches meaningful automatic changes/failure/recovery and keeps unchanged, u
   b = f.begin('saved-view:virtual', 'CAN-200', tree(2, 'CAN-200'));
   f.complete(a, tree(4, 'CAN-100', ['Partial']));
   f.complete(b, tree(4, 'CAN-200'));
-  assert.match(markup(), /Refresh recovered across 1 roots/);
+  assert.match(markup(), /Refresh recovered across 1 root/);
   assert.doesNotMatch(markup(), /Sample error/);
   const count = messages.length;
   f.receive(
@@ -229,7 +229,7 @@ it('distinguishes consecutive meaningful same-count deliveries while deduplicati
   assert.equal(messages.length, 2);
   assert.match(
     messages[0].text,
-    /Changes found across 1 roots.*Last updated at/,
+    /Changes found across 1 root.*Last updated at/,
   );
   assert.notEqual(messages[0].text, messages[1].text);
   const unchanged = f.begin('a', 'CAN-100', third);
@@ -240,6 +240,10 @@ it('distinguishes consecutive meaningful same-count deliveries while deduplicati
     f.fail(request, 'CAN-100', 'Same retained failure');
   }
   assert.equal(messages.length, 3);
+  assert.match(
+    messages.at(-1)!.text,
+    /Refresh failed across 1 root.*1 root failed/,
+  );
 });
 
 it('separates view A and B ownership even when they share a root and ignores late background completion/error', () => {
@@ -254,6 +258,7 @@ it('separates view A and B ownership even when they share a root and ignores lat
     roots: [view.roots[0]],
   });
   f.requestView();
+  assert.match(messages.at(-1)!.text, /Other view: 1 of 1 root pending/);
   assert.equal(f.request('a'), true); // New destination owns deferred intent, even behind an old manual read.
   const count = messages.length;
   f.complete(a, tree(2));
@@ -261,7 +266,7 @@ it('separates view A and B ownership even when they share a root and ignores lat
   assert.equal(messages.length, count);
   const current = f.begin('a', 'CAN-100', tree(2));
   f.complete(current, tree(3));
-  assert.match(messages.at(-1)!.text, /Other view: refreshed 1 of 1 roots/);
+  assert.match(messages.at(-1)!.text, /Other view: refreshed 1 of 1 root/);
   f.activate(owner, view);
   const returned = renderToStaticMarkup(
     React.createElement(RefreshStatus, {
@@ -282,6 +287,17 @@ it('reports interruption and no-source requests without inventing successful del
   f.end(a);
   f.forget('saved-view:virtual');
   assert.match(markup(), /refreshed 0 of 2 roots.*2 roots failed.*interrupted/);
+  f.requestView();
+  f.request('a');
+  f.request('saved-view:virtual');
+  const retryA = f.begin('a', 'CAN-100', tree(1));
+  const retryB = f.begin('saved-view:virtual', 'CAN-200', tree(1, 'CAN-200'));
+  f.complete(retryA, tree(2, 'CAN-100', ['Partial A']));
+  f.complete(retryB, tree(2, 'CAN-200', ['Partial B']));
+  assert.match(
+    markup(),
+    /2 roots returned partial results.*Partial A.*Partial B/,
+  );
   f.activate(refreshDestination('a', 'empty'), {
     name: 'Empty view',
     roots: [],
