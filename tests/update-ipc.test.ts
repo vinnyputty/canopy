@@ -63,6 +63,56 @@ before(async () => {
 after(async () => {
   await rm(directory, { recursive: true, force: true });
 });
+for (const platform of ['linux', 'win32']) {
+  it(`main IPC platform identity integration: ${platform} source model`, async () => {
+    const source = join(directory, `source-${platform}.cjs`);
+    // Control production branches only; Node's filesystem/path behavior remains
+    // native to the host. This is source coverage, not target-OS acceptance.
+    await build({
+      stdin: {
+        contents:
+          "export {launch} from './src/main/app'; export {Updates} from './src/main/updates'; export {createDemoFixture} from './src/main/demo';",
+        resolveDir: resolve('.'),
+      },
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      external: ['electron'],
+      define: { 'process.platform': JSON.stringify(platform) },
+      outfile: source,
+    });
+    for (const scenario of [
+      'load-replacement',
+      'write-replacement',
+      'active-replacement',
+    ]) {
+      const profile = join(directory, `${platform}-${scenario}`);
+      mkdirSync(profile);
+      const child = spawnSync(
+        process.execPath,
+        [
+          join(directory, 'controls.cjs'),
+          source,
+          scenario,
+          '--password-store=gnome-libsecret',
+        ],
+        {
+          env: {
+            ...process.env,
+            CANOPY_USER_DATA: profile,
+            CANOPY_DEMO_TEMP: '0',
+            CANOPY_IPC_PLATFORM: platform,
+          },
+          encoding: 'utf8',
+          timeout: 20_000,
+        },
+      );
+      assert.equal(child.status, 0, child.stdout + child.stderr);
+      assert.match(child.stdout, new RegExp(`PASS ${scenario}`));
+      assert.ok(!existsSync(join(profile, 'credentials.json')));
+    }
+  });
+}
 for (const scenario of [
   'load-cancel',
   'load-destroyed',

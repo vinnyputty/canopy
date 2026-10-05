@@ -15,6 +15,7 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import { supportLinks, type SupportLink } from '../shared/support';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -32,6 +33,7 @@ import React, {
 } from 'react';
 import {
   AlertCircle,
+  Info,
   ArrowLeft,
   ArrowRight,
   Pin,
@@ -263,6 +265,7 @@ export function App() {
     | 'appearance'
     | 'settings'
     | 'connect'
+    | 'support'
     | null
   >(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
@@ -273,6 +276,49 @@ export function App() {
       settingsTrigger.current?.focus();
     }
   }, [dialog]);
+  const supportButton = useRef<HTMLButtonElement>(null);
+  const supportReturnFocus = useRef<{
+    trigger: HTMLElement | null;
+    fallback: HTMLElement | null;
+  } | null>(null);
+  const showSupport = useCallback((trigger?: HTMLElement) => {
+    if (!supportReturnFocus.current) {
+      supportReturnFocus.current = {
+        fallback: settingsFlow.current
+          ? settingsTrigger.current
+          : supportButton.current,
+        trigger:
+          trigger ??
+          (document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null),
+      };
+    }
+    setDialog('support');
+  }, []);
+  useLayoutEffect(() => {
+    if (dialog === null && supportReturnFocus.current) {
+      const { trigger, fallback } = supportReturnFocus.current;
+      supportReturnFocus.current = null;
+      const target =
+        trigger?.isConnected && trigger !== document.body
+          ? trigger
+          : fallback?.isConnected
+            ? fallback
+            : supportButton.current;
+      target?.focus({ preventScroll: true });
+    }
+  }, [dialog]);
+  useEffect(() => {
+    const unsubscribe = window.canopy.onShowSupport(() => showSupport());
+    // Acknowledge only after the authoritative renderer installs its listener.
+    void window.canopy
+      .supportReady()
+      .catch((error) =>
+        console.error('Could not subscribe to About requests:', error),
+      );
+    return unsubscribe;
+  }, [showSupport]);
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
     palette: NonNullable<Workspace['palette']>;
@@ -2203,13 +2249,19 @@ export function App() {
         run: () => expandAll(false),
       },
       {
+        id: 'support',
+        label: 'About & Support',
+        icon: Info,
+        run: () => showSupport(),
+      },
+      {
         id: 'shortcuts',
         label: 'Keyboard shortcuts',
         icon: Keyboard,
         run: () => setDialog('shortcuts'),
       },
     ],
-    [activeTab, expandAll, refreshTab],
+    [activeTab, expandAll, refreshTab, showSupport],
   );
 
   useEffect(() => {
@@ -3387,9 +3439,7 @@ export function App() {
     >
       <aside className="sidebar" aria-label="Canopy sidebar">
         <div className="brand">
-          <div className="brand-mark">
-            <span />
-          </div>
+          <img className="brand-mark" src="icon.svg" alt="" />
           <span>Canopy</span>
         </div>
         <button
@@ -3518,6 +3568,14 @@ export function App() {
         >
           <Settings2 size={16} />
           <span>Settings</span>
+        </button>
+        <button
+          className="sidebar-settings"
+          ref={supportButton}
+          onClick={(event) => showSupport(event.currentTarget)}
+        >
+          <Info size={16} />
+          <span>About &amp; Support</span>
         </button>
         {!demoMode && (
           <button className="sidebar-settings" onClick={launchDemo}>
@@ -5353,6 +5411,9 @@ export function App() {
             </button>
           </div>
         </Dialog>
+      )}
+      {dialog === 'support' && (
+        <SupportDialog onClose={() => setDialog(null)} />
       )}
       {dialog === 'appearance' && (
         <AppearanceDialog
@@ -7447,6 +7508,55 @@ function shortcutDisplay(shortcut = '') {
     .replace('Alt', '⌥')
     .replace('Shift', '⇧')
     .replaceAll('+', '');
+}
+
+function SupportDialog({ onClose }: { onClose: () => void }) {
+  const [version, setVersion] = useState<string>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void window.canopy.appVersion().then(
+      (value) => {
+        if (active) setVersion(value);
+      },
+      () => {
+        if (active) setError('Could not read the application version.');
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+  const open = async (link: SupportLink) => {
+    setError('');
+    try {
+      await window.canopy.openSupportLink(link);
+    } catch {
+      setError('Could not open the link in your browser. Try again.');
+    }
+  };
+  return (
+    <Dialog title="About & Support" onClose={onClose} compact initialFocus>
+      <div className="support-dialog">
+        <img src="icon.svg" width="80" height="80" alt="" />
+        <h3>Canopy</h3>
+        <p role="status">
+          {version ? `Version ${version}` : 'Reading version…'}
+        </p>
+        <p>A focused desktop workspace for issue trees.</p>
+        {Object.entries(supportLinks).map(([id, link]) => (
+          <button key={id} onClick={() => void open(id as SupportLink)}>
+            <ExternalLink size={15} /> {link.label}
+          </button>
+        ))}
+        {error && (
+          <p className="dialog-error" role="alert">
+            {error}
+          </p>
+        )}
+      </div>
+    </Dialog>
+  );
 }
 
 function AppearanceDialog({

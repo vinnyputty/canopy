@@ -4,6 +4,7 @@ import {
   relationshipKinds,
   relationshipFailure,
 } from '../shared/relationships';
+import { supportLinks, supportUrl } from '../shared/support';
 import { Providers } from './providers';
 import {
   app,
@@ -52,6 +53,8 @@ import {
 } from '../shared/views';
 
 app.setName('Canopy');
+if (process.platform === 'win32') app.setAppUserModelId('app.canopy.desktop');
+if (process.platform === 'linux') app.setDesktopName('canopy.desktop');
 configureLinuxCredentialStore((store) =>
   app.commandLine.appendSwitch('password-store', store),
 );
@@ -331,6 +334,8 @@ async function start(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
 ) {
+  if (process.platform === 'darwin' && !app.isPackaged)
+    app.dock?.setIcon(join(__dirname, 'branding/icons/512x512.png'));
   const storage = new Storage(app.getPath('userData'));
   const auth = new Auth(storage, (url) => shell.openExternal(url));
   let authError: string | undefined;
@@ -424,6 +429,20 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let creatingWindow: Promise<void> | null = null;
+  let supportPending = false;
+  let supportSubscriber: BrowserWindow | null = null;
+  const deliverSupport = () => {
+    if (
+      supportPending &&
+      window &&
+      supportSubscriber === window &&
+      !window.isDestroyed()
+    ) {
+      supportPending = false;
+      window.webContents.send('canopy:showSupport');
+    }
+  };
   const handlers: Record<string, (...args: any[]) => unknown> = {
     updateState: () => updates.snapshot(),
     updatePreferences: (value: unknown) => updates.preferences(value),
@@ -436,6 +455,12 @@ async function start(
     dismissUpdateNotice: () => updates.dismiss(),
     openRelease: (tag: unknown) =>
       updates.open(tag, (url) => shell.openExternal(url)),
+    supportReady: () => {
+      supportSubscriber = window;
+      deliverSupport();
+    },
+    appVersion: () => app.getVersion(),
+    openSupportLink: (link: unknown) => shell.openExternal(supportUrl(link)),
     demoMode: () => demoMode,
     demoTimeScale: () => {
       const scale = Number(process.env.CANOPY_DEMO_TIME_SCALE ?? 1);
@@ -796,6 +821,12 @@ async function start(
       minHeight: Math.min(600, saved?.bounds.height ?? 600),
       ...(saved?.bounds ?? {}),
       title: demoMode ? 'Canopy — Demo' : 'Canopy',
+      icon: join(
+        __dirname,
+        process.platform === 'win32'
+          ? 'branding/icon.ico'
+          : 'branding/icons/256x256.png',
+      ),
       backgroundColor: '#141719',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
       webPreferences: {
@@ -812,6 +843,9 @@ async function start(
         clearRelationshipRequests();
     });
     created.webContents.on('render-process-gone', clearRelationshipRequests);
+    created.webContents.on('did-start-loading', () => {
+      if (window === created) supportSubscriber = null;
+    });
     created.webContents.on('destroyed', () => {
       updates.cancel();
       for (const controller of searches.values()) controller.abort();
@@ -872,10 +906,30 @@ async function start(
     window.webContents.session.setPermissionRequestHandler(
       (_wc, _permission, callback) => callback(false),
     );
-    window.on('closed', () => {
-      window = null;
+    created.on('closed', () => {
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+      }
     });
-    await window.loadFile(html);
+    try {
+      await created.loadFile(html);
+    } catch (error) {
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+        if (!created.isDestroyed()) created.destroy();
+      }
+      throw error;
+    }
+  };
+  const ensureWindow = (): Promise<void> => {
+    if (creatingWindow) return creatingWindow;
+    if (window) return Promise.resolve();
+    creatingWindow = createWindow().finally(() => {
+      creatingWindow = null;
+    });
+    return creatingWindow;
   };
   const openDemoFromMenu = () =>
     void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
@@ -884,6 +938,20 @@ async function start(
         error instanceof Error ? error.message : String(error),
       ),
     );
+  const showSupport = () => {
+    supportPending = true;
+    void ensureWindow()
+      .then(() => {
+        if (!window) return;
+        if (window.isMinimized()) window.restore();
+        window.show();
+        window.focus();
+        deliverSupport();
+      })
+      .catch((error: Error) =>
+        dialog.showErrorBox('Could not open About & Support', error.message),
+      );
+  };
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       ...(process.platform === 'darwin'
@@ -891,7 +959,7 @@ async function start(
             {
               label: 'Canopy',
               submenu: [
-                { role: 'about' as const },
+                { label: 'About Canopy', click: showSupport },
                 ...(!demoMode
                   ? [
                       {
@@ -923,6 +991,24 @@ async function start(
             },
           ]),
       {
+        label: 'Help',
+        submenu: [
+          { label: 'About & Support', click: showSupport },
+          ...Object.values(supportLinks).map(({ label, url }) => ({
+            label,
+            click: () =>
+              void shell
+                .openExternal(url)
+                .catch((error: Error) =>
+                  dialog.showErrorBox(
+                    'Could not open support link',
+                    error.message,
+                  ),
+                ),
+          })),
+        ],
+      },
+      {
         label: 'Edit',
         submenu: [
           { role: 'undo' },
@@ -946,10 +1032,12 @@ async function start(
       },
     ]),
   );
-  await createWindow();
   app.on('activate', () => {
-    if (!window) void createWindow();
+    void ensureWindow().catch((error: Error) =>
+      dialog.showErrorBox('Could not open Canopy', error.message),
+    );
   });
+  await ensureWindow();
 }
 export function launch(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
