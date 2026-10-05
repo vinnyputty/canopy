@@ -186,5 +186,8 @@ export async function auditBulk(app, page, modifier) {
   const error = page
     .getByRole('alert')
     .filter({ hasText: 'Temporary bulk failure' });
-  if (await error.isVisible()) await error.getByRole('button').click();
+  if (await error.isVisible())
+    await error
+      .getByRole('button', { name: 'Dismiss error', exact: true })
+      .click();
 }

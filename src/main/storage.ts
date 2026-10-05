@@ -57,7 +57,7 @@ export class Storage {
       ) as T;
     } catch {
       throw new Error(
-        'Saved credentials could not be unlocked using this OS account.',
+        'Saved credentials could not be unlocked using this OS account. Unlock the keychain and restart Canopy with the original OS account. Keep a backup of saved credentials; do not delete them to retry.',
       );
     }
   }

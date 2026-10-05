@@ -88,7 +88,7 @@ js_binary(
 js_binary(
     name = "smoke_github",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/smoke-github.mjs", "tools/smoke-github-cli.mjs"],
+    data = [":build", ":node_modules", "package.json", "tools/smoke-github.mjs", "tools/smoke-github-cli.mjs", "tools/smoke-setup.mjs"],
     args = ["smoke-github"],
     patch_node_fs = False,
     tags = ["manual"],

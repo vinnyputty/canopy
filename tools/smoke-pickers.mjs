@@ -84,7 +84,7 @@ export async function auditPickers(app, page) {
   await page
     .getByRole('alert')
     .filter({ hasText: 'Assignment permission denied' })
-    .getByRole('button')
+    .getByRole('button', { name: 'Dismiss error', exact: true })
     .click();
   // Restore the initial owner through the same validated action.
   await field('assignee').click();
@@ -517,7 +517,14 @@ export async function auditSelfConnections(app, page) {
         .fill('test@example.invalid');
       await page.getByPlaceholder('Paste your token').fill('fixture-token');
       await page
-        .getByRole('button', { name: 'Connect with token', exact: true })
+        .getByRole('button', { name: 'Verify and save Jira', exact: true })
+        .click();
+      // The demo IDs deliberately lack a verified token-account identity.
+      await expect(
+        page.getByRole('dialog', { name: 'Connect Jira', exact: true }),
+      ).toContainText('Connection saved.');
+      await page
+        .getByRole('button', { name: 'Close dialog', exact: true })
         .click();
     };
     await replaceAccount();

@@ -7,6 +7,7 @@ import type {
 } from '../shared/types';
 import type { Storage } from './storage';
 import { JiraRequests } from './jira-requests';
+import { providerFetch, verificationError } from './connection-errors';
 
 type Tokens = { accessToken: string; refreshToken: string; expiresAt: number };
 type Grant = {
@@ -130,7 +131,7 @@ export class Auth {
     if (owners.size !== 1)
       throw new Error('Use one GitHub repository owner per connection.');
     const call = async (path: string) => {
-      const response = await fetch(`https://api.github.com${path}`, {
+      const response = await providerFetch(`https://api.github.com${path}`, {
         headers: {
           Authorization: `Bearer ${token}`,
           Accept: 'application/vnd.github+json',
@@ -139,17 +140,21 @@ export class Auth {
         redirect: 'error',
         signal: AbortSignal.timeout(20_000),
       });
-      if (!response.ok)
-        throw new Error(
-          `GitHub returned ${response.status} while verifying ${path}. Check token permissions and selected repositories.`,
-        );
+      if (!response.ok) throw await verificationError('GitHub', response);
       return response.json();
     };
     const user = await call('/user');
     if (typeof user.login !== 'string')
       throw new Error('GitHub did not return an account.');
-    for (const repo of repositories)
-      await call(`/repos/${repo}/issues?per_page=1`);
+    for (const repo of repositories) {
+      try {
+        await call(`/repos/${repo}/issues?per_page=1`);
+      } catch (error) {
+        throw new Error(
+          `Could not verify ${repo}. ${(error as Error).message}`,
+        );
+      }
+    }
     const id = `github:${createHash('sha256')
       .update(`${user.login}:${repositories[0].split('/')[0]}`)
       .digest('hex')
@@ -162,11 +167,18 @@ export class Auth {
       url: 'https://github.com',
       repositories,
     };
+    const previous = this.githubAccounts;
     this.githubAccounts = [
       ...this.githubAccounts.filter((account) => account.connection.id !== id),
       { connection, token },
     ];
-    await this.save();
+    try {
+      await this.save();
+    } catch (error) {
+      this.githubAccounts = previous;
+      throw error;
+    }
+    this.githubRetry.delete(id);
     return this.connections();
   }
   async githubRequest(
@@ -195,7 +207,7 @@ export class Auth {
       throw new Error(
         `GitHub rate limit reached. Retry after ${new Date(retryAt).toLocaleTimeString()}.`,
       );
-    const response = await fetch(`https://api.github.com${path}`, {
+    const response = await providerFetch(`https://api.github.com${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${account.token}`,
@@ -284,7 +296,14 @@ export class Auth {
       typeof input.scoped !== 'boolean'
     )
       throw new Error('Enter your Jira site, Atlassian email, and API token.');
-    const site = new URL(input.siteUrl.trim());
+    let site: URL;
+    try {
+      site = new URL(input.siteUrl.trim());
+    } catch {
+      throw new Error(
+        'Enter your Jira Cloud site origin, such as https://your-team.atlassian.net.',
+      );
+    }
     if (
       site.protocol !== 'https:' ||
       !/^[a-z0-9-]+\.atlassian\.net$/.test(site.hostname) ||
@@ -308,7 +327,7 @@ export class Auth {
       throw new Error('Enter a valid Atlassian email and API token.');
     let apiBase = site.origin;
     if (input.scoped) {
-      const response = await fetch(`${site.origin}/_edge/tenant_info`, {
+      const response = await providerFetch(`${site.origin}/_edge/tenant_info`, {
         redirect: 'error',
         signal: AbortSignal.timeout(20_000),
       });
@@ -325,15 +344,12 @@ export class Auth {
       apiBase = `https://api.atlassian.com/ex/jira/${resource.cloudId}`;
     }
     const authorization = `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`;
-    const response = await fetch(`${apiBase}/rest/api/3/myself`, {
+    const response = await providerFetch(`${apiBase}/rest/api/3/myself`, {
       headers: { Authorization: authorization, Accept: 'application/json' },
       signal: AbortSignal.timeout(20_000),
       redirect: 'error',
     });
-    if (!response.ok)
-      throw new Error(
-        `Jira rejected this connection (${response.status}). Check the email, token type/scopes, site access, and your company’s API-token policy.`,
-      );
+    if (!response.ok) throw await verificationError('Jira', response);
     const account = await response.json();
     if (typeof account.accountId !== 'string')
       throw new Error('Jira did not return a valid account.');
@@ -346,12 +362,18 @@ export class Auth {
       provider: 'jira',
     };
     const saved = { connection, email, token, apiBase };
-    this.requests.forget(id);
+    const previous = this.accounts;
     this.accounts = [
       ...this.accounts.filter((a) => a.connection.id !== id),
       saved,
     ];
-    await this.save();
+    try {
+      await this.save();
+    } catch (error) {
+      this.accounts = previous;
+      throw error;
+    }
+    this.requests.forget(id);
     return this.connections();
   }
   private async startConnect() {
@@ -360,7 +382,7 @@ export class Auth {
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     const session = await json(
-      await fetch(`${origin}/sessions`, {
+      await providerFetch(`${origin}/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ challenge }),
@@ -381,7 +403,7 @@ export class Auth {
     const deadline = Date.now() + 5 * 60_000;
     while (Date.now() < deadline) {
       await delay(1500);
-      const response = await fetch(`${origin}/sessions/${session.id}`, {
+      const response = await providerFetch(`${origin}/sessions/${session.id}`, {
         headers: { Authorization: `Bearer ${verifier}` },
         signal: AbortSignal.timeout(20_000),
         redirect: 'error',
@@ -389,7 +411,7 @@ export class Auth {
       if (response.status === 202) continue;
       const credentials = tokens(await json(response));
       const resources = await json(
-        await fetch(
+        await providerFetch(
           'https://api.atlassian.com/oauth/token/accessible-resources',
           {
             headers: { Authorization: `Bearer ${credentials.accessToken}` },
@@ -478,7 +500,7 @@ export class Auth {
       const send = () => {
         assertCurrent();
         this.requests.assertReady(connectionId);
-        return fetch(`${base}${path}`, {
+        return providerFetch(`${base}${path}`, {
           ...init,
           headers: {
             'Content-Type': 'application/json',
@@ -516,7 +538,7 @@ export class Auth {
         assertCurrent();
         if (response.status === 403)
           throw new Error(
-            `Jira denied access. Check issue permissions and your organization’s app-access policy. ${details}`,
+            `Jira denied access. Check token scopes, issue permissions, and your organization’s app-access policy. ${details}`,
           );
         if (response.status === 401)
           throw new Error(
@@ -535,7 +557,7 @@ export class Auth {
   private async refresh(grant: Grant) {
     if (!this.refreshing.has(grant.id)) {
       const task = (async () => {
-        const response = await fetch(
+        const response = await providerFetch(
           `${brokerOrigin(grant.brokerUrl)}/refresh`,
           {
             method: 'POST',

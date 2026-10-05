@@ -30,6 +30,7 @@ import type {
   ChildIssueInput,
 } from '../shared/types';
 import { Auth } from './auth';
+import { diagnosticReport, exportDiagnosticReport } from './diagnostics';
 import { JiraProvider, jiraRemoteLinkUrl } from './jira';
 import {
   GithubProvider,
@@ -424,6 +425,7 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let reviewedDiagnostics: string | undefined;
   const handlers: Record<string, (...args: any[]) => unknown> = {
     updateState: () => updates.snapshot(),
     updatePreferences: (value: unknown) => updates.preferences(value),
@@ -436,6 +438,36 @@ async function start(
     dismissUpdateNotice: () => updates.dismiss(),
     openRelease: (tag: unknown) =>
       updates.open(tag, (url) => shell.openExternal(url)),
+    diagnostics: () => {
+      let credentialStorage: 'available' | 'unavailable' | 'unlock-failed' =
+        authError ? 'unlock-failed' : 'available';
+      try {
+        storage.assertSecure();
+      } catch {
+        credentialStorage = 'unavailable';
+      }
+      reviewedDiagnostics = diagnosticReport({
+        version: app.getVersion(),
+        platform: process.platform,
+        demoMode,
+        credentialStorage,
+        connections: connections(),
+        retryAt: (connection) =>
+          connection.provider === 'github'
+            ? auth.githubSyncStatus(connection.id).retryAt
+            : auth.syncStatus(connection.id).retryAt,
+      });
+      return reviewedDiagnostics;
+    },
+    exportDiagnostics: (reviewed: unknown) =>
+      exportDiagnosticReport(reviewed, reviewedDiagnostics, async () => {
+        const result = await dialog.showSaveDialog(window!, {
+          title: 'Export reviewed diagnostics',
+          defaultPath: 'canopy-diagnostics.json',
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        return result.canceled ? undefined : result.filePath;
+      }),
     demoMode: () => demoMode,
     demoTimeScale: () => {
       const scale = Number(process.env.CANOPY_DEMO_TIME_SCALE ?? 1);
