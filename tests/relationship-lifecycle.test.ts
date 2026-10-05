@@ -29,7 +29,12 @@ import {
 import { activateTab, sameRoot, visit } from '../src/renderer/workspace';
 import { rootView } from '../src/renderer/table-view';
 import { DemoProvider } from '../src/main/demo-provider';
-import { RootRefreshGate, RefreshSchedule } from '../src/renderer/refresh';
+import {
+  RootRefreshGate,
+  RefreshSchedule,
+  RefreshAnnouncements,
+  treeRefreshError,
+} from '../src/renderer/refresh';
 import { Mutations } from '../src/renderer/mutations';
 import {
   issueRelationships,
@@ -265,6 +270,8 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
     'relationshipConfirmedSnapshots',
     'updateRelationshipGraphs',
     'manualRelationshipRefreshes',
+    'refreshAnnouncement',
+    'refreshAnnouncements',
     'relationshipGeneration',
     'relationshipIdentity',
     'inspectRelationships',
@@ -333,6 +340,8 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
   const context: any = {
     relationshipChangedKeys,
     relationshipKinds,
+    RefreshAnnouncements,
+    treeRefreshError,
     crypto: { randomUUID: () => `request-${pending.length}` },
     useState: (value: unknown) => {
       const index = stateIndex++;
@@ -460,10 +469,11 @@ function rendererRequests(realRefresh = false, initialTabs?: TabState[]) {
   assert.ok(publish, 'production mutation snapshot callback');
   runInNewContext(
     js(
-      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, receiveInbox: receiveInboxGraphs, inspection: typeof inboxInspection === 'undefined' ? undefined : inboxInspection, refresh: refreshTab, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current], graphRef: () => relationshipGraphsRef.current };`,
+      `${declarations}\nglobalThis.api = { inspect: inspectRelationships, receiveInbox: receiveInboxGraphs, inspection: typeof inboxInspection === 'undefined' ? undefined : inboxInspection, refresh: refreshTab, feedback: refreshAnnouncements, publish: ${publish.getText(source)}, intent: () => [...manualRelationshipRefreshes.current], graphRef: () => relationshipGraphsRef.current };`,
     ),
     context,
   );
+  context.api.feedback.activate(tabs[0]?.id ?? null);
   const renderEffects = () => {
     effectIndex = 0;
     runInNewContext(js(effects), context);
@@ -2004,7 +2014,12 @@ test('actual Inbox and saved-view refresh callbacks carry manual relationship in
     const first = api.inspect('work', 'A-1');
     api.pending[0].resolve(graph('A-1'));
     await first;
+    api.context.api.feedback.activate('view', {
+      name,
+      roots: [{ id: 'work/A-1', label: 'A-1', tabIds: [api.tabs[0].id] }],
+    });
     const context = {
+      refreshAnnouncements: api.context.api.feedback,
       setIdentityRetry: () => {},
       savedSources: [api.tabs[0]],
       allRefreshTabs: api.tabs,

@@ -112,13 +112,14 @@ for (const dismissal of ['Escape', 'Cancel', 'Save', 'backdrop']) {
       parentElement: null,
     };
     let active: unknown;
-    const origin = {
+    class ElementFixture {}
+    const origin = Object.assign(new ElementFixture(), {
       isConnected: true,
       parentElement: container,
       focus: () => {
         active = origin;
       },
-    };
+    });
     active = 'palette input';
     let nextDialog;
     const shortcutCommand = findNode(
@@ -206,7 +207,10 @@ for (const dismissal of ['Escape', 'Cancel', 'Save', 'backdrop']) {
     // Exercise the production Dialog's actual autoFocus and Escape/backdrop handlers.
     const dialog = execute(declaration(source, 'Dialog').getText(), {
       __jsx: jsx,
-      useRef: () => ({ current: null }),
+      HTMLElement: ElementFixture,
+      requestAnimationFrame: (callback: () => void) => callback(),
+      useRef: (value: unknown) => ({ current: value }),
+      useLayoutEffect: (effect: () => () => void) => effect(),
       useEffect: (effect: () => void) => effect(),
       window: {
         addEventListener: (_: string, listener: typeof keydown) => {

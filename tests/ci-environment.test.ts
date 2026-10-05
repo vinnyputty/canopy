@@ -147,6 +147,56 @@ for (const platform of ['darwin', 'linux']) {
   });
 }
 
+for (const [platform, display] of [
+  ['darwin', undefined],
+  ['win32', undefined],
+  ['linux', undefined],
+  ['linux', ':fixture'],
+] as const) {
+  test(`actual CI isolates focused accessibility after full smoke on ${platform} with ${display ?? 'no display'}`, async () => {
+    const parent = {
+      USER_SECRET: secret,
+      DISPLAY: display,
+      CANOPY_SMOKE_ACCESSIBILITY_ONLY: '1',
+      JS_BINARY__NODE_BINARY: 'fixture-parent-node',
+      RUNFILES_DIR: 'fixture-parent-runfiles',
+    };
+    const { calls } = await run(platform, parent);
+    const smokeCalls = calls.filter((call) => call.args.includes('//:smoke'));
+    assert.equal(smokeCalls.length, 2);
+    assert.equal(smokeCalls[0].env.CANOPY_SMOKE_ACCESSIBILITY_ONLY, undefined);
+    assert.equal(smokeCalls[1].env.CANOPY_SMOKE_ACCESSIBILITY_ONLY, '1');
+    assert.equal(
+      calls.filter((call) => call.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY === '1')
+        .length,
+      1,
+    );
+    assert.deepEqual(
+      calls
+        .filter((call) => call.args.includes('run'))
+        .map((call) => call.args.at(-1)),
+      ['//:smoke', '//:smoke', '//:demo_check', '//:package'],
+    );
+    for (const call of smokeCalls) {
+      assert.equal(call.env.JS_BINARY__NODE_BINARY, undefined);
+      assert.equal(call.env.RUNFILES_DIR, undefined);
+      assert.equal(call.env.CSC_IDENTITY_AUTO_DISCOVERY, 'false');
+      assert.equal(call.cwd, '/fixture source');
+      assert.deepEqual(
+        call.args,
+        platform === 'linux' && !display
+          ? ['-a', 'bazel', '--ignore_all_rc_files', 'run', '//:smoke']
+          : ['--ignore_all_rc_files', 'run', '//:smoke'],
+      );
+      assert.equal(
+        call.command,
+        platform === 'linux' && !display ? 'xvfb-run' : 'bazel',
+      );
+    }
+    assert.equal(parent.CANOPY_SMOKE_ACCESSIBILITY_ONLY, '1');
+  });
+}
+
 test('Windows cache aliases follow Node sorted-first semantics without stale aliases', async () => {
   const { testCall } = await run('win32', {
     PSMODULEANALYSISCACHEPATH: cache,

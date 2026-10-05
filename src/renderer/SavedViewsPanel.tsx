@@ -9,6 +9,7 @@ import type { ViewResult, ViewSource } from './saved-views';
 
 type Props = {
   view: SavedIssueView;
+  refreshStatusId?: string;
   connections: Connection[];
   availableRoots: RootReference[];
   sources: ViewSource[];
@@ -45,7 +46,11 @@ export function SavedViewsPanel(props: Props) {
   const filters = (value: Partial<SavedIssueView['filters']>) =>
     patch({ filters: { ...view.filters, ...value } });
   return (
-    <section className="saved-view-page" aria-label={`${view.name} saved view`}>
+    <section
+      className="saved-view-page"
+      aria-label={`${view.name} saved view`}
+      aria-describedby={props.refreshStatusId}
+    >
       <header className="saved-view-header">
         <div>
           <h1>{view.name}</h1>

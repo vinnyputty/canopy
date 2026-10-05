@@ -147,7 +147,15 @@ import {
   readingStyle,
 } from './table-view';
 import { Mutations } from './mutations';
-import { RefreshSchedule, RootRefreshGate } from './refresh';
+import {
+  refreshDestination,
+  treeRefreshError,
+  RefreshAnnouncements,
+  type RefreshAnnouncement,
+  RefreshSchedule,
+  RootRefreshGate,
+} from './refresh';
+import { RefreshStatus } from './RefreshStatus';
 import {
   configuredRoots,
   sourceTabId,
@@ -637,6 +645,11 @@ export function App() {
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const previousVirtualTabs = useRef(new Map<string, TabState>());
+  const [refreshAnnouncement, setRefreshAnnouncement] =
+    useState<RefreshAnnouncement | null>(null);
+  const [refreshAnnouncements] = useState(
+    () => new RefreshAnnouncements(setRefreshAnnouncement),
+  );
   const refreshSchedule = useRef(new RefreshSchedule());
   const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
   const snapshotsRef = useRef(snapshots);
@@ -810,6 +823,25 @@ export function App() {
         .filter((tab) => savedSources.some((source) => sameRoot(source, tab)))
         .map((tab) => tab.id)
     : [];
+  const refreshOwner = refreshDestination(
+    workspace.activeTabId,
+    activeSavedView?.id,
+  );
+  refreshAnnouncements.activate(
+    refreshOwner,
+    activeSavedView
+      ? {
+          name: activeSavedView.name,
+          roots: savedSources.map((source) => ({
+            id: refreshRootKey(source),
+            label: `${connections.find((connection) => connection.id === source.connectionId)?.name ?? source.connectionId} · ${source.rootKey}`,
+            tabIds: allRefreshTabs
+              .filter((tab) => sameRoot(source, tab))
+              .map((tab) => tab.id),
+          })),
+        }
+      : undefined,
+  );
   const sourceTabKeys = JSON.stringify(
     workspace.tabs.map(({ id, connectionId, rootKey }) => [
       id,
@@ -851,6 +883,10 @@ export function App() {
     [activeSavedView, savedSources, viewSnapshots, currentUsers],
   );
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
+  const savingKeys =
+    snapshot?.issues
+      .filter((issue) => saving.has(`${activeTab?.connectionId}:${issue.key}`))
+      .map((issue) => issue.key) ?? [];
   const nextTaskOpen = activeTab ? Boolean(nextTaskViews[activeTab.id]) : false;
   const nextTaskCriterion = activeTab
     ? (nextTaskCriteria[activeTab.id] ?? 'rank')
@@ -1324,6 +1360,7 @@ export function App() {
     ) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       if (userRequested) manualRelationshipRefreshes.current.add(tab.id);
+      const userQueued = userRequested && refreshAnnouncements.request(tab.id);
       explicit ||= forcedRefreshes.current.has(tab.id);
       if (
         (!navigator.onLine && !demoMode) ||
@@ -1335,7 +1372,10 @@ export function App() {
       }
       if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
       if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) {
-        if (explicit && !runningExplicitRefreshes.current.has(tab.id)) {
+        if (
+          userQueued ||
+          (explicit && !runningExplicitRefreshes.current.has(tab.id))
+        ) {
           forcedRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
         }
@@ -1360,6 +1400,11 @@ export function App() {
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
       refreshSequences.current[tab.id] = sequence;
       if (explicit) runningExplicitRefreshes.current.set(tab.id, sequence);
+      const announcement = refreshAnnouncements.begin(
+        tab.id,
+        tab.rootKey,
+        mutations.confirmedSnapshot(tab.id) ?? snapshotsRef.current[tab.id],
+      );
       const epoch = mutations.beginRefresh();
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
@@ -1393,7 +1438,9 @@ export function App() {
                 refreshSequences.current[tab.id] !== sequence)
             )
               continue;
-            const previous = mutations.confirmedSnapshot(target.id);
+            const previous =
+              mutations.confirmedSnapshot(target.id) ??
+              snapshotsRef.current[target.id];
             mutations.receive(target, next, epoch);
             const confirmed = mutations.confirmedSnapshot(target.id) ?? next;
             if (manualRelationships)
@@ -1407,6 +1454,13 @@ export function App() {
                   ),
                 ],
                 new Set(),
+              );
+            if (target.id !== tab.id)
+              refreshAnnouncements.receive(
+                target.id,
+                mutations.confirmedSnapshot(target.id) ?? next,
+                previous,
+                announcement.scope,
               );
             delivered.add(target.id);
           }
@@ -1441,6 +1495,11 @@ export function App() {
           deferredRefreshes.current.add(tab.id);
         }
         if (!delivered.size) return;
+        if (delivered.has(tab.id))
+          refreshAnnouncements.complete(
+            announcement,
+            mutations.confirmedSnapshot(tab.id) ?? next,
+          );
         setConnectionErrors((current) => {
           const copy = new Set(current);
           for (const id of delivered) copy.delete(id);
@@ -1463,19 +1522,23 @@ export function App() {
         if (
           refreshSequences.current[tab.id] !== sequence ||
           !rootRefreshes.current.isCurrent(rootKey, load.generation) ||
-          !tabsRef.current.some((item) => item.id === tab.id)
+          !tabsRef.current.some((item) => item.id === tab.id) ||
+          refreshBlocked.current(tab.connectionId)
         )
           return;
         if (status?.retryAt) {
           cooldowns.current[tab.connectionId] = status.retryAt;
           setCooldownTimes({ ...cooldowns.current });
         }
+        const message = treeRefreshError(error);
+        refreshAnnouncements.fail(announcement, tab.rootKey, message);
         setConnectionErrors((current) => new Set(current).add(tab.id));
         setErrors((current) => ({
           ...current,
-          [tab.id]: error instanceof Error ? error.message : String(error),
+          [tab.id]: message,
         }));
       } finally {
+        refreshAnnouncements.end(announcement);
         mutations.endRefresh(epoch);
         if (runningExplicitRefreshes.current.get(tab.id) === sequence)
           runningExplicitRefreshes.current.delete(tab.id);
@@ -1825,6 +1888,7 @@ export function App() {
         forcedRefreshes.current.delete(id);
         manualRelationshipRefreshes.current.delete(id);
         runningExplicitRefreshes.current.delete(id);
+        refreshAnnouncements.forget(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
         setter(
@@ -3571,6 +3635,11 @@ export function App() {
       </aside>
 
       <main className="main">
+        <RefreshStatus
+          message={refreshAnnouncement}
+          owner={refreshOwner}
+          scope={refreshAnnouncements.scope}
+        />
         <div className="tabstrip" role="tablist" aria-label="Open issue trees">
           <button
             className="icon-button sidebar-reveal"
@@ -3769,6 +3838,7 @@ export function App() {
                   }}
                   onMoreRoots={() => setInboxRootLimit((limit) => limit + 10)}
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((tab) =>
@@ -3781,6 +3851,7 @@ export function App() {
               ) : (
                 <SavedViewsPanel
                   view={activeSavedView}
+                  refreshStatusId="refresh-status"
                   connections={connections}
                   availableRoots={availableRoots}
                   sources={savedSources}
@@ -3826,6 +3897,7 @@ export function App() {
                     }))
                   }
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((item) =>
@@ -4275,6 +4347,7 @@ export function App() {
                   </button>
                 )}
                 <button
+                  aria-label="Dismiss error"
                   onClick={() =>
                     setErrors((value) => {
                       const copy = { ...value };
@@ -4303,7 +4376,7 @@ export function App() {
               </div>
             )}
             {snapshot?.warnings.map((warning) => (
-              <div className="warning-banner" key={warning}>
+              <div className="warning-banner" key={warning} role="status">
                 <AlertCircle size={14} />
                 {warning}
               </div>
@@ -4696,6 +4769,7 @@ export function App() {
                   ) : shownTree ? (
                     <div
                       role="tree"
+                      data-tab-id={activeTab.id}
                       aria-label={`${activeTab.rootKey} issue tree`}
                       className="issue-tree"
                     >
@@ -4874,6 +4948,11 @@ export function App() {
                   )}
                 </div>
                 <footer className="statusbar">
+                  <span className="sr-only" role="status" aria-atomic="true">
+                    {savingKeys.length > 0
+                      ? `Saving ${savingKeys.join(', ')}`
+                      : ''}
+                  </span>
                   {snapshot ? (
                     <>
                       <span>
@@ -6066,6 +6145,24 @@ function SummaryEditor({
 }) {
   const [value, setValue] = useState(issue.summary);
   const committed = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    const container = input?.parentElement;
+    const tree = container?.closest('[role="tree"]');
+    const tabId = tree?.getAttribute('data-tab-id');
+    return () => {
+      if (document.activeElement !== input) return;
+      requestAnimationFrame(() => {
+        if (
+          container?.isConnected &&
+          tree?.getAttribute('data-tab-id') === tabId &&
+          document.activeElement === document.body
+        )
+          container.querySelector<HTMLButtonElement>('button.summary')?.focus();
+      });
+    };
+  }, []);
   const submit = () => {
     if (committed.current) return;
     committed.current = true;
@@ -6078,6 +6175,7 @@ function SummaryEditor({
   };
   return (
     <input
+      ref={inputRef}
       autoFocus
       className="summary-input"
       value={value}
@@ -7858,6 +7956,20 @@ function Dialog({
   initialFocus?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const returnFocus = useRef(
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
+  useLayoutEffect(() => {
+    const trigger = returnFocus.current;
+    return () => {
+      requestAnimationFrame(() => {
+        if (trigger?.isConnected && document.activeElement === document.body)
+          trigger.focus();
+      });
+    };
+  }, []);
   useEffect(() => {
     const panel = panelRef.current;
     const keydown = (event: KeyboardEvent) => {
@@ -7922,9 +8034,14 @@ function Dialog({
 
 function TreeSkeleton() {
   return (
-    <div className="skeleton" aria-label="Loading issue tree">
+    <div className="skeleton" role="status" aria-label="Loading issue tree">
+      <span className="sr-only">Loading issue tree</span>
       {[0, 1, 2, 3, 4, 5].map((item) => (
-        <div key={item} style={{ marginLeft: `${(item % 3) * 26}px` }}>
+        <div
+          key={item}
+          aria-hidden="true"
+          style={{ marginLeft: `${(item % 3) * 26}px` }}
+        >
           <span />
           <span />
           <span />

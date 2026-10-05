@@ -39,14 +39,14 @@ js_test(
     name = "format_check",
     entry_point = "tools/check.mjs",
     args = ["format"],
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", "docs/*.json", ".github/**/*.yml"]),
 )
 
 js_test(
     name = "portable_checks",
     timeout = "long",
     entry_point = "tools/portable-check.mjs",
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", "docs/*.json", ".github/**/*.yml"]),
 )
 
 js_binary(
@@ -79,7 +79,7 @@ js_binary(
 js_binary(
     name = "smoke",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-sidebar.mjs", "tests/fixtures/sidebar-root-view.json", "tools/smoke-child.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-palette.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs"],
+    data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-accessibility.mjs", "tools/smoke-saved-feedback.mjs", "tools/smoke-sidebar.mjs", "tests/fixtures/sidebar-root-view.json", "tools/smoke-child.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-palette.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs"],
     args = ["smoke"],
     patch_node_fs = False,
     tags = ["manual"],

@@ -19,10 +19,11 @@
   --border: #d9dde4;
   --border-soft: #e7e9ed;
   --text: #1e2430;
-  --muted: #626b79;
-  --faint: #9299a6;
+  --muted: #576171;
+  --faint: #576171;
   --accent: #2d6db5;
   --accent-hover: #245b99;
+  --on-accent: #ffffff;
   --danger: #bd3c47;
   --warning: #865c13;
   --brand-from: #5a93d4;
@@ -45,9 +46,10 @@
   --border-soft: #2c3036;
   --text: #e4e7eb;
   --muted: #a1a8b3;
-  --faint: #747c88;
+  --faint: #a1a8b3;
   --accent: #67a0df;
   --accent-hover: #79afe8;
+  --on-accent: #17191d;
   --danger: #e06a73;
   --warning: #e8bd76;
   --brand-from: #5a93d4;
@@ -68,9 +70,10 @@
     --border-soft: #2c3036;
     --text: #e4e7eb;
     --muted: #a1a8b3;
-    --faint: #747c88;
+    --faint: #a1a8b3;
     --accent: #67a0df;
     --accent-hover: #79afe8;
+    --on-accent: #17191d;
     --danger: #e06a73;
     --warning: #e8bd76;
     --brand-from: #5a93d4;
@@ -91,9 +94,10 @@
   --border-soft: #d7e5e8;
   --text: #17303b;
   --muted: #49616c;
-  --faint: #647b84;
+  --faint: #49616c;
   --accent: #096b83;
   --accent-hover: #07566b;
+  --on-accent: #ffffff;
   --danger: #ae3547;
   --warning: #865809;
   --brand-from: #2799ae;
@@ -117,6 +121,7 @@
   --faint: #8caab4;
   --accent: #8cdaed;
   --accent-hover: #ade9f5;
+  --on-accent: #10252e;
   --danger: #ff929c;
   --warning: #ecc078;
   --brand-from: #41b6cb;
@@ -136,9 +141,10 @@
   --border-soft: #e0e8d9;
   --text: #263329;
   --muted: #58695a;
-  --faint: #718171;
+  --faint: #58695a;
   --accent: #3d7133;
   --accent-hover: #315d29;
+  --on-accent: #ffffff;
   --danger: #af3944;
   --warning: #80560c;
   --brand-from: #7cae65;
@@ -162,6 +168,7 @@
   --faint: #9fb69e;
   --accent: #b0e19d;
   --accent-hover: #cdf0c0;
+  --on-accent: #1b261f;
   --danger: #ff979d;
   --warning: #eac17b;
   --brand-from: #8ac47a;
@@ -185,6 +192,7 @@
     --faint: #8caab4;
     --accent: #8cdaed;
     --accent-hover: #ade9f5;
+    --on-accent: #10252e;
     --danger: #ff929c;
     --warning: #ecc078;
     --brand-from: #41b6cb;
@@ -206,6 +214,7 @@
     --faint: #9fb69e;
     --accent: #b0e19d;
     --accent-hover: #cdf0c0;
+    --on-accent: #1b261f;
     --danger: #ff979d;
     --warning: #eac17b;
     --brand-from: #8ac47a;
@@ -799,12 +808,13 @@ select:focus-visible,
 }
 .toolbar {
   min-height: 46px;
-  flex: 0 0 46px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 0 12px 0 17px;
+  gap: 8px 12px;
+  padding: 8px 12px 8px 17px;
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg);
 }
@@ -826,6 +836,7 @@ select:focus-visible,
 }
 .toolbar-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
 }
@@ -1415,8 +1426,9 @@ select:focus-visible,
   opacity: 1;
 }
 .statusbar {
-  height: 23px;
-  flex: 0 0 23px;
+  min-height: 23px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -1524,7 +1536,7 @@ select:focus-visible,
 }
 .primary {
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .primary:hover:not(:disabled) {
   background: var(--accent-hover);
@@ -1707,7 +1719,7 @@ kbd {
 .dialog {
   width: min(520px, calc(100vw - 36px));
   max-height: min(650px, calc(100vh - 80px));
-  overflow: hidden;
+  overflow: auto;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--panel-raised);
@@ -2278,7 +2290,7 @@ kbd {
   *,
   *:before,
   *:after {
-    animation-duration: 0.001ms !important;
+    animation: none !important;
     transition-duration: 0.001ms !important;
   }
 }
