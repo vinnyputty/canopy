@@ -41,6 +41,7 @@ import {
 import { Storage } from './storage';
 import { Updates } from './updates';
 import { restoreWindow, type WindowState } from './window-state';
+import { WindowStateSaver } from './window-state-saver';
 import { configureLinuxCredentialStore } from './credentials';
 import { demoWorkspace } from './demo';
 import {
@@ -819,8 +820,12 @@ async function start(
       clearRelationshipRequests();
     });
     if (saved?.maximized) created.maximize();
-    let savingWindow: Promise<void> = Promise.resolve();
+    const windowStateSaver = new WindowStateSaver(
+      (state) => storage.write('window', state),
+      (error) => console.error('Could not save window state:', error),
+    );
     let closeApproved = false;
+    let closingWindow = false;
     const saveBounds = () => {
       if (
         demoMode ||
@@ -829,13 +834,10 @@ async function start(
         created.isFullScreen()
       )
         return;
-      savingWindow = storage.write('window', {
+      windowStateSaver.update({
         bounds: created.getNormalBounds(),
         maximized: created.isMaximized(),
       } satisfies WindowState);
-      void savingWindow.catch((error) =>
-        console.error('Could not save window state:', error),
-      );
     };
     created.on('resize', saveBounds);
     created.on('move', saveBounds);
@@ -844,14 +846,14 @@ async function start(
     created.on('close', (event) => {
       if (closeApproved) return;
       event.preventDefault();
+      if (closingWindow) return;
+      closingWindow = true;
       saveBounds();
-      void savingWindow
-        .catch(() => {})
-        .finally(() => {
-          closeApproved = true;
-          if (quitting) app.quit();
-          else created.close();
-        });
+      void windowStateSaver.flush().finally(() => {
+        closeApproved = true;
+        if (quitting) app.quit();
+        else created.close();
+      });
     });
     window.webContents.on('before-input-event', (event, input) => {
       const modifier =

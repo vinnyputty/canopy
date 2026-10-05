@@ -27,6 +27,7 @@ await cp(join(root, 'dist'), stagedDist, {
 const mode = process.argv[2];
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 if (mode === 'smoke') manifest.main = 'dist/smoke-main.cjs';
+if (mode === 'window-check') manifest.main = 'dist/window-main.cjs';
 delete manifest.dependencies;
 delete manifest.devDependencies;
 delete manifest.packageManager;
@@ -36,7 +37,8 @@ if (
   mode === 'demo' ||
   mode === 'demo-check' ||
   mode === 'smoke' ||
-  mode === 'smoke-github'
+  mode === 'smoke-github' ||
+  mode === 'window-check'
 ) {
   // Electron's platform archive is a runtime download, outside Bazel actions.
   const { downloadArtifact } = await import('@electron/get');
@@ -69,18 +71,23 @@ if (
   const demoData =
     mode === 'demo' ? await mkdtemp(join(tmpdir(), 'canopy-demo-')) : null;
   const result =
-    mode === 'smoke' || mode === 'smoke-github' || mode === 'demo-check'
+    mode === 'smoke' ||
+    mode === 'smoke-github' ||
+    mode === 'demo-check' ||
+    mode === 'window-check'
       ? spawnSync(
           process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
           [
             join(
               root,
               'tools',
-              mode === 'smoke'
-                ? 'smoke.mjs'
-                : mode === 'demo-check'
-                  ? 'demo-check.mjs'
-                  : 'smoke-github-cli.mjs',
+              mode === 'window-check'
+                ? 'window-check.mjs'
+                : mode === 'smoke'
+                  ? 'smoke.mjs'
+                  : mode === 'demo-check'
+                    ? 'demo-check.mjs'
+                    : 'smoke-github-cli.mjs',
             ),
           ],
           {
