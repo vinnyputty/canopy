@@ -95,6 +95,15 @@ js_binary(
 )
 
 js_binary(
+    name = "instance_check",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", "package.json", "tools/instance-check.mjs"],
+    args = ["instance-check"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
     name = "package",
     entry_point = "tools/desktop.mjs",
     data = [":build", ":node_modules", "package.json"],

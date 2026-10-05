@@ -35,6 +35,7 @@ if (
   mode === 'dev' ||
   mode === 'demo' ||
   mode === 'demo-check' ||
+  mode === 'instance-check' ||
   mode === 'smoke' ||
   mode === 'smoke-github'
 ) {
@@ -69,7 +70,10 @@ if (
   const demoData =
     mode === 'demo' ? await mkdtemp(join(tmpdir(), 'canopy-demo-')) : null;
   const result =
-    mode === 'smoke' || mode === 'smoke-github' || mode === 'demo-check'
+    mode === 'smoke' ||
+    mode === 'smoke-github' ||
+    mode === 'demo-check' ||
+    mode === 'instance-check'
       ? spawnSync(
           process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
           [
@@ -80,8 +84,11 @@ if (
                 ? 'smoke.mjs'
                 : mode === 'demo-check'
                   ? 'demo-check.mjs'
-                  : 'smoke-github-cli.mjs',
+                  : mode === 'instance-check'
+                    ? 'instance-check.mjs'
+                    : 'smoke-github-cli.mjs',
             ),
+            ...(mode === 'instance-check' ? process.argv.slice(3) : []),
           ],
           {
             stdio: 'inherit',
