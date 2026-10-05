@@ -239,11 +239,12 @@ export function App() {
   );
   const setWorkspace = useCallback(
     (update: React.SetStateAction<Workspace>) => {
-      storeWorkspace((current) =>
-        typeof update === 'function'
-          ? update(withScrollPositions(current, scrollPositions.current))
-          : update,
-      );
+      storeWorkspace((current) => {
+        if (typeof update !== 'function') return update;
+        const overlaid = withScrollPositions(current, scrollPositions.current);
+        const next = update(overlaid);
+        return next === overlaid ? current : next;
+      });
     },
     [],
   );

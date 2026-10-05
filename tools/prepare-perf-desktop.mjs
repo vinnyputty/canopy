@@ -139,8 +139,8 @@ for (const [label, source] of [
       contents: `
     import { createHash } from 'node:crypto';
     import { largeProvider } from './tests/fixtures/large-trees';
-    import { buildIssueTree, filterTree, flattenVisible } from '${join(archive, 'src/renderer/tree.ts')}';
-    import { viewResults } from '${join(archive, 'src/renderer/saved-views.ts')}';
+    import { buildIssueTree, filterTree, flattenVisible } from ${JSON.stringify(join(archive, 'src/renderer/tree.ts'))};
+    import { viewResults } from ${JSON.stringify(join(archive, 'src/renderer/saved-views.ts'))};
     export async function counts() {
       const results = [];
       for (const provider of ['jira', 'github']) {
