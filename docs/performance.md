@@ -24,7 +24,7 @@ Source review precedes changed GUI acceptance. All Electron/GUI/clipboard work r
 `tools/prepare-perf-desktop.mjs` builds a clean, committed candidate and an explicit exact `CANOPY_PERF_BASE` commit (current comparison main `b27c0bc8dcc17cf09198d09245d0aa76c52341e8`) into isolated temporary archives without launching Electron. Both sources use identical candidate fake-transport fixtures and audit observers, with real source-specific providers, preload, IPC handlers and renderer. The manifest records exact source IDs, audit harness hashes, output bundle hashes and expected counts computed with each source's production provider/filter/saved-view functions. It requires complete fixtures before preparing the pair. The preparer also writes the full manifest SHA-256. The driver requires fresh approval naming that exact base, candidate and manifest digest, validates complete paired source/scenario ownership, and checks every required harness and bundle hash before importing desktop tooling:
 
 ```sh
-CANOPY_PERF_BASE='63b0c6e32c2995b0ec2b421375402bd21e8d229e' node tools/prepare-perf-desktop.mjs
+CANOPY_PERF_BASE='b27c0bc8dcc17cf09198d09245d0aa76c52341e8' node tools/prepare-perf-desktop.mjs
 CANOPY_PERF_APPROVED_BASE='<freshly approved exact base>' CANOPY_PERF_APPROVED_MANIFEST_SHA256='<freshly approved manifest digest>' CANOPY_PERF_PAIR='<printed manifest path>' CANOPY_PERF_APPROVED_HEAD='<freshly source-approved exact candidate>' CANOPY_DESKTOP_TOKEN='<explicitly granted token>' CANOPY_ELECTRON_PATH='<Electron executable>' node tools/perf-desktop.mjs
 ```
 
