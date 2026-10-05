@@ -4,6 +4,7 @@ import {
   relationshipKinds,
   relationshipFailure,
 } from '../shared/relationships';
+import { authoringAction } from '../shared/authoring';
 import { Providers } from './providers';
 import {
   app,
@@ -612,6 +613,71 @@ async function start(
       return client.olderComments(normalized(id, issue), page);
     },
     issueUrl: (id: string, issue: string) => issueUrl(id, issue),
+    authoringOptions: (id: string, issue: string) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Authoring is unavailable for demo issues.');
+      return client.authoring.options(normalized(id, issue));
+    },
+    previewParent: (id: string, issue: string, parent: string | null) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Parent changes are unavailable for demo issues.');
+      return client.authoring.plan(
+        normalized(id, issue),
+        parent === null ? null : normalized(id, parent),
+      );
+    },
+    author: (id: string, issue: string, value: unknown) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Authoring is unavailable for demo issues.');
+      const action = authoringAction(value);
+      const issueKey = normalized(id, issue);
+      if (action.kind === 'parent') {
+        action.plan.key = normalized(id, action.plan.key);
+        if (action.plan.key !== issueKey)
+          throw new Error('Preview belongs to a different issue.');
+        if (action.plan.parentKey)
+          action.plan.parentKey = normalized(id, action.plan.parentKey);
+        if (action.plan.previousParent)
+          action.plan.previousParent = normalized(
+            id,
+            action.plan.previousParent,
+          );
+      }
+      return client.authoring.write(issueKey, action);
+    },
+    openAttachment: async (id: string, issue: string, attachmentId: string) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Attachments are unavailable for demo issues.');
+      const options = await client.authoring.options(normalized(id, issue));
+      const attachment = options.attachments.find(
+        (item) => item.id === text(attachmentId),
+      );
+      if (!attachment)
+        throw new Error('Attachment is unavailable. Refresh and try again.');
+      const connection = connections().find((item) => item.id === id)!;
+      const url =
+        client instanceof JiraProvider
+          ? new URL(
+              `/rest/api/3/attachment/content/${encodeURIComponent(attachment.id)}`,
+              connection.url,
+            )
+          : new URL(attachment.url);
+      if (
+        url.protocol !== 'https:' ||
+        url.username ||
+        url.password ||
+        (client instanceof GithubProvider &&
+          !['github.com', 'user-images.githubusercontent.com'].includes(
+            url.hostname,
+          ))
+      )
+        throw new Error('Invalid attachment URL.');
+      await shell.openExternal(url.href);
+    },
     development: (id: string, issue: string) =>
       provider(id).development(normalized(id, issue)),
     openDevelopmentLink: (id: string, url: string) => {
