@@ -1,6 +1,22 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
 const api: CanopyAPI = {
+  handoffReady: (clientId) =>
+    ipcRenderer.invoke('canopy:handoffReady', clientId),
+  handoffAck: (session, id, result) =>
+    ipcRenderer.invoke('canopy:handoffAck', session, id, result),
+  handoffCancel: (session) =>
+    ipcRenderer.invoke('canopy:handoffCancel', session),
+  onHandoff: (callback) => {
+    const listener = (
+      _event: unknown,
+      state: import('../shared/types').HandoffState,
+    ) => callback(state);
+    ipcRenderer.on('canopy:handoff', listener);
+    return () => {
+      ipcRenderer.removeListener('canopy:handoff', listener);
+    };
+  },
   updateState: () => ipcRenderer.invoke('canopy:updateState'),
   updatePreferences: (value) =>
     ipcRenderer.invoke('canopy:updatePreferences', value),

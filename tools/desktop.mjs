@@ -12,6 +12,10 @@ import {
 import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+if (process.argv[2] === 'handoff-check')
+  (await import('./handoff-audit.mjs')).requireHandoffLifecycle(
+    process.argv.slice(3),
+  );
 const require = createRequire(import.meta.url);
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
@@ -27,6 +31,7 @@ await cp(join(root, 'dist'), stagedDist, {
 const mode = process.argv[2];
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 if (mode === 'smoke') manifest.main = 'dist/smoke-main.cjs';
+if (mode === 'handoff-check') manifest.main = 'dist/handoff-audit-main.cjs';
 delete manifest.dependencies;
 delete manifest.devDependencies;
 delete manifest.packageManager;
@@ -36,6 +41,7 @@ if (
   mode === 'demo' ||
   mode === 'demo-check' ||
   mode === 'instance-check' ||
+  mode === 'handoff-check' ||
   mode === 'smoke' ||
   mode === 'smoke-github'
 ) {
@@ -73,7 +79,8 @@ if (
     mode === 'smoke' ||
     mode === 'smoke-github' ||
     mode === 'demo-check' ||
-    mode === 'instance-check'
+    mode === 'instance-check' ||
+    mode === 'handoff-check'
       ? spawnSync(
           process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
           [
@@ -84,11 +91,15 @@ if (
                 ? 'smoke.mjs'
                 : mode === 'demo-check'
                   ? 'demo-check.mjs'
-                  : mode === 'instance-check'
-                    ? 'instance-check.mjs'
-                    : 'smoke-github-cli.mjs',
+                  : mode === 'handoff-check'
+                    ? 'handoff-check.mjs'
+                    : mode === 'instance-check'
+                      ? 'instance-check.mjs'
+                      : 'smoke-github-cli.mjs',
             ),
-            ...(mode === 'instance-check' ? process.argv.slice(3) : []),
+            ...(['instance-check', 'handoff-check'].includes(mode)
+              ? process.argv.slice(3)
+              : []),
           ],
           {
             stdio: 'inherit',
@@ -102,7 +113,11 @@ if (
         )
       : spawnSync(
           executable,
-          [staging, ...(mode === 'demo' ? ['--canopy-demo'] : [])],
+          [
+            staging,
+            ...(mode === 'demo' ? ['--canopy-demo'] : []),
+            ...process.argv.slice(3),
+          ],
           {
             stdio: 'inherit',
             env: demoData

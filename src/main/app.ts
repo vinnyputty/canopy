@@ -1,9 +1,11 @@
 import { validTriage } from '../shared/triage';
+import { WorkHandoffQueue } from './work-handoff';
 import {
   issueRelationships,
   relationshipKinds,
   relationshipFailure,
 } from '../shared/relationships';
+import { validateCopyTemplate } from '../shared/copy-template';
 import { Providers } from './providers';
 import {
   app,
@@ -57,6 +59,19 @@ configureLinuxCredentialStore((store) =>
 if (process.env.CANOPY_USER_DATA)
   app.setPath('userData', process.env.CANOPY_USER_DATA);
 let window: BrowserWindow | null = null;
+const handoffs = new WorkHandoffQueue(() => {
+  if (window && !window.isDestroyed()) {
+    try {
+      window.webContents.send('canopy:handoff', {
+        session: '',
+        rejected: true,
+      });
+    } catch {
+      handoffs.cancel();
+    }
+  }
+});
+let resetHandoffCancellation = () => {};
 let focusRequested = false;
 let focusWindow = () => {
   focusRequested = true;
@@ -167,6 +182,11 @@ function workspace(value: Workspace) {
     (value.viewDefaults !== undefined && !validViewMap(value.viewDefaults))
   )
     throw new Error('Invalid table view.');
+  if (
+    value.copyTemplate !== undefined &&
+    !validateCopyTemplate(value.copyTemplate)
+  )
+    throw new Error('Invalid copy template.');
   if (value.reading !== undefined && !validReading(value.reading))
     throw new Error('Invalid reading settings.');
   if (value.triage !== undefined && !validTriage(value.triage))
@@ -418,6 +438,31 @@ async function start(
   };
   let demoLaunch: symbol | null = null;
   const handlers: Record<string, (...args: any[]) => unknown> = {
+    handoffReady: (clientId: unknown) => {
+      if (
+        typeof clientId !== 'string' ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(
+          clientId,
+        )
+      )
+        throw new Error('Invalid handoff owner.');
+      if (quitting || closingWindow || !window || window.isDestroyed())
+        throw new Error('Canopy is closing.');
+      const owner = window;
+      resetHandoffCancellation();
+      return handoffs.ready((state) => {
+        if (window === owner && !owner.isDestroyed()) {
+          try {
+            owner.webContents.send('canopy:handoff', state);
+          } catch {
+            handoffs.cancel();
+          }
+        }
+      }, clientId);
+    },
+    handoffAck: (session: unknown, id: unknown, result: unknown) =>
+      handoffs.acknowledge(session, id, result),
+    handoffCancel: (session: unknown) => handoffs.cancel(text(session, 128)),
     updateState: () => updates.snapshot(),
     updatePreferences: (value: unknown) => updates.preferences(value),
     checkUpdates: (background: unknown) => {
@@ -801,12 +846,28 @@ async function start(
       },
     });
     const created = window;
+    let initialLoad = true;
+    let handoffCanceled = false;
+    const cancelHandoffs = () => {
+      if (handoffCanceled || window !== created) return;
+      handoffCanceled = true;
+      handoffs.cancel();
+    };
+    resetHandoffCancellation = () => {
+      handoffCanceled = false;
+    };
     created.webContents.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument)
+      if (details.isMainFrame && !details.isSameDocument) {
         clearRelationshipRequests();
+        if (!initialLoad) cancelHandoffs();
+      }
     });
-    created.webContents.on('render-process-gone', clearRelationshipRequests);
+    created.webContents.on('render-process-gone', () => {
+      clearRelationshipRequests();
+      cancelHandoffs();
+    });
     created.webContents.on('destroyed', () => {
+      cancelHandoffs();
       updates.cancel();
       for (const controller of searches.values()) controller.abort();
       searches.clear();
@@ -837,6 +898,7 @@ async function start(
     created.on('unmaximize', saveBounds);
     created.on('close', (event) => {
       if (closeApproved) return;
+      cancelHandoffs();
       event.preventDefault();
       if (closingWindow) return;
       closingWindow = new Promise<void>((resolve) => {
@@ -877,6 +939,7 @@ async function start(
       window = null;
     });
     await window.loadFile(html);
+    initialLoad = false;
   };
   const openDemoFromMenu = () =>
     void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
@@ -984,14 +1047,44 @@ async function start(
 export function launch(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
+  handoffArguments: string[] = [],
 ) {
   // Electron scopes this lock to userData, including isolated demo/smoke profiles.
   // Acquire it before readiness or reading any profile state.
-  if (!app.requestSingleInstanceLock()) {
+  const boundedArgs =
+    handoffArguments.length <= 2 &&
+    handoffArguments.every(
+      (arg) => typeof arg === 'string' && arg.length <= 2048,
+    )
+      ? handoffArguments
+      : ['--invalid-canopy-command'];
+  if (
+    !app.requestSingleInstanceLock({
+      canopyArguments: boundedArgs,
+      canopyMode: demoMode ? 'demo' : 'main',
+    })
+  ) {
     app.quit();
     return;
   }
-  app.on('second-instance', () => focusWindow());
+  app.on('before-quit', () => handoffs.stop());
+  handoffs.receive(boundedArgs);
+  app.on('second-instance', (_event, _argv, _directory, data: unknown) => {
+    if (data !== undefined) {
+      if (
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length !== 2 ||
+        !('canopyArguments' in data) ||
+        !('canopyMode' in data) ||
+        data.canopyMode !== (demoMode ? 'demo' : 'main')
+      )
+        handoffs.reject();
+      else handoffs.receive(data.canopyArguments);
+    }
+    focusWindow();
+  });
   app
     .whenReady()
     .then(() => start(createFixture, demoMode))

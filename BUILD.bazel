@@ -25,28 +25,28 @@ js_test(
     name = "test",
     timeout = "long",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-refresh.mjs", "tools/portable-check.mjs", "tools/ci.mjs"],
+    data = [":node_modules", ":sources", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-refresh.mjs", "tools/portable-check.mjs", "tools/ci.mjs", "tools/handoff-audit.mjs", "tools/handoff-check.mjs", "tools/desktop.mjs", "tools/handoff-native.mjs", "tools/handoff-transport.mjs", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts"],
 )
 
 js_test(
     name = "typecheck",
     entry_point = "tools/check.mjs",
     args = ["types"],
-    data = [":node_modules", ":sources"],
+    data = [":node_modules", ":sources", "tools/audit-lifecycle.d.mts"],
 )
 
 js_test(
     name = "format_check",
     entry_point = "tools/check.mjs",
     args = ["format"],
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md", "tools/audit-lifecycle.d.mts"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
 )
 
 js_test(
     name = "portable_checks",
     timeout = "long",
     entry_point = "tools/portable-check.mjs",
-    data = [":node_modules", ":sources", ".prettierrc.json", "README.md"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
+    data = [":node_modules", ":sources", ".prettierrc.json", "README.md", "tools/audit-lifecycle.d.mts"] + glob(["tools/*.mjs", "docs/*.md", ".github/**/*.yml"]),
 )
 
 js_binary(
@@ -131,6 +131,15 @@ js_binary(
     name = "palette_check",
     entry_point = "tools/palette-check.mjs",
     data = [":build", ":node_modules", "package.json", "tools/audit-lifecycle.mjs"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "handoff_check",
+    entry_point = "tools/desktop.mjs",
+    data = [":build", ":node_modules", "package.json", "tools/handoff-check.mjs", "tools/handoff-audit.mjs", "tools/handoff-native.mjs", "tools/handoff-transport.mjs", "tools/audit-lifecycle.mjs"],
+    args = ["handoff-check"],
     patch_node_fs = False,
     tags = ["manual"],
 )

@@ -212,6 +212,7 @@ export type TabState = {
 };
 export type Workspace = {
   triage?: import('./triage').TriageState;
+  copyTemplate?: string;
   reading?: ReadingSettings;
   tabs: TabState[];
   activeTabId: string | null;
@@ -244,7 +245,29 @@ export type TokenConnectionInput = {
   scoped: boolean;
 };
 export type GithubConnectionInput = { token: string; repositories: string[] };
+export type HandoffDelivery = {
+  expiresAt: number;
+  session: string;
+  id: string;
+  intent: import('./work-handoff').WorkHandoff;
+};
+export type HandoffState = {
+  session: string;
+  delivery?: HandoffDelivery;
+  rejected?: boolean;
+  canceledId?: string;
+};
+
 export interface CanopyAPI {
+  handoffReady(clientId: string): Promise<HandoffState>;
+  handoffAck(
+    session: string,
+    id: string,
+    result: 'opened' | 'rejected',
+  ): Promise<boolean>;
+  handoffCancel(session: string): Promise<boolean>;
+  onHandoff(callback: (state: HandoffState) => void): () => void;
+
   updateState(): Promise<import('./updates').UpdateState>;
   updatePreferences(
     value: import('./updates').UpdatePreferences,
