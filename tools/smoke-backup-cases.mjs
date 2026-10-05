@@ -106,10 +106,13 @@ try {
   const saved = async () =>
     JSON.parse(await readFile(join(profile, 'workspace.json'), 'utf8'));
   const seed = async (workspace) => {
-    await page.evaluate(async (value) => {
-      await window.canopy.saveWorkspace(value);
-      await window.canopy.reloadWorkspace();
-    }, workspace);
+    await page.evaluate(
+      (value) => window.canopy.saveWorkspace(value),
+      workspace,
+    );
+    // Observe reload from the host; the old document cannot await its own
+    // reload IPC reply after main destroys its execution context.
+    await page.reload();
     await expect(
       page.getByRole('button', { name: 'Settings', exact: true }),
     ).toBeVisible();
