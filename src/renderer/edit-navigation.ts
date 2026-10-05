@@ -37,23 +37,42 @@ export function retainEditingOrder(
     !retained.size
   )
     return next;
-  const prior = new Map(
-    previous.children.map((child) => [child.issue.key, child]),
-  );
-  const children = next.children.map((child) =>
-    retainEditingOrder(child, prior.get(child.issue.key), retained)!,
-  );
-  const pinned = new Map(
-    children
-      .filter(
-        (child) => retained.has(child.issue.key) && prior.has(child.issue.key),
-      )
-      .map((child) => [child.issue.key, child]),
-  );
-  const ordered = children.filter((child) => !pinned.has(child.issue.key));
-  previous.children.forEach((child, index) => {
-    const node = pinned.get(child.issue.key);
-    if (node) ordered.splice(Math.min(index, ordered.length), 0, node);
-  });
-  return { ...next, children: ordered };
+  const pending = [{ next, previous }],
+    order: { next: IssueNode; previous: IssueNode }[] = [];
+  const results = new Map<IssueNode, IssueNode>();
+  while (pending.length) {
+    const pair = pending.pop()!;
+    order.push(pair);
+    const prior = new Map(
+      pair.previous.children.map((child) => [child.issue.key, child]),
+    );
+    for (const child of pair.next.children) {
+      const old = prior.get(child.issue.key);
+      if (old) pending.push({ next: child, previous: old });
+    }
+  }
+  for (let i = order.length - 1; i >= 0; i--) {
+    const { next: current, previous: old } = order[i];
+    const prior = new Map(
+      old.children.map((child) => [child.issue.key, child]),
+    );
+    const children = current.children.map(
+      (child) => results.get(child) ?? child,
+    );
+    const pinned = new Map(
+      children
+        .filter(
+          (child) =>
+            retained.has(child.issue.key) && prior.has(child.issue.key),
+        )
+        .map((child) => [child.issue.key, child]),
+    );
+    const ordered = children.filter((child) => !pinned.has(child.issue.key));
+    old.children.forEach((child, index) => {
+      const node = pinned.get(child.issue.key);
+      if (node) ordered.splice(Math.min(index, ordered.length), 0, node);
+    });
+    results.set(current, { ...current, children: ordered });
+  }
+  return results.get(next)!;
 }

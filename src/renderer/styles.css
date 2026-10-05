@@ -2447,7 +2447,15 @@ kbd {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: calc(43px + var(--branch-depth) * 23px);
+  left: 43px;
+  width: calc(1px + var(--branch-depth) * 23px);
+  background: repeating-linear-gradient(
+    to right,
+    var(--border) 0,
+    var(--border) 1px,
+    transparent 1px,
+    transparent 23px
+  );
   border-left: 1px solid var(--border);
   pointer-events: none;
   z-index: 1;
@@ -3160,4 +3168,15 @@ kbd {
 .palette-detail small {
   color: var(--muted);
   margin-top: 3px;
+}
+
+/* Viewport gaps carry layout only; logical membership stays in the row model. */
+[data-row-window] {
+  overflow-anchor: none;
+}
+[data-window-row] {
+  display: flow-root;
+}
+.saved-view-list [data-window-row] {
+  padding-bottom: 5px;
 }

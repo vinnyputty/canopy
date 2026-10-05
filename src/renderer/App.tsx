@@ -1,6 +1,7 @@
 import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
 import { recoverTriage } from '../shared/triage';
 import { InboxPanel } from './InboxPanel';
+import { WindowedRows, type RowWindow } from './WindowedRows';
 import {
   relationshipChangedKeys,
   relationshipDestination,
@@ -15,6 +16,7 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import { withScrollPositions } from './scroll-position';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -89,6 +91,8 @@ import {
   ancestorPath,
   expansionKeys,
   childCounts,
+  treeCounts,
+  visibleRows,
   indexTree,
   type IssueNode,
 } from './tree';
@@ -228,11 +232,35 @@ function refreshRootKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {
 }
 export function App() {
   const updates = useUpdates();
-  const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const [workspace, storeWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const scrollPositions = useRef(new Map<string, number>());
+  const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const setWorkspace = useCallback(
+    (update: React.SetStateAction<Workspace>) => {
+      storeWorkspace((current) => {
+        if (typeof update !== 'function') return update;
+        const overlaid = withScrollPositions(current, scrollPositions.current);
+        const next = update(overlaid);
+        return next === overlaid ? current : next;
+      });
+    },
+    [],
+  );
+  useEffect(() => {
+    const retained = new Set(
+      [...workspace.tabs, ...(workspace.closedTabs ?? [])].map((tab) => tab.id),
+    );
+    for (const id of scrollPositions.current.keys())
+      if (!retained.has(id)) scrollPositions.current.delete(id);
+  }, [workspace.tabs, workspace.closedTabs]);
+  useEffect(() => () => clearTimeout(scrollSaveTimer.current), []);
   const [selectedViewIssue, setSelectedViewIssue] = useState<string | null>(
     null,
   );
   const [connections, storeConnections] = useState<Connection[]>([]);
+  const [snapshotEvictions, setSnapshotEvictions] = useState(new Set<string>());
   const [snapshots, setSnapshots] = useState<Record<string, TreeSnapshot>>({});
   const [confirmedSnapshots, setConfirmedSnapshots] = useState<
     Record<string, TreeSnapshot>
@@ -306,7 +334,10 @@ export function App() {
   const appearanceSaving = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
-  workspaceRef.current = workspace;
+  workspaceRef.current = withScrollPositions(
+    workspace,
+    scrollPositions.current,
+  );
   connectionsRef.current = connections;
   historyRef.current = history;
   const [sidebarSession, setSidebarSession] = useState(emptySidebarSession);
@@ -693,6 +724,12 @@ export function App() {
             }
           }
           relationshipConfirmedSnapshots.current = view.confirmedSnapshots;
+          setSnapshotEvictions(view.evicted);
+          for (const id of view.evicted) {
+            const tab = tabsRef.current.find((tab) => tab.id === id);
+            if (tab) rootRefreshes.current.releaseSnapshot(refreshRootKey(tab));
+            displayedTrees.current.delete(id);
+          }
           setSnapshots(view.snapshots);
           setConfirmedSnapshots(view.confirmedSnapshots);
           setSaving(view.saving);
@@ -709,6 +746,17 @@ export function App() {
               fields.map((field) => field[0].toUpperCase() + field.slice(1)),
             ),
           })),
+        undefined,
+        (tab) => [rootRefreshes.current.snapshot(refreshRootKey(tab))],
+        function* (tab) {
+          const root = displayedTrees.current.get(tab.id);
+          const pending = root ? [root] : [];
+          while (pending.length) {
+            const node = pending.pop()!;
+            yield node.issue;
+            pending.push(...node.children);
+          }
+        },
       ),
   );
   const editSession = useRef(0);
@@ -793,6 +841,8 @@ export function App() {
       })),
     [savedSources],
   );
+  const sourceTabsRef = useRef(sourceTabs);
+  sourceTabsRef.current = sourceTabs;
   activeIdRef.current = activeSavedView
     ? (sourceTabs[0]?.id ?? null)
     : workspace.activeTabId;
@@ -876,10 +926,13 @@ export function App() {
       if (!root) return current;
       return {
         ...current,
-        seenRoots: boundRoots({
-          ...current.seenRoots,
-          [rootKey]: markIssueSeen(root, issue, Date.now()),
-        }),
+        seenRoots: boundRoots(
+          {
+            ...current.seenRoots,
+            [rootKey]: markIssueSeen(root, issue, Date.now()),
+          },
+          current.seenRoots ?? {},
+        ),
       };
     });
   };
@@ -1019,7 +1072,11 @@ export function App() {
     (patch: Partial<RootView>) => {
       if (!activeTab) return;
       setWorkspace((current) => setRootView(current, activeTab, patch));
-      if (patch.assumeMatchingStatusTransitions && snapshot)
+      if (
+        patch.assumeMatchingStatusTransitions &&
+        snapshot &&
+        !snapshot.incomplete
+      )
         void pickers.prime(
           activeTab.connectionId,
           activeTab.rootKey,
@@ -1057,6 +1114,22 @@ export function App() {
   useEffect(() => {
     tabsRef.current = allRefreshTabs;
   }, [allRefreshTabs]);
+  const protectedSnapshotIds = JSON.stringify([
+    ...Object.keys(bulkOperations),
+    ...(childParent ? [childParent.tabId] : []),
+    ...(multiSelection ? [multiSelection.tabId] : []),
+    ...(activeSavedView
+      ? activeViewSourceIdsRef.current
+      : activeTab
+        ? [activeTab.id]
+        : []),
+    ...allRefreshTabs
+      .filter((tab) => editor?.connectionId === tab.connectionId)
+      .map((tab) => tab.id),
+  ]);
+  useEffect(() => {
+    mutations.protectSnapshots(JSON.parse(protectedSnapshotIds));
+  }, [mutations, protectedSnapshotIds]);
   useEffect(() => {
     if (activeSavedView?.filters.assignee !== 'me') return;
     let live = true;
@@ -1290,7 +1363,10 @@ export function App() {
     const save = pendingWorkspaceSave.current
       .catch(() => {})
       .then(() => {
-        if (!demoResetting.current) return window.canopy.saveWorkspace(value);
+        if (!demoResetting.current)
+          return window.canopy.saveWorkspace(
+            withScrollPositions(value, scrollPositions.current),
+          );
       });
     pendingWorkspaceSave.current = save;
     return save;
@@ -1315,16 +1391,73 @@ export function App() {
     };
   }, [workspace, ready, saveWorkspace]);
 
+  const cancelledTrees = useRef(new Set<string>());
+  const treeRequests = useRef(new Map<string, { id: string; epoch: number }>());
+  const treeMounted = useRef(true);
+  useEffect(() => {
+    treeMounted.current = true;
+    const unsubscribe = window.canopy.onTreeProgress((requestId, next) => {
+      for (const [root, request] of treeRequests.current) {
+        if (request.id !== requestId) continue;
+        for (const target of tabsRef.current.filter(
+          (tab) => refreshRootKey(tab) === root,
+        )) {
+          if (refreshBlocked.current(target.connectionId)) continue;
+          // Refreshes retain the last cached tree until the final response.
+          if (
+            !snapshotsRef.current[target.id] ||
+            snapshotsRef.current[target.id].incomplete?.reason ===
+              'Loading more issues…'
+          )
+            mutations.receive(target, next, request.epoch);
+        }
+      }
+    });
+    const dispose = () => {
+      if (!treeMounted.current) return;
+      treeMounted.current = false;
+      unsubscribe();
+      rootRefreshes.current.clear();
+      for (const [root, request] of treeRequests.current) {
+        const [connectionId] = JSON.parse(root);
+        void window.canopy.cancelTree(connectionId, request.id);
+      }
+      treeRequests.current.clear();
+    };
+    window.addEventListener('beforeunload', dispose);
+    return () => {
+      window.removeEventListener('beforeunload', dispose);
+      dispose();
+    };
+  }, [mutations]);
+  const cancelTree = useCallback((tab: TabState) => {
+    const root = refreshRootKey(tab);
+    cancelledTrees.current.add(root);
+    rootRefreshes.current.invalidateQueued(root);
+    const request = treeRequests.current.get(root);
+    if (request) void window.canopy.cancelTree(tab.connectionId, request.id);
+  }, []);
+
   const refreshTab = useCallback(
     async (
       tab: TabState,
       quiet = false,
       explicit = false,
       userRequested = false,
+      retryCancelled = false,
     ) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       if (userRequested) manualRelationshipRefreshes.current.add(tab.id);
       explicit ||= forcedRefreshes.current.has(tab.id);
+      if (retryCancelled) cancelledTrees.current.delete(refreshRootKey(tab));
+      if (cancelledTrees.current.has(refreshRootKey(tab))) return;
+      if (
+        mutations.isEvicted(tab.id) &&
+        !explicit &&
+        activeIdRef.current !== tab.id &&
+        !activeViewSourceIdsRef.current.includes(tab.id)
+      )
+        return;
       if (
         (!navigator.onLine && !demoMode) ||
         refreshBlocked.current(tab.connectionId)
@@ -1341,14 +1474,31 @@ export function App() {
         }
         return;
       }
+      const epoch = mutations.beginRefresh();
       const rootKey = refreshRootKey(tab);
       const load = rootRefreshes.current.load(
         rootKey,
         explicit,
         !snapshotsRef.current[tab.id],
-        () => window.canopy.tree(tab.connectionId, tab.rootKey),
+        () => {
+          if (
+            !treeMounted.current ||
+            cancelledTrees.current.has(rootKey) ||
+            !tabsRef.current.some((item) => refreshRootKey(item) === rootKey)
+          )
+            throw new Error('Tree request cancelled before dispatch.');
+          const id = crypto.randomUUID();
+          treeRequests.current.set(rootKey, { id, epoch });
+          return window.canopy
+            .tree(tab.connectionId, tab.rootKey, id)
+            .finally(() => {
+              if (treeRequests.current.get(rootKey)?.id === id)
+                treeRequests.current.delete(rootKey);
+            });
+        },
       );
       if ('due' in load) {
+        mutations.endRefresh(epoch);
         refreshSchedule.current.defer(tab.id, load.due);
         return;
       }
@@ -1360,17 +1510,26 @@ export function App() {
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
       refreshSequences.current[tab.id] = sequence;
       if (explicit) runningExplicitRefreshes.current.set(tab.id, sequence);
-      const epoch = mutations.beginRefresh();
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
       try {
         const next = await load.promise;
+        if (next.incomplete) {
+          const status = await window.canopy
+            .syncStatus(tab.connectionId)
+            .catch(() => null);
+          if (status?.retryAt) {
+            cooldowns.current[tab.connectionId] = status.retryAt;
+            setCooldownTimes({ ...cooldowns.current });
+          }
+        }
         const targets = load.started
           ? tabsRef.current.filter((item) => refreshRootKey(item) === rootKey)
           : [tab];
         if (
           rootRefreshes.current.isCurrent(rootKey, load.generation) &&
           !refreshBlocked.current(tab.connectionId) &&
+          !next.incomplete &&
           connectionsRef.current.find((item) => item.id === tab.connectionId)
             ?.provider === 'jira' &&
           targets.some(
@@ -1414,17 +1573,22 @@ export function App() {
             const confirmed =
               mutations.confirmedSnapshot(delivered.values().next().value!) ??
               next;
+            if (mutations.confirmedSnapshot(delivered.values().next().value!))
+              rootRefreshes.current.replaceSnapshot(rootKey, confirmed);
             setWorkspace((current) => {
               const seenKey = seenRootKey(tab.connectionId, tab.rootKey);
               return {
                 ...current,
-                seenRoots: boundRoots({
-                  ...current.seenRoots,
-                  [seenKey]: seedOrExtend(
-                    current.seenRoots?.[seenKey],
-                    confirmed,
-                  ),
-                }),
+                seenRoots: boundRoots(
+                  {
+                    ...current.seenRoots,
+                    [seenKey]: seedOrExtend(
+                      current.seenRoots?.[seenKey],
+                      confirmed,
+                    ),
+                  },
+                  current.seenRoots ?? {},
+                ),
               };
             });
           }
@@ -1439,6 +1603,11 @@ export function App() {
           )
             manualRelationshipRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
+          if (rootRefreshes.current.isCurrent(rootKey, load.generation))
+            rootRefreshes.current.releaseSnapshot(rootKey);
+        } else {
+          if (rootRefreshes.current.isCurrent(rootKey, load.generation))
+            rootRefreshes.current.releaseSnapshot(rootKey);
         }
         if (!delivered.size) return;
         setConnectionErrors((current) => {
@@ -1656,9 +1825,11 @@ export function App() {
   const restoreScroll = useCallback((tab: TabState) => {
     const element = scrollRef.current;
     if (!element) return;
-    element.scrollTop = tab.scrollTop;
+    const savedTop = scrollPositions.current.get(tab.id) ?? tab.scrollTop;
+    element.scrollTop = savedTop;
     const scrollTop = element.scrollTop;
-    if (scrollTop === tab.scrollTop) return;
+    if (scrollTop === savedTop) return;
+    scrollPositions.current.set(tab.id, scrollTop);
     // Chromium can clamp without emitting another scroll event after a layout
     // restoration. Save the actual offset even while native events are guarded.
     setWorkspace((current) => {
@@ -1694,6 +1865,7 @@ export function App() {
   }, [activeTab, Boolean(snapshot), restoreScroll]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
+    if (patch.scrollTop !== undefined) scrollPositions.current.delete(tabId);
     setWorkspace((current) => {
       const tab = current.tabs.find((tab) => tab.id === tabId);
       const next =
@@ -1719,6 +1891,7 @@ export function App() {
     if (!restoring) setHistory(visit(historyRef.current, from, tab));
     pendingScrollRestore.current =
       current.tabs.find((item) => sameRoot(item, tab))?.id ?? tab.id;
+    if (restoring) scrollPositions.current.delete(pendingScrollRestore.current);
     setWorkspace((value) => ({
       ...activateTab(value, tab, restoring),
       activeSavedViewId: null,
@@ -1803,17 +1976,22 @@ export function App() {
 
   const forgetTabs = useCallback(
     (ids: string[]) => {
-      for (const tab of workspaceRef.current.tabs.filter((item) =>
-        ids.includes(item.id),
-      )) {
-        if (
-          !tabsRef.current.some(
-            (other) =>
-              !ids.includes(other.id) &&
-              refreshRootKey(other) === refreshRootKey(tab),
-          )
-        )
+      const removed = tabsRef.current.filter((tab) => ids.includes(tab.id));
+      const survivors = tabsRef.current.filter((tab) => !ids.includes(tab.id));
+      // A saved-view root remains owned when its real tab closes. Materialize
+      // that consumer before releasing the tab or dispatching queued work.
+      for (const source of sourceTabsRef.current)
+        if (!survivors.some((tab) => sameRoot(tab, source)))
+          survivors.push(source);
+      tabsRef.current = survivors;
+      for (const tab of removed) {
+        const owners = survivors.filter((other) => sameRoot(other, tab));
+        for (const owner of owners) mutations.adopt(owner, tab.id);
+        if (!owners.length) {
+          cancelTree(tab);
           rootRefreshes.current.forget(refreshRootKey(tab));
+          cancelledTrees.current.delete(refreshRootKey(tab));
+        }
       }
       for (const id of ids) {
         mutations.forget(id);
@@ -1836,7 +2014,7 @@ export function App() {
         ),
       );
     },
-    [mutations],
+    [mutations, cancelTree],
   );
 
   useEffect(() => {
@@ -1850,15 +2028,20 @@ export function App() {
     );
     previousVirtualTabs.current = virtualTabs;
     if (!removed.length) return;
-    for (const tab of removed)
+    for (const tab of removed) {
+      for (const owner of allRefreshTabs.filter((item) => sameRoot(item, tab)))
+        mutations.adopt(owner, tab.id);
       if (
         !allRefreshTabs.some(
           (item) => refreshRootKey(item) === refreshRootKey(tab),
         )
-      )
+      ) {
+        cancelTree(tab);
         rootRefreshes.current.forget(refreshRootKey(tab));
+      }
+    }
     forgetTabs(removed.map((tab) => tab.id));
-  }, [allRefreshTabs, forgetTabs]);
+  }, [allRefreshTabs, forgetTabs, cancelTree, mutations]);
 
   const closeTabIds = useCallback(
     (ids: string[]) => {
@@ -2188,7 +2371,8 @@ export function App() {
         id: 'refresh',
         label: 'Refresh current tree',
         icon: RefreshCw,
-        run: () => activeTab && void refreshTab(activeTab, true, true, true),
+        run: () =>
+          activeTab && void refreshTab(activeTab, true, true, true, true),
       },
       {
         id: 'expandAll',
@@ -2478,7 +2662,7 @@ export function App() {
   );
   const tasks = useMemo(
     () =>
-      snapshot
+      snapshot && nextTaskOpen
         ? nextTasks(
             snapshot,
             activeConnection?.provider ?? 'jira',
@@ -2500,6 +2684,7 @@ export function App() {
         : [],
     [
       snapshot,
+      nextTaskOpen,
       activeConnection?.provider,
       nextTaskCriterion,
       activeTab?.id,
@@ -2567,26 +2752,11 @@ export function App() {
   const expandedSet = new Set(
     filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
+  if (editor && editor.connectionId === activeTab?.connectionId)
+    for (const node of ancestorPath(shownTree, editor.key))
+      expandedSet.add(node.issue.key);
   const linkedSet = new Set(activeTab?.linkedExpanded ?? []);
-  const counts = useMemo(() => {
-    const result = new Map<string, ReturnType<typeof childCounts>>();
-    const visit = (node: IssueNode): number => {
-      const descendants = node.children.reduce(
-        (sum, child) => sum + 1 + visit(child),
-        0,
-      );
-      result.set(node.issue.key, {
-        open: node.children.filter(
-          (child) => child.issue.status.category !== 'done',
-        ).length,
-        total: node.children.length,
-        descendants,
-      });
-      return descendants;
-    };
-    if (tree) visit(tree);
-    return result;
-  }, [tree]);
+  const counts = useMemo(() => treeCounts(tree), [tree]);
   const breadcrumb = ancestorPath(
     tree,
     activeTab?.selectedKey ?? activeTab?.focusKey,
@@ -3774,7 +3944,7 @@ export function App() {
                       const tab = allRefreshTabs.find((tab) =>
                         sameRoot(tab, source),
                       );
-                      if (tab) void refreshTab(tab, true, true, true);
+                      if (tab) void refreshTab(tab, true, true, true, true);
                     }
                   }}
                 />
@@ -3790,7 +3960,15 @@ export function App() {
                     savedSources
                       .map((source) => [
                         source.id,
-                        errors[sourceTabId(source, workspace.tabs)],
+                        errors[sourceTabId(source, workspace.tabs)] ??
+                          (snapshotEvictions.has(
+                            sourceTabId(source, workspace.tabs),
+                          )
+                            ? 'Snapshot released to keep memory bounded. Reload when online; unread baselines are retained.'
+                            : undefined) ??
+                          (viewSnapshots[source.id]?.incomplete
+                            ? `Incomplete results: ${viewSnapshots[source.id].incomplete!.reason}`
+                            : undefined),
                       ])
                       .filter(([, error]) => error),
                   )}
@@ -3800,12 +3978,20 @@ export function App() {
                   loading={
                     new Set(
                       savedSources
-                        .filter((source) =>
-                          loading.has(sourceTabId(source, workspace.tabs)),
+                        .filter(
+                          (source) =>
+                            loading.has(sourceTabId(source, workspace.tabs)) ||
+                            refreshing.has(sourceTabId(source, workspace.tabs)),
                         )
                         .map((source) => source.id),
                     )
                   }
+                  onCancel={() => {
+                    for (const tab of allRefreshTabs.filter((tab) =>
+                      savedSources.some((source) => sameRoot(source, tab)),
+                    ))
+                      cancelTree(tab);
+                  }}
                   onSelect={setSelectedViewIssue}
                   onOpen={openSavedResult}
                   onChange={(view) =>
@@ -3831,7 +4017,7 @@ export function App() {
                       const tab = allRefreshTabs.find((item) =>
                         sameRoot(item, source),
                       );
-                      if (tab) void refreshTab(tab, true, true, true);
+                      if (tab) void refreshTab(tab, true, true, true, true);
                     }
                   }}
                 />
@@ -3949,7 +4135,9 @@ export function App() {
                     refreshing.has(activeTab.id) ||
                     (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                   }
-                  onClick={() => void refreshTab(activeTab, true, true, true)}
+                  onClick={() =>
+                    void refreshTab(activeTab, true, true, true, true)
+                  }
                   title="Refresh"
                 >
                   <RefreshCw
@@ -3967,13 +4155,16 @@ export function App() {
                       );
                       setWorkspace((current) => ({
                         ...current,
-                        seenRoots: boundRoots({
-                          ...current.seenRoots,
-                          [rootKey]: markRootSeen(
-                            confirmedSnapshot,
-                            current.seenRoots?.[rootKey],
-                          ),
-                        }),
+                        seenRoots: boundRoots(
+                          {
+                            ...current.seenRoots,
+                            [rootKey]: markRootSeen(
+                              confirmedSnapshot,
+                              current.seenRoots?.[rootKey],
+                            ),
+                          },
+                          current.seenRoots ?? {},
+                        ),
                       }));
                     }}
                   >
@@ -4263,7 +4454,9 @@ export function App() {
                 </span>
                 {errors[activeTab.id] && (
                   <button
-                    onClick={() => void refreshTab(activeTab, true, true, true)}
+                    onClick={() =>
+                      void refreshTab(activeTab, true, true, true, true)
+                    }
                     disabled={
                       (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
@@ -4300,6 +4493,46 @@ export function App() {
                   {undoState.label}
                 </button>
                 <small>⌘Z / Ctrl+Z</small>
+              </div>
+            )}
+            {snapshot &&
+              snapshot.issues.some(
+                (issue) => !activeSeenRoot?.issues[issue.key],
+              ) && (
+                <div className="error-banner" role="status">
+                  Unread tracking covers only retained baselines (up to 12
+                  roots, 1,000 issues per root and 2 MB). Existing unread
+                  baselines are kept; other issues have no change baseline. Once
+                  a limit is reached, new roots or issues cannot be tracked.
+                  Closing tabs or marking issues seen does not release space.
+                </div>
+              )}
+            {(loading.has(activeTab.id) ||
+              refreshing.has(activeTab.id) ||
+              snapshot?.incomplete) && (
+              <div className="error-banner" role="status">
+                <span>
+                  {snapshot?.incomplete
+                    ? `Incomplete results: ${snapshot.incomplete.reason}`
+                    : 'Loading issues… Cached issues remain readable.'}
+                </span>
+                {loading.has(activeTab.id) || refreshing.has(activeTab.id) ? (
+                  <button onClick={() => cancelTree(activeTab)}>
+                    Cancel load
+                  </button>
+                ) : (
+                  <button
+                    disabled={
+                      !online ||
+                      (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                    }
+                    onClick={() =>
+                      void refreshTab(activeTab, true, true, true, true)
+                    }
+                  >
+                    Retry load
+                  </button>
+                )}
               </div>
             )}
             {snapshot?.warnings.map((warning) => (
@@ -4675,14 +4908,40 @@ export function App() {
                       pendingScrollRestore.current === activeTab.id
                     )
                       return;
-                    updateTab(activeTab.id, {
-                      scrollTop: event.currentTarget.scrollTop,
-                    });
+                    scrollPositions.current.set(
+                      activeTab.id,
+                      event.currentTarget.scrollTop,
+                    );
+                    workspaceRef.current = withScrollPositions(
+                      workspaceRef.current,
+                      scrollPositions.current,
+                    );
+                    clearTimeout(scrollSaveTimer.current);
+                    scrollSaveTimer.current = setTimeout(() => {
+                      void saveWorkspace(workspaceRef.current).catch(
+                        (error: unknown) => {
+                          setErrors((current) => ({
+                            ...current,
+                            workspace: `Couldn’t save workspace: ${String(error)}`,
+                          }));
+                        },
+                      );
+                    }, 180);
                   }}
                 >
                   <TableHeader view={view} update={updateView} />
                   {loading.has(activeTab.id) && !snapshot ? (
                     <TreeSkeleton />
+                  ) : snapshotEvictions.has(activeTab.id) && !snapshot ? (
+                    <EmptyState
+                      icon={AlertCircle}
+                      title="Snapshot released to keep memory bounded"
+                      detail="Unread baselines are retained. Reload this tree when online; open drafts and the current view are protected."
+                      action="Reload tree"
+                      onAction={() =>
+                        void refreshTab(activeTab, false, true, true, true)
+                      }
+                    />
                   ) : errors[activeTab.id] && !snapshot ? (
                     <EmptyState
                       icon={AlertCircle}
@@ -4690,7 +4949,7 @@ export function App() {
                       detail={errors[activeTab.id]}
                       action="Try again"
                       onAction={() =>
-                        void refreshTab(activeTab, false, true, true)
+                        void refreshTab(activeTab, false, true, true, true)
                       }
                     />
                   ) : shownTree ? (
@@ -4700,6 +4959,7 @@ export function App() {
                       className="issue-tree"
                     >
                       <TreeRows
+                        key={activeTab.id}
                         provider={activeConnection?.provider ?? 'jira'}
                         node={shownTree}
                         currentUser={currentUsers[activeTab.connectionId]}
@@ -4779,7 +5039,11 @@ export function App() {
                               : { issue, x, y, trigger: toggle },
                           );
                         }}
-                        editor={editor}
+                        editor={
+                          editor?.connectionId === activeTab.connectionId
+                            ? editor
+                            : null
+                        }
                         beginEdit={beginEdit}
                         onOpenWorkflow={(key) => void openWorkflow(key)}
                         cancelEdit={() => setEditor(null)}
@@ -5521,7 +5785,76 @@ type RowsProps = {
   focusNeighbor: (key: string, direction: -1 | 1, extend?: boolean) => void;
 };
 
-function TreeRows(props: RowsProps) {
+export function TreeRows(props: RowsProps) {
+  const api = useRef<RowWindow | null>(null);
+  const expanded = useMemo(() => {
+    if (!props.editor) return props.expanded;
+    // An open editor owns its row even if a collapse action hides its ancestry.
+    const next = new Set(props.expanded);
+    for (const node of ancestorPath(props.node, props.editor.key))
+      next.add(node.issue.key);
+    return next;
+  }, [props.node, props.expanded, props.editor?.key]);
+  const rows = useMemo(
+    () => visibleRows(props.node, expanded),
+    [props.node, expanded],
+  );
+  const ids = useMemo(() => rows.map((row) => row.node.issue.key), [rows]);
+  const focus = (key: string, extend = false) => {
+    const element = api.current?.ensure(key);
+    if (!element) return;
+    props.suppressFocus.current = true;
+    if (extend) {
+      props.onMultiSelect(key, true, false);
+    } else props.onSelect(key);
+    element
+      .querySelector<HTMLElement>('[data-tree-key]')
+      ?.focus({ preventScroll: true });
+    props.suppressFocus.current = false;
+  };
+  return (
+    <WindowedRows
+      ids={ids}
+      api={api}
+      scrollSelector=".tree-scroll"
+      pinned={[
+        props.selectedKey,
+        props.editor?.key,
+        props.menuKey,
+        props.dragKey,
+        props.revealedKey,
+      ]}
+      renderRow={(index) => {
+        const { node, depth, position, siblings } = rows[index];
+        return (
+          <TreeRow
+            {...props}
+            node={node}
+            depth={props.depth + depth}
+            expanded={expanded}
+            position={position}
+            siblings={siblings}
+            focusDestination={focus}
+            edgeKeys={[ids[0], ids.at(-1)!]}
+            focusNeighbor={(key, direction, extend) => {
+              const target = ids[ids.indexOf(key) + direction];
+              if (target) focus(target, extend);
+            }}
+          />
+        );
+      }}
+    />
+  );
+}
+
+function TreeRow(
+  props: RowsProps & {
+    position: number;
+    siblings: number;
+    focusDestination: (key: string, extend?: boolean) => void;
+    edgeKeys: [string, string];
+  },
+) {
   const {
     node,
     depth,
@@ -5570,6 +5903,21 @@ function TreeRows(props: RowsProps) {
       const rect = event.currentTarget.getBoundingClientRect();
       props.onContextMenu(issue, rect.left + 30, rect.top + 30);
       return;
+    }
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      props.focusDestination(
+        props.edgeKeys[event.key === 'Home' ? 0 : 1],
+        event.shiftKey,
+      );
+    }
+    if (event.key === 'ArrowRight' && open && node.children.length) {
+      event.preventDefault();
+      props.focusDestination(node.children[0].issue.key);
+    }
+    if (event.key === 'ArrowLeft' && !open && issue.parentKey) {
+      event.preventDefault();
+      props.focusDestination(issue.parentKey);
     }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
@@ -5835,6 +6183,12 @@ function TreeRows(props: RowsProps) {
   return (
     <div
       role="treeitem"
+      className={depth > 0 ? 'tree-branch' : undefined}
+      style={{ '--branch-depth': depth - 1 } as React.CSSProperties}
+      data-tree-parent={issue.parentKey}
+      aria-level={depth + 1}
+      aria-posinset={props.position}
+      aria-setsize={props.siblings}
       aria-expanded={hasChildren ? open : undefined}
       aria-label={`${issue.key}: ${issue.summary}`}
       aria-selected={
@@ -5982,22 +6336,6 @@ function TreeRows(props: RowsProps) {
           openExternal={props.onOpenExternal}
           provider={props.provider}
         />
-      )}
-      {hasChildren && open && (
-        <div
-          role="group"
-          className="tree-branch"
-          style={{ '--branch-depth': depth } as React.CSSProperties}
-        >
-          {node.children.map((child) => (
-            <TreeRows
-              key={child.issue.key}
-              {...props}
-              node={child}
-              depth={depth + 1}
-            />
-          ))}
-        </div>
       )}
     </div>
   );
@@ -6452,6 +6790,7 @@ function StatusEditor({
                   ? 'This transition requires fields that Canopy does not edit yet.'
                   : undefined
               }
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => save(choice.id)}
             >
               <span className="status-transition-label">
@@ -6472,6 +6811,7 @@ function StatusEditor({
                   choices.every((value) => value.requiresFields)
                 }
                 aria-label={`Open ${issue.key} in Jira for ${choice.name}`}
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={openWorkflow}
               >
                 Open in Jira
@@ -6489,6 +6829,7 @@ function StatusEditor({
               )}
               role="menuitem"
               title="Each step is checked in Jira before it runs. Undo may stop if a reverse transition is unavailable."
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => savePath(path)}
             >
               <span>

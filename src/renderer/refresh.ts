@@ -13,6 +13,7 @@ type RootEntry<T> = {
   generation: number;
   lastSuccess?: number;
   snapshot?: T;
+  active?: { promise: Promise<T>; generation: number; explicit: boolean };
 };
 
 /** Shares tree reads and their minimum automatic interval across duplicate tabs. */
@@ -45,16 +46,35 @@ export class RootRefreshGate<T> {
         };
       return { due };
     }
+    const previous = root.inflight;
+    const generation = ++this.nextGeneration;
+    root.generation = generation;
+    this.roots.set(key, root);
     const request = () => {
+      if (!this.isCurrent(key, generation))
+        return Promise.reject<T>(
+          new Error('Tree request cancelled before dispatch.'),
+        );
       try {
-        return fetch();
+        const promise = fetch();
+        root.active = { promise, generation, explicit };
+        void promise
+          .finally(() => {
+            if (root.active?.generation === generation) root.active = undefined;
+            // Queued invalidation can restore this raw provider promise as the
+            // inflight owner, distinct from load's queued wrapper promise.
+            if (root.inflight === promise) {
+              root.inflight = undefined;
+              root.inflightExplicit = undefined;
+            }
+          })
+          .catch(() => {});
+        return promise;
       } catch (error) {
         return Promise.reject<T>(error);
       }
     };
-    const previous = root.inflight;
     const promise = previous ? previous.then(request, request) : request();
-    const generation = ++this.nextGeneration;
     root.inflight = promise;
     root.inflightExplicit = explicit;
     root.generation = generation;
@@ -62,7 +82,7 @@ export class RootRefreshGate<T> {
     void promise
       .then(
         (snapshot) => {
-          if (root.generation !== generation) return;
+          if (!this.isCurrent(key, generation)) return;
           root.snapshot = snapshot;
           root.lastSuccess = this.now();
         },
@@ -85,6 +105,34 @@ export class RootRefreshGate<T> {
     const active = new Set(keys);
     for (const [key, root] of this.roots)
       if (!active.has(key) && !root.inflight) this.roots.delete(key);
+  }
+
+  snapshot(key: string): T | undefined {
+    return this.roots.get(key)?.snapshot;
+  }
+
+  replaceSnapshot(key: string, snapshot: T): void {
+    const root = this.roots.get(key);
+    if (root) root.snapshot = snapshot;
+  }
+
+  invalidateQueued(key: string): void {
+    const root = this.roots.get(key);
+    if (!root) return;
+    if (root.active) {
+      root.generation = root.active.generation;
+      root.inflight = root.active.promise;
+      root.inflightExplicit = root.active.explicit;
+    } else this.forget(key);
+  }
+
+  clear(): void {
+    this.roots.clear();
+  }
+
+  releaseSnapshot(key: string): void {
+    const root = this.roots.get(key);
+    if (root) root.snapshot = undefined;
   }
 
   forget(key: string): void {

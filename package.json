@@ -35,6 +35,7 @@
     "electron-builder": "26.15.3",
     "esbuild": "0.25.12",
     "extract-zip": "2.0.1",
+    "jsdom": "27.0.1",
     "prettier": "3.9.6",
     "tsx": "4.23.13",
     "typescript": "5.9.3"

@@ -103,3 +103,5 @@ Editing descriptions and comments, attachments, issue deletion, creating issues 
 The sidebar Triage inbox collects unread changes, assigned work, confirmed blockers and selected review statuses across known workspace roots and providers. Local pins, snoozes and bounded action history save with the workspace; coverage limits and partial failures remain visible. See [workspace controls](docs/workspace.md#triage-inbox).
 
 Portable source checks run from an unrelated temporary directory. The aggregate source suite has a ten-minute child deadline within Bazel’s `long` test bound; type and format children retain their one-minute deadlines on macOS/Linux and ten-minute Windows deadlines. Individual fixture and native operation deadlines remain unchanged. Windows CI includes successful test output so operators can inspect sanitized input-control results alongside required lifecycle assertions. Context comparisons remain read-only diagnostics and may report bounded failures or unavailable outcomes.
+
+Large-tree loading, cache budgets and reproducible performance checks are documented in [the performance audit](docs/performance.md).

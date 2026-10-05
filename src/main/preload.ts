@@ -20,7 +20,21 @@ const api: CanopyAPI = {
   connectGithub: (input) => ipcRenderer.invoke('canopy:connectGithub', input),
   disconnect: (id) => ipcRenderer.invoke('canopy:disconnect', id),
   syncStatus: (id) => ipcRenderer.invoke('canopy:syncStatus', id),
-  tree: (id, key) => ipcRenderer.invoke('canopy:tree', id, key),
+  tree: (id, key, requestId) =>
+    ipcRenderer.invoke('canopy:tree', id, key, requestId),
+  cancelTree: (id, requestId) =>
+    ipcRenderer.invoke('canopy:cancelTree', id, requestId),
+  onTreeProgress: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      requestId: string,
+      snapshot: import('../shared/types').TreeSnapshot,
+    ) => callback(requestId, snapshot);
+    ipcRenderer.on('canopy:treeProgress', listener);
+    return () => {
+      ipcRenderer.removeListener('canopy:treeProgress', listener);
+    };
+  },
   preview: (id, key) => ipcRenderer.invoke('canopy:preview', id, key),
   relationships: (id, key, requestId) =>
     ipcRenderer.invoke('canopy:relationships', id, key, requestId),
