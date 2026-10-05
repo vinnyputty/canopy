@@ -90,6 +90,8 @@ Installers are written to `release/`: DMG/ZIP on macOS, NSIS on Windows, and App
 
 The renderer uses React and TypeScript. Electron's sandboxed preload exposes a narrow typed IPC API. Jira requests and credentials remain in the main process; the renderer cannot make network requests. Workspace state is stored under Electron's application user-data directory. Linux requires a working Secret Service/KWallet backend for real credentials; the insecure `basic_text` fallback is rejected.
 
+The standalone [planning views experiment](docs/planning-prototype.md) provides synthetic graph and milestone fixtures plus an evaluation worksheet for optional post-v1 views.
+
 For an editor's local `node_modules`, with Node.js available:
 
 ```sh
