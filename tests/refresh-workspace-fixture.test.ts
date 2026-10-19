@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { withScrollPositions } from '../src/renderer/scroll-position';
 import { validateWorkspace } from '../src/shared/workspace-validation';
@@ -70,13 +70,14 @@ async function model(options: Record<string, unknown> = {}) {
       store.save(value);
     },
   };
-  const webContents = { mainFrame: { url: 'file:///window.html' } };
+  const html = fileURLToPath(new URL('window.html', import.meta.url));
+  const webContents = { mainFrame: { url: pathToFileURL(html).href } };
   const event = { sender: webContents, senderFrame: webContents.mainFrame };
   const trusted = (handler: (...args: any[]) => any) =>
     execute(trust, {
       handler,
       window: { webContents },
-      html: '/window.html',
+      html,
       pathToFileURL,
     });
   const save = trusted(store.save);
