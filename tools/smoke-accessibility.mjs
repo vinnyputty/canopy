@@ -33,7 +33,7 @@ export async function auditAccessibility(app, page, evidence) {
   // Observe actual fixture completions without substituting responses or clocks.
   await app.evaluate(() => {
     const demo = globalThis.canopySmoke;
-    const observations = { trees: [], updates: [], failures: [] };
+    const observations = { trees: [], attempts: [], updates: [], failures: [] };
     globalThis.canopyAccessibility = observations;
     const tree = demo.tree.bind(demo);
     demo.tree = async (key) => {
@@ -43,6 +43,7 @@ export async function auditAccessibility(app, page, evidence) {
     };
     const update = demo.update.bind(demo);
     demo.update = async (key, patch) => {
+      observations.attempts.push({ key, patch });
       try {
         const result = await update(key, patch);
         observations.updates.push({
@@ -216,8 +217,7 @@ export async function auditAccessibility(app, page, evidence) {
   await capture('summary-rolled-back');
   await alert.getByRole('button', { name: 'Dismiss error' }).click();
 
-  // Focus the same CAN-101 subtree in two distinct tabs so its row/container
-  // survives navigation. The real tab shortcut acts while its editor is focused.
+  // Same-key rows in different tabs have separate editor and focus ownership.
   await open.click();
   await picker.getByRole('combobox').fill('CAN-101');
   await picker.getByRole('button', { name: 'Open tree', exact: true }).click();
@@ -242,13 +242,36 @@ export async function auditAccessibility(app, page, evidence) {
   const sourceTabId = await page.getByRole('tree').getAttribute('data-tab-id');
   expect(sourceTabId).not.toBeNull();
   expect(sourceTabId).not.toBe(targetTabId);
-  const survivingTitle = await sharedSummary.evaluateHandle(
+  const outgoingTitle = await sharedSummary.evaluateHandle(
     (e) => e.parentElement,
   );
+  const confirmedSummary = await sharedSummary.textContent();
+  expect(
+    (await latestTree('CAN-101')).issues.find(({ key }) => key === 'CAN-101')
+      .summary,
+  ).toBe(confirmedSummary);
   await sharedSummary.press('Enter');
   await expect(
     page.getByLabel('Summary for CAN-101', { exact: true }),
   ).toBeFocused();
+  await page
+    .getByLabel('Summary for CAN-101', { exact: true })
+    .fill('Sample outgoing tab draft must not leak');
+  await page.evaluate(() => {
+    globalThis.canopyTabFocus = [];
+    const record = (event) => {
+      const target = event.target;
+      if (!target.closest('[data-tree-key="CAN-101"]')) return;
+      globalThis.canopyTabFocus.push({
+        tabId: target.closest('[role="tree"]')?.getAttribute('data-tab-id'),
+        editor: target.matches('input.summary-input'),
+        summary: target.matches('button.summary'),
+      });
+    };
+    globalThis.canopyTabFocusStop = () =>
+      document.removeEventListener('focusin', record, true);
+    document.addEventListener('focusin', record, true);
+  });
   await page.keyboard.press(
     process.platform === 'darwin' ? 'Meta+3' : 'Control+3',
   );
@@ -260,19 +283,61 @@ export async function auditAccessibility(app, page, evidence) {
     page.getByLabel('Summary for CAN-101', { exact: true }),
   ).toHaveCount(0);
   await afterRestoration();
-  expect(
-    await survivingTitle.evaluate(
-      (e) =>
-        e.isConnected &&
-        e ===
-          document.querySelector(
-            '[data-tree-key="CAN-101"] > .issue-row .issue-title',
-          ),
-    ),
-  ).toBe(true);
+  const tabTransition = await outgoingTitle.evaluate((node) => ({
+    outgoingTitleConnected: node.isConnected,
+    outgoingTitleIsCurrent:
+      node ===
+      document.querySelector(
+        '[data-tree-key="CAN-101"] > .issue-row .issue-title',
+      ),
+    focus: globalThis.canopyTabFocus,
+  }));
+  await writeFile(
+    join(evidence, 'summary-tab-transition.json'),
+    JSON.stringify({ sourceTabId, targetTabId, ...tabTransition }, null, 2),
+  );
+  expect(tabTransition.focus).toEqual([]);
+  await expect(sharedSummary).toHaveText(confirmedSummary);
   await expect(sharedSummary).not.toBeFocused();
+  const noLeakedEdit = async () => {
+    await expect(
+      page.getByLabel('Summary for CAN-101', { exact: true }),
+    ).toHaveCount(0);
+    await expect(sharedSummary).toHaveText(confirmedSummary);
+    expect(
+      (await fixture('tree', 'CAN-101')).issues.find(
+        ({ key }) => key === 'CAN-101',
+      ).summary,
+    ).toBe(confirmedSummary);
+    expect(
+      await app.evaluate(() =>
+        globalThis.canopyAccessibility.attempts.filter(
+          ({ key }) => key === 'CAN-101',
+        ),
+      ),
+    ).toEqual([]);
+  };
+  await noLeakedEdit();
   await capture('summary-same-key-tab-transition');
-  await survivingTitle.dispose();
+  await outgoingTitle.dispose();
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
+  await expect(page.getByRole('tree')).toHaveAttribute(
+    'data-tab-id',
+    sourceTabId,
+  );
+  await afterRestoration();
+  await noLeakedEdit();
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeFocused();
+  await page.getByRole('tab', { name: /CAN-101/ }).click();
+  await expect(page.getByRole('tree')).toHaveAttribute(
+    'data-tab-id',
+    targetTabId,
+  );
+  await afterRestoration();
+  await noLeakedEdit();
+  await expect(page.getByRole('tab', { name: /CAN-101/ })).toBeFocused();
+  expect(await page.evaluate(() => globalThis.canopyTabFocus)).toEqual([]);
+  await page.evaluate(() => globalThis.canopyTabFocusStop());
   await page.getByRole('tab', { name: /CAN-100/ }).click();
   await page.locator('.tree-view-menu > summary').click();
   await page.getByRole('button', { name: 'Back to root', exact: true }).click();
