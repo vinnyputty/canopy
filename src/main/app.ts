@@ -796,6 +796,7 @@ async function start(
       minWidth: Math.min(920, saved?.bounds.width ?? 920),
       minHeight: Math.min(600, saved?.bounds.height ?? 600),
       ...(saved?.bounds ?? {}),
+      show: !saved?.maximized,
       title: demoMode ? 'Canopy — Demo' : 'Canopy',
       backgroundColor: '#141719',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -819,7 +820,6 @@ async function start(
       searches.clear();
       clearRelationshipRequests();
     });
-    if (saved?.maximized) created.maximize();
     const windowStateSaver = new WindowStateSaver(
       (state) => storage.write('window', state),
       (error) => console.error('Could not save window state:', error),
@@ -855,6 +855,11 @@ async function start(
         else created.close();
       });
     });
+    if (saved?.maximized) {
+      // X11 must receive maximized state before mapping to retain normal bounds.
+      created.maximize();
+      created.show();
+    }
     window.webContents.on('before-input-event', (event, input) => {
       const modifier =
         process.platform === 'darwin' ? input.meta : input.control;

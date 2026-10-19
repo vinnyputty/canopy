@@ -227,6 +227,7 @@ try {
   await burst('close');
   await burst('quit');
 
+  const normal = await snapshot();
   await running.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].maximize(),
   );
@@ -240,17 +241,15 @@ try {
   let latest = await stop();
   await reopen(latest);
   assert.equal(latest.maximized, true);
+  assert.deepEqual(latest.bounds, normal.bounds);
+  latest = await stop();
+  await reopen(latest);
+  assert.deepEqual(latest, { ...normal, maximized: true });
   results.push({ check: 'maximize + quit/reopen', latest });
   await running.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows()[0].unmaximize(),
   );
-  await expect
-    .poll(() =>
-      running.evaluate(({ BrowserWindow }) =>
-        BrowserWindow.getAllWindows()[0].isMaximized(),
-      ),
-    )
-    .toBe(false);
+  await expect.poll(snapshot).toEqual(normal);
   latest = await stop();
   await reopen(latest);
   results.push({ check: 'unmaximize + quit/reopen', latest });

@@ -38,11 +38,19 @@ Observed on macOS / arm64 with Electron 44.3.0 on 2026-10-02, against main `2d57
 
 ## Pending native acceptance
 
+Observed on Linux / x64 with Electron 44.3.0 on 2026-10-18 in an isolated Xephyr X11 desktop with Openbox:
+
+- Passed: three complete `window_check` runs, including native move/resize bursts and immediate close/quit, repeated maximized relaunch, unmaximize, minimized and fullscreen ignored bounds changes, actual bounds replacement failure with later sample workspace/fake credential writes, and unreachable saved coordinates. Each burst delivered 48 move and 24 resize events with zero intermediate writes. Every launch completed qualified shutdown and profile cleanup.
+- Saved maximized windows are created hidden, maximized with persistence listeners attached, then shown. A standalone Electron probe reproduced incorrect `getNormalBounds()` when showing before maximizing; maximizing while hidden retained the original rectangle. The original application failure was intermittent. Separate original-source reruns also exposed a harness race: `isMaximized()` becomes false before unmaximize finishes resizing. The harness waits for the exact preceding normal rectangle and verifies it survives repeated maximized relaunches.
+- Sway XWayland refused the fixture's absolute initial placement. That failing run remains evidence of the tiling desktop constraint; Openbox results do not establish absolute placement support on Sway or native Wayland.
+
+Logs, exit codes, probes, and source checksums are retained under `/home/kayn/canopy-validation-20261018/evidence/` on `vbd`; initial failures are preserved as `window-xwayland.log` and `window-x11-openbox.log`. Native programmatic fullscreen coverage passed on Openbox; fullscreen acceptance on macOS remains pending.
+
 Keep the PR draft until required user-dependent checks are complete. Use disposable sample profiles and an exclusive GUI token for further automated desktop runs. Further `window_check` execution also requires qualified `AuditOwner` evidence of ownership and absence before profile removal. The harness adopts the existing qualified lifecycle helper; source controls and owned Node tests do not establish Electron/native absence or grant runtime authority. Fresh complete source review and separately authorized native execution remain required.
 
 - [ ] Complete fullscreen entry, ignored bounds changes, close/quit, and relaunch on a desktop session that delivers the native fullscreen transition.
 - [ ] Confirm physical drag/resize, maximize, minimized quit, and immediate quit/relaunch ordering on macOS.
-- [ ] Run the actual Electron fixture and native interactions on Windows and Linux; record results separately from macOS.
+- [ ] Run the actual Electron fixture on Windows and physical native interactions on Windows and Linux; record results separately from macOS and the isolated Linux X11 fixture.
 - [ ] Confirm physical monitor-removal restoration using an explicitly authorized disposable setup. The out-of-range coordinate fixture is automated coverage, not a physical display-removal result.
 
 Real OS shutdown and live provider/credential tests are not required for this issue.
