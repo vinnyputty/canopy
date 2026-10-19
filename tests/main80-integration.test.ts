@@ -126,6 +126,7 @@ test('actual main teardown cancels both an in-flight update check and tree/searc
     updateSignal: AbortSignal | undefined,
     treeSignal: AbortSignal | undefined,
     finishTree!: (value: object) => void;
+  let handoffCancellations = 0;
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
@@ -164,6 +165,7 @@ test('actual main teardown cancels both an in-flight update check and tree/searc
     searchController = searches.get('search')!;
   const context = {
     updates,
+    cancelHandoffs: () => handoffCancellations++,
     clearRelationshipRequests: () => {},
     trees,
     searches,
@@ -201,6 +203,7 @@ test('actual main teardown cancels both an in-flight update check and tree/searc
   assert.equal(searchController.signal.aborted, true);
   assert.equal(trees.size, 0);
   assert.equal(searches.size, 0);
+  assert.equal(handoffCancellations, 1);
   release();
   finishTree({ rootKey: 'ROOT-1', issues: [], fetchedAt: 1, warnings: [] });
   await Promise.all([updateRead, treeRead]);

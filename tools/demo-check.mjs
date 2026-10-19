@@ -541,6 +541,8 @@ try {
       .poll(() => childBrowser.contexts()[0]?.pages().length ?? 0)
       .toBeGreaterThan(0);
     const childPage = childBrowser.contexts()[0].pages()[0];
+    // Activate the CDP-attached child before observing its rendered tour.
+    await childPage.bringToFront();
     await expect(
       childPage.getByRole('region', { name: 'Canopy demo' }),
     ).toBeVisible();

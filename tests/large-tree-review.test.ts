@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { handoffNavigation } from '../src/renderer/work-handoff';
 import { SidebarWork } from '../src/renderer/SidebarWork';
 import { emptySidebarSession } from '../src/renderer/sidebar-organization';
 import ts from 'typescript';
@@ -632,6 +633,7 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
   const search = new AbortController();
   const searches = new Map([['search', search]]);
   let updateCancellations = 0;
+  let handoffCancellations = 0;
   const updates = {
     cancel: () => {
       updateCancellations++;
@@ -659,6 +661,8 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
         trees,
         searches,
         updates,
+        initialLoad: false,
+        cancelHandoffs: () => handoffCancellations++,
         clearRelationshipRequests: () => {},
       },
     );
@@ -670,6 +674,7 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
   navigation({ isMainFrame: true, isSameDocument: false });
   assert.ok(controllers.every((c) => c.signal.aborted));
   assert.equal(trees.size, 0);
+  assert.equal(handoffCancellations, 1);
   const next = new AbortController();
   trees.set('new-renderer', next);
   assert.equal(updateCancellations, 0);
@@ -679,6 +684,138 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
   assert.equal(search.signal.aborted, true);
   assert.equal(trees.size, 0);
   assert.equal(searches.size, 0);
+  assert.equal(handoffCancellations, 2);
+});
+
+test('App enables handoff after successful inactive startup reads are evicted without treating their data as available', async () => {
+  const active = tab('startup-active', 'T-2');
+  const inactive = tab('startup-inactive', 'T-3');
+  const h = refreshContext([active, inactive]);
+  let view!: MutationView;
+  h.context.mutations = new Mutations(
+    {} as CanopyAPI,
+    (next) => {
+      view = next;
+      h.context.snapshotsRef.current = next.snapshots;
+      for (const id of next.evicted) {
+        const owner = [active, inactive].find((t) => t.id === id)!;
+        h.context.rootRefreshes.current.releaseSnapshot(rootKey(owner));
+      }
+    },
+    (error) => assert.fail(error),
+    undefined,
+    1,
+  );
+  h.context.mutations.protectSnapshots([active.id]);
+  h.context.window.canopy.tree = async (_connection, root, request) => {
+    h.calls.push(request);
+    return { ...snap([issue(root === active.rootKey ? 2 : 3)]), rootKey: root };
+  };
+  const errors: Record<string, string> = {};
+  const effect = (() => {
+    let found: ts.Expression | undefined;
+    function visit(node: ts.Node) {
+      if (
+        ts.isCallExpression(node) &&
+        node.expression.getText(ast) === 'useEffect' &&
+        node.arguments[0]?.getText(ast).includes('setHandoffEnabled(true)')
+      )
+        found = node.arguments[0];
+      ts.forEachChild(node, visit);
+    }
+    visit(ast);
+    assert.ok(found);
+    return found;
+  })();
+  let enabled = false;
+  const checkReadiness = (hydrated = true, ready = true, online = true) =>
+    execute(effect, {
+      handoffHydrated: hydrated,
+      ready,
+      online,
+      allRefreshTabs: [active, inactive],
+      confirmedSnapshots: view.confirmedSnapshots,
+      errors,
+      navigator: { onLine: online },
+      refreshSchedule: h.context.refreshSchedule,
+      setHandoffEnabled: (value: boolean) => {
+        enabled = value;
+      },
+    })();
+  checkReadiness();
+  assert.equal(enabled, false);
+  await h.refresh(inactive);
+  assert.equal(h.context.mutations.isEvicted(inactive.id), true);
+  assert.equal(view.confirmedSnapshots[inactive.id], undefined);
+  assert.equal(errors[inactive.id], undefined);
+  checkReadiness();
+  assert.equal(enabled, false);
+  await h.refresh(active);
+  assert.ok(view.confirmedSnapshots[active.id]);
+  assert.equal(view.confirmedSnapshots[inactive.id], undefined);
+  checkReadiness(false);
+  assert.equal(enabled, false);
+  checkReadiness(true, false);
+  assert.equal(enabled, false);
+  checkReadiness();
+  assert.equal(enabled, true);
+  const connection: Connection = {
+    id: 'c',
+    provider: 'jira',
+    name: 'Sample',
+    url: 'https://sample.atlassian.net',
+    accountName: 'sample',
+  };
+  const workspace: Workspace = {
+    tabs: [active, inactive],
+    activeTabId: active.id,
+    theme: 'dark',
+    shortcuts: {},
+    sidebarCollapsed: false,
+  };
+  const retained = [active, inactive].flatMap((t) =>
+    view.confirmedSnapshots[t.id]
+      ? [
+          {
+            connectionId: t.connectionId,
+            snapshot: view.confirmedSnapshots[t.id],
+          },
+        ]
+      : [],
+  );
+  assert.equal(
+    handoffNavigation(
+      {
+        kind: 'issue',
+        connection: 'c',
+        provider: 'jira',
+        host: 'sample.atlassian.net',
+        root: 'T-2',
+        key: 'T-2',
+      },
+      [connection],
+      workspace,
+      retained,
+      () => 'new',
+    ).kind,
+    'issue',
+  );
+  assert.throws(() =>
+    handoffNavigation(
+      {
+        kind: 'issue',
+        connection: 'c',
+        provider: 'jira',
+        host: 'sample.atlassian.net',
+        root: 'T-3',
+        key: 'T-3',
+      },
+      [connection],
+      workspace,
+      retained,
+      () => 'new',
+    ),
+  );
 });
 
 test('App announces initial/incomplete loads while a complete quiet refresh stays quiet', () => {

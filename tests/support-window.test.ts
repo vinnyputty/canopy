@@ -7,8 +7,11 @@ import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import { transformSync } from 'esbuild';
+import { WorkHandoffQueue } from '../src/main/work-handoff';
 import { restoreWindow, type WindowState } from '../src/main/window-state';
 import { WindowStateSaver } from '../src/main/window-state-saver';
+import { validateWorkspace } from '../src/shared/workspace-validation';
+import { WorkspaceTransfer } from '../src/main/workspace-transfer';
 import { supportLinks, supportUrl } from '../src/shared/support';
 
 const require = createRequire(import.meta.url);
@@ -211,8 +214,12 @@ async function fixture() {
               errors.push(message),
           },
         };
+      if (name === '../shared/workspace-validation')
+        return { validateWorkspace };
       if (name === '../shared/support') return { supportLinks, supportUrl };
+      if (name === './work-handoff') return { WorkHandoffQueue };
       if (name === './window-state-saver') return { WindowStateSaver };
+      if (name === './workspace-transfer') return { WorkspaceTransfer };
       if (name === './storage') return { Storage };
       if (name === './auth')
         return {

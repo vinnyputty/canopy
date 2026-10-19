@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+import type { Workspace } from '../shared/types';
 import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { safeStorage } from 'electron';
@@ -19,14 +21,36 @@ export class Storage {
       );
     }
   }
+  private async persist(name: string, contents: string, validate?: () => void) {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const file = join(this.directory, `${name}.json`);
+    await writeSavedFile(file, contents, validate);
+  }
+
   write(name: string, value: unknown): Promise<void> {
     const contents = JSON.stringify(value);
     const task = this.pending
       .catch(() => {})
+      .then(() => this.persist(name, contents));
+    this.pending = task;
+    return task;
+  }
+  replaceWorkspace(
+    expected: Workspace,
+    next: Workspace,
+    validate?: () => void,
+  ): Promise<void> {
+    const contents = JSON.stringify(next);
+    const task = this.pending
+      .catch(() => {})
       .then(async () => {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
-        const file = join(this.directory, `${name}.json`);
-        await writeSavedFile(file, contents);
+        validate?.();
+        const current = await this.read<Workspace>('workspace');
+        if (!isDeepStrictEqual(current, JSON.parse(JSON.stringify(expected))))
+          throw new Error(
+            'Workspace changed after preview; review the import again.',
+          );
+        await this.persist('workspace', contents, validate);
       });
     this.pending = task;
     return task;

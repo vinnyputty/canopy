@@ -158,6 +158,7 @@ type Entry = {
   due: number;
   started: number;
   inflight: boolean;
+  settled: boolean;
 };
 
 /** One schedule per tab, shared by timers, activation, focus, and retry. */
@@ -185,6 +186,7 @@ export class RefreshSchedule {
           due: now,
           started: -Infinity,
           inflight: false,
+          settled: false,
         });
       } else if (entry.active !== active) {
         entry.active = active;
@@ -218,10 +220,15 @@ export class RefreshSchedule {
     return true;
   }
 
+  hasSettled(id: string): boolean {
+    return this.entries.get(id)?.settled === true;
+  }
+
   finish(id: string, now: number): void {
     const entry = this.entries.get(id);
     if (!entry) return;
     entry.inflight = false;
+    entry.settled = true;
     entry.due = now + entry.interval;
     if (!entry.active)
       entry.interval = Math.min(entry.interval * 2, MAX_BACKGROUND_REFRESH_MS);

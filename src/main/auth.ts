@@ -191,10 +191,23 @@ export class Auth {
     );
     if (!account)
       throw new Error('This GitHub connection is unavailable. Connect again.');
+    // Authoring only needs these read endpoints, within this account's selection.
+    const authoringRead = path.match(
+      /^\/repos\/([a-z0-9_.-]+\/[a-z0-9_.-]+)(?:\/milestones\?state=all&per_page=100)?$/i,
+    );
+    const selectedRead = Boolean(
+      authoringRead &&
+      (init.method ?? 'GET').toUpperCase() === 'GET' &&
+      !init.body &&
+      account.connection.repositories?.some(
+        (repo) => repo.toLowerCase() === authoringRead[1].toLowerCase(),
+      ),
+    );
     if (
       !path.startsWith('/') ||
       path.includes('..') ||
       !(
+        selectedRead ||
         path === '/graphql' ||
         /^\/(repos\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(issues|labels|assignees)|search\/issues|user)([/?].*)?$/i.test(
           path,
@@ -204,8 +217,11 @@ export class Auth {
       throw new Error('Invalid GitHub API path.');
     const retryAt = this.githubRetry.get(id) ?? 0;
     if (retryAt > Date.now())
-      throw new Error(
-        `GitHub rate limit reached. Retry after ${new Date(retryAt).toLocaleTimeString()}.`,
+      throw Object.assign(
+        new Error(
+          `GitHub rate limit reached. Retry after ${new Date(retryAt).toLocaleTimeString()}.`,
+        ),
+        { status: 429 },
       );
     const response = await providerFetch(`https://api.github.com${path}`, {
       ...init,
@@ -248,21 +264,33 @@ export class Auth {
             ? reset
             : Date.now() + 60_000;
       this.githubRetry.set(id, until);
-      throw new Error(
-        `GitHub rate limit reached. Retry after ${new Date(until).toLocaleTimeString()}.`,
+      throw Object.assign(
+        new Error(
+          `GitHub rate limit reached. Retry after ${new Date(until).toLocaleTimeString()}.`,
+        ),
+        { status: response.status },
       );
     }
     if (!response.ok) {
       if (response.status === 401)
-        throw new Error(
-          'GitHub authorization expired or was revoked. Reconnect this account.',
+        throw Object.assign(
+          new Error(
+            'GitHub authorization expired or was revoked. Reconnect this account.',
+          ),
+          { status: response.status },
         );
       if (response.status === 403 || response.status === 404)
-        throw new Error(
-          `GitHub denied access to ${path}. Check that the repository is selected and the token has Issues permission.${detail ? ` ${detail}` : ''}`,
+        throw Object.assign(
+          new Error(
+            `GitHub denied access to ${path}. Check that the repository is selected and the token has Issues permission.${detail ? ` ${detail}` : ''}`,
+          ),
+          { status: response.status },
         );
-      throw new Error(
-        `GitHub returned ${response.status} for ${path}.${detail ? ` ${detail}` : ''}`,
+      throw Object.assign(
+        new Error(
+          `GitHub returned ${response.status} for ${path}.${detail ? ` ${detail}` : ''}`,
+        ),
+        { status: response.status },
       );
     }
     if (response.status === 204) return undefined;
@@ -522,9 +550,12 @@ export class Auth {
       }
       assertCurrent();
       if (response.status === 429)
-        throw this.requests.rateLimited(
-          connectionId,
-          response.headers.get('Retry-After'),
+        throw Object.assign(
+          this.requests.rateLimited(
+            connectionId,
+            response.headers.get('Retry-After'),
+          ),
+          { status: response.status },
         );
       if (!response.ok) {
         let details = '';
@@ -537,15 +568,24 @@ export class Auth {
         } catch {}
         assertCurrent();
         if (response.status === 403)
-          throw new Error(
-            `Jira denied access. Check token scopes, issue permissions, and your organization’s app-access policy. ${details}`,
+          throw Object.assign(
+            new Error(
+              `Jira denied access. Check token scopes, issue permissions and your organization’s app-access policy. ${details}`,
+            ),
+            { status: response.status },
           );
         if (response.status === 401)
-          throw new Error(
-            'Jira authorization expired or was revoked. Reconnect this site.',
+          throw Object.assign(
+            new Error(
+              'Jira authorization expired or was revoked. Reconnect this site.',
+            ),
+            { status: response.status },
           );
-        throw new Error(
-          `Jira returned ${response.status}. ${details || 'The issue may be unavailable or this action may not be supported.'}`,
+        throw Object.assign(
+          new Error(
+            `Jira returned ${response.status}. ${details || 'The issue may be unavailable or this action may not be supported.'}`,
+          ),
+          { status: response.status },
         );
       }
       if (response.status === 204) return undefined;

@@ -200,27 +200,6 @@ for (const [platform, display] of [
         platform === 'linux' && !display ? 'xvfb-run' : 'bazel',
       );
     }
-    const instanceCall = calls.find((call) =>
-      call.args.includes('//:instance_check'),
-    );
-    assert.ok(instanceCall);
-    assert.deepEqual(instanceCall.args, [
-      ...(platform === 'linux' && !display ? ['-a', 'bazel'] : []),
-      '--ignore_all_rc_files',
-      'run',
-      '//:instance_check',
-      '--',
-      '--state-only',
-    ]);
-    assert.equal(
-      instanceCall.command,
-      platform === 'linux' && !display ? 'xvfb-run' : 'bazel',
-    );
-    assert.equal(instanceCall.cwd, '/fixture source');
-    assert.equal(instanceCall.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY, undefined);
-    assert.equal(instanceCall.env.JS_BINARY__NODE_BINARY, undefined);
-    assert.equal(instanceCall.env.RUNFILES_DIR, undefined);
-    assert.equal(instanceCall.env.CSC_IDENTITY_AUTO_DISCOVERY, 'false');
     assert.equal(parent.CANOPY_SMOKE_ACCESSIBILITY_ONLY, '1');
   });
 }

@@ -12,6 +12,10 @@ import {
 import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+if (process.argv[2] === 'handoff-check')
+  (await import('./handoff-audit.mjs')).requireHandoffLifecycle(
+    process.argv.slice(3),
+  );
 const require = createRequire(import.meta.url);
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const workspace = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
@@ -28,15 +32,12 @@ await cp(join(root, 'assets/branding'), join(staging, 'assets/branding'), {
   recursive: true,
   dereference: true,
 });
-await cp(join(root, 'assets/branding'), join(staging, 'assets/branding'), {
-  recursive: true,
-  dereference: true,
-});
 const mode = process.argv[2];
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 if (mode === 'smoke' || mode === 'branding-check')
   manifest.main = 'dist/smoke-main.cjs';
 if (mode === 'window-check') manifest.main = 'dist/window-main.cjs';
+if (mode === 'handoff-check') manifest.main = 'dist/handoff-audit-main.cjs';
 delete manifest.dependencies;
 delete manifest.devDependencies;
 delete manifest.packageManager;
@@ -48,10 +49,10 @@ if (
   mode === 'demo' ||
   mode === 'demo-check' ||
   mode === 'instance-check' ||
+  mode === 'handoff-check' ||
   mode === 'smoke' ||
   mode === 'smoke-github' ||
-  mode === 'window-check' ||
-  mode === 'branding-check'
+  mode === 'window-check'
 ) {
   // Electron's platform archive is a runtime download, outside Bazel actions.
   const { downloadArtifact } = await import('@electron/get');
@@ -89,7 +90,8 @@ if (
     mode === 'demo-check' ||
     mode === 'instance-check' ||
     mode === 'window-check' ||
-    mode === 'branding-check'
+    mode === 'branding-check' ||
+    mode === 'handoff-check'
       ? spawnSync(
           process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
           [
@@ -98,17 +100,21 @@ if (
               'tools',
               mode === 'branding-check'
                 ? 'smoke-branding.mjs'
-                : mode === 'smoke'
-                  ? 'smoke.mjs'
-                  : mode === 'demo-check'
-                    ? 'demo-check.mjs'
-                    : mode === 'window-check'
-                      ? 'window-check.mjs'
-                      : mode === 'instance-check'
-                        ? 'instance-check.mjs'
-                        : 'smoke-github-cli.mjs',
+                : mode === 'window-check'
+                  ? 'window-check.mjs'
+                  : mode === 'smoke'
+                    ? 'smoke.mjs'
+                    : mode === 'demo-check'
+                      ? 'demo-check.mjs'
+                      : mode === 'handoff-check'
+                        ? 'handoff-check.mjs'
+                        : mode === 'instance-check'
+                          ? 'instance-check.mjs'
+                          : 'smoke-github-cli.mjs',
             ),
-            ...(mode === 'instance-check' ? process.argv.slice(3) : []),
+            ...(['instance-check', 'handoff-check'].includes(mode)
+              ? process.argv.slice(3)
+              : []),
           ],
           {
             stdio: 'inherit',
@@ -127,7 +133,11 @@ if (
                 join(root, 'tools/render-icons.cjs'),
                 join(workspace, 'assets/branding'),
               ]
-            : [staging, ...(mode === 'demo' ? ['--canopy-demo'] : [])],
+            : [
+                staging,
+                ...(mode === 'demo' ? ['--canopy-demo'] : []),
+                ...process.argv.slice(3),
+              ],
           {
             stdio: 'inherit',
             env: demoData

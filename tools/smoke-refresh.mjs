@@ -1,5 +1,88 @@
 import { expect } from '@playwright/test';
 
+/** The demo handler saves synchronously; renderer timers must not replace the fixture during reload. */
+export async function installDuplicateRefreshWorkspace(app, page) {
+  const workspace = await app.evaluate(async ({ ipcMain, BrowserWindow }) => {
+    const channel = 'canopy:saveWorkspace';
+    const original = ipcMain._invokeHandlers.get(channel);
+    const load = ipcMain._invokeHandlers.get('canopy:loadWorkspace');
+    if (!original || !load || !globalThis.canopySmoke)
+      throw new Error(
+        'Duplicate refresh fixture requires demo workspace handlers.',
+      );
+    if (globalThis.refreshWorkspaceFixture)
+      throw new Error(
+        'Duplicate refresh fixture already owns workspace saves.',
+      );
+    const audit = { original };
+    globalThis.refreshWorkspaceFixture = audit;
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, () => {});
+    try {
+      const sender = BrowserWindow.getAllWindows()[0].webContents;
+      const event = { sender, senderFrame: sender.mainFrame };
+      const saved = await load(event);
+      const first = saved?.tabs.find(
+        (tab) => tab.rootKey === 'CAN-100' && tab.connectionId === 'demo',
+      );
+      if (!first)
+        throw new Error('Duplicate refresh fixture requires CAN-100.');
+      const workspace = {
+        ...saved,
+        tabs: [first, { ...first, id: 'refresh-duplicate-CAN-100' }],
+        activeTabId: first.id,
+      };
+      await original(event, workspace);
+      return workspace;
+    } catch (error) {
+      ipcMain.removeHandler(channel);
+      ipcMain.handle(channel, original);
+      delete globalThis.refreshWorkspaceFixture;
+      throw error;
+    }
+  });
+  let failed = false;
+  try {
+    await page.reload();
+    await expect(page.getByRole('tab')).toHaveCount(2);
+    await expect(page.locator('[role=tab] .tab-label b')).toHaveText([
+      'CAN-100',
+      'CAN-100',
+    ]);
+    await expect(page.getByRole('tab').nth(0)).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(page.getByRole('tab').nth(1)).toHaveAttribute(
+      'aria-selected',
+      'false',
+    );
+    for (const [index, tab] of workspace.tabs.entries())
+      await expect(page.getByRole('tab').nth(index)).toHaveAttribute(
+        'data-tab-id',
+        tab.id,
+      );
+    expect(await page.evaluate(() => window.canopy.loadWorkspace())).toEqual(
+      workspace,
+    );
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    try {
+      await app.evaluate(({ ipcMain }) => {
+        const channel = 'canopy:saveWorkspace';
+        const audit = globalThis.refreshWorkspaceFixture;
+        ipcMain.removeHandler(channel);
+        ipcMain.handle(channel, audit.original);
+        delete globalThis.refreshWorkspaceFixture;
+      });
+    } catch (error) {
+      if (!failed) throw error;
+    }
+  }
+}
+
 /** Uses the real optimistic mutation controller and demo IPC, with gated responses. */
 export async function auditRefresh(app, page, resizeWindow) {
   const fixture = (method, ...args) =>
@@ -374,16 +457,7 @@ export async function auditRefresh(app, page, resizeWindow) {
   // Restored duplicate tabs share their first request and receive manual updates.
   const beforeDuplicate = await calls('CAN-100');
   await hold('duplicate-initial', 'tree', 'CAN-100');
-  await page.evaluate(async () => {
-    const workspace = await window.canopy.loadWorkspace();
-    const first = workspace.tabs.find((tab) => tab.rootKey === 'CAN-100');
-    await window.canopy.saveWorkspace({
-      ...workspace,
-      tabs: [first, { ...first, id: 'refresh-duplicate-CAN-100' }],
-      activeTabId: first.id,
-    });
-  });
-  await page.reload();
+  await installDuplicateRefreshWorkspace(app, page);
   await started('duplicate-initial');
   expect(await calls('CAN-100')).toBe(beforeDuplicate + 1);
   await release('duplicate-initial');

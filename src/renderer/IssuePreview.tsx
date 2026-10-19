@@ -1,4 +1,5 @@
 import { RelationshipGroups } from './RelationshipGroups';
+import { RichAuthoring } from './RichAuthoring';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type {
@@ -46,6 +47,7 @@ export function IssuePreview({
   onWidth,
   onClose,
   onChanged,
+  onAuthoringChanged,
   onPreview,
   onJump,
   onOpenExternal,
@@ -67,6 +69,7 @@ export function IssuePreview({
   onWidth: (width: number) => void;
   onClose: () => void;
   onChanged: (issue: Issue) => void;
+  onAuthoringChanged: () => void;
   onPreview: (key: string) => void;
   onJump: (key: string) => void;
   onOpenExternal: (key: string) => void;
@@ -595,6 +598,17 @@ export function IssuePreview({
                 )}
               </section>
             )}
+            <RichAuthoring
+              connectionId={connectionId}
+              issueKey={issueKey}
+              provider={provider}
+              onRefresh={() => {
+                setAttempt((value) => value + 1);
+                onAuthoringChanged();
+              }}
+              onPreview={onPreview}
+              onBrowser={() => onOpenExternal(issueKey)}
+            />
             <section>
               <h3>Description</h3>
               <div className="preview-text">

@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import ts from 'typescript';
+import { validateWorkspace } from '../src/shared/workspace-validation';
+import { execute, findNode, sourceFile } from './source-probe';
 
 const source = readFileSync(
   new URL('../tools/smoke-pickers.mjs', import.meta.url),
@@ -101,12 +105,13 @@ async function capture(
 
 test('self-connection capture exposes stale persisted roots beside current DOM', async () => {
   const saved = workspace(['CAN-100', 'CAN-106']);
+  saved.activeTabId = saved.tabs[1].id;
   const result = await capture(() => saved, ['CAN-100']);
   assert.equal(result.error, result.stop);
   assert.equal(result.passed, saved);
   assert.equal(result.messages.length, 1);
   assert.deepEqual(JSON.parse(result.messages[0].slice(prefix.length)), {
-    activeTabId: 'can-100',
+    activeTabId: 'can-106',
     tabCount: 2,
     tabs: [tab('CAN-100'), tab('CAN-106')],
     renderedTabCount: 1,
@@ -229,4 +234,293 @@ test('self-connection capture caps samples, strings and recentOutput message siz
     }
     assert.ok(!message.includes('PRIVATE_WORKSPACE_PAYLOAD'));
   }
+});
+
+const auditSource = ts.createSourceFile(
+  'smoke-pickers.mjs',
+  source,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.JS,
+);
+const restoring = findNode(
+  auditSource,
+  (node): node is ts.TryStatement =>
+    ts.isTryStatement(node) &&
+    !!node.finallyBlock?.getText().includes('waitForTimeout(250)'),
+);
+const restoration = restoring
+  .getText()
+  .replace(restoring.tryBlock.getText(), '{ await auditBody(); }');
+const mainSource = sourceFile(new URL('../src/main/app.ts', import.meta.url));
+const mainSave = findNode(
+  mainSource,
+  (node): node is ts.PropertyAssignment =>
+    ts.isPropertyAssignment(node) && node.name.getText() === 'saveWorkspace',
+).initializer.getText();
+const trust = findNode(
+  mainSource,
+  (node): node is ts.ArrowFunction =>
+    ts.isArrowFunction(node) &&
+    node.getText().includes('Untrusted application window.'),
+).getText();
+
+function restoreModel(options: Record<string, unknown> = {}) {
+  const saved = {
+    ...workspace(['CAN-100', 'CAN-106']),
+    theme: 'system',
+    shortcuts: {},
+    sidebarCollapsed: false,
+    tabs: ['CAN-100', 'CAN-106'].map((rootKey, index) => ({
+      ...tab(rootKey),
+      id: `captured-${index}`,
+      summary: rootKey,
+      expanded: [],
+      hideDone: false,
+      scrollTop: 0,
+    })),
+  };
+  saved.activeTabId = options.missingActive
+    ? 'missing-active-tab'
+    : saved.tabs[options.firstActive ? 0 : 1].id;
+  const fixture = {
+    ...saved,
+    tabs: [{ ...saved.tabs[0], id: 'fixture' }],
+    activeTabId: 'fixture',
+  };
+  const store = execute(
+    `() => {
+    let demoWorkspaceState = structuredClone(initial);
+    return { save: ${mainSave}, load: () => structuredClone(demoWorkspaceState) };
+  }`,
+    { initial: fixture, demoMode: true, structuredClone, validateWorkspace },
+  )();
+  const html = fileURLToPath(new URL('window.html', import.meta.url));
+  const contents = { mainFrame: { url: pathToFileURL(html).href } };
+  const event = { sender: contents, senderFrame: contents.mainFrame };
+  const trusted = (handler: (...args: any[]) => unknown) =>
+    execute(trust, {
+      handler,
+      window: { webContents: contents },
+      html,
+      pathToFileURL,
+    });
+  const originalSave = trusted((value: unknown) => {
+    if ('saveFailure' in options) throw options.saveFailure;
+    store.save(value);
+  });
+  const originals = new Map<string, (...args: any[]) => any>([
+    ['canopy:saveWorkspace', originalSave],
+    ['canopy:loadWorkspace', trusted(store.load)],
+    ['canopy:connections', () => 'original connections'],
+  ]);
+  const handlers = new Map<string, (...args: any[]) => any>(
+    [...originals].map(([key]) => [key, () => undefined]),
+  );
+  const owner: Record<string, any> = {
+    canopySmoke: {
+      remoteUpdate: async (key: string, patch: unknown) => {
+        assert.equal(key, 'CAN-100');
+        assert.deepEqual(patch, { assigneeId: 'alex' });
+        if ('setupFailure' in options) throw options.setupFailure;
+      },
+    },
+    selfConnectionAudit: { handlers: originals },
+  };
+  const ipcMain = {
+    removeHandler: (key: string) => handlers.delete(key),
+    handle: (key: string, handler: (...args: any[]) => any) => {
+      assert(!handlers.has(key));
+      handlers.set(key, handler);
+    },
+  };
+  let evaluations = 0,
+    reloads = 0,
+    rendered = structuredClone(fixture);
+  const window = {
+    canopy: {
+      saveWorkspace: (value: unknown) =>
+        handlers.get('canopy:saveWorkspace')!(event, value),
+      loadWorkspace: () => handlers.get('canopy:loadWorkspace')!(event),
+    },
+  };
+  const page = {
+    waitForTimeout: async (ms: number) => assert.equal(ms, 250),
+    evaluate: (callback: (...args: any[]) => unknown, value: unknown) =>
+      execute(`(${callback})`, { window })(value),
+    reload: async () => {
+      reloads++;
+      // A pending renderer save must still write the captured snapshot here.
+      await window.canopy.saveWorkspace(fixture);
+      if ('reloadFailure' in options) throw options.reloadFailure;
+      rendered = await window.canopy.loadWorkspace();
+      assert.deepEqual(
+        rendered,
+        saved,
+        'Save guard must own persistence through reload',
+      );
+      if (options.wrongOrder) rendered.tabs.reverse();
+      if (options.wrongId) rendered.tabs[0].id = 'foreign-tab';
+      if (options.wrongRoot) rendered.tabs[0].rootKey = 'CAN-200';
+      if (options.wrongCount) rendered.tabs.pop();
+      if (options.wrongSelection) rendered.activeTabId = rendered.tabs[0].id;
+      if (options.corruptPersistence) store.save(fixture);
+    },
+    getByRole: (role: string, args?: { name: string }) => ({
+      role,
+      name: args?.name,
+      nth: (index: number) => ({ index }),
+    }),
+    locator: (selector: string) => {
+      assert.equal(selector, '[role=tab] .tab-label b');
+      return {};
+    },
+  };
+  const expect = (value: any) => ({
+    toHaveCount: async (count: number) =>
+      assert.equal(rendered.tabs.length, count),
+    toHaveText: async (roots: string[]) =>
+      assert.deepEqual(
+        rendered.tabs.map((t) => t.rootKey),
+        roots,
+      ),
+    toHaveAttribute: async (key: string, expected: string) =>
+      assert.equal(
+        key === 'data-tab-id'
+          ? rendered.tabs[value.index].id
+          : String(
+              options.bothSelected ||
+                rendered.tabs[value.index].id === rendered.activeTabId,
+            ),
+        expected,
+      ),
+    toBeDefined: () => assert.notEqual(value, undefined),
+    toBeVisible: async () => {
+      const active = rendered.tabs.find((t) => t.id === rendered.activeTabId);
+      assert.equal(value.role, 'tree');
+      assert.equal(
+        value.name,
+        `${options.wrongTree ? 'CAN-100' : active?.rootKey} issue tree`,
+      );
+    },
+    toEqual: (expected: unknown) => assert.deepEqual(value, expected),
+  });
+  const app = {
+    evaluate: (callback: (...args: any[]) => unknown, value: unknown) => {
+      evaluations++;
+      if (evaluations === 2 && 'cleanupFailure' in options)
+        throw options.cleanupFailure;
+      return execute(`(${callback})`, { globalThis: owner })(
+        { ipcMain },
+        value,
+      );
+    },
+  };
+  const run = () =>
+    execute(`async () => { let failed = false; ${restoration} }`, {
+      app,
+      page,
+      workspace: saved,
+      expect,
+      auditBody: () => {
+        if ('bodyFailure' in options) throw options.bodyFailure;
+      },
+    })();
+  return {
+    run,
+    saved,
+    fixture,
+    store,
+    originals,
+    handlers,
+    originalSave,
+    owner,
+    event,
+    get reloads() {
+      return reloads;
+    },
+  };
+}
+
+for (const firstActive of [false, true])
+  test(`restores the persisted snapshot with ${firstActive ? 'first' : 'non-first CAN-106'} active`, async () => {
+    const m = restoreModel({ firstActive });
+    await m.run();
+    assert.deepEqual(m.store.load(), m.saved);
+    assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
+    for (const [key, handler] of m.originals)
+      assert.equal(m.handlers.get(key), handler);
+    assert.equal(m.owner.selfConnectionAudit, undefined);
+    await m.originalSave(m.event, m.fixture);
+    assert.deepEqual(m.store.load(), m.fixture);
+    assert.throws(
+      () => m.originalSave({ ...m.event, sender: {} }, m.saved),
+      /Untrusted application window/,
+    );
+    assert.throws(
+      () =>
+        m.originalSave(
+          { ...m.event, senderFrame: { ...m.event.senderFrame } },
+          m.saved,
+        ),
+      /Untrusted application window/,
+    );
+  });
+
+for (const option of [
+  'missingActive',
+  'wrongCount',
+  'wrongOrder',
+  'wrongId',
+  'wrongRoot',
+  'wrongSelection',
+  'bothSelected',
+  'wrongTree',
+  'corruptPersistence',
+])
+  test(`restoration refuses ${option} and releases save ownership`, async () => {
+    const m = restoreModel({ [option]: true });
+    await assert.rejects(m.run(), { code: 'ERR_ASSERTION' });
+    assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
+    assert.equal(m.owner.selfConnectionAudit, undefined);
+  });
+
+for (const primary of [
+  new Error('raw restoration failure'),
+  undefined,
+  null,
+  false,
+  0,
+  '',
+]) {
+  for (const phase of ['saveFailure', 'reloadFailure', 'setupFailure'])
+    test(`preserves raw ${phase} ${String(primary)} and restores handlers`, async () => {
+      const m = restoreModel({ [phase]: primary });
+      await assert.rejects(m.run(), (error) => error === primary);
+      assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
+      assert.equal(m.owner.selfConnectionAudit, undefined);
+      assert.equal(m.reloads, phase === 'reloadFailure' ? 1 : 0);
+    });
+  test(`primary audit failure ${String(primary)} survives restoration failure`, async () => {
+    const m = restoreModel({
+      bodyFailure: primary,
+      reloadFailure: new Error('secondary restoration'),
+    });
+    await assert.rejects(m.run(), (error) => error === primary);
+    assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
+    assert.equal(m.owner.selfConnectionAudit, undefined);
+  });
+  test(`primary restoration failure ${String(primary)} survives cleanup failure`, async () => {
+    const m = restoreModel({
+      reloadFailure: primary,
+      cleanupFailure: new Error('secondary cleanup'),
+    });
+    await assert.rejects(m.run(), (error) => error === primary);
+  });
+}
+
+test('cleanup failure refuses an otherwise successful restoration', async () => {
+  const cleanupFailure = new Error('cleanup failed');
+  const m = restoreModel({ cleanupFailure });
+  await assert.rejects(m.run(), (error) => error === cleanupFailure);
 });

@@ -244,3 +244,25 @@ it('queues one explicit read behind an automatic read and discards the older gen
   assert.equal(await latest.promise, 'fresh tree');
   assert.equal(requests, 2);
 });
+
+it('retains initial read settlement across later refreshes and removes it with its tab', () => {
+  const schedule = new RefreshSchedule();
+  assert.equal(schedule.hasSettled('missing'), false);
+  schedule.sync(['a', 'b'], 'a', 0);
+  assert.equal(schedule.hasSettled('a'), false);
+  assert.equal(schedule.begin('a', 0), true);
+  assert.equal(schedule.hasSettled('a'), false);
+  schedule.defer('a', 50);
+  assert.equal(schedule.hasSettled('a'), false);
+  assert.equal(schedule.begin('a', 1000), true);
+  schedule.finish('a', 1001);
+  assert.equal(schedule.hasSettled('a'), true);
+  assert.equal(schedule.begin('a', 2001, true), true);
+  assert.equal(schedule.hasSettled('a'), true);
+  schedule.finish('b', 2002);
+  assert.equal(schedule.hasSettled('b'), true);
+  schedule.forget('a');
+  assert.equal(schedule.hasSettled('a'), false);
+  schedule.sync([], null, 2003);
+  assert.equal(schedule.hasSettled('b'), false);
+});

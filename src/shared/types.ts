@@ -2,6 +2,12 @@ import type { SupportLink } from './support';
 export const MAX_TREE_ISSUES = 20_000;
 export const MAX_TREE_CALLS = 5_000;
 
+import type {
+  AuthoringOptions,
+  AuthoringAction,
+  AuthoringResult,
+  ParentPlan,
+} from './authoring';
 export type Choice = { id: string; name: string };
 export type Status = Choice & { category: 'new' | 'indeterminate' | 'done' };
 export type Connection = {
@@ -217,6 +223,7 @@ export type TabState = {
 };
 export type Workspace = {
   triage?: import('./triage').TriageState;
+  copyTemplate?: string;
   reading?: ReadingSettings;
   tabs: TabState[];
   activeTabId: string | null;
@@ -249,7 +256,29 @@ export type TokenConnectionInput = {
   scoped: boolean;
 };
 export type GithubConnectionInput = { token: string; repositories: string[] };
+export type HandoffDelivery = {
+  expiresAt: number;
+  session: string;
+  id: string;
+  intent: import('./work-handoff').WorkHandoff;
+};
+export type HandoffState = {
+  session: string;
+  delivery?: HandoffDelivery;
+  rejected?: boolean;
+  canceledId?: string;
+};
+
 export interface CanopyAPI {
+  handoffReady(clientId: string): Promise<HandoffState>;
+  handoffAck(
+    session: string,
+    id: string,
+    result: 'opened' | 'rejected',
+  ): Promise<boolean>;
+  handoffCancel(session: string): Promise<boolean>;
+  onHandoff(callback: (state: HandoffState) => void): () => void;
+
   updateState(): Promise<import('./updates').UpdateState>;
   updatePreferences(
     value: import('./updates').UpdatePreferences,
@@ -258,12 +287,32 @@ export interface CanopyAPI {
   cancelUpdateCheck(): Promise<void>;
   dismissUpdateNotice(): Promise<import('./updates').UpdateState>;
   openRelease(tag: string): Promise<void>;
+  diagnostics(): Promise<string>;
+  exportDiagnostics(reviewed: string): Promise<boolean>;
   supportReady(): Promise<void>;
   appVersion(): Promise<string>;
   openSupportLink(link: SupportLink): Promise<void>;
   onShowSupport(callback: () => void): () => void;
-  diagnostics(): Promise<string>;
-  exportDiagnostics(reviewed: string): Promise<boolean>;
+  authoringOptions(
+    connectionId: string,
+    key: string,
+  ): Promise<AuthoringOptions>;
+  previewParent(
+    connectionId: string,
+    key: string,
+    parentKey: string | null,
+  ): Promise<ParentPlan>;
+  author(
+    connectionId: string,
+    key: string,
+    action: AuthoringAction,
+  ): Promise<AuthoringResult>;
+  openAttachment(
+    connectionId: string,
+    key: string,
+    attachmentId: string,
+  ): Promise<void>;
+
   demoMode(): Promise<boolean>;
   demoTimeScale(): Promise<number>;
   launchDemo(): Promise<void>;
@@ -360,6 +409,23 @@ export interface CanopyAPI {
     position?: 'before' | 'after',
   ): Promise<void>;
   priorityOrder(connectionId: string, keys: string[]): Promise<string[]>;
+  prepareWorkspaceExport(): Promise<{
+    token: string;
+    backup: import('./workspace-backup').WorkspaceBackup;
+  }>;
+  exportWorkspace(token: string): Promise<boolean>;
+  chooseWorkspaceBackup(): Promise<
+    import('./workspace-backup').WorkspaceBackup | null
+  >;
+  previewWorkspaceImport(
+    backup: import('./workspace-backup').WorkspaceBackup,
+    mapping: Record<string, string>,
+    mode: import('./workspace-backup').ImportMode,
+  ): Promise<import('./workspace-backup').ImportPreview>;
+  applyWorkspaceImport(token: string): Promise<Workspace>;
+  rollbackWorkspaceImport(): Promise<Workspace>;
+  canUndoWorkspaceImport(): Promise<boolean>;
+  reloadWorkspace(): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;

@@ -131,3 +131,60 @@ test('non-lock errors and non-Windows failures propagate immediately', async () 
     assert.equal(attempts, 1);
   }
 });
+
+test('replacement approval is checked again after Windows lock retries', async (t) => {
+  const directory = await mkdtemp(
+    join(tmpdir(), 'canopy-replacement-approval-'),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const destination = join(directory, 'workspace.json');
+  const source = `${destination}.tmp`;
+  await writeFile(destination, 'existing sample workspace');
+  await writeFile(source, 'imported sample workspace');
+  let approved = true;
+  let attempts = 0;
+  await assert.rejects(
+    replaceFile(
+      source,
+      destination,
+      'win32',
+      async () => {
+        attempts++;
+        approved = false;
+        throw failure('EPERM');
+      },
+      () => {
+        if (!approved) throw new Error('Connection approval changed');
+      },
+    ),
+    /Connection approval changed/,
+  );
+  assert.equal(attempts, 1);
+  assert.equal(
+    await readFile(destination, 'utf8'),
+    'existing sample workspace',
+  );
+  assert.equal(await readFile(source, 'utf8'), 'imported sample workspace');
+});
+
+test('unique saved-file replacement rechecks approval and removes refused staging', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'canopy-write-approval-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const destination = join(directory, 'workspace.json');
+  await writeFile(destination, 'original');
+  let checks = 0;
+  await writeSavedFile(destination, 'approved', () => {
+    checks++;
+  });
+  assert.equal(checks, 1);
+  assert.equal(await readFile(destination, 'utf8'), 'approved');
+  const refusal = new Error('approval expired');
+  await assert.rejects(
+    writeSavedFile(destination, 'refused', () => {
+      throw refusal;
+    }),
+    (error) => error === refusal,
+  );
+  assert.equal(await readFile(destination, 'utf8'), 'approved');
+  assert.deepEqual(await readdir(directory), ['workspace.json']);
+});
