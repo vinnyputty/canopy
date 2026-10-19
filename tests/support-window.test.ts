@@ -757,3 +757,118 @@ it('a refused close restores bounds debouncing for the surviving window', async 
   await setImmediate();
   assert.equal(window.destroyed, true);
 });
+
+it('a timed-out close cannot drain bounds after Keep open restores debouncing', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const renderer = gate();
+  f.controls.flush = () => renderer.wait;
+  context.after(async () => {
+    renderer.release();
+    f.controls.flush = async () => {};
+    window.close();
+    await setImmediate();
+  });
+  window.close();
+  await setImmediate();
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(window.destroyed, false);
+  const writes = f.writes.length;
+  window.bounds.x = 73;
+  window.emit('move');
+  renderer.release();
+  await setImmediate();
+  assert.equal(
+    f.writes.length,
+    writes,
+    'abandoned close must leave the pending bounds debounce intact',
+  );
+  context.mock.timers.tick(199);
+  await setImmediate();
+  assert.equal(f.writes.length, writes);
+  context.mock.timers.tick(1);
+  await setImmediate();
+  assert.equal(f.writes.length, writes + 1);
+  assert.equal(f.writes.at(-1)?.value.bounds.x, 73);
+  window.bounds.x = 74;
+  window.emit('move');
+  await setImmediate();
+  assert.equal(
+    f.writes.length,
+    writes + 1,
+    'late renderer settlement must not leave the saver flushing',
+  );
+  context.mock.timers.tick(200);
+  await setImmediate();
+  assert.equal(f.writes.length, writes + 2);
+  assert.equal(f.writes.at(-1)?.value.bounds.x, 74);
+  assert.equal(window.destroyed, false);
+  f.controls.flush = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+});
+
+it('an abandoned renderer completion cannot drain bounds or approve a newer close', async (context) => {
+  const flush = WindowStateSaver.prototype.flush;
+  let drains = 0;
+  context.mock.method(
+    WindowStateSaver.prototype,
+    'flush',
+    function (this: WindowStateSaver) {
+      drains++;
+      return flush.call(this);
+    },
+  );
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const abandoned = gate();
+  f.controls.flush = () => abandoned.wait;
+  window.close();
+  await setImmediate();
+  assert.equal(drains, 1);
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  const current = gate();
+  context.after(async () => {
+    abandoned.release();
+    current.release();
+    await setImmediate();
+  });
+  f.controls.flush = () => current.wait;
+  window.close();
+  await setImmediate();
+  assert.equal(drains, 2);
+  const writes = f.writes.length;
+  abandoned.release();
+  await setImmediate();
+  assert.equal(drains, 2, 'only the current close owns a final bounds drain');
+  assert.equal(f.writes.length, writes);
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(f.controls.quits, 0);
+  assert.throws(
+    () =>
+      f.invoke(window, 'handoffReady', '11111111-1111-4111-8111-111111111111'),
+    /closing/,
+  );
+  current.release();
+  await setImmediate();
+  assert.equal(
+    drains,
+    3,
+    'the current close still drains final bounds after its own renderer settles',
+  );
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.prompts, 1);
+});

@@ -1595,7 +1595,10 @@ export function App() {
           }
           saved = workspaceRef.current;
           await saveWorkspace(saved);
-        } while (workspaceRef.current !== saved);
+        } while (
+          workspaceTransferBusy.current ||
+          workspaceRef.current !== saved
+        );
       } catch (error) {
         setErrors((value) => ({
           ...value,

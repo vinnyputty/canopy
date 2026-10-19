@@ -226,6 +226,37 @@ await assert.rejects(onApply(()=>transfer.rollback()),/changed after preview/);
 assert.deepEqual(await storage.read('workspace'),persisted(edited));assert.equal(workspaceTransferBusy.current,false);
 console.log('PASS guarded Undo after subsequent edits rejects and preserves imported roots/settings and those edits');
 assert.equal(await fs.readFile(${JSON.stringify(join(directory, 'credentials.json'))},'utf8'),'FAKE SAMPLE SENTINEL');
+async function transferDuringCloseSave(operation) {
+  let saveEnter,saveRelease,operationEnter,operationRelease;
+  const saveEntered=new Promise(r=>saveEnter=r),saveHeld=new Promise(r=>saveRelease=r);
+  const operationEntered=new Promise(r=>operationEnter=r),operationHeld=new Promise(r=>operationRelease=r);
+  globalThis.rendererStageGate=async(file)=>{if(file.includes('workspace.json.')&&file.endsWith('.tmp')){globalThis.rendererStageGate=undefined;saveEnter();await saveHeld;}};
+  const closing=attemptMainQuit();await saveEntered;
+  const applying=onApply(async()=>{operationEnter();await operationHeld;return operation();});
+  saveRelease();
+  const result=await closing;await operationEntered;
+  const heldBytes=await bytes();
+  try {
+    assert.equal(result.closed,false,'Close must recheck a transfer started during its awaited save');
+    assert.equal(result.quitCalls,0);
+    assert.match(String(result.errors[0]?.[1]),/transfer is in progress/);
+    assert.equal(workspaceTransferCommitted.current,false);
+    await assert.rejects(saveWorkspace(baseline),/transfer is in progress/);
+    assert.equal(await bytes(),heldBytes);
+  } finally {operationRelease();await applying;}
+}
+workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;reload=()=>{};
+await saveWorkspace(baseline);
+const concurrentPreview=await transfer.preview(backup,mapping,'replace');
+await transferDuringCloseSave(()=>transfer.apply(concurrentPreview.token));
+assert.equal(await bytes(),JSON.stringify(concurrentPreview.workspace));
+workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;active=false;
+await transferDuringCloseSave(()=>transfer.rollback());
+assert.equal(await bytes(),JSON.stringify(baseline));
+workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
+const ordinaryClose=await attemptMainQuit();assert.equal(ordinaryClose.closed,true);assert.equal(ordinaryClose.quitCalls,1);assert.deepEqual(ordinaryClose.errors,[]);
+console.log('PASS Apply and Undo started during awaited close save refuse quit until commit; ordinary close recovers');
+
 `;
     const bundle = await build({
       stdin: { contents: source, resolveDir: root, loader: 'ts' },

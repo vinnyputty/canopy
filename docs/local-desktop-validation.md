@@ -19,8 +19,8 @@ The final stacked desktop candidate combines the source features below. The feat
 ## Integration invariants
 
 - Activation, duplicate launches, and About & Support share one window-creation promise. Failed loads dispose only their authoritative window; refused closes release waiting focus requests and restore bounds debouncing and handoff delivery.
-- The workspace-close layer drains coalesced bounds and the renderer workspace, including bounds changed during the renderer handshake. The shared deadline, unavailable-renderer recovery, explicit abandonment consent, and Windows session-end handling remain intact.
-- Backup transfer blocks old-document saves. The workspace-close layer refuses an uncommitted transfer; after commit, it acknowledges persistence without saving stale renderer state, including when reload fails. Failed operations restore normal saves. Atomic replacement retains private unique staging, fresh approval checks, and cleanup.
+- The workspace-close layer drains coalesced bounds and the renderer workspace, including bounds changed during the renderer handshake. Abandoned close attempts cannot start a final bounds drain. The shared deadline, unavailable-renderer recovery, explicit abandonment consent, and Windows session-end handling remain intact.
+- Backup transfer blocks old-document saves. The workspace-close layer rechecks transfer state after awaited saves and refuses an uncommitted transfer; after commit, it acknowledges persistence without saving stale renderer state, including when reload fails. Failed operations restore normal saves. Atomic replacement retains private unique staging, fresh approval checks, and cleanup.
 - Handoff startup readiness records completed initial reads independently of cache retention. Destination resolution requires retained confirmed data. Saved-view handoff exits Inbox before activating its destination.
 - Accessibility feedback, viewport rendering, cancellable provider reads, authoring recovery, setup diagnostics, and support delivery retain their source invariants. Tree, search, relationship, and handoff owners are released on document teardown.
 
