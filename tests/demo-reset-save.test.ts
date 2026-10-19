@@ -56,6 +56,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     let fixture; const demoMode = demo;
     const demoWorkspace = initial;
     let demoWorkspaceState = structuredClone(initial);
+    let savingWorkspace = Promise.resolve(), receivedWorkspace, retryUnavailableWorkspace = false;
     return {load: ${handler('loadWorkspace')}, save: ${handler('saveWorkspace')}, reset: ${handler('resetDemo')}};
   }`,
     {

@@ -1,9 +1,10 @@
 # Desktop source integration
 
-The desktop feature candidate combines the source features below. Its base is `8ba36a3864dddb28778b304a8ffde0cd43d2402c`, which includes the planning prototype. Release/package PRs #108, #110, #119, and #121 remain separate.
+The final stacked desktop candidate combines the source features below. The feature layer contains the shared desktop features; the workspace-close layer supplies #101 and its integration corrections. Its base is `8ba36a3864dddb28778b304a8ffde0cd43d2402c`, which includes the planning prototype. Release/package PRs #108, #110, #119, and #121 remain separate.
 
 ## Pinned source
 
+- #101 `fix/93-workspace-close`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `325c8d636a5503b597ad5c345d3c40a216a86c19` (workspace-close layer).
 - #103 `fix/94-single-instance`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `64fa228f62f37ab2b31d2aed7d1a78ec314f5a5d`.
 - #113 `fix/95-window-write-coalescing`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `0369e1cad755b4b787bd3002df2991d3f26890d3`.
 - #106 `feat/82-connection-setup`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `70b3333943e4a926c6cb398501c50f404873e2d7`.
@@ -17,9 +18,9 @@ The desktop feature candidate combines the source features below. Its base is `8
 
 ## Integration invariants
 
-- Activation, duplicate launches, and About & Support share one window-creation promise. Failed loads dispose only their authoritative window.
-- Move and resize events debounce to the latest bounds. Close and quit drain the final bounds before disposing the window.
-- Backup transfer blocks old-document saves. Committed transfers retain their old-document save barrier through reload failure. Failed operations restore normal saves. Atomic replacement retains private unique staging, fresh approval checks, and cleanup.
+- Activation, duplicate launches, and About & Support share one window-creation promise. Failed loads dispose only their authoritative window; refused closes release waiting focus requests and restore bounds debouncing and handoff delivery.
+- The workspace-close layer drains coalesced bounds and the renderer workspace, including bounds changed during the renderer handshake. The shared deadline, unavailable-renderer recovery, explicit abandonment consent, and Windows session-end handling remain intact.
+- Backup transfer blocks old-document saves. The workspace-close layer refuses an uncommitted transfer; after commit, it acknowledges persistence without saving stale renderer state, including when reload fails. Failed operations restore normal saves. Atomic replacement retains private unique staging, fresh approval checks, and cleanup.
 - Handoff startup readiness records completed initial reads independently of cache retention. Destination resolution requires retained confirmed data. Saved-view handoff exits Inbox before activating its destination.
 - Accessibility feedback, viewport rendering, cancellable provider reads, authoring recovery, setup diagnostics, and support delivery retain their source invariants. Tree, search, relationship, and handoff owners are released on document teardown.
 
@@ -31,9 +32,10 @@ Full provenance, exact historical outcomes, reproduction logs, and mutation resu
 
 ## Final Windows validation
 
-- Build the desktop feature candidate and record the exact source revision and executable payload.
-- Verify duplicate-launch exclusion, focus/restoration, recreation, and handoff delivery across startup, window recreation, and restart.
+- Build the full stacked source candidate and record the exact source revision and executable payload.
+- Verify duplicate-launch exclusion, focus/restoration, recreation, and handoff delivery across startup, close refusal, and restart.
 - Verify move/resize bursts, maximized restore/unmaximize normal bounds, and final bounds drain on close and quit.
-- Verify held Apply/Undo rejects old-document saves, failed reload preserves imported bytes and the save barrier, and failed transfer restores ordinary persistence.
+- Verify normal close, quit, session-end requests, critical termination handling, renderer loss, failed/held saves, deadline consent, retry, and listener cleanup.
+- Verify held Apply/Undo refuses close safely, committed transfer with failed reload permits clean close without changing imported bytes, and failed transfer restores ordinary persistence.
 - Verify Inbox-to-saved-view handoff, startup cache eviction readiness, and refusal of targets whose confirmed data is unavailable.
 - Use synthetic providers for mutation fixtures. Jira verification is read-only. Record remaining native or provider limitations explicitly; release prerequisites and signing remain separate gates.

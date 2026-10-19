@@ -423,6 +423,7 @@ export function App() {
   const historyRef = useRef(history);
   const workspaceRef = useRef(workspace);
   const workspaceTransferBusy = useRef(false);
+  const workspaceTransferCommitted = useRef(false);
   const [workspaceTransferActive, setWorkspaceTransferActive] = useState(false);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
@@ -1533,6 +1534,37 @@ export function App() {
         workspaceSaveTimer.current = null;
     };
   }, [workspace, ready, saveWorkspace]);
+
+  useLayoutEffect(() => {
+    if (!ready) return;
+    window.canopy.onWorkspaceFlush(async () => {
+      if (!workspaceLoaded.current) return;
+      try {
+        // A change made while an earlier write is in flight must also persist.
+        let saved: Workspace;
+        do {
+          if (workspaceTransferBusy.current) {
+            if (workspaceTransferCommitted.current) return;
+            throw new Error(
+              'Workspace transfer is in progress; wait for reload.',
+            );
+          }
+          if (workspaceSaveTimer.current !== null) {
+            window.clearTimeout(workspaceSaveTimer.current);
+            workspaceSaveTimer.current = null;
+          }
+          saved = workspaceRef.current;
+          await saveWorkspace(saved);
+        } while (workspaceRef.current !== saved);
+      } catch (error) {
+        setErrors((value) => ({
+          ...value,
+          workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
+        }));
+        throw error;
+      }
+    });
+  }, [ready, saveWorkspace]);
 
   const cancelledTrees = useRef(new Set<string>());
   const treeRequests = useRef(new Map<string, { id: string; epoch: number }>());
@@ -4761,8 +4793,25 @@ export function App() {
                 {activeTab.focusKey && <span>Focused subtree</span>}
               </nav>
             }
-            {(errors.workspace ||
-              errors[activeTab.id] ||
+            {errors.workspace && (
+              <div className="error-banner" role="alert">
+                <AlertCircle size={15} />
+                <span>{errors.workspace}</span>
+                <button
+                  aria-label="Dismiss workspace save error"
+                  onClick={() =>
+                    setErrors((value) => {
+                      const copy = { ...value };
+                      delete copy.workspace;
+                      return copy;
+                    })
+                  }
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+            {(errors[activeTab.id] ||
               errors.edit ||
               errors.app ||
               (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow) && (
@@ -4771,10 +4820,7 @@ export function App() {
                 <span>
                   {(cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                     ? `${activeConnection?.provider === 'github' ? 'GitHub' : 'Jira'} rate limit reached. Refresh resumes after ${new Date(cooldownTimes[activeTab.connectionId]).toLocaleTimeString()}.`
-                    : (errors.workspace ??
-                      errors.edit ??
-                      errors[activeTab.id] ??
-                      errors.app)}
+                    : (errors.edit ?? errors[activeTab.id] ?? errors.app)}
                 </span>
                 {!demoMode && (
                   <button onClick={() => setDialog('setup')}>Setup help</button>
@@ -4799,7 +4845,6 @@ export function App() {
                   onClick={() =>
                     setErrors((value) => {
                       const copy = { ...value };
-                      delete copy.workspace;
                       delete copy.edit;
                       delete copy[activeTab.id];
                       delete copy.app;
@@ -5553,7 +5598,7 @@ export function App() {
             onDemo={launchDemo}
             demoMode={demoMode}
             hasConnections={connections.length > 0}
-            error={errors.app ?? errors.workspace}
+            error={errors.workspace ?? errors.app}
           />
         )}
       </main>
@@ -6017,7 +6062,7 @@ export function App() {
                   'Workspace transfer is in progress; wait for reload.',
                 );
               workspaceTransferBusy.current = true;
-              let transferred = false;
+              workspaceTransferCommitted.current = false;
               setWorkspaceTransferActive(true);
               if (workspaceSaveTimer.current !== null) {
                 window.clearTimeout(workspaceSaveTimer.current);
@@ -6027,10 +6072,10 @@ export function App() {
                 // This is the only save admitted after the persistence barrier closes.
                 await saveWorkspace(workspaceRef.current, true);
                 await operation();
-                transferred = true;
+                workspaceTransferCommitted.current = true;
                 await window.canopy.reloadWorkspace();
               } catch (error) {
-                if (!transferred) {
+                if (!workspaceTransferCommitted.current) {
                   workspaceTransferBusy.current = false;
                   setWorkspaceTransferActive(false);
                   throw error;
@@ -6066,6 +6111,13 @@ export function App() {
                 theme,
                 palette,
               });
+              // Closing can flush before React commits this update. Preserve
+              // other workspace changes made while the appearance write waited.
+              workspaceRef.current = {
+                ...workspaceRef.current,
+                theme,
+                palette,
+              };
               setWorkspace((current) => ({ ...current, theme, palette }));
               setAppearancePreview(null);
               setDialog((current) =>
