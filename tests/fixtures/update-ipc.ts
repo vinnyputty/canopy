@@ -89,6 +89,9 @@ class Window extends EventEmitter {
   isMinimized() {
     return false;
   }
+  isVisible() {
+    return true;
+  }
   show() {}
   focus() {}
 }

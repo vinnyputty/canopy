@@ -129,7 +129,12 @@ async function fixture() {
       return this.bounds;
     }
     restore() {}
+    isVisible() {
+      return this.shown;
+    }
     show() {
+      if (this.shown && this.maximized)
+        this.bounds = { x: 0, y: 0, width: 1600, height: 1000 };
       this.presentation.push('show');
       this.shown = true;
     }
@@ -423,7 +428,17 @@ it('saved maximized windows receive maximize before show and retain normal bound
   const window = f.windows[0];
   assert.equal(window.maximized, true);
   assert.equal(window.initiallyShown, false);
-  assert.deepEqual(window.presentation.slice(0, 2), ['maximize', 'show']);
+  assert.deepEqual(window.presentation, ['maximize', 'show']);
+  f.app.emit('activate');
+  f.about();
+  await setImmediate();
+  assert.deepEqual(window.presentation, ['maximize', 'show']);
+  assert.ok(window.focused >= 3);
+  window.shown = false;
+  f.about();
+  await setImmediate();
+  assert.deepEqual(window.presentation, ['maximize', 'show', 'show']);
+  assert.equal(window.shown, true);
   window.close();
   await setImmediate();
   assert.deepEqual(f.writes.at(-1)?.value, f.controls.saved);
