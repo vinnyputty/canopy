@@ -30,8 +30,17 @@ export function installSampleCopySink(clipboard: object) {
   if (
     Reflect.ownKeys(clipboard).some((key) => typeof key !== 'string') ||
     typeof originals.writeText?.value !== 'function' ||
-    Object.values(originals).some(
-      (d) => d.get || d.set || !d.configurable || typeof d.value !== 'function',
+    Object.entries(originals).some(
+      ([name, d]) =>
+        d.get ||
+        d.set ||
+        !d.configurable ||
+        (typeof d.value !== 'function' &&
+          !(
+            name === 'selection' &&
+            d.value !== null &&
+            typeof d.value === 'object'
+          )),
     )
   )
     throw new Error('Clipboard cannot be isolated before sample copy.');
@@ -42,6 +51,8 @@ export function installSampleCopySink(clipboard: object) {
   const matches = (name: string, d: PropertyDescriptor) => {
     const current = Object.getOwnPropertyDescriptor(clipboard, name);
     return (
+      current?.get === d.get &&
+      current?.set === d.set &&
       current?.value === d.value &&
       current?.writable === d.writable &&
       current?.enumerable === d.enumerable &&
@@ -89,7 +100,18 @@ export function installSampleCopySink(clipboard: object) {
                 'Native clipboard access denied in sample audit.',
               );
             };
-      const descriptor = { ...original, value };
+      const descriptor: PropertyDescriptor =
+        name === 'selection' && typeof original.value === 'object'
+          ? {
+              get: () => {
+                throw new Error(
+                  'Native clipboard access denied in sample audit.',
+                );
+              },
+              enumerable: original.enumerable,
+              configurable: original.configurable,
+            }
+          : { ...original, value };
       Object.defineProperty(clipboard, name, descriptor);
       installed[name] = descriptor;
     }

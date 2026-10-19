@@ -192,6 +192,99 @@ test('sample sink isolates every main clipboard API without reading original for
   sink.restore();
 });
 
+test('Electron selection object is inaccessible and restored without native access', () => {
+  let native = 0;
+  const selection = Object.defineProperty({}, 'readText', {
+    get() {
+      native++;
+      throw Error('native selection');
+    },
+  });
+  const clipboard = {
+    writeText(_text: string) {
+      native++;
+    },
+    selection,
+  };
+  const originals = Object.getOwnPropertyDescriptors(clipboard);
+  const sink = installSampleCopySink(clipboard);
+  assert.throws(() => clipboard.selection, /Native clipboard access denied/);
+  clipboard.writeText('Reviewed');
+  assert.deepEqual(sink.inspect(), { count: 1, text: 'Reviewed' });
+  assert.equal(native, 0);
+  sink.restore();
+  assert.deepEqual(Object.getOwnPropertyDescriptors(clipboard), originals);
+  sink.restore();
+});
+
+for (const changed of ['get', 'set'] as const) {
+  test(`selection ${changed} ownership changes are detected and preserved on restore`, () => {
+    const clipboard = { writeText(_text: string) {}, selection: {} };
+    const originalWrite = clipboard.writeText;
+    const sink = installSampleCopySink(clipboard);
+    const foreign = {
+      ...Object.getOwnPropertyDescriptor(clipboard, 'selection'),
+      [changed]: () => ({}),
+    };
+    Object.defineProperty(clipboard, 'selection', foreign);
+    assert.throws(() => sink.inspect(), /isolation changed/);
+    assert.throws(() => clipboard.writeText('Reviewed'), /isolation changed/);
+    assert.throws(() => sink.restore(), /ownership changed/);
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(clipboard, 'selection'),
+      foreign,
+    );
+    assert.equal(clipboard.writeText, originalWrite);
+  });
+}
+
+test('unknown clipboard objects refuse before mutation', () => {
+  const clipboard = { writeText() {}, unknown: {} };
+  const originals = Object.getOwnPropertyDescriptors(clipboard);
+  assert.throws(() => installSampleCopySink(clipboard), /cannot be isolated/);
+  assert.deepEqual(Object.getOwnPropertyDescriptors(clipboard), originals);
+});
+
+for (const descriptor of [
+  { value: {}, configurable: false },
+  {
+    get: () => {
+      throw Error('native getter');
+    },
+    configurable: true,
+  },
+  { value: null, configurable: true },
+  { value: 1, configurable: true },
+]) {
+  test(`unsafe selection descriptor refuses before mutation: ${JSON.stringify(descriptor)}`, () => {
+    const clipboard = Object.defineProperty(
+      { writeText() {} },
+      'selection',
+      descriptor,
+    );
+    const originals = Object.getOwnPropertyDescriptors(clipboard);
+    assert.throws(() => installSampleCopySink(clipboard), /cannot be isolated/);
+    assert.deepEqual(Object.getOwnPropertyDescriptors(clipboard), originals);
+  });
+}
+
+test('partial installation restores selection and methods after a definition failure', () => {
+  const target = { selection: {}, writeText(_text: string) {}, readText() {} };
+  const originals = Object.getOwnPropertyDescriptors(target);
+  let failed = false;
+  const clipboard = new Proxy(target, {
+    defineProperty(object, name, descriptor) {
+      if (name === 'readText' && !failed) {
+        failed = true;
+        throw Error('installation failed');
+      }
+      return Reflect.defineProperty(object, name, descriptor);
+    },
+  });
+  assert.throws(() => installSampleCopySink(clipboard), /installation failed/);
+  assert.deepEqual(Object.getOwnPropertyDescriptors(target), originals);
+});
+
 test('unsafe isolation fails before mutation and foreign replacement retains ownership', () => {
   const unsafe = Object.defineProperty({}, 'writeText', {
     value() {
