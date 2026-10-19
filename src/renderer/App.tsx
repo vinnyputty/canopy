@@ -205,7 +205,12 @@ const EMPTY_WORKSPACE: Workspace = {
   previewWidth: 420,
 };
 
-type Editor = { connectionId: string; key: string; field: EditField } | null;
+type Editor = {
+  tabId: string;
+  connectionId: string;
+  key: string;
+  field: EditField;
+} | null;
 
 function cx(...names: Array<string | false | null | undefined>) {
   return names.filter(Boolean).join(' ');
@@ -2686,7 +2691,12 @@ export function App() {
     (key: string, field: EditField) => {
       if (!activeTab) return;
       editSession.current++;
-      setEditor({ connectionId: activeTab.connectionId, key, field });
+      setEditor({
+        tabId: activeTab.id,
+        connectionId: activeTab.connectionId,
+        key,
+        field,
+      });
       if (field !== 'summary')
         void pickers.open(
           activeTab.connectionId,
@@ -2752,7 +2762,9 @@ export function App() {
       if (!success && field !== 'summary') {
         pickers.rejected(connectionId, key, field);
         if (activeIdRef.current === tabId && editSession.current === session)
-          setEditor((current) => current ?? { connectionId, key, field });
+          setEditor(
+            (current) => current ?? { tabId, connectionId, key, field },
+          );
       }
     },
     [activeTab, mutations, pickers],
@@ -3448,7 +3460,12 @@ export function App() {
           'CAN-111 priority',
         );
         await delay(2000);
-        setEditor({ connectionId: 'demo', key: 'CAN-111', field: 'priority' });
+        setEditor({
+          tabId: 'demo-can-100',
+          connectionId: 'demo',
+          key: 'CAN-111',
+          field: 'priority',
+        });
         tourEditor.current = true;
         await pickers.open('demo', 'CAN-111', 'priority');
         await waitFor(
@@ -5311,7 +5328,8 @@ export function App() {
                           );
                         }}
                         editor={
-                          editor?.connectionId === activeTab.connectionId
+                          editor?.tabId === activeTab.id &&
+                          editor.connectionId === activeTab.connectionId
                             ? editor
                             : null
                         }

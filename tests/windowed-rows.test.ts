@@ -354,7 +354,12 @@ test('real row focus, editor draft, menu and rank drag owners survive viewport r
   const state = await dom();
   try {
     const props = treeProps(Array.from({ length: 1001 }, (_, i) => issue(i)));
-    props.editor = { connectionId: 'work', key: 'R-1', field: 'summary' };
+    props.editor = {
+      tabId: 'work:a',
+      connectionId: 'work',
+      key: 'R-1',
+      field: 'summary',
+    };
     props.menuKey = 'R-2';
     props.dragKey = 'R-3';
     let dropped: string[] = [];
@@ -624,7 +629,7 @@ test('actual filtered rich rows retain hidden-Done semantics, linked controls an
   }
 });
 
-test('actual App editor prop and effective expansion preserve the owning alias and exclude foreign accounts', () => {
+test('actual App editor prop excludes foreign tabs and accounts and retains editing ancestry', () => {
   const text = readFileSync(
     new URL('../src/renderer/App.tsx', import.meta.url),
     'utf8',
@@ -660,14 +665,20 @@ test('actual App editor prop and effective expansion preserve the owning alias a
   walk(ast);
   assert.ok(editorExpression);
   assert.ok(expansion);
-  const editor = { connectionId: 'work', key: 'R-500', field: 'summary' };
-  const evaluate = (connectionId: string) =>
+  const editor = {
+    tabId: 'work:a',
+    connectionId: 'work',
+    key: 'R-500',
+    field: 'summary',
+  };
+  const evaluate = (id: string, connectionId: string) =>
     vm.runInNewContext(`(${editorExpression})`, {
       editor,
-      activeTab: { connectionId },
+      activeTab: { id, connectionId },
     });
-  assert.equal(evaluate('work'), editor);
-  assert.equal(evaluate('other'), null);
+  assert.equal(evaluate('work:a', 'work'), editor);
+  assert.equal(evaluate('work:b', 'work'), null);
+  assert.equal(evaluate('work:a', 'other'), null);
   const node = buildIssueTree(
     Array.from({ length: 1001 }, (_, i) => issue(i)),
     'R-0',
