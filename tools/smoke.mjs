@@ -1,4 +1,6 @@
+import * as authoringLifecycle from './audit-lifecycle.mjs';
 import { auditInbox } from './smoke-inbox.mjs';
+import { auditAuthoring } from './smoke-authoring.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditAccessibility } from './smoke-accessibility.mjs';
 import { auditSidebar } from './smoke-sidebar.mjs';
@@ -204,7 +206,18 @@ async function launch(production = false, fixtureEnv = {}) {
 
 async function close() {
   if (!app) return;
-  await app.close();
+  if (smokeFailure) {
+    // Failed fixtures may retain a crashed/hung renderer or a native close
+    // warning. Preserve the assertion failure and terminate only this launch.
+    const process = app.process();
+    if (process.exitCode === null && process.signalCode === null)
+      process.kill('SIGKILL');
+    await expect
+      .poll(() => process.exitCode !== null || process.signalCode !== null, {
+        timeout: 5000,
+      })
+      .toBe(true);
+  } else await app.close();
   app = undefined;
   page = undefined;
 }
@@ -3636,6 +3649,7 @@ try {
   await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
+  await auditAuthoring(appPath, executablePath, env, authoringLifecycle);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

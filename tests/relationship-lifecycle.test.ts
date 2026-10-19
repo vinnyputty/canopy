@@ -128,6 +128,8 @@ function mainRequests() {
   const webContents = new EventEmitter();
   let updateCancellations = 0;
   const context = {
+    initialLoad: false,
+    cancelHandoffs: () => {},
     AbortController,
     relationshipKinds,
     relationshipFailure,

@@ -1,4 +1,5 @@
 import { recoverTriage } from './triage';
+import { validateCopyTemplate } from './copy-template';
 import type {
   RootView,
   ReadingSettings,
@@ -208,6 +209,9 @@ export function recoverWorkspaceViews(workspace: Workspace): Workspace {
   return {
     ...workspace,
     triage: recoverTriage(workspace.triage),
+    copyTemplate: validateCopyTemplate(workspace.copyTemplate)
+      ? workspace.copyTemplate
+      : undefined,
     tabs: recoverTabs(workspace.tabs),
     ...(workspace.closedTabs
       ? { closedTabs: recoverTabs(workspace.closedTabs) }

@@ -80,6 +80,8 @@ async function fixture(source = setter) {
     workspaceRef,
     workspaceSaveTimer,
     pendingWorkspaceSave,
+    workspaceLoaded: { current: true },
+    workspaceTransferBusy: { current: false },
     demoResetting: { current: false },
     setErrors: () => {},
     window: {

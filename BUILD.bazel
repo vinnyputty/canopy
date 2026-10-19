@@ -30,7 +30,7 @@ js_test(
     name = "test",
     timeout = "long",
     entry_point = "tools/test.mjs",
-    data = [":node_modules", ":sources", "tools/smoke-accessibility.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-refresh.mjs", "tools/portable-check.mjs", "tools/ci.mjs", "tools/window-check.mjs", "tools/smoke-pickers.mjs", "tools/audit-lifecycle.mjs", "tools/demo-check.mjs", "tools/desktop.mjs", "tools/audit-lifecycle.d.mts", "tools/perf-desktop.mjs", "tools/prepare-perf-desktop.mjs", "tools/benchmark-large-trees.mjs"],
+    data = [":node_modules", ":sources", "tools/smoke-accessibility.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", "tools/smoke-github.mjs", "tools/smoke-refresh.mjs", "tools/portable-check.mjs", "tools/ci.mjs", "tools/window-check.mjs", "tools/stage-backup-smoke.mjs", "tools/smoke-pickers.mjs", "tools/perf-desktop.mjs", "tools/audit-lifecycle.mjs", "tools/prepare-perf-desktop.mjs", "tools/demo-check.mjs", "tools/benchmark-large-trees.mjs", "tools/smoke-authoring.mjs", "tools/authoring-audit.mjs", "tools/handoff-audit.mjs", "tools/handoff-check.mjs", "tools/desktop.mjs", "tools/handoff-native.mjs", "tools/handoff-transport.mjs", "tools/audit-lifecycle.d.mts"] + glob(["tools/smoke-backup*.mjs", "tools/backup-audit-cleanup.mjs"]),
 )
 
 js_test(
@@ -84,7 +84,7 @@ js_binary(
 js_binary(
     name = "smoke",
     entry_point = "tools/desktop.mjs",
-    data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-sidebar.mjs", "tests/fixtures/sidebar-root-view.json", "tools/smoke-child.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-palette.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", ":branding", "tools/smoke-accessibility.mjs", "tools/smoke-saved-feedback.mjs", "tools/audit-lifecycle.mjs"],
+    data = [":build", ":node_modules", "package.json", "tools/smoke.mjs", "tools/smoke-sidebar.mjs", "tests/fixtures/sidebar-root-view.json", "tools/smoke-child.mjs", "tools/smoke-bulk.mjs", "tools/smoke-refresh.mjs", "tools/smoke-search.mjs", "tools/smoke-palette.mjs", "tools/smoke-pickers.mjs", "tools/smoke-workflow.mjs", "tools/smoke-preview.mjs", "tools/smoke-github.mjs", "tools/smoke-relationships.mjs", "tools/smoke-inbox.mjs", ":branding", "tools/smoke-accessibility.mjs", "tools/smoke-saved-feedback.mjs", "tools/smoke-authoring.mjs", "tools/authoring-audit.mjs", "tools/audit-lifecycle.mjs"],
     args = ["smoke"],
     patch_node_fs = False,
     tags = ["manual"],
@@ -149,12 +149,6 @@ js_binary(
     tags = ["manual"],
 )
 
-js_test(
-    name = "branding_check",
-    entry_point = "tools/check-branding.mjs",
-    data = [":node_modules", ":branding", "package.json", "tools/icon-formats.mjs"],
-)
-
 js_binary(
     name = "icons",
     entry_point = "tools/desktop.mjs",
@@ -164,11 +158,58 @@ js_binary(
     tags = ["manual"],
 )
 
+js_test(
+    name = "branding_check",
+    entry_point = "tools/check-branding.mjs",
+    data = [":node_modules", ":branding", "package.json", "tools/icon-formats.mjs"],
+)
+
 js_binary(
     name = "branding_smoke",
     entry_point = "tools/desktop.mjs",
     data = [":build", ":node_modules", ":branding", "package.json", "tools/smoke-branding.mjs"],
     args = ["branding-check"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "stage_backup_smoke",
+    entry_point = "tools/stage-backup-smoke.mjs",
+    data = [":build", ":node_modules", ":sources"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "backup_cases",
+    entry_point = "tools/smoke-backup-cases.mjs",
+    data = [":node_modules", "tools/smoke-search.mjs", "tools/smoke-refresh.mjs", "tools/backup-audit-cleanup.mjs", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "backup_smoke",
+    entry_point = "tools/smoke-backup.mjs",
+    data = [":node_modules", "tools/backup-audit-cleanup.mjs", "tools/audit-lifecycle.mjs", "tools/audit-lifecycle.d.mts"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "authoring_check",
+    entry_point = "tools/authoring-check.mjs",
+    data = [":build", ":node_modules", "package.json", "tools/smoke-authoring.mjs", "tools/authoring-audit.mjs", "tools/audit-lifecycle.mjs"],
+    patch_node_fs = False,
+    tags = ["manual"],
+)
+
+js_binary(
+    name = "handoff_check",
+    entry_point = "tools/desktop.mjs",
+    data = [":branding", ":build", ":node_modules", "package.json", "tools/handoff-check.mjs", "tools/handoff-audit.mjs", "tools/handoff-native.mjs", "tools/handoff-transport.mjs", "tools/audit-lifecycle.mjs"],
+    args = ["handoff-check"],
     patch_node_fs = False,
     tags = ["manual"],
 )
