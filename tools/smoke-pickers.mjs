@@ -84,7 +84,7 @@ export async function auditPickers(app, page) {
   await page
     .getByRole('alert')
     .filter({ hasText: 'Assignment permission denied' })
-    .getByRole('button')
+    .getByRole('button', { name: 'Dismiss error', exact: true })
     .click();
   // Restore the initial owner through the same validated action.
   await field('assignee').click();
@@ -383,7 +383,49 @@ export async function auditPickers(app, page) {
 }
 
 export async function auditSelfConnections(app, page) {
-  const workspace = await page.evaluate(() => window.canopy.loadWorkspace());
+  const workspace = await page.evaluate(async () => {
+    const saved = await window.canopy.loadWorkspace();
+    // Observe this capture and the current tab roots in the same callback.
+    // Renderer console output is retained by the smoke's recentOutput listener.
+    try {
+      const text = (value) =>
+        typeof value === 'string'
+          ? value
+              .slice(0, 32)
+              .toWellFormed()
+              .replace(/[\u0000-\u001f]/g, '?')
+          : null;
+      const tabs = Array.isArray(saved?.tabs) ? saved.tabs : [];
+      const rendered = document.querySelectorAll('[role="tab"]');
+      const renderedTabs = [];
+      for (let index = 0; index < Math.min(rendered.length, 4); index += 1) {
+        const tab = rendered[index];
+        renderedTabs.push({
+          rootKey: text(tab.querySelector('.tab-label b')?.textContent),
+          selected: text(tab.getAttribute('aria-selected')),
+        });
+      }
+      // At most 21 strings, each escaping to at most 64 characters; with
+      // keys, structure and counts, the complete JSON stays below 1900.
+      console.log(
+        'Self-connection workspace capture: ' +
+          JSON.stringify({
+            activeTabId: text(saved?.activeTabId),
+            tabCount: tabs.length,
+            tabs: tabs.slice(0, 4).map((tab) => ({
+              id: text(tab?.id),
+              connectionId: text(tab?.connectionId),
+              rootKey: text(tab?.rootKey),
+            })),
+            renderedTabCount: rendered.length,
+            renderedTabs,
+          }),
+      );
+    } catch {
+      // Diagnostics must preserve the original load result and fixture behavior.
+    }
+    return saved;
+  });
   await app.evaluate(async ({ ipcMain }, workspace) => {
     const demo = globalThis.canopySmoke;
     const handlers = new Map();
@@ -517,7 +559,14 @@ export async function auditSelfConnections(app, page) {
         .fill('test@example.invalid');
       await page.getByPlaceholder('Paste your token').fill('fixture-token');
       await page
-        .getByRole('button', { name: 'Connect with token', exact: true })
+        .getByRole('button', { name: 'Verify and save Jira', exact: true })
+        .click();
+      // The demo IDs deliberately lack a verified token-account identity.
+      await expect(
+        page.getByRole('dialog', { name: 'Connect Jira', exact: true }),
+      ).toContainText('Connection saved.');
+      await page
+        .getByRole('button', { name: 'Close dialog', exact: true })
         .click();
     };
     await replaceAccount();

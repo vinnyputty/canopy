@@ -22,7 +22,18 @@ After the smoke runner installs the Electron runtime, run `bazel run //:palette_
 
 Windows CI forwards an already configured `PSModuleAnalysisCachePath` to Bazel source tests by variable name, preserving its value outside command arguments. An unset override remains unset; this preserves configuration and does not establish a loader remedy. Windows PowerShell snapshot children construct their compatible default module paths independently of an inherited PowerShell 7 environment. Windows CI compares inherited, default, and explicit system-module loading sequentially before source tests; each diagnostic comparison has the same finite snapshot deadline and leaves the required native lifecycle tests active. Within each Windows lifecycle test worker, bounded comparisons also exercise the unchanged raw snapshot and canonical import with synchronous input, asynchronous open stdin, explicit stdin EOF, and ignored input. They report sanitized schema/status/phase summaries, byte counts, child closure and output timing, enforcing the same per-stream output cap. Unconfirmed control closure fails worker setup before lifecycle fixtures start; fully closed diagnostic failures leave required tests active. Additional bounded module-only controls compare inherited context, system working directory, a disposable writable module cache, and runner temp directory in both prebuild and lifecycle workers. They report hashed image/home/cwd/temp/cache identities, manifest readability and hash, and allowlisted architecture/version metadata; only these child contexts change. The disposable cache is removed after confirmed child closure and retained if closure is unconfirmed. Per-operation durations are reported separately from cumulative suite elapsed time. These comparisons never grant cleanup authority; native results, not local transport models, establish whether the input/context difference matters. Audit finalization preserves caught failures, including falsy thrown values, while keeping diagnostic and cleanup errors secondary. Snapshot failures and module comparisons report allowlisted phase/status/error codes, stream byte counts, subprocess timing, and CPU/memory samples; raw child streams, error text, and child causes stay out of diagnostics. A missing script-entry marker leaves startup or script entry unestablished; load samples provide context, not a timeout diagnosis. The demo check holds the starting-tour render before initial UI assertions, then verifies Pause/Next/Resume at their expected steps. Hold failures log the requested target, render trace, pre-reset tree state, current workspace, and tour status with a bounded diagnostic read, preserving the assertion. These diagnostics require actual platform CI evidence to establish a failure cause.
 
-Run `bazel run //:smoke_github` for a focused Electron test with mocked GitHub API responses covering connection, cross-repository sub-issues, edits, labels, and grouped search. It uses isolated app data and does not use your saved credentials.
+Run `bazel run //:window_check` for the focused Electron window persistence fixture: native bounds changes, immediate close/quit and relaunch, maximize/minimize, controlled bounds-write failure, and unreachable saved coordinates. It uses a disposable sample profile and fake credential records, retaining the profile unless every launch has qualified ownership and full-scope termination. Desktop runs require the exclusive GUI token; unavailable fullscreen transitions are reported as pending. See [window persistence validation](docs/window-persistence-validation.md) for automated results and remaining native acceptance.
+
+Run `bazel run //:smoke_github` for focused Electron tests covering setup dismissal and late results, canonical Jira reconnect, reviewed diagnostics save/cancel/failure, and mocked GitHub connection, cross-repository sub-issues, edits, labels, and grouped search. It uses isolated app data and does not use your saved credentials.
+
+Each profile has one Canopy process. Launching it again restores and focuses its window; demo and smoke profiles run independently. Run `bazel run //:instance_check` on an active desktop to check rapid duplicate launches, window restoration, profile isolation, and native focus with temporary app data on the host OS. CI passes `--state-only` to verify instance and window state on macOS, Windows, and Linux; native focus acceptance remains pending until the default check passes on each target OS.
+
+The demo launcher removes the temporary profile it creates after the child exits or fails to start. An inherited `CANOPY_USER_DATA` path is retained, including when `CANOPY_DEMO_TEMP=1` is set.
+
+On macOS, also close the window and click Canopy's Dock icon to verify native activation recreates and focuses it. The automated check exercises the application’s `activate` handler; a real Dock click remains a separate native acceptance check.
+
+Linux `--state-only` checks restoration of a hidden window so it can run on a virtual display without a window manager. Native minimized-window restoration remains part of the default check.
+Run `CANOPY_SMOKE_ACCESSIBILITY_ONLY=1 bazel run //:smoke` for the observed accessibility barrier regressions, after source review and desktop-test authorization. It captures Chromium accessibility snapshots, screenshots, and rendered contrast measurements in `.cache/accessibility/`. Native screen-reader qualification on macOS, Windows, and Linux remains a separate pending gate; see [the accessibility audit](docs/accessibility-audit.md).
 
 Run the full CI sequence locally with:
 
@@ -30,11 +41,13 @@ Run the full CI sequence locally with:
 bazel run //:ci
 ```
 
-This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the Electron smoke and guided demo checks, and packages Canopy. CI runs test targets sequentially with the existing launcher budgets for the complete unit and working-directory suites. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
+This builds, tests, checks the Bazel scripts from an unrelated working directory, runs the full Electron smoke, focused accessibility audit, guided demo and instance checks, and packages Canopy. The accessibility mode is scoped to its separate smoke invocation on every CI platform; headless Linux wraps both smoke invocations in `xvfb-run`. CI runs test targets sequentially with the existing launcher budgets for the complete unit and working-directory suites. The extra working-directory check catches cross-platform runfiles assumptions before remote CI. Packaging produces installers only for the host operating system, so run it on each target OS to verify every installer format. Headless Linux needs `xvfb-run`. Windows uses PowerShell or Command Prompt. Bazel supplies Node.js for the runner. For an isolated Bazel output directory, use `bazel --output_base=/tmp/canopy-bazel run //:ci -- --output_base=/tmp/canopy-bazel`.
 
 Bazel downloads pinned Node.js and npm dependencies from `pnpm-lock.yaml`. You do not need a global Node.js installation. `//:dev` downloads the matching Electron runtime and starts the bundled app. Runtime downloads require network access. Normal builds start with your saved Jira connections. The local sample provider powers both the guided demo and the smoke-test entry point; smoke-only failure controls stay in the test fixture.
 
-Use **Connect Jira site** to add a Jira Cloud site, your Atlassian account email, and a personal API token. Select **Scoped** for a token created with scopes, or **Classic** for a token created without scopes. Canopy checks `/myself` before saving the connection and uses the operating system credential store to encrypt credentials. Tokens stay in the Electron main process. Each connection is associated with a site and account.
+Use **Connect Jira or GitHub → Jira** to add a Jira Cloud site, your Atlassian account email, and a personal API token. Select **Scoped** for a token created with scopes, or **Classic** for a token created without scopes. Canopy checks `/myself` before saving the connection and uses the operating system credential store to encrypt credentials. Tokens stay in the Electron main process. Each connection is associated with a site and account.
+
+The connection dialog guides provider choice, token permissions, verification, and **Open first root**. Choose **Later** to keep a verified connection without opening a tab. **Setup help** in the sidebar opens over the current workspace and includes credential, permission, keyring, rate-limit, and connectivity recovery steps. It also offers **Review diagnostics** and **Save reviewed diagnostics…** for a local support report; no data is sent automatically. See [setup help and diagnostics](docs/connections.md#setup-help-and-diagnostics).
 
 See [Jira connection setup](docs/connections.md) for token scopes and organization policy checks. [Browser OAuth](docs/oauth.md) is an optional alternative and requires the included broker service.
 
@@ -78,6 +91,10 @@ Jira roots prefetch status choices by issue type so child menus open with cached
 
 Jira Cloud limits and hierarchy behavior are described in [Jira API notes](docs/jira.md).
 
+## About & Support
+
+Open **About & Support** from the sidebar, command palette, or **Help** menu on every platform; macOS also has **Canopy → About Canopy**. The view shows the running application's version and opens Releases, Documentation, and Report an issue in your browser. Issue reports open a blank form; Canopy does not attach workspace data or credentials.
+
 ## Packaging
 
 ```sh
@@ -85,6 +102,27 @@ bazel run //:package
 ```
 
 Installers are written to `release/`: DMG/ZIP on macOS, NSIS on Windows, and AppImage/DEB on Linux. Packaging runs on the target operating system. Builds are unsigned; macOS distribution needs signing and notarization for a smooth installation experience. CI builds and checks each OS and creates platform artifacts for pull requests. GUI launch and real-site integration must also be verified on the target machine.
+
+### Branding
+
+`assets/branding/icon.svg` is the source mark: a rounded green tile with a white issue hierarchy, extending the app's tree and lucide line visual system. The sidebar and About view use the same SVG. Platform assets are generated with the repository's pinned Electron/Chromium canvas renderer and PNG-backed ICO/ICNS containers, without additional tools or global configuration:
+
+```sh
+bazel --output_base=/tmp/canopy-bazel-79 run //:icons
+bazel --output_base=/tmp/canopy-bazel-79 test //:branding_check --test_output=errors
+```
+
+Run `bazel run //:branding_smoke` to check About version, support links and browser failures, menus, command palette, runtime icon decoding, held window creation and renderer subscription, keyboard focus/Tab containment and restoration, and macOS About reopening using a disposable profile and intercepted browser links. Set `CANOPY_PACKAGED_EXE` to an unsigned packaged executable to run the same check against that app. Run icon generation separately from other Electron/desktop checks. Commit the generated PNG set, ICO, ICNS, and source/version/hash manifest together with the SVG. `branding_check` validates the package schema, source freshness, image dimensions, PNG decoding, and containers. Bazel includes branding resources in build and desktop runfiles; the desktop launcher stages them for electron-builder and packages runtime icons under `dist/branding`.
+
+Explicit [electron-builder v26 icon paths](https://www.electron.build/v26/docs/features/icons-and-images/) cover macOS app and DMG volume, Windows executable and NSIS installer/uninstaller, and Linux icon sizes. Linux's `desktopName`, `syncDesktopName`, executable name, and `StartupWMClass` agree with [desktop entry integration](https://www.electron.build/v26/docs/linux/). Windows uses the configured app ID for taskbar grouping; macOS source launches set the Dock icon.
+
+Native acceptance remains pending on target machines. Keep release/branding PRs pending until installers and installed apps are checked at normal and high-DPI scales:
+
+- macOS: DMG volume and app icon, Finder, Dock, window switcher, app/Help menus, version and support links; include closing all windows and reopening About from the menu.
+- Windows: NSIS installer/uninstaller, installed shortcut and executable, Start menu, taskbar grouping, window switcher, Help menu, version and support links.
+- Linux: AppImage and installed DEB, desktop entry and launcher icon, taskbar grouping and window switcher under X11/Wayland, Help menu, version and support links.
+
+About & Support has its own sidebar entry alongside Settings and is also available from the command palette and native menus.
 
 ## Development
 

@@ -5,6 +5,8 @@ import { runCimContextControls } from './windows-cim-input-control.mjs';
 const cwd = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 const startupOptions = process.argv.slice(2);
 const env = { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' };
+// CI always runs the full smoke before the isolated accessibility audit.
+delete env.CANOPY_SMOKE_ACCESSIBILITY_ONLY;
 // Nested Bazel launchers must resolve their own runfiles and Node toolchain.
 for (const key of Object.keys(env)) {
   if (key.startsWith('JS_BINARY__') || key.startsWith('RUNFILES')) {
@@ -25,8 +27,12 @@ if (process.platform === 'win32') {
     testEnvironment.push('--test_env=PSModuleAnalysisCachePath');
   }
 }
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd, env, stdio: 'inherit' });
+function run(command, args, commandEnv = env) {
+  const result = spawnSync(command, args, {
+    cwd,
+    env: commandEnv,
+    stdio: 'inherit',
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     console.error(
@@ -48,6 +54,7 @@ bazel(
   '//:test',
   '//:typecheck',
   '//:format_check',
+  '//:branding_check',
   '//:portable_checks',
   // Unit and portability targets each launch the complete process-heavy suite.
   '--local_test_jobs=1',
@@ -55,10 +62,36 @@ bazel(
   ...testEnvironment,
 );
 if (process.platform === 'linux' && !env.DISPLAY) {
+  run('xvfb-run', [
+    '-a',
+    'bazel',
+    ...startupOptions,
+    'run',
+    '//:branding_smoke',
+  ]);
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke']);
+  run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke'], {
+    ...env,
+    CANOPY_SMOKE_ACCESSIBILITY_ONLY: '1',
+  });
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:demo_check']);
+  run('xvfb-run', [
+    '-a',
+    'bazel',
+    ...startupOptions,
+    'run',
+    '//:instance_check',
+    '--',
+    '--state-only',
+  ]);
 } else {
+  bazel('run', '//:branding_smoke');
   bazel('run', '//:smoke');
+  run('bazel', [...startupOptions, 'run', '//:smoke'], {
+    ...env,
+    CANOPY_SMOKE_ACCESSIBILITY_ONLY: '1',
+  });
   bazel('run', '//:demo_check');
+  bazel('run', '//:instance_check', '--', '--state-only');
 }
 bazel('run', '//:package');

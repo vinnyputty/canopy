@@ -1,8 +1,8 @@
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { safeStorage } from 'electron';
 import { linuxCredentialStorageError } from './credentials';
-import { replaceFile } from './replace-file';
+import { writeSavedFile } from './replace-file';
 
 export class Storage {
   private pending: Promise<void> = Promise.resolve();
@@ -26,8 +26,7 @@ export class Storage {
       .then(async () => {
         await mkdir(this.directory, { recursive: true, mode: 0o700 });
         const file = join(this.directory, `${name}.json`);
-        await writeFile(`${file}.tmp`, contents, { mode: 0o600 });
-        await replaceFile(`${file}.tmp`, file);
+        await writeSavedFile(file, contents);
       });
     this.pending = task;
     return task;
@@ -57,7 +56,7 @@ export class Storage {
       ) as T;
     } catch {
       throw new Error(
-        'Saved credentials could not be unlocked using this OS account.',
+        'Saved credentials could not be unlocked using this OS account. Unlock the keychain and restart Canopy with the original OS account. Keep a backup of saved credentials; do not delete them to retry.',
       );
     }
   }

@@ -1,5 +1,22 @@
-import { rename } from 'node:fs/promises';
+import { open, rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+
+/** Replace saved state without reusing temporary files left by an earlier launch. */
+export async function writeSavedFile(destination: string, contents: string) {
+  const temporary = `${destination}.${randomUUID()}.tmp`;
+  const file = await open(temporary, 'wx', 0o600);
+  try {
+    try {
+      await file.writeFile(contents);
+    } finally {
+      await file.close();
+    }
+    await replaceFile(temporary, destination);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
 
 /** Keep the existing file intact while Windows releases a temporary file lock. */
 export async function replaceFile(

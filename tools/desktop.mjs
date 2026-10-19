@@ -24,19 +24,34 @@ await cp(join(root, 'dist'), stagedDist, {
   recursive: true,
   dereference: true,
 });
+await cp(join(root, 'assets/branding'), join(staging, 'assets/branding'), {
+  recursive: true,
+  dereference: true,
+});
+await cp(join(root, 'assets/branding'), join(staging, 'assets/branding'), {
+  recursive: true,
+  dereference: true,
+});
 const mode = process.argv[2];
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-if (mode === 'smoke') manifest.main = 'dist/smoke-main.cjs';
+if (mode === 'smoke' || mode === 'branding-check')
+  manifest.main = 'dist/smoke-main.cjs';
+if (mode === 'window-check') manifest.main = 'dist/window-main.cjs';
 delete manifest.dependencies;
 delete manifest.devDependencies;
 delete manifest.packageManager;
 await writeFile(join(staging, 'package.json'), JSON.stringify(manifest));
 if (
+  mode === 'branding-check' ||
+  mode === 'icons' ||
   mode === 'dev' ||
   mode === 'demo' ||
   mode === 'demo-check' ||
+  mode === 'instance-check' ||
   mode === 'smoke' ||
-  mode === 'smoke-github'
+  mode === 'smoke-github' ||
+  mode === 'window-check' ||
+  mode === 'branding-check'
 ) {
   // Electron's platform archive is a runtime download, outside Bazel actions.
   const { downloadArtifact } = await import('@electron/get');
@@ -69,19 +84,31 @@ if (
   const demoData =
     mode === 'demo' ? await mkdtemp(join(tmpdir(), 'canopy-demo-')) : null;
   const result =
-    mode === 'smoke' || mode === 'smoke-github' || mode === 'demo-check'
+    mode === 'smoke' ||
+    mode === 'smoke-github' ||
+    mode === 'demo-check' ||
+    mode === 'instance-check' ||
+    mode === 'window-check' ||
+    mode === 'branding-check'
       ? spawnSync(
           process.env.JS_BINARY__NODE_BINARY ?? process.execPath,
           [
             join(
               root,
               'tools',
-              mode === 'smoke'
-                ? 'smoke.mjs'
-                : mode === 'demo-check'
-                  ? 'demo-check.mjs'
-                  : 'smoke-github-cli.mjs',
+              mode === 'branding-check'
+                ? 'smoke-branding.mjs'
+                : mode === 'smoke'
+                  ? 'smoke.mjs'
+                  : mode === 'demo-check'
+                    ? 'demo-check.mjs'
+                    : mode === 'window-check'
+                      ? 'window-check.mjs'
+                      : mode === 'instance-check'
+                        ? 'instance-check.mjs'
+                        : 'smoke-github-cli.mjs',
             ),
+            ...(mode === 'instance-check' ? process.argv.slice(3) : []),
           ],
           {
             stdio: 'inherit',
@@ -95,7 +122,12 @@ if (
         )
       : spawnSync(
           executable,
-          [staging, ...(mode === 'demo' ? ['--canopy-demo'] : [])],
+          mode === 'icons'
+            ? [
+                join(root, 'tools/render-icons.cjs'),
+                join(workspace, 'assets/branding'),
+              ]
+            : [staging, ...(mode === 'demo' ? ['--canopy-demo'] : [])],
           {
             stdio: 'inherit',
             env: demoData
@@ -119,7 +151,10 @@ if (
       ...manifest.build,
       electronVersion: version,
       npmRebuild: false,
-      directories: { output: join(workspace, 'release') },
+      directories: {
+        ...manifest.build.directories,
+        output: join(workspace, 'release'),
+      },
     },
     publish: 'never',
   });
