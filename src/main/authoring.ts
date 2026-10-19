@@ -6,6 +6,7 @@ import type {
   ParentPlan,
 } from '../shared/authoring';
 import { documentText } from './adf';
+import { JiraRateLimitError } from './jira-requests';
 
 type Request = (path: string, init?: RequestInit) => Promise<any>;
 const json = (method: string, body: unknown): RequestInit => ({
@@ -24,11 +25,9 @@ export function writeFailure(error: unknown): AuthoringResult {
   const reason = message(error);
   const status = (error as { status?: number })?.status;
   const definite =
-    (status !== undefined &&
-      [400, 401, 403, 404, 409, 410, 422, 429].includes(status)) ||
-    /(?:returned|rejected|HTTP) (?:400|401|403|404|409|410|422|429)\b|rate limit reached|authorization expired/i.test(
-      reason,
-    );
+    error instanceof JiraRateLimitError ||
+    (typeof status === 'number' &&
+      [400, 401, 403, 404, 409, 410, 422, 429].includes(status));
   return {
     state: definite ? 'rejected' : 'unknown',
     message: `${reason} ${definite ? 'No confirmed write; correct the problem and retry.' : 'The outcome is unknown. Refresh and check in the browser before retrying to avoid duplicate writes.'}`,
@@ -185,18 +184,40 @@ export class GithubAuthoring {
     return raw;
   }
   private async parent(key: string): Promise<string | null> {
-    try {
-      const raw = await this.request(this.path(key, '/parent'));
-      return this.normalize(raw.html_url);
-    } catch (error) {
-      if (
-        (error as { status?: number })?.status === 404 ||
-        /(?:returned|HTTP) 404\b/.test(message(error))
+    const [owner, repo] = this.repo(key).split('/');
+    const result = await this.request(
+      '/graphql',
+      json('POST', {
+        query:
+          'query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){parent{url}}}}',
+        variables: { owner, repo, number: Number(key.split('#')[1]) },
+      }),
+    );
+    const issue = result?.data?.repository?.issue;
+    if (
+      (result?.errors !== undefined &&
+        (!Array.isArray(result.errors) || result.errors.length > 0)) ||
+      !issue ||
+      typeof issue !== 'object' ||
+      Array.isArray(issue) ||
+      !Object.hasOwn(issue, 'parent')
+    )
+      throw new Error(
+        'GitHub did not confirm the current parent. Open in GitHub.',
+      );
+    if (issue.parent === null) return null;
+    if (
+      typeof issue.parent?.url !== 'string' ||
+      !/^https:\/\/github\.com\/[^/?#]+\/[^/?#]+\/issues\/\d+$/.test(
+        issue.parent.url,
       )
-        return null;
-      throw error;
-    }
+    )
+      throw new Error('GitHub returned an invalid parent URL. Open in GitHub.');
+    const parent = this.normalize(issue.parent.url);
+    this.path(parent);
+    return parent;
   }
+
   async options(key: string): Promise<AuthoringOptions> {
     key = this.normalize(key);
     const repo = this.repo(key);
@@ -540,6 +561,12 @@ export class JiraAuthoring {
       ] as const) {
         if (!this.editable(meta, id) || !(id in (raw.fields ?? {}))) continue;
         const source = raw.fields?.[id];
+        if (
+          id === 'labels' &&
+          (!Array.isArray(source) ||
+            source.some((label) => typeof label !== 'string'))
+        )
+          continue;
         fields.push({
           id,
           name: meta.fields[id].name ?? id,
@@ -800,17 +827,25 @@ export class JiraAuthoring {
           : action.kind === 'parent'
             ? (await this.issue(key)).fields?.parent?.key ===
               (action.plan.parentKey ?? undefined)
-            : current.fields.find((field) => field.id === action.id)?.value ===
-              (action.id === 'labels'
-                ? [
-                    ...new Set(
-                      action.value
-                        .split(',')
-                        .map((label) => label.trim())
-                        .filter(Boolean),
-                    ),
-                  ].join(', ')
-                : action.value);
+            : (() => {
+                const field = current.fields.find(
+                  (field) => field.id === action.id,
+                );
+                if (!field) return false;
+                if (action.id !== 'labels') return field.value === action.value;
+                const labels = (value: string) =>
+                  JSON.stringify(
+                    [
+                      ...new Set(
+                        value
+                          .split(',')
+                          .map((label) => label.trim())
+                          .filter(Boolean),
+                      ),
+                    ].sort(),
+                  );
+                return labels(field.value) === labels(action.value);
+              })();
       return matches
         ? { state: 'saved', message: 'Saved and verified.' }
         : {

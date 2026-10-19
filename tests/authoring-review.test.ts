@@ -6,6 +6,7 @@ import {
   JiraAuthoring,
   editDocumentFragments,
   plainDocument,
+  writeFailure,
 } from '../src/main/authoring';
 import { authoringAction } from '../src/shared/authoring';
 import type { Connection } from '../src/shared/types';
@@ -81,6 +82,21 @@ test('real Auth and GitHub provider authoring authorize selected metadata/milest
     const path = parsed.pathname + parsed.search,
       method = init?.method ?? 'GET';
     calls.push({ path, method });
+    if (path === '/graphql') {
+      const { variables } = JSON.parse(String(init?.body));
+      const parent = parents.get(
+        `${variables.owner}/${variables.repo}#${variables.number}`,
+      );
+      return Response.json({
+        data: {
+          repository: {
+            issue: {
+              parent: parent ? { url: issues.get(parent).html_url } : null,
+            },
+          },
+        },
+      });
+    }
     if (/^\/repos\/team\/[ab]$/.test(path))
       return Response.json({ permissions: { push: true }, has_issues: true });
     if (/^\/repos\/team\/[ab]\/milestones\?state=all&per_page=100$/.test(path))
@@ -90,12 +106,6 @@ test('real Auth and GitHub provider authoring authorize selected metadata/milest
     const key = `${match[1]}#${match[2]}`,
       suffix = match[3] ?? '';
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    if (suffix === '/parent') {
-      const parent = parents.get(key);
-      return parent
-        ? Response.json(issues.get(parent))
-        : Response.json({}, { status: 404 });
-    }
     if (method === 'GET') return Response.json(issues.get(key));
     if (suffix === '/comments') return Response.json({ id: 50 });
     if (method === 'PATCH') {
@@ -979,6 +989,7 @@ for (const keepMatching of [false, true]) {
     // The handler also refuses an over-limit edit if called outside DOM disabling.
     pane.change(newLabel, 'Attempted added edit');
     assert.equal(f.storage.get(f.key()), before);
+    assert.equal(f.storage.size, before === undefined ? 0 : 1);
     assert.equal(pane.button(acceptDescription).disabled, false);
     if (keepMatching) {
       assert.equal(pane.input('Description text run 1').disabled, false);
@@ -1271,4 +1282,106 @@ test('actual RichAuthoring reopens and shortens an over-limit draft while retain
   assert.equal(uncertain.comment, original.comment);
   assert.equal(uncertain.childSummary, original.childSummary);
   reopened.unmount();
+});
+
+test('draft persistence guard rejects a retained save-retry handler after recovery fails or the pane unmounts', async () => {
+  for (const mode of [
+    'recovery',
+    'edit-recovery',
+    'unmount',
+    'account',
+    'issue',
+  ]) {
+    const f = richAuthoringFixture();
+    const pane = f.mount();
+    await pane.open();
+    f.failStorage();
+    pane.change('Comment draft', 'Unsent bytes');
+    const retry = pane.button('Retry saving draft').onClick;
+    f.restoreStorage();
+    if (mode === 'recovery' || mode === 'edit-recovery') {
+      f.storage.set(f.key(), '{original invalid bytes');
+      if (mode === 'recovery') f.reload();
+      else pane.change('Comment draft', 'Retain raw bytes');
+      pane.render();
+    } else if (mode === 'unmount') pane.unmount();
+    else
+      pane.owner(
+        mode === 'account' ? 'other-account' : 'account',
+        mode === 'issue' ? 'team/a#2' : 'team/a#1',
+      );
+    const before = f.storage.get(f.key());
+    retry();
+    pane.render();
+    assert.equal(f.storage.get(f.key()), before);
+    assert.equal(f.storage.size, before === undefined ? 0 : 1);
+    if (mode === 'recovery' || mode === 'edit-recovery') {
+      assert.match(pane.text(), /Draft recovery failed/);
+      assert.throws(() => pane.button('Retry saving draft'), /Missing button/);
+    }
+    pane.unmount();
+  }
+});
+
+test('GitHub request errors preserve response status through authorization, rate-limit headers, cooldown and generic failures', async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const [status, headers, detail] of [
+      ...[400, 401, 403, 404, 409, 410, 422, 500, 502, 503].map((status) => [
+        status,
+        {},
+        status >= 500 ? 'HTTP 401 rate limit reached' : 'Provider refusal',
+      ]),
+      [429, { 'retry-after': '2' }, 'Slow down'],
+      [429, {}, 'Slow down'],
+      [
+        403,
+        {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 60),
+        },
+        'Exhausted',
+      ],
+      [403, { 'retry-after': '2' }, 'Secondary rate limit'],
+    ] as [number, Record<string, string>, string][]) {
+      const { auth, connection } = await githubAuthFixture();
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return Response.json({ message: detail }, { status, headers });
+      };
+      await assert.rejects(
+        auth.githubRequest(connection.id, '/repos/team/a/issues/1/comments', {
+          method: 'POST',
+          body: '{}',
+        }),
+        (error: any) => {
+          assert.equal(error.status, status);
+          assert.equal(
+            writeFailure(error).state,
+            status >= 500 ? 'unknown' : 'rejected',
+          );
+          assert.doesNotMatch(error.message, /fixture-token|Bearer /);
+          return true;
+        },
+      );
+      assert.equal(calls, 1);
+      if (status === 429 || (status === 403 && detail !== 'Provider refusal')) {
+        await assert.rejects(
+          auth.githubRequest(connection.id, '/repos/team/a/issues/1/comments', {
+            method: 'POST',
+            body: '{}',
+          }),
+          (error: any) => {
+            assert.equal(error.status, 429);
+            assert.equal(writeFailure(error).state, 'rejected');
+            return true;
+          },
+        );
+        assert.equal(calls, 1);
+      }
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
 });

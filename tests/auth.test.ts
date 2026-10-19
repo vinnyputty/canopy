@@ -483,3 +483,54 @@ test('keyring write failure rolls back a replacement while keeping the prior acc
     globalThis.fetch = original;
   }
 });
+
+test('Jira request errors retain numeric HTTP status for every response branch and typed cooldowns', async () => {
+  const original = globalThis.fetch;
+  try {
+    for (const status of [
+      400, 401, 403, 404, 409, 410, 422, 429, 500, 502, 503,
+    ]) {
+      for (const header of status === 429
+        ? ['2', 'invalid', new Date(Date.now() + 60000).toUTCString()]
+        : [undefined]) {
+        const auth = transportHarness();
+        await auth.load();
+        let calls = 0;
+        globalThis.fetch = async () => {
+          calls++;
+          return Response.json(
+            { errorMessages: ['HTTP 401 rate limit reached'] },
+            { status, headers: header ? { 'Retry-After': header } : {} },
+          );
+        };
+        await assert.rejects(
+          auth.request('test-a', '/rest/api/3/issue/ABC-1', {
+            method: 'PUT',
+            body: '{}',
+          }),
+          (error: any) => {
+            assert.equal(error.status, status);
+            assert.doesNotMatch(
+              error.message,
+              /fixture-token|Basic |Bearer |test@example/,
+            );
+            return true;
+          },
+        );
+        assert.equal(calls, 1);
+        if (status === 429) {
+          await assert.rejects(
+            auth.request('test-a', '/rest/api/3/issue/ABC-1', {
+              method: 'PUT',
+              body: '{}',
+            }),
+            /rate limit/,
+          );
+          assert.equal(calls, 1);
+        }
+      }
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+});

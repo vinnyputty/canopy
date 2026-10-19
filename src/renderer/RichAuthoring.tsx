@@ -37,6 +37,10 @@ export function RichAuthoring({
   const [error, setError] = useState('');
   const [draftError, setDraftError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [retryDraft, setRetryDraft] = useState<AuthoringDraft>();
+  const recoveryFailed = useRef(false);
+  const owner = useRef({ connectionId, issueKey });
+  owner.current = { connectionId, issueKey };
   const [attempt, setAttempt] = useState(0);
   const [plan, setPlan] = useState<ParentPlan>();
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
@@ -48,6 +52,7 @@ export function RichAuthoring({
   currentDraft.current = draft;
   useEffect(() => {
     mounted.current = true;
+    setRetryDraft(undefined);
     const reloadDraft = () => {
       setActiveAttempt(activeAuthoringAttempt(connectionId, issueKey));
       try {
@@ -58,9 +63,13 @@ export function RichAuthoring({
             JSON.stringify(currentDraft.current.result)
         )
           setCheckedProvider(false);
+        recoveryFailed.current = false;
+        setDraftError('');
         currentDraft.current = latest;
         setDraft(latest);
       } catch (reason) {
+        recoveryFailed.current = true;
+        setRetryDraft(undefined);
         const recovery: AuthoringDraft = {
           pending: 'draft recovery',
           result: {
@@ -109,17 +118,26 @@ export function RichAuthoring({
     };
   }, [open, connectionId, issueKey, attempt]);
   const persist = (next: AuthoringDraft) => {
+    if (
+      recoveryFailed.current ||
+      !mounted.current ||
+      owner.current.connectionId !== connectionId ||
+      owner.current.issueKey !== issueKey
+    )
+      return false;
     try {
       saveDraft(localStorage, connectionId, issueKey, next);
       currentDraft.current = next;
       if (mounted.current) {
         setDraft(next);
         setDraftError('');
+        setRetryDraft(undefined);
       }
       return true;
     } catch (reason) {
       if (mounted.current) {
         setDraft(next);
+        setRetryDraft(next);
         setDraftError(
           `Could not save draft: ${String(reason)}. Keep this pane open and retry draft recovery before writing.`,
         );
@@ -138,6 +156,8 @@ export function RichAuthoring({
         editVersions.child = crypto.randomUUID();
       persist({ ...latest, ...patch, editVersions });
     } catch (reason) {
+      recoveryFailed.current = true;
+      setRetryDraft(undefined);
       setDraftError(`Draft recovery failed: ${String(reason)}`);
     }
   };
@@ -153,6 +173,8 @@ export function RichAuthoring({
     try {
       before = loadDraft(localStorage, connectionId, issueKey);
     } catch (reason) {
+      recoveryFailed.current = true;
+      setRetryDraft(undefined);
       setDraftError(`Draft recovery failed: ${String(reason)}`);
       return;
     }
@@ -291,9 +313,11 @@ export function RichAuthoring({
           {draftError && (
             <p role="alert">
               {draftError}{' '}
-              <button onClick={() => persist(currentDraft.current)}>
-                Retry saving draft
-              </button>
+              {retryDraft && (
+                <button onClick={() => persist(retryDraft)}>
+                  Retry saving draft
+                </button>
+              )}
             </p>
           )}
           {error && <p role="alert">{error}</p>}
@@ -377,6 +401,8 @@ export function RichAuthoring({
                     }
                     persist(next);
                   } catch (reason) {
+                    recoveryFailed.current = true;
+                    setRetryDraft(undefined);
                     setDraftError(`Draft recovery failed: ${String(reason)}`);
                   }
                   setCheckedProvider(false);

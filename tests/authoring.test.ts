@@ -11,6 +11,7 @@ import {
   textDocument,
   writeFailure,
 } from '../src/main/authoring';
+import { JiraRateLimitError } from '../src/main/jira-requests';
 import { authoringAction } from '../src/shared/authoring';
 import { GithubProvider, githubKey } from '../src/main/github';
 import {
@@ -43,11 +44,26 @@ function githubFixture() {
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ path, method, body });
+    if (path === '/graphql') {
+      const parent = parents.get(body.variables.number);
+      return {
+        data: {
+          repository: {
+            issue: {
+              parent: parent ? { url: issues.get(parent).html_url } : null,
+            },
+          },
+        },
+      };
+    }
     if (path === '/repos/team/a')
       return { permissions: permission, has_issues: true };
     if (path.includes('/milestones?')) return [{ number: 7, title: 'Release' }];
     if (method !== 'GET' && fail === path)
-      throw new Error('GitHub returned 422. Invalid hierarchy.');
+      throw Object.assign(
+        new Error('GitHub returned 422. Invalid hierarchy.'),
+        { status: 422 },
+      );
     if (path === '/repos/team/a/issues' && method === 'POST') {
       const raw = {
         ...issues.get(1),
@@ -65,14 +81,6 @@ function githubFixture() {
     if (!match) throw new Error(`Unexpected ${path}`);
     const number = Number(match[1]),
       suffix = match[2];
-    if (suffix === '/parent') {
-      const parent = parents.get(number);
-      if (!parent)
-        throw Object.assign(new Error('GitHub denied access to parent.'), {
-          status: 404,
-        });
-      return issues.get(parent);
-    }
     if (method === 'GET') return structuredClone(issues.get(number));
     if (suffix === '/sub_issues') {
       parents.set(body.sub_issue_id, number);
@@ -209,7 +217,7 @@ test('GitHub refuses cycles, stale plans, pull requests, and account/repository 
   f.issues.get(1).pull_request = {};
   await assert.rejects(f.author.options('team/a#1'), /Pull requests/);
   assert.equal(
-    f.calls.some((call) => call.method !== 'GET'),
+    f.calls.some((call) => call.method !== 'GET' && call.path !== '/graphql'),
     false,
   );
 });
@@ -363,7 +371,10 @@ function jiraFixture() {
         throw new Error('Read temporarily unavailable');
       return structuredClone(issues.get(key));
     }
-    if (failWrite) throw new Error('Jira returned 403. Edit forbidden.');
+    if (failWrite)
+      throw Object.assign(new Error('Jira returned 403. Edit forbidden.'), {
+        status: 403,
+      });
     if (path.endsWith('/comment')) return { id: '88' };
     committed = true;
     Object.assign(issues.get(key).fields, body.fields);
@@ -538,7 +549,7 @@ test('Jira metadata and permissions govern authoring fields and comment access',
     'rejected',
   );
   assert.equal(
-    f.calls.some((call) => call.method !== 'GET'),
+    f.calls.some((call) => call.method !== 'GET' && call.path !== '/graphql'),
     false,
   );
 });
@@ -679,8 +690,8 @@ test('write failures distinguish explicit rejection from unconfirmed server/tran
     assert.equal(writeFailure(error).state, 'unknown');
   for (const error of [
     Object.assign(new Error('Denied'), { status: 403 }),
-    new Error('Jira returned 422'),
-    new Error('GitHub rate limit reached.'),
+    Object.assign(new Error('Changed provider wording'), { status: 422 }),
+    Object.assign(new Error('Changed rate wording'), { status: 429 }),
   ])
     assert.equal(writeFailure(error).state, 'rejected');
 });
@@ -862,5 +873,252 @@ test('Jira parent authoring updates old and destination trees while search still
   assert.equal(
     newTree.issues.find((issue) => issue.key === 'ABC-2')?.parentKey,
     'ABC-3',
+  );
+});
+
+test('GitHub parent previews require complete GraphQL confirmation before any hierarchy write', async () => {
+  const f = githubFixture();
+  let response: any = { data: { repository: { issue: { parent: null } } } };
+  let queries = 0;
+  const author = new GithubAuthoring(
+    async (path, init) => {
+      if (path !== '/graphql') return f.request(path, init);
+      queries++;
+      assert.equal(init?.method, 'POST');
+      const body = JSON.parse(String(init?.body));
+      assert.deepEqual(body.variables, {
+        owner: 'team',
+        repo: 'a',
+        number: body.variables.number,
+      });
+      assert.match(body.query, /issue\(number:\$number\)\{parent\{url\}\}/);
+      return response;
+    },
+    (key, suffix = '') => {
+      key = githubKey(key);
+      if (!key.startsWith('team/a#'))
+        throw new Error('Outside selected repository');
+      return `/repos/team/a/issues/${key.split('#')[1]}${suffix}`;
+    },
+    githubKey,
+  );
+  const plan = await author.plan('team/a#2', 'team/a#3');
+  assert.equal(plan.previousParent, null);
+  assert.ok(queries >= 2);
+  response = {
+    data: {
+      repository: {
+        issue: { parent: { url: 'https://github.com/team/a/issues/1' } },
+      },
+    },
+  };
+  const removal = await author.plan('team/a#2', null);
+  assert.equal(removal.previousParent, 'team/a#1');
+  assert.ok(
+    removal.effects.some((effect) =>
+      effect.includes('leaves the child list of team/a#1'),
+    ),
+  );
+  assert.equal(
+    (await author.write('team/a#2', { kind: 'parent', plan })).state,
+    'rejected',
+  );
+  for (const issue of [null, undefined, {}]) {
+    response = { data: { repository: { issue } } };
+    await assert.rejects(
+      author.plan('team/a#2', null),
+      /did not confirm the current parent/,
+    );
+  }
+  for (const invalid of [
+    undefined,
+    null,
+    {},
+    { data: null },
+    { data: { repository: null } },
+    { data: { repository: { issue: null } } },
+    { data: { repository: { issue: {} } } },
+    { data: { repository: { issue: { parent: undefined } } } },
+    {
+      data: { repository: { issue: { parent: null } } },
+      errors: [{ message: 'Forbidden' }],
+    },
+    { data: { repository: { issue: { parent: null } } }, errors: {} },
+    ...[
+      {},
+      { url: 42 },
+      { url: 'team/a#1' },
+      { url: 'https://evil.example/team/a/issues/1' },
+      { url: 'https://github.com/team/a/issues/0' },
+      { url: 'https://github.com/team/a/issues/1?secret=1' },
+      { url: 'https://github.com/team/unselected/issues/1' },
+    ].map((parent) => ({ data: { repository: { issue: { parent } } } })),
+  ]) {
+    response = invalid;
+    await assert.rejects(author.plan('team/a#2', null), /GitHub|Outside|Enter/);
+    await assert.rejects(
+      author.plan('team/a#2', 'team/a#3'),
+      /GitHub|Outside|Enter/,
+    );
+    assert.equal(
+      (await author.write('team/a#2', { kind: 'parent', plan })).state,
+      'rejected',
+    );
+  }
+  assert.equal(
+    f.calls.some((call) => ['POST', 'DELETE'].includes(call.method)),
+    false,
+  );
+});
+
+test('Jira verifies label sets and refuses unavailable label fields without relaxing other fields', async () => {
+  for (const [requested, returned, expected] of [
+    ['alpha, beta,alpha', [' beta ', 'alpha', 'alpha', ''], 'saved'],
+    [' beta ,alpha, ', ['alpha', 'beta'], 'saved'],
+    ['', [], 'saved'],
+    [', ,', ['', ' '], 'saved'],
+    ['alpha,beta', ['alpha'], 'partial'],
+    ['', ['alpha'], 'partial'],
+    ['', undefined, 'partial'],
+    ['', null, 'partial'],
+    ['', {}, 'partial'],
+    ['', [42], 'partial'],
+  ] as const) {
+    const f = jiraFixture();
+    const author = new JiraAuthoring(f.request, async () => {
+      if (returned === undefined) delete f.issues.get('ABC-2').fields.labels;
+      else f.issues.get('ABC-2').fields.labels = returned;
+    });
+    const result = await author.write('ABC-2', {
+      kind: 'field',
+      id: 'labels',
+      previous: '',
+      value: requested,
+    });
+    assert.equal(
+      result.state,
+      expected,
+      JSON.stringify({ requested, returned }),
+    );
+    assert.equal(f.calls.filter((call) => call.method === 'PUT').length, 1);
+  }
+  for (const labels of [undefined, null, {}, [42]]) {
+    const f = jiraFixture();
+    if (labels === undefined) delete f.issues.get('ABC-2').fields.labels;
+    else f.issues.get('ABC-2').fields.labels = labels;
+    assert.equal(
+      (await f.author.options('ABC-2')).fields.some(
+        (field) => field.id === 'labels',
+      ),
+      false,
+    );
+    assert.equal(
+      (
+        await f.author.write('ABC-2', {
+          kind: 'field',
+          id: 'labels',
+          previous: '',
+          value: '',
+        })
+      ).state,
+      'rejected',
+    );
+    assert.equal(
+      f.calls.some((call) => call.method === 'PUT'),
+      false,
+    );
+  }
+  const f = jiraFixture();
+  assert.equal(
+    (
+      await f.author.write('ABC-2', {
+        kind: 'field',
+        id: 'components',
+        previous: '',
+        value: 'b,a',
+      })
+    ).state,
+    'partial',
+  );
+});
+
+test('write rejection classification uses structured status without trusting human messages', () => {
+  assert.equal(
+    writeFailure(new JiraRateLimitError(Date.now() + 60000)).state,
+    'rejected',
+  );
+  for (const status of [400, 401, 403, 404, 409, 410, 422, 429])
+    assert.equal(
+      writeFailure(Object.assign(new Error('Arbitrary wording'), { status }))
+        .state,
+      'rejected',
+    );
+  for (const status of [undefined, 500, 502, 503, '401'])
+    for (const message of [
+      'HTTP 401',
+      'Jira returned 422',
+      'GitHub rate limit reached',
+      'authorization expired',
+    ])
+      assert.equal(
+        writeFailure(Object.assign(new Error(message), { status })).state,
+        'unknown',
+      );
+});
+
+test('GitHub parent confirmation rejects failed reads before writes and reports unconfirmed readback after one write', async () => {
+  for (const readback of ['different', 'inaccessible']) {
+    const f = githubFixture();
+    let written = false;
+    const author = new GithubAuthoring(
+      async (path, init) => {
+        if (path === '/graphql' && written) {
+          if (readback === 'inaccessible')
+            throw Object.assign(new Error('Parent unavailable'), {
+              status: 404,
+            });
+          return { data: { repository: { issue: { parent: null } } } };
+        }
+        const value = await f.request(path, init);
+        if (path.endsWith('/sub_issues') && init?.method === 'POST')
+          written = true;
+        return value;
+      },
+      (key, suffix = '') =>
+        `/repos/${key.split('#')[0]}/issues/${key.split('#')[1]}${suffix}`,
+      githubKey,
+    );
+    const plan = await author.plan('team/a#2', 'team/a#3');
+    assert.equal(
+      (await author.write('team/a#2', { kind: 'parent', plan })).state,
+      'partial',
+    );
+    assert.equal(
+      f.calls.filter(
+        (call) => call.path.endsWith('/sub_issues') && call.method === 'POST',
+      ).length,
+      1,
+    );
+  }
+  const f = githubFixture();
+  const author = new GithubAuthoring(
+    async (path, init) => {
+      if (path === '/graphql')
+        throw Object.assign(new Error('GitHub denied access'), { status: 404 });
+      return f.request(path, init);
+    },
+    (key, suffix = '') =>
+      `/repos/${key.split('#')[0]}/issues/${key.split('#')[1]}${suffix}`,
+    githubKey,
+  );
+  await assert.rejects(author.plan('team/a#2', 'team/a#3'), /denied/);
+  const plan = await f.author.plan('team/a#2', 'team/a#3');
+  assert.equal(
+    (await author.write('team/a#2', { kind: 'parent', plan })).state,
+    'rejected',
+  );
+  assert.equal(
+    f.calls.some((call) => call.method !== 'GET' && call.path !== '/graphql'),
+    false,
   );
 });

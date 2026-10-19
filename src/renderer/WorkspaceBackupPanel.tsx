@@ -50,11 +50,12 @@ export function WorkspaceBackupPanel({
       <p>
         Backup includes server URLs and names, connection IDs, root keys and
         summaries, favorites, recent and closed roots, saved view names and
-        filters, appearance, reading, pane sizes, and keyboard shortcuts. These
-        metadata may reveal private project names, issue titles, account
-        identifiers in saved filters, and workflow details. Store the file
-        privately. Repeated closed-root history is exported once per root; open
-        roots take precedence.
+        filters, appearance, reading, pane sizes, keyboard shortcuts, and the
+        copy template. Copy templates can contain private text. These metadata
+        may reveal private project names, issue titles, account identifiers in
+        saved filters, and workflow details. Store the file privately. Repeated
+        closed-root history is exported once per root; open roots take
+        precedence.
       </p>
       <p>
         Credentials and tokens, issue snapshots, comments, descriptions, and

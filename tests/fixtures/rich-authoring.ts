@@ -153,6 +153,11 @@ export function richAuthoringFixture() {
         });
         while (hook.effects.length) hook.effects.shift()!();
       },
+      owner(nextConnectionId: string, nextIssueKey = issueKey) {
+        connectionId = nextConnectionId;
+        issueKey = nextIssueKey;
+        pane.render();
+      },
       unmount() {
         for (const slot of hook.slots) slot?.cleanup?.();
       },
@@ -208,6 +213,13 @@ export function richAuthoringFixture() {
     flush,
     storage,
     key,
+    restoreStorage: () => {
+      storageFailure = false;
+    },
+    reload: () =>
+      load(
+        resolve(import.meta.dirname, '../../src/renderer/authoring-drafts.ts'),
+      ).saveDraft({ setItem() {}, removeItem() {} }, 'account', 'team/a#1', {}),
     failStorage: () => {
       storageFailure = true;
     },
