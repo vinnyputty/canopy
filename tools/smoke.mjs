@@ -1578,6 +1578,7 @@ try {
   await auditPickers(app, page);
   await auditBulk(app, page, modifier);
   await auditSelfConnections(app, page);
+  await page.getByRole('tab', { name: /CAN-100/ }).click();
   const rootSummary = 'A calmer place to get things done';
   const rootTitle = `CAN-100: ${rootSummary} · Canopy demo`;
   const rootTab = page.locator(`[role="tab"][title="${rootTitle}"]`);

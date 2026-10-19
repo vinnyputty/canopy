@@ -502,6 +502,7 @@ export async function auditSelfConnections(app, page) {
       return issue;
     });
   }, workspace);
+  let failed = false;
   try {
     await page.reload();
     const field = () =>
@@ -608,58 +609,91 @@ export async function auditSelfConnections(app, page) {
     expect(
       await app.evaluate(() => globalThis.selfConnectionAudit.writes.at(-1)),
     ).toEqual({ connection: 'demo', patch: { assigneeId: 'jordan' } });
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    // Let the app's debounced save of the two-tab fixture reach the stub
-    // before restoring the real workspace handler.
-    await page.waitForTimeout(250);
-    await app.evaluate(async ({ ipcMain }, saved) => {
-      const audit = globalThis.selfConnectionAudit;
-      let temporarySaveHandlerInstalled = false;
-      try {
-        await globalThis.canopySmoke.remoteUpdate('CAN-100', {
-          assigneeId: 'alex',
-        });
-        for (const [channel, handler] of audit.handlers) {
-          ipcMain.removeHandler(channel);
-          // Pending renderer saves must preserve the captured workspace until reload.
-          ipcMain.handle(
-            channel,
-            channel === 'canopy:saveWorkspace'
-              ? (event) => handler(event, saved)
-              : handler,
-          );
-        }
-        temporarySaveHandlerInstalled = true;
-      } finally {
-        if (!temporarySaveHandlerInstalled) {
+    try {
+      // Let the app's debounced save of the two-tab fixture reach the stub
+      // before restoring the real workspace handler.
+      await page.waitForTimeout(250);
+      await app.evaluate(async ({ ipcMain }, saved) => {
+        const audit = globalThis.selfConnectionAudit;
+        let temporarySaveHandlerInstalled = false;
+        try {
+          await globalThis.canopySmoke.remoteUpdate('CAN-100', {
+            assigneeId: 'alex',
+          });
           for (const [channel, handler] of audit.handlers) {
             ipcMain.removeHandler(channel);
-            ipcMain.handle(channel, handler);
+            // Pending renderer saves must preserve the captured workspace until reload.
+            ipcMain.handle(
+              channel,
+              channel === 'canopy:saveWorkspace'
+                ? (event) => handler(event, saved)
+                : handler,
+            );
           }
-          delete globalThis.selfConnectionAudit;
+          temporarySaveHandlerInstalled = true;
+        } finally {
+          if (!temporarySaveHandlerInstalled) {
+            for (const [channel, handler] of audit.handlers) {
+              ipcMain.removeHandler(channel);
+              ipcMain.handle(channel, handler);
+            }
+            delete globalThis.selfConnectionAudit;
+          }
+        }
+      }, workspace);
+      let restorationFailed = false;
+      try {
+        await page.evaluate(
+          (saved) => window.canopy.saveWorkspace(saved),
+          workspace,
+        );
+        await page.reload();
+        await expect(page.getByRole('tab')).toHaveCount(workspace.tabs.length);
+        await expect(page.locator('[role=tab] .tab-label b')).toHaveText(
+          workspace.tabs.map((tab) => tab.rootKey),
+        );
+        for (const [index, tab] of workspace.tabs.entries()) {
+          const restored = page.getByRole('tab').nth(index);
+          await expect(restored).toHaveAttribute('data-tab-id', tab.id);
+          await expect(restored).toHaveAttribute(
+            'aria-selected',
+            String(tab.id === workspace.activeTabId),
+          );
+        }
+        const active = workspace.tabs.find(
+          (tab) => tab.id === workspace.activeTabId,
+        );
+        expect(active).toBeDefined();
+        await expect(
+          page.getByRole('tree', { name: `${active.rootKey} issue tree` }),
+        ).toBeVisible();
+        expect(
+          await page.evaluate(() => window.canopy.loadWorkspace()),
+        ).toEqual(workspace);
+      } catch (error) {
+        restorationFailed = true;
+        throw error;
+      } finally {
+        try {
+          await app.evaluate(({ ipcMain }) => {
+            const channel = 'canopy:saveWorkspace';
+            ipcMain.removeHandler(channel);
+            ipcMain.handle(
+              channel,
+              globalThis.selfConnectionAudit.handlers.get(channel),
+            );
+            delete globalThis.selfConnectionAudit;
+          });
+        } catch (error) {
+          if (!restorationFailed) throw error;
         }
       }
-    }, workspace);
-    try {
-      await page.evaluate(
-        (saved) => window.canopy.saveWorkspace(saved),
-        workspace,
-      );
-      await page.reload();
-      await expect(page.getByRole('tab')).toHaveCount(workspace.tabs.length);
-      await expect(
-        page.getByRole('tree', { name: 'CAN-100 issue tree' }),
-      ).toBeVisible();
-    } finally {
-      await app.evaluate(({ ipcMain }) => {
-        const channel = 'canopy:saveWorkspace';
-        ipcMain.removeHandler(channel);
-        ipcMain.handle(
-          channel,
-          globalThis.selfConnectionAudit.handlers.get(channel),
-        );
-        delete globalThis.selfConnectionAudit;
-      });
+    } catch (error) {
+      if (!failed) throw error;
     }
   }
 }
