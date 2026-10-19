@@ -7,7 +7,7 @@ import type {
   TreeSnapshot,
   Workspace,
 } from '../shared/types';
-import type { IssueNode } from './tree';
+import { mapIssueTree, type IssueNode } from './tree';
 import {
   COLUMN_BOUNDS,
   DEFAULT_READING,
@@ -151,27 +151,25 @@ export function sortIssueTree(
         return null;
     }
   };
-  return {
-    ...node,
-    children: node.children
-      .map((child) => sortIssueTree(child, sort, priorityOrder))
-      .sort((a, b) => {
-        const av = value(a.issue),
-          bv = value(b.issue);
-        if (av === null && bv !== null) return 1;
-        if (bv === null && av !== null) return -1;
-        const order =
-          av === null || bv === null
-            ? 0
-            : typeof av === 'number' && typeof bv === 'number'
-              ? av - bv
-              : collator.compare(String(av), String(bv));
-        return (
-          order * (sort.direction === 'asc' ? 1 : -1) ||
-          collator.compare(a.issue.key, b.issue.key)
-        );
-      }),
-  };
+  return mapIssueTree(node, (current, children) => ({
+    ...current,
+    children: children.sort((a, b) => {
+      const av = value(a.issue),
+        bv = value(b.issue);
+      if (av === null && bv !== null) return 1;
+      if (bv === null && av !== null) return -1;
+      const order =
+        av === null || bv === null
+          ? 0
+          : typeof av === 'number' && typeof bv === 'number'
+            ? av - bv
+            : collator.compare(String(av), String(bv));
+      return (
+        order * (sort.direction === 'asc' ? 1 : -1) ||
+        collator.compare(a.issue.key, b.issue.key)
+      );
+    }),
+  }))!;
 }
 export function canRank(
   snapshot: TreeSnapshot | undefined,

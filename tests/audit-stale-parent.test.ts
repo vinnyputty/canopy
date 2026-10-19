@@ -52,7 +52,7 @@ for (const mode of [
       const signals = [];
       cp.spawn = () => root;
       cp.execFile = (command, args, options, callback) => {
-        assert.ok(options.timeout > 0 && options.timeout <= 100);
+        assert.ok(options.timeout > 0 && options.timeout <= 1000);
         if (command === 'powershell.exe')
           queueMicrotask(() => callback(null, { stdout: JSON.stringify(rows), stderr: '' }));
         else if (command === 'taskkill.exe') {
@@ -79,7 +79,7 @@ for (const mode of [
       };
       process.kill = () => { throw new Error('OS signals prohibited'); };
       const { AuditOwner, finishAudit } = await import(${JSON.stringify(helper)});
-      const owner = new AuditOwner({ profile: 'chronology-fixture', executable: 'fixture', graceMs: 1, operationMs: 100, killMs: 100 });
+      const owner = new AuditOwner({ profile: 'chronology-fixture', executable: 'fixture', graceMs: 1, operationMs: 1000, killMs: mode === 'kill-stalled' ? 100 : 1000 });
       const launch = () => owner.launch(() => cp.spawn('fixture', [], { env: { CANOPY_USER_DATA: 'chronology-fixture' }, detached: false }));
       let primary;
       try { await launch(); owner.confirm(root); } catch (error) { primary = error; }

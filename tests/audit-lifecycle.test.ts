@@ -251,7 +251,8 @@ for (const mode of ['reject', 'hang'] as const) {
         );
         assert.equal(alive(f.descendant), false);
         assert.equal(alive(unrelated.pid!), true);
-        await assert.rejects(access(f.profile));
+        if (mode === 'hang') await access(f.profile);
+        else await assert.rejects(access(f.profile));
       },
       () => f.dispose(),
       async () => {
@@ -490,7 +491,7 @@ test('launch rejection after actual spawn retains original launch error while cl
   );
 });
 
-test('launch failure without spawned process preserves primary while reporting filesystem faults', async () => {
+test('launch failure without spawned process preserves primary and retains profile while reporting evidence faults', async () => {
   const owner = new AuditOwner({
     profile: 'never-created',
     executable: process.execPath,
@@ -518,11 +519,16 @@ test('launch failure without spawned process preserves primary while reporting f
     (error: AggregateError) =>
       error.cause === primary &&
       error.errors[0] === primary &&
-      error.errors.length === 4,
+      error.errors.some((detail: Error) =>
+        /Profile retained/.test(detail.message),
+      ) &&
+      !error.errors.some((detail: Error) =>
+        /PROFILE EBUSY/.test(detail.message),
+      ),
   );
 });
 
-test('otherwise successful audit fails evidence/removal errors independently', async () => {
+test('audit without captured child retains profile and reports evidence errors', async () => {
   const owner = new AuditOwner({
     profile: 'never-created',
     executable: process.execPath,
@@ -537,7 +543,13 @@ test('otherwise successful audit fails evidence/removal errors independently', a
         throw new Error('EVIDENCE EACCES');
       },
     }),
-    (error: AggregateError) => error.errors.length === 2,
+    (error: AggregateError) =>
+      error.errors.some((detail: Error) =>
+        /Profile retained/.test(detail.message),
+      ) &&
+      error.errors.some((detail: Error) =>
+        /EVIDENCE EACCES/.test(detail.message),
+      ),
   );
 });
 
@@ -726,7 +738,7 @@ test('exact palette audit catch/finally preserves assertion plus filesystem faul
     'join',
     'deadline',
     'injected',
-    'let failure; let failed=false; const log=[]; try { throw injected; }' +
+    'let failure; let failed=false; const auditSettled=true; const auditRetained=false; const log=[]; try { throw injected; }' +
       tail,
   );
   const f = await fixture();

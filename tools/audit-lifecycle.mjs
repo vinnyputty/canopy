@@ -6,6 +6,14 @@ import { cpus, freemem, totalmem } from 'node:os';
 const execFile = promisify(childProcess.execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let activeCimSnapshots = 0;
+const captureHooks = new WeakMap();
+const diagnosticString = (value) => {
+  try {
+    return String(value?.message ?? value);
+  } catch {
+    return 'Diagnostic value could not be formatted';
+  }
+};
 
 function hostCpuTimes() {
   return cpus().reduce(
@@ -535,19 +543,39 @@ export class AuditOwner {
       killPid,
     });
     this.scopes = [];
+    this.operations = new Set();
+    this.retained = false;
   }
   get child() {
     return this.scopes.length === 1 ? this.scopes[0].child : undefined;
   }
+  get operationsSettled() {
+    return this.operations.size === 0;
+  }
+  retainProfile() {
+    this.retained = true;
+  }
+  track(operation) {
+    const pending = Promise.resolve().then(operation);
+    this.operations.add(pending);
+    return pending.finally(() => this.operations.delete(pending));
+  }
   restore() {
+    if (this.operations.size) return;
     this.restoreCapture?.();
     this.restoreCapture = undefined;
   }
   async launch(operation) {
+    if (this.operations.size || this.retained)
+      throw new Error(
+        'Previous audit operation is pending or its profile is retained',
+      );
     const original = childProcess.spawn;
+    const hook = { original, active: true };
     const owner = this;
     const capture = function (command, args, options) {
-      const child = original.call(this, command, args, options);
+      const child = hook.original.call(this, command, args, options);
+      if (!hook.active) return child;
       if (options?.env?.CANOPY_USER_DATA === owner.profile) {
         if (
           Number.isSafeInteger(child.pid) &&
@@ -565,22 +593,29 @@ export class AuditOwner {
       }
       return child;
     };
+    captureHooks.set(capture, hook);
     childProcess.spawn = capture;
     syncBuiltinESMExports();
     this.restoreCapture = () => {
+      hook.active = false;
       if (childProcess.spawn === capture) {
-        childProcess.spawn = original;
+        let previous = hook.original;
+        while (captureHooks.get(previous)?.active === false)
+          previous = captureHooks.get(previous).original;
+        childProcess.spawn = previous;
         syncBuiltinESMExports();
       }
     };
     try {
-      const app = await operation();
-      if (this.scopes.length !== 1)
-        throw new Error('Expected exactly one verified audit launch');
-      await this.scopes[0].ready;
-      if (this.scopes[0].captureError) throw this.scopes[0].captureError;
-      await this.scopes[0].live();
-      return app;
+      return await this.track(async () => {
+        const app = await operation();
+        if (this.scopes.length !== 1)
+          throw new Error('Expected exactly one verified audit launch');
+        await this.scopes[0].ready;
+        if (this.scopes[0].captureError) throw this.scopes[0].captureError;
+        await this.scopes[0].live();
+        return app;
+      });
     } finally {
       this.restore();
     }
@@ -594,8 +629,20 @@ export class AuditOwner {
     }
   }
   async shutdown(close) {
+    if (this.retained || !this.operationsSettled) {
+      this.retained = true;
+      return {
+        terminated: false,
+        errors: [
+          new Error(
+            'Audit operation settlement was unconfirmed; profile retained',
+          ),
+        ],
+      };
+    }
     this.restore();
     const errors = [];
+    if (!this.scopes.length) this.unknownLaunch = true;
     if (this.unknownLaunch)
       errors.push(
         new Error('Unestablished launch ownership; profile retained'),
@@ -612,7 +659,7 @@ export class AuditOwner {
     if (close && !this.unknownLaunch) {
       try {
         await deadline(
-          close,
+          () => this.track(close),
           Math.max(1, gracefulEnd - Date.now()),
           'Graceful audit close',
         );
@@ -620,7 +667,9 @@ export class AuditOwner {
         errors.push(error);
       }
     }
-    let terminated = !this.unknownLaunch;
+    if (this.operations.size) this.retained = true;
+    let terminated =
+      !this.unknownLaunch && !this.retained && this.operationsSettled;
     for (const scope of this.scopes) {
       try {
         await scope.ready;
@@ -671,15 +720,18 @@ export async function finishAudit({
   writeEvidence,
   secondary = () => {},
   operationMs = 3000,
+  operationsSettled = () => true,
 }) {
   const errors = [];
+  const pending = new Set();
+  let unsettled = false;
   const report = (error) => {
     errors.push(error);
     try {
       secondary(
         error instanceof Error
           ? error
-          : new Error(String(error), { cause: error }),
+          : new Error(diagnosticString(error), { cause: error }),
       );
     } catch (reportError) {
       errors.push(
@@ -689,9 +741,21 @@ export async function finishAudit({
   };
   const attempt = async (label, operation) => {
     try {
-      await deadline(operation, operationMs, label);
+      await deadline(
+        () => {
+          const writer = Promise.resolve().then(operation);
+          pending.add(writer);
+          return writer.finally(() => pending.delete(writer));
+        },
+        operationMs,
+        label,
+      );
     } catch (error) {
-      const detail = new Error(`${label}: ${String(error?.message ?? error)}`, {
+      if (pending.size) {
+        unsettled = true;
+        if (label === 'Profile removal') owner.retainProfile?.();
+      }
+      const detail = new Error(`${label}: ${diagnosticString(error)}`, {
         cause: error,
       });
       report(detail);
@@ -705,15 +769,24 @@ export async function finishAudit({
     shutdown = { terminated: false, errors: [error] };
   }
   for (const error of shutdown.errors) report(error);
-  if (shutdown.terminated) await attempt('Profile removal', removeProfile);
-  else report(new Error(`Profile retained: ${owner.profile}`));
   await attempt('Evidence write', writeEvidence);
+  if (unsettled) owner.retainProfile?.();
+  if (
+    shutdown.terminated &&
+    owner.operationsSettled !== false &&
+    owner.retained !== true &&
+    operationsSettled() &&
+    !unsettled &&
+    !pending.size
+  )
+    await attempt('Profile removal', removeProfile);
+  else report(new Error(`Profile retained: ${owner.profile}`));
   if (primaryFailed && !errors.length) throw primary;
   if (primaryFailed || errors.length) {
     const first = primaryFailed ? primary : errors[0];
     throw new AggregateError(
       primaryFailed ? [primary, ...errors] : errors,
-      `${String(first?.message ?? first)}; ${errors.length} diagnostic/cleanup error(s)`,
+      `${diagnosticString(first)}; ${errors.length} diagnostic/cleanup error(s)`,
       { cause: first },
     );
   }

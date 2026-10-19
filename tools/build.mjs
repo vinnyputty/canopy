@@ -42,6 +42,15 @@ await Promise.all([
     outfile: 'dist/window-main.cjs',
   }),
   build({
+    entryPoints: ['tests/fixtures/performance-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    external: ['electron'],
+    outfile: 'dist/performance-main.cjs',
+  }),
+  build({
     entryPoints: ['src/main/preload.ts'],
     bundle: true,
     platform: 'node',
