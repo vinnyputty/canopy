@@ -6,7 +6,7 @@ The desktop feature candidate combines the source features below. Its base is `8
 
 - #103 `fix/94-single-instance`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `64fa228f62f37ab2b31d2aed7d1a78ec314f5a5d`.
 - #113 `fix/95-window-write-coalescing`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `0369e1cad755b4b787bd3002df2991d3f26890d3`.
-- #106 `feat/82-connection-setup`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `33c31c78e01a6c5929d5ba659d52beede99b6d86`.
+- #106 `feat/82-connection-setup`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `70b3333943e4a926c6cb398501c50f404873e2d7`.
 - #109 `feat/79-branding-support`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `fb899f6b334e4759fbc12d9619ee1f5e7e3f1d3f`.
 - #117 `fix/88-accessibility`: `a8502c1c50ed82be986770f04d4ae6aae742514a` → `176f892d31e28b2a8204801a02e53d759f8c4d08`.
 - #122 `perf/90-large-trees`: `b27c0bc8dcc17cf09198d09245d0aa76c52341e8` → `d7b78ae3c99c121a669d2922d1dbe0e401e91ef6`.
