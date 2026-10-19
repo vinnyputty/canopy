@@ -346,6 +346,24 @@ try {
     });
   }
 
+  const page = await running.firstWindow();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByLabel('Text size', { exact: true }).selectOption('small');
+  await expect(page.getByLabel('Text size', { exact: true })).toHaveValue(
+    'small',
+  );
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await page.evaluate(() => window.canopy.flushWorkspace());
+  const expectedWorkspace = JSON.parse(
+    await readFile(join(profile, 'workspace.json'), 'utf8'),
+  );
+  assert.deepEqual(expectedWorkspace.tabs, []);
+  assert.equal(expectedWorkspace.activeTabId, null);
+  assert.deepEqual(expectedWorkspace.reading, {
+    textSize: 'small',
+    spacing: 'compact',
+  });
+
   // Force the real atomic replacement to fail only in this disposable profile.
   await rm(savedFile, { force: true });
   await mkdir(savedFile);
@@ -382,12 +400,15 @@ try {
   }
   await stop('close'); // Final bounds replacement also fails; close must still exit.
   assert.match(processOutput, /Could not save window state/);
-  for (const name of ['workspace', 'credentials']) {
-    assert.deepEqual(
-      JSON.parse(await readFile(join(profile, `${name}.json`), 'utf8')),
-      markers[name],
-    );
-  }
+  // Close flushes renderer state over the direct-storage marker.
+  assert.deepEqual(
+    JSON.parse(await readFile(join(profile, 'workspace.json'), 'utf8')),
+    expectedWorkspace,
+  );
+  assert.deepEqual(
+    JSON.parse(await readFile(join(profile, 'credentials.json'), 'utf8')),
+    markers.credentials,
+  );
   results.push({
     check:
       'actual bounds I/O failure + later sample workspace/fake credential writes + close',
