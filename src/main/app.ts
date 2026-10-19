@@ -1041,6 +1041,7 @@ async function start(
             windowStateSaver.flush(),
             flushRenderer(attempt.signal),
           ]).then(async (result) => {
+            attempt.signal.throwIfAborted();
             await windowStateSaver.flush();
             return result;
           }),
