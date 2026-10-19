@@ -38,9 +38,18 @@ let lockData: unknown;
 const forbidden = () => {
   throw new Error('Forbidden external/credential/provider/clipboard boundary');
 };
+const identity: string[] = [];
 const app = Object.assign(new EventEmitter(), {
   isPackaged: true,
   setName() {},
+  setDesktopName(name: string) {
+    assert.equal(name, 'canopy.desktop');
+    identity.push('linux');
+  },
+  setAppUserModelId(id: string) {
+    assert.equal(id, 'app.canopy.desktop');
+    identity.push('win32');
+  },
   commandLine: { appendSwitch() {} },
   getPath() {
     profileCalls++;
@@ -175,6 +184,12 @@ const load = (
     return id === 'electron' ? electron : load.call(this, id, ...args);
   };
 const source = createRequire(sourcePath)(sourcePath);
+assert.deepEqual(
+  identity,
+  process.platform === 'linux' || process.platform === 'win32'
+    ? [process.platform]
+    : [],
+);
 source.launch(
   async () => {
     fixtureCalls++;
