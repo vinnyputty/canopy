@@ -1,17 +1,27 @@
 import { register } from 'tsx/cjs/api';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-const production = (path) =>
-  require(
-    resolve(
-      process.env.CANOPY_PERF_SOURCE ??
-        fileURLToPath(new URL('..', import.meta.url)),
-      path,
-    ),
-  );
+const source = resolve(
+  process.env.CANOPY_PERF_SOURCE ??
+    fileURLToPath(new URL('..', import.meta.url)),
+);
+function benchmarkHead(source, explicitHead) {
+  if (explicitHead) return explicitHead;
+  if (!existsSync(join(source, '.git')))
+    throw new Error(
+      'Measured source has no .git; set CANOPY_PERF_HEAD for an archive',
+    );
+  return execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: source,
+    encoding: 'utf8',
+  }).trim();
+}
+const head = benchmarkHead(source, process.env.CANOPY_PERF_HEAD);
+const production = (path) => require(resolve(source, path));
 register();
 const implementations = {
   ...production('src/main/jira.ts'),
@@ -139,12 +149,7 @@ process.stdout.write(
   JSON.stringify(
     {
       source: process.env.CANOPY_PERF_SOURCE ?? 'worktree',
-      head:
-        process.env.CANOPY_PERF_HEAD ??
-        execFileSync('git', ['rev-parse', 'HEAD'], {
-          cwd: fileURLToPath(new URL('..', import.meta.url)),
-          encoding: 'utf8',
-        }).trim(),
+      head,
       runtime: process.version,
       latencyMs: Number(process.env.CANOPY_PERF_LATENCY_MS ?? 0),
       samples: 5,

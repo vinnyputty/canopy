@@ -680,3 +680,48 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
   assert.equal(trees.size, 0);
   assert.equal(searches.size, 0);
 });
+
+test('App announces initial/incomplete loads while a complete quiet refresh stays quiet', () => {
+  let banner!: ts.JsxExpression;
+  function walk(node: ts.Node) {
+    if (
+      ts.isJsxExpression(node) &&
+      node.expression &&
+      ts.isBinaryExpression(node.expression) &&
+      node.expression.operatorToken.kind ===
+        ts.SyntaxKind.AmpersandAmpersandToken &&
+      node.getText(ast).includes('Cancel load') &&
+      node.getText(ast).includes('Retry load') &&
+      node.getText(ast).length < 2500
+    )
+      banner = node;
+    ts.forEachChild(node, walk);
+  }
+  walk(ast);
+  assert.ok(banner?.expression && ts.isBinaryExpression(banner.expression));
+  const condition = banner.expression.left;
+  for (const snapshot of [
+    undefined,
+    snap([issue(0)]),
+    snap([issue(0)], true),
+  ]) {
+    for (const busy of [false, true]) {
+      const context = {
+        snapshot,
+        activeTab: { id: 'a' },
+        loading: new Set(busy ? ['a'] : []),
+        refreshing: new Set<string>(),
+      };
+      assert.equal(
+        Boolean(execute(condition, context)),
+        Boolean(snapshot?.incomplete || (!snapshot && busy)),
+      );
+      context.loading.clear();
+      if (busy) context.refreshing.add('a');
+      assert.equal(
+        Boolean(execute(condition, context)),
+        Boolean(snapshot?.incomplete || (!snapshot && busy)),
+      );
+    }
+  }
+});

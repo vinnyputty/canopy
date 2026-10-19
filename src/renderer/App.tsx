@@ -2859,50 +2859,91 @@ export function App() {
     });
     setReveal({ tabId: activeTab.id, key });
   };
-  const retainedKeys = new Set(
-    [...saving]
-      .filter(
-        (key) => activeTab && key.startsWith(`${activeTab.connectionId}:`),
-      )
-      .map((key) => key.slice(activeTab!.connectionId.length + 1)),
+  const retainedKeys = useMemo(() => {
+    const keys = new Set(
+      [...saving]
+        .filter(
+          (key) => activeTab && key.startsWith(`${activeTab.connectionId}:`),
+        )
+        .map((key) => key.slice(activeTab!.connectionId.length + 1)),
+    );
+    if (editor?.connectionId === activeTab?.connectionId && editor)
+      keys.add(editor.key);
+    return keys;
+  }, [saving, activeTab?.connectionId, editor?.connectionId, editor?.key]);
+  const retainedPaths = useMemo(
+    () =>
+      new Set(
+        [...retainedKeys].flatMap((key) =>
+          ancestorPath(tree, key).map((node) => node.issue.key),
+        ),
+      ),
+    [retainedKeys, tree],
   );
-  if (editor?.connectionId === activeTab?.connectionId && editor)
-    retainedKeys.add(editor.key);
-  const retainedPaths = new Set(
-    [...retainedKeys].flatMap((key) =>
-      ancestorPath(tree, key).map((node) => node.issue.key),
-    ),
+  const focusedTree = useMemo(
+    () => findNode(tree, activeTab?.focusKey) ?? tree,
+    [tree, activeTab?.focusKey],
   );
-  const focusedTree = findNode(tree, activeTab?.focusKey) ?? tree;
-  const filteredTree = filterTree(
-    focusedTree,
-    query,
-    activeTab?.filters ?? {},
-    activeTab?.hideDone ?? false,
-    activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
-    reveal?.tabId === activeTab?.id ? reveal?.key : undefined,
-    retainedKeys,
+  const filteredTree = useMemo(
+    () =>
+      filterTree(
+        focusedTree,
+        query,
+        activeTab?.filters ?? {},
+        activeTab?.hideDone ?? false,
+        activeTab ? currentUsers[activeTab.connectionId]?.id : undefined,
+        reveal?.tabId === activeTab?.id ? reveal?.key : undefined,
+        retainedKeys,
+      ),
+    [
+      focusedTree,
+      query,
+      activeTab?.filters,
+      activeTab?.hideDone,
+      activeTab?.connectionId,
+      activeTab?.id,
+      currentUsers,
+      reveal,
+      retainedKeys,
+    ],
   );
-  const sortedTree = filteredTree
-    ? sortIssueTree(filteredTree, view.sort, priorityOrder)
-    : null;
-  const shownTree =
-    view.sort.column === 'rank'
-      ? sortedTree
-      : retainEditingOrder(
-          sortedTree,
-          activeTab ? displayedTrees.current.get(activeTab.id) : null,
-          retainedPaths,
-        );
+  const sortedTree = useMemo(
+    () =>
+      filteredTree
+        ? sortIssueTree(filteredTree, view.sort, priorityOrder)
+        : null,
+    [filteredTree, view.sort, priorityOrder],
+  );
+  const shownTree = useMemo(
+    () =>
+      view.sort.column === 'rank'
+        ? sortedTree
+        : retainEditingOrder(
+            sortedTree,
+            activeTab ? displayedTrees.current.get(activeTab.id) : null,
+            retainedPaths,
+          ),
+    [sortedTree, view.sort.column, activeTab?.id, retainedPaths],
+  );
   useEffect(() => {
     if (activeTab) displayedTrees.current.set(activeTab.id, shownTree);
   });
-  const expandedSet = new Set(
-    filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
-  );
-  if (editor && editor.connectionId === activeTab?.connectionId)
-    for (const node of ancestorPath(shownTree, editor.key))
-      expandedSet.add(node.issue.key);
+  const expandedSet = useMemo(() => {
+    const expanded = new Set(
+      filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
+    );
+    if (editor && editor.connectionId === activeTab?.connectionId)
+      for (const node of ancestorPath(shownTree, editor.key))
+        expanded.add(node.issue.key);
+    return expanded;
+  }, [
+    filtering,
+    shownTree,
+    activeTab?.expanded,
+    activeTab?.connectionId,
+    editor?.connectionId,
+    editor?.key,
+  ]);
   const linkedSet = new Set(activeTab?.linkedExpanded ?? []);
   const counts = useMemo(() => treeCounts(tree), [tree]);
   const breadcrumb = ancestorPath(
@@ -4687,8 +4728,8 @@ export function App() {
                   Closing tabs or marking issues seen does not release space.
                 </div>
               )}
-            {(loading.has(activeTab.id) ||
-              refreshing.has(activeTab.id) ||
+            {((!snapshot &&
+              (loading.has(activeTab.id) || refreshing.has(activeTab.id))) ||
               snapshot?.incomplete) && (
               <div className="error-banner" role="status">
                 <span>

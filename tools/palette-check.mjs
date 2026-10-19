@@ -617,7 +617,7 @@ try {
                 await mkdir(evidence, { recursive: true });
                 const content = await page
                   .locator('body')
-                  .innerText({ timeout: 3000 });
+                  .innerText({ timeout: 2000 });
                 await writeFile(join(evidence, 'failure-dom.txt'), content);
               },
             },

@@ -55,6 +55,7 @@ async function dom(initialNotifications = false) {
   const pendingObservers = new Set<() => void>();
   const frames = new Map<number, FrameRequestCallback>();
   let frameId = 0;
+  let geometryReads = 0;
   const prior = new Map<string, PropertyDescriptor | undefined>();
   for (const [name, input] of Object.entries({
     window,
@@ -108,6 +109,7 @@ async function dom(initialNotifications = false) {
     return 0;
   };
   window.HTMLElement.prototype.getBoundingClientRect = function () {
+    geometryReads++;
     let top = 0;
     if (
       this.hasAttribute('data-window-row') ||
@@ -174,14 +176,17 @@ async function dom(initialNotifications = false) {
     });
     assert.equal(frames.size, 0, 'finite observer/frame work');
   };
-  const render = async (element: React.ReactNode) => {
+  const render = async (element: React.ReactNode, settle = true) => {
     await act(async () => root.render(element));
-    await flush();
+    if (settle) await flush();
   };
   return {
     host,
     window,
     custom,
+    get geometryReads() {
+      return geometryReads;
+    },
     render,
     flush,
     scroll: async (top: number) => {
@@ -689,7 +694,7 @@ test('actual App editor prop excludes foreign tabs and accounts and retains edit
   vm.runInNewContext(expansion, {
     editor,
     activeTab: { connectionId: 'work' },
-    expandedSet,
+    expanded: expandedSet,
     shownTree: node,
     ancestorPath,
   });
@@ -1164,3 +1169,95 @@ test('changing geometry respects eight measurements during and after synchronous
   changingGeometry(false));
 test('initial observer deliveries preserve bounded measurement work and external recovery', () =>
   changingGeometry(true));
+
+test('TreeRows selection rerender retains measured keyboard alignment across equivalent tree inputs', async () => {
+  const state = await dom(true);
+  try {
+    const issues = Array.from({ length: 1001 }, (_, i) => issue(i));
+    let selected = '';
+    function SelectionTree() {
+      const [key, setKey] = React.useState('R-0');
+      const props = treeProps(issues);
+      // App filtering/expansion can produce new objects while preserving order.
+      return React.createElement(TreeRows, {
+        ...props,
+        selectedKey: key,
+        onSelect: (next) => {
+          selected = next;
+          if (next === 'R-1000')
+            for (let i = 980; i <= 1000; i++) state.custom.set(`R-${i}`, 150);
+          setKey(next);
+        },
+      });
+    }
+    await state.render(React.createElement(SelectionTree));
+    const first = state.host.querySelector<HTMLElement>(
+      '[data-tree-key="R-0"]',
+    )!;
+    await act(async () => first.focus());
+    await state.key(first, 'End');
+    assert.equal(selected, 'R-1000');
+    assert.equal(
+      state.window.document.activeElement?.getAttribute('data-tree-key'),
+      'R-1000',
+    );
+    const destination = state.host.querySelector<HTMLElement>(
+      '[data-window-row="R-1000"]',
+    )!;
+    const rect = destination.getBoundingClientRect();
+    assert.ok(
+      rect.top >= -1 && rect.bottom <= state.host.clientHeight + 1,
+      `selected variable-height destination fits: ${rect.top}..${rect.bottom}`,
+    );
+  } finally {
+    await state.cleanup();
+  }
+});
+
+test('equivalent ordered IDs reuse measurement ownership; reordering and removal retire pending requests', async () => {
+  const state = await dom();
+  const api = { current: null as RowWindow | null };
+  try {
+    const ids = Array.from({ length: 1000 }, (_, i) => `v${i}`);
+    const render = (members: string[]) =>
+      React.createElement(WindowedRows, {
+        ids: members,
+        api,
+        scrollSelector: '.tree-scroll',
+        renderRow: (i) => React.createElement('button', null, members[i]),
+      });
+    await state.render(render(ids));
+    const original = model(state.host);
+    const reads = state.geometryReads;
+    await state.render(render([...ids]));
+    assert.equal(model(state.host), original);
+    assert.equal(
+      state.geometryReads,
+      reads,
+      'selection-only equivalent input does not remeasure rows',
+    );
+    await act(async () => {
+      api.current!.ensure('v500');
+    });
+    const reordered = [...ids.filter((id) => id !== 'v500'), 'v500'];
+    await state.render(render(reordered), false);
+    assert.deepEqual(model(state.host), reordered);
+    assert.notEqual(model(state.host), original);
+    assert.equal(
+      state.host.querySelector('[data-window-row="v500"]'),
+      null,
+      'new order retires pending alignment and pin before another frame',
+    );
+    await state.flush();
+    await act(async () => {
+      api.current!.ensure('v800');
+    });
+    await state.render(render(ids.filter((id) => id !== 'v800')), false);
+    assert.equal(api.current!.ensure('v800'), null);
+    assert.equal(state.host.querySelector('[data-window-row="v800"]'), null);
+    await state.flush();
+  } finally {
+    await state.cleanup();
+    assert.equal(api.current, null);
+  }
+});

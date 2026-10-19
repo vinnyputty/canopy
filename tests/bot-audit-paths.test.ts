@@ -88,7 +88,22 @@ for (const mode of ['native', 'POSIX', 'Windows'] as const)
             ? 'D:\\override 界'
             : '/tmp/override 界'
         : repo;
+      const sourceInitializer = (
+        find(
+          ast,
+          (n) =>
+            ts.isVariableDeclaration(n) && n.name.getText(ast) === 'source',
+        ) as ts.VariableDeclaration
+      ).initializer!;
+      const measuredSource = run(`(${sourceInitializer.getText(ast)})`, {
+        moduleURL,
+        URL,
+        fileURLToPath: decode,
+        resolve: path.resolve,
+        process: { env: override ? { CANOPY_PERF_SOURCE: selected } : {} },
+      });
       const fn = run(`(${initializer.getText(ast)})`, {
+        source: measuredSource,
         moduleURL,
         URL,
         fileURLToPath: decode,
@@ -107,8 +122,13 @@ for (const mode of ['native', 'POSIX', 'Windows'] as const)
         ) as ts.PropertyAssignment
       ).initializer;
       assert.equal(
-        run(`(${cwd.getText(ast)})`, { moduleURL, URL, fileURLToPath: decode }),
-        repo,
+        run(`(${cwd.getText(ast)})`, {
+          source: measuredSource,
+          moduleURL,
+          URL,
+          fileURLToPath: decode,
+        }),
+        path.resolve(selected),
       );
     });
 for (const platform of ['darwin', 'win32'])

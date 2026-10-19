@@ -14,8 +14,8 @@ export type RowModelElement = HTMLDivElement & {
 };
 
 export function WindowedRows({
-  ids,
-  rowKeys = ids,
+  ids: suppliedIds,
+  rowKeys: suppliedRowKeys,
   renderRow,
   pinned = [],
   api,
@@ -28,6 +28,15 @@ export function WindowedRows({
   api?: React.RefObject<RowWindow | null>;
   scrollSelector: string;
 }) {
+  const orderedIds = useRef(suppliedIds);
+  if (
+    orderedIds.current !== suppliedIds &&
+    (orderedIds.current.length !== suppliedIds.length ||
+      orderedIds.current.some((id, index) => id !== suppliedIds[index]))
+  )
+    orderedIds.current = suppliedIds;
+  const ids = orderedIds.current;
+  const rowKeys = suppliedRowKeys ?? ids;
   const root = useRef<RowModelElement>(null);
   const elements = useRef(new Map<string, HTMLDivElement>());
   const heights = useRef(new Map<string, number>());
