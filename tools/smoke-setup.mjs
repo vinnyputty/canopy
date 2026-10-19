@@ -289,6 +289,7 @@ export async function auditSetup(app, page) {
       exact: true,
     });
     await save.click();
+    await expect(save).toBeFocused();
     await expect(
       page
         .getByRole('dialog', { name: 'Setup help', exact: true })
@@ -298,6 +299,7 @@ export async function auditSetup(app, page) {
       globalThis.setupAudit.exportMode = 'save';
     });
     await save.click();
+    await expect(save).toBeFocused();
     await expect(
       page
         .getByRole('dialog', { name: 'Setup help', exact: true })
@@ -312,12 +314,14 @@ export async function auditSetup(app, page) {
       globalThis.setupAudit.exportMode = 'failure';
     });
     await save.click();
+    await expect(save).toBeFocused();
     await expect(
       page
         .getByRole('dialog', { name: 'Setup help', exact: true })
         .getByRole('status'),
     ).toContainText('Could not save diagnostics.');
     await expect(report).toHaveText(reviewed);
+    await auditDiagnosticsFocus(app, page);
     await page
       .getByRole('button', { name: 'Close dialog', exact: true })
       .click();
@@ -344,5 +348,153 @@ export async function auditSetup(app, page) {
     await expect(
       page.getByRole('heading', { name: 'See the whole tree.' }),
     ).toBeVisible();
+  }
+}
+
+export async function auditDiagnosticsFocus(app, page) {
+  const help = () =>
+    page.getByRole('dialog', { name: 'Setup help', exact: true });
+  const save = () =>
+    help().getByRole('button', {
+      name: 'Save reviewed diagnostics…',
+      exact: true,
+    });
+  await app.evaluate(({ dialog }) => {
+    globalThis.focusSaveDialog = dialog.showSaveDialog;
+    dialog.showSaveDialog = () =>
+      new Promise((resolve, reject) => {
+        globalThis.focusExport = { resolve, reject };
+      });
+  });
+  const settle = (failure = false) =>
+    app.evaluate((_electron, failure) => {
+      if (failure) globalThis.focusExport.reject(new Error('Export refused'));
+      else globalThis.focusExport.resolve({ canceled: true });
+      delete globalThis.focusExport;
+    }, failure);
+  try {
+    for (const failure of [false, true]) {
+      await save().click();
+      await expect(save()).toBeDisabled();
+      await help()
+        .getByRole('button', { name: 'Close dialog', exact: true })
+        .focus();
+      await page.evaluate(
+        () =>
+          new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          ),
+      );
+      await expect(
+        help().getByRole('button', { name: 'Close dialog', exact: true }),
+      ).toBeFocused();
+      await settle(failure);
+      await expect(save()).toBeEnabled();
+      await expect(save()).toBeFocused();
+      await page.keyboard.press('Tab');
+      await expect(
+        help().getByRole('button', { name: 'Close dialog', exact: true }),
+      ).toBeFocused();
+    }
+    await help()
+      .getByRole('button', { name: 'Review diagnostics', exact: true })
+      .click();
+    await expect(save()).toBeEnabled();
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    await expect(save()).not.toBeFocused();
+    await save().click();
+    await expect(save()).toBeDisabled();
+    await help()
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .click();
+    await page
+      .getByRole('complementary')
+      .getByRole('button', { name: 'Setup help', exact: true })
+      .click();
+    const connect = help().getByRole('button', {
+      name: 'Connect Jira or GitHub',
+      exact: true,
+    });
+    await connect.focus();
+    await settle();
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    await expect(connect).toBeFocused();
+    await expect(help().getByRole('status')).toHaveCount(0);
+    await help()
+      .getByRole('button', { name: 'Review diagnostics', exact: true })
+      .click();
+    await expect(save()).toBeVisible();
+    await page.evaluate(() => {
+      const request = window.requestAnimationFrame;
+      const cancel = window.cancelAnimationFrame;
+      const pending = new Map();
+      window.focusFrames = {
+        pending,
+        restore: () => {
+          window.requestAnimationFrame = request;
+          window.cancelAnimationFrame = cancel;
+        },
+      };
+      window.requestAnimationFrame = (callback) => {
+        const id = request(() => {});
+        pending.set(id, callback);
+        return id;
+      };
+      window.cancelAnimationFrame = (id) => {
+        pending.delete(id);
+        cancel(id);
+      };
+    });
+    await save().click();
+    await expect(save()).toBeDisabled();
+    expect(await page.evaluate(() => window.focusFrames.pending.size)).toBe(0);
+    await settle();
+    await expect(save()).toBeEnabled();
+    expect(await page.evaluate(() => window.focusFrames.pending.size)).toBe(1);
+    await help()
+      .getByRole('button', { name: 'Close dialog', exact: true })
+      .evaluate((button) => button.click());
+    await expect(help()).toHaveCount(0);
+    expect(await page.evaluate(() => window.focusFrames.pending.size)).toBe(0);
+    await page.evaluate(() => {
+      window.focusFrames.restore();
+      delete window.focusFrames;
+    });
+    await page
+      .getByRole('complementary')
+      .getByRole('button', { name: 'Setup help', exact: true })
+      .click();
+    await help()
+      .getByRole('button', { name: 'Review diagnostics', exact: true })
+      .click();
+    await expect(save()).toBeVisible();
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    await expect(save()).not.toBeFocused();
+  } finally {
+    await page.evaluate(() => {
+      window.focusFrames?.restore();
+      delete window.focusFrames;
+    });
+    await app.evaluate(({ dialog }) => {
+      globalThis.focusExport?.resolve({ canceled: true });
+      delete globalThis.focusExport;
+      dialog.showSaveDialog = globalThis.focusSaveDialog;
+      delete globalThis.focusSaveDialog;
+    });
   }
 }

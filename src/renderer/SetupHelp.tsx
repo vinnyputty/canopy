@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 
 export function TokenPermissions({
   provider,
@@ -87,6 +87,14 @@ export function SetupHelp({
   const [report, setReport] = useState('');
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
+  const saveButton = useRef<HTMLButtonElement>(null);
+  const restoreSaveFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (busy || !restoreSaveFocus.current) return;
+    restoreSaveFocus.current = false;
+    const frame = requestAnimationFrame(() => saveButton.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [busy]);
   const review = async () => {
     setBusy(true);
     setStatus('');
@@ -100,6 +108,7 @@ export function SetupHelp({
     }
   };
   const save = async () => {
+    restoreSaveFocus.current = true;
     setBusy(true);
     setStatus('');
     try {
@@ -201,6 +210,7 @@ export function SetupHelp({
             {report}
           </pre>
           <button
+            ref={saveButton}
             className="primary"
             disabled={busy}
             onClick={() => void save()}
