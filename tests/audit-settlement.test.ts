@@ -24,6 +24,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function boundary() {
+  let now = 0;
   let rows = '';
   let child = { pid: 4242, exitCode: null as number | null, signalCode: null };
   const signals: unknown[] = [];
@@ -40,6 +41,11 @@ function boundary() {
       cpus: () => [],
       freemem: () => 0,
       totalmem: () => 0,
+      Date: class extends Date {
+        static now() {
+          return now;
+        }
+      },
       process: {
         pid: 100,
         platform: 'darwin',
@@ -91,6 +97,7 @@ function boundary() {
     expire: (ms: number) => {
       const timer = timers.find((timer) => !timer.cleared && timer.ms === ms);
       assert.ok(timer, `deadline ${ms}`);
+      now += ms;
       timer.cleared = true;
       timer.callback();
     },
