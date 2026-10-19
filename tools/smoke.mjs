@@ -1,5 +1,6 @@
 import { auditInbox } from './smoke-inbox.mjs';
 import { _electron as electron, expect } from '@playwright/test';
+import { auditAccessibility } from './smoke-accessibility.mjs';
 import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
@@ -855,7 +856,10 @@ async function auditMutations() {
     page.getByRole('tab', { name: new RegExp(root) }).click();
   const dismissError = async (text) => {
     await expect(page.getByRole('alert')).toContainText(text);
-    await page.getByRole('alert').getByRole('button').click();
+    await page
+      .getByRole('alert')
+      .getByRole('button', { name: 'Dismiss error', exact: true })
+      .click();
   };
   const undo = async (name) => {
     const button = page.getByRole('button', { name, exact: true });
@@ -1294,7 +1298,10 @@ async function auditMutationViews() {
           .length,
     ),
   ).toBe(rankCalls);
-  await page.getByRole('alert').getByRole('button').click();
+  await page
+    .getByRole('alert')
+    .getByRole('button', { name: 'Dismiss error', exact: true })
+    .click();
   await app.evaluate(() => {
     globalThis.canopySmoke.rankingState = undefined;
   });
@@ -1409,6 +1416,21 @@ try {
     recursive: true,
     force: true,
   });
+  if (process.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY === '1') {
+    await launch();
+    await auditAccessibility(
+      app,
+      page,
+      join(workspace, '.cache', 'accessibility'),
+    );
+    expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
+    await close();
+    await rm(userData, { recursive: true, force: true });
+    console.log(
+      'Canopy observed accessibility barrier regressions passed. Native qualification remains separate.',
+    );
+    process.exit(0);
+  }
   if (process.env.CANOPY_SMOKE_SIDEBAR_ONLY === '1') {
     await auditSidebarSample();
     expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
@@ -2702,7 +2724,9 @@ try {
   await resizeWindow(600);
   // The earlier error assertion is complete. Its banner is transient across
   // restart, so remove it before testing restoration under an unchanged layout.
-  await page.locator('.error-banner button').click();
+  await page
+    .getByRole('button', { name: 'Dismiss error', exact: true })
+    .click();
   await expect(page.locator('.error-banner')).toHaveCount(0);
   // Exercise the gutter-free geometry used by overlay scrollbars on macOS.
   await setScrollbars('none');
@@ -3449,6 +3473,18 @@ try {
   await launch();
   await auditPalette(app, page);
   await auditSearch(app, page);
+  // Search ends on a missing root. Persist the refresh fixture's active tab
+  // before its reload rather than relying on an unfinished debounce.
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await waitForSavedWorkspace((saved) =>
+    saved.tabs.some(
+      (tab) => tab.id === saved.activeTabId && tab.rootKey === 'CAN-200',
+    ),
+  );
   await auditRefresh(app, page, resizeWindow);
 
   await page.getByTitle('Disconnect Canopy demo').click();

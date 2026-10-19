@@ -159,6 +159,14 @@ test('dismissal restores focus without native scrolling and restores both scroll
 
 test('palette renders typed contextual options and an explicit remote search entry', () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const previousElement = Object.getOwnPropertyDescriptor(
+    globalThis,
+    'HTMLElement',
+  );
+  Object.defineProperty(globalThis, 'HTMLElement', {
+    configurable: true,
+    value: class HTMLElement {},
+  });
   Object.defineProperty(globalThis, 'document', {
     configurable: true,
     value: { activeElement: null },
@@ -190,6 +198,9 @@ test('palette renders typed contextual options and an explicit remote search ent
   } finally {
     if (previous) Object.defineProperty(globalThis, 'document', previous);
     else Reflect.deleteProperty(globalThis, 'document');
+    if (previousElement)
+      Object.defineProperty(globalThis, 'HTMLElement', previousElement);
+    else Reflect.deleteProperty(globalThis, 'HTMLElement');
   }
 });
 

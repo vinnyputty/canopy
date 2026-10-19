@@ -4,6 +4,7 @@ import {
   relationshipKinds,
   relationshipFailure,
 } from '../shared/relationships';
+import { supportLinks, supportUrl } from '../shared/support';
 import { Providers } from './providers';
 import {
   app,
@@ -17,7 +18,6 @@ import {
 } from 'electron';
 import { join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -30,6 +30,7 @@ import type {
   ChildIssueInput,
 } from '../shared/types';
 import { Auth } from './auth';
+import { diagnosticReport, exportDiagnosticReport } from './diagnostics';
 import { JiraProvider, jiraRemoteLinkUrl } from './jira';
 import {
   GithubProvider,
@@ -41,6 +42,7 @@ import {
 import { Storage } from './storage';
 import { Updates } from './updates';
 import { restoreWindow, type WindowState } from './window-state';
+import { WindowStateSaver } from './window-state-saver';
 import { configureLinuxCredentialStore } from './credentials';
 import { demoWorkspace } from './demo';
 import {
@@ -52,22 +54,18 @@ import {
 } from '../shared/views';
 
 app.setName('Canopy');
+if (process.platform === 'win32') app.setAppUserModelId('app.canopy.desktop');
+if (process.platform === 'linux') app.setDesktopName('canopy.desktop');
 configureLinuxCredentialStore((store) =>
   app.commandLine.appendSwitch('password-store', store),
 );
 if (process.env.CANOPY_USER_DATA)
   app.setPath('userData', process.env.CANOPY_USER_DATA);
-if (process.env.CANOPY_DEMO_TEMP === '1' && process.env.CANOPY_USER_DATA) {
-  const directory = process.env.CANOPY_USER_DATA;
-  process.on('exit', () => {
-    try {
-      rmSync(directory, { recursive: true, force: true });
-    } catch {
-      // The launching app also removes this directory after the demo exits.
-    }
-  });
-}
 let window: BrowserWindow | null = null;
+let focusRequested = false;
+let focusWindow = () => {
+  focusRequested = true;
+};
 const html = join(__dirname, 'renderer/index.html');
 function text(value: unknown, limit = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit)
@@ -331,6 +329,8 @@ async function start(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
 ) {
+  if (process.platform === 'darwin' && !app.isPackaged)
+    app.dock?.setIcon(join(__dirname, 'branding/icons/512x512.png'));
   const storage = new Storage(app.getPath('userData'));
   const auth = new Auth(storage, (url) => shell.openExternal(url));
   let authError: string | undefined;
@@ -424,6 +424,21 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let creatingWindow: Promise<void> | null = null;
+  let supportPending = false;
+  let supportSubscriber: BrowserWindow | null = null;
+  const deliverSupport = () => {
+    if (
+      supportPending &&
+      window &&
+      supportSubscriber === window &&
+      !window.isDestroyed()
+    ) {
+      supportPending = false;
+      window.webContents.send('canopy:showSupport');
+    }
+  };
+  let reviewedDiagnostics: string | undefined;
   const handlers: Record<string, (...args: any[]) => unknown> = {
     updateState: () => updates.snapshot(),
     updatePreferences: (value: unknown) => updates.preferences(value),
@@ -436,6 +451,42 @@ async function start(
     dismissUpdateNotice: () => updates.dismiss(),
     openRelease: (tag: unknown) =>
       updates.open(tag, (url) => shell.openExternal(url)),
+    supportReady: () => {
+      supportSubscriber = window;
+      deliverSupport();
+    },
+    appVersion: () => app.getVersion(),
+    openSupportLink: (link: unknown) => shell.openExternal(supportUrl(link)),
+    diagnostics: () => {
+      let credentialStorage: 'available' | 'unavailable' | 'unlock-failed' =
+        authError ? 'unlock-failed' : 'available';
+      try {
+        storage.assertSecure();
+      } catch {
+        credentialStorage = 'unavailable';
+      }
+      reviewedDiagnostics = diagnosticReport({
+        version: app.getVersion(),
+        platform: process.platform,
+        demoMode,
+        credentialStorage,
+        connections: connections(),
+        retryAt: (connection) =>
+          connection.provider === 'github'
+            ? auth.githubSyncStatus(connection.id).retryAt
+            : auth.syncStatus(connection.id).retryAt,
+      });
+      return reviewedDiagnostics;
+    },
+    exportDiagnostics: (reviewed: unknown) =>
+      exportDiagnosticReport(reviewed, reviewedDiagnostics, async () => {
+        const result = await dialog.showSaveDialog(window!, {
+          title: 'Export reviewed diagnostics',
+          defaultPath: 'canopy-diagnostics.json',
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        return result.canceled ? undefined : result.filePath;
+      }),
     demoMode: () => demoMode,
     demoTimeScale: () => {
       const scale = Number(process.env.CANOPY_DEMO_TIME_SCALE ?? 1);
@@ -467,7 +518,7 @@ async function start(
           if (demoLaunch === launch) demoLaunch = null;
           void rm(childDirectory, { recursive: true, force: true });
           if (window && !window.isDestroyed()) {
-            window.show();
+            if (!window.isVisible()) window.show();
             window.focus();
           }
         });
@@ -778,6 +829,7 @@ async function start(
       return handler(...args);
     });
   let quitting = false;
+  let closingWindow: Promise<void> | undefined;
   app.on('before-quit', () => {
     quitting = true;
     updates.cancel();
@@ -795,7 +847,14 @@ async function start(
       minWidth: Math.min(920, saved?.bounds.width ?? 920),
       minHeight: Math.min(600, saved?.bounds.height ?? 600),
       ...(saved?.bounds ?? {}),
+      show: !saved?.maximized,
       title: demoMode ? 'Canopy — Demo' : 'Canopy',
+      icon: join(
+        __dirname,
+        process.platform === 'win32'
+          ? 'branding/icon.ico'
+          : 'branding/icons/256x256.png',
+      ),
       backgroundColor: '#141719',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
       webPreferences: {
@@ -812,15 +871,21 @@ async function start(
         clearRelationshipRequests();
     });
     created.webContents.on('render-process-gone', clearRelationshipRequests);
+    created.webContents.on('did-start-loading', () => {
+      if (window === created) supportSubscriber = null;
+    });
     created.webContents.on('destroyed', () => {
       updates.cancel();
       for (const controller of searches.values()) controller.abort();
       searches.clear();
       clearRelationshipRequests();
     });
-    if (saved?.maximized) created.maximize();
-    let savingWindow: Promise<void> = Promise.resolve();
+    const windowStateSaver = new WindowStateSaver(
+      (state) => storage.write('window', state),
+      (error) => console.error('Could not save window state:', error),
+    );
     let closeApproved = false;
+    let closing = false;
     const saveBounds = () => {
       if (
         demoMode ||
@@ -829,13 +894,10 @@ async function start(
         created.isFullScreen()
       )
         return;
-      savingWindow = storage.write('window', {
+      windowStateSaver.update({
         bounds: created.getNormalBounds(),
         maximized: created.isMaximized(),
       } satisfies WindowState);
-      void savingWindow.catch((error) =>
-        console.error('Could not save window state:', error),
-      );
     };
     created.on('resize', saveBounds);
     created.on('move', saveBounds);
@@ -844,15 +906,26 @@ async function start(
     created.on('close', (event) => {
       if (closeApproved) return;
       event.preventDefault();
-      saveBounds();
-      void savingWindow
-        .catch(() => {})
-        .finally(() => {
-          closeApproved = true;
-          if (quitting) app.quit();
-          else created.close();
+      if (closing) return;
+      closing = true;
+      closingWindow = new Promise<void>((resolve) => {
+        created.once('closed', () => {
+          closingWindow = undefined;
+          resolve();
         });
+      });
+      saveBounds();
+      void windowStateSaver.flush().finally(() => {
+        closeApproved = true;
+        if (quitting) app.quit();
+        else if (!created.isDestroyed()) created.close();
+      });
     });
+    if (saved?.maximized) {
+      // X11 must receive maximized state before mapping to retain normal bounds.
+      created.maximize();
+      created.show();
+    }
     window.webContents.on('before-input-event', (event, input) => {
       const modifier =
         process.platform === 'darwin' ? input.meta : input.control;
@@ -872,10 +945,32 @@ async function start(
     window.webContents.session.setPermissionRequestHandler(
       (_wc, _permission, callback) => callback(false),
     );
-    window.on('closed', () => {
-      window = null;
+    created.on('closed', () => {
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+      }
     });
-    await window.loadFile(html);
+    try {
+      await created.loadFile(html);
+    } catch (error) {
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+        if (!created.isDestroyed()) created.destroy();
+      }
+      throw error;
+    }
+  };
+  const ensureWindow = async (): Promise<void> => {
+    if (closingWindow) await closingWindow;
+    if (quitting) return;
+    if (creatingWindow) return creatingWindow;
+    if (window) return Promise.resolve();
+    creatingWindow = createWindow().finally(() => {
+      creatingWindow = null;
+    });
+    return creatingWindow;
   };
   const openDemoFromMenu = () =>
     void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
@@ -884,6 +979,20 @@ async function start(
         error instanceof Error ? error.message : String(error),
       ),
     );
+  const showSupport = () => {
+    supportPending = true;
+    void ensureWindow()
+      .then(() => {
+        if (!window || quitting) return;
+        if (window.isMinimized()) window.restore();
+        if (!window.isVisible()) window.show();
+        window.focus();
+        deliverSupport();
+      })
+      .catch((error: Error) =>
+        dialog.showErrorBox('Could not open About & Support', error.message),
+      );
+  };
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       ...(process.platform === 'darwin'
@@ -891,7 +1000,7 @@ async function start(
             {
               label: 'Canopy',
               submenu: [
-                { role: 'about' as const },
+                { label: 'About Canopy', click: showSupport },
                 ...(!demoMode
                   ? [
                       {
@@ -923,6 +1032,24 @@ async function start(
             },
           ]),
       {
+        label: 'Help',
+        submenu: [
+          { label: 'About & Support', click: showSupport },
+          ...Object.values(supportLinks).map(({ label, url }) => ({
+            label,
+            click: () =>
+              void shell
+                .openExternal(url)
+                .catch((error: Error) =>
+                  dialog.showErrorBox(
+                    'Could not open support link',
+                    error.message,
+                  ),
+                ),
+          })),
+        ],
+      },
+      {
         label: 'Edit',
         submenu: [
           { role: 'undo' },
@@ -946,15 +1073,44 @@ async function start(
       },
     ]),
   );
-  await createWindow();
-  app.on('activate', () => {
-    if (!window) void createWindow();
-  });
+  const showWindow = async () => {
+    await ensureWindow();
+    if (quitting) return;
+    if (window && !window.isDestroyed()) {
+      if (window.isMinimized()) window.restore();
+      if (!window.isVisible()) window.show();
+      if (process.platform === 'darwin') app.focus({ steal: true });
+      window.focus();
+    }
+  };
+  await showWindow();
+  let pendingFocusRequests = 0;
+  focusWindow = () => {
+    pendingFocusRequests += 1;
+    focusRequested = true;
+    void showWindow()
+      .catch((error) =>
+        dialog.showErrorBox('Canopy could not open', (error as Error).message),
+      )
+      .finally(() => {
+        pendingFocusRequests -= 1;
+        focusRequested = pendingFocusRequests > 0;
+      });
+  };
+  if (focusRequested) focusWindow();
+  app.on('activate', focusWindow);
 }
 export function launch(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
 ) {
+  // Electron scopes this lock to userData, including isolated demo/smoke profiles.
+  // Acquire it before readiness or reading any profile state.
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
+  app.on('second-instance', () => focusWindow());
   app
     .whenReady()
     .then(() => start(createFixture, demoMode))
@@ -963,6 +1119,7 @@ export function launch(
       app.quit();
     });
   app.on('window-all-closed', () => {
-    if (demoMode || process.platform !== 'darwin') app.quit();
+    if ((demoMode || process.platform !== 'darwin') && !focusRequested)
+      app.quit();
   });
 }

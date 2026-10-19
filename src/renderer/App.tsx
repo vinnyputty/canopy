@@ -15,6 +15,12 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import { supportLinks, type SupportLink } from '../shared/support';
+import {
+  runSetupVerification,
+  verifiedSetupConnection,
+} from './connection-setup';
+import { SetupHelp, TokenPermissions } from './SetupHelp';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -32,6 +38,7 @@ import React, {
 } from 'react';
 import {
   AlertCircle,
+  Info,
   ArrowLeft,
   ArrowRight,
   Pin,
@@ -147,7 +154,15 @@ import {
   readingStyle,
 } from './table-view';
 import { Mutations } from './mutations';
-import { RefreshSchedule, RootRefreshGate } from './refresh';
+import {
+  refreshDestination,
+  treeRefreshError,
+  RefreshAnnouncements,
+  type RefreshAnnouncement,
+  RefreshSchedule,
+  RootRefreshGate,
+} from './refresh';
+import { RefreshStatus } from './RefreshStatus';
 import {
   configuredRoots,
   sourceTabId,
@@ -174,7 +189,12 @@ const EMPTY_WORKSPACE: Workspace = {
   previewWidth: 420,
 };
 
-type Editor = { connectionId: string; key: string; field: EditField } | null;
+type Editor = {
+  tabId: string;
+  connectionId: string;
+  key: string;
+  field: EditField;
+} | null;
 
 function cx(...names: Array<string | false | null | undefined>) {
   return names.filter(Boolean).join(' ');
@@ -263,6 +283,8 @@ export function App() {
     | 'appearance'
     | 'settings'
     | 'connect'
+    | 'support'
+    | 'setup'
     | null
   >(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
@@ -272,6 +294,63 @@ export function App() {
       settingsFlow.current = false;
       settingsTrigger.current?.focus();
     }
+  }, [dialog]);
+  const supportButton = useRef<HTMLButtonElement>(null);
+  const supportReturnFocus = useRef<{
+    trigger: HTMLElement | null;
+    fallback: HTMLElement | null;
+  } | null>(null);
+  const showSupport = useCallback((trigger?: HTMLElement) => {
+    if (!supportReturnFocus.current) {
+      supportReturnFocus.current = {
+        fallback: settingsFlow.current
+          ? settingsTrigger.current
+          : supportButton.current,
+        trigger:
+          trigger ??
+          (document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null),
+      };
+    }
+    setDialog('support');
+  }, []);
+  useLayoutEffect(() => {
+    if (dialog === null && supportReturnFocus.current) {
+      const { trigger, fallback } = supportReturnFocus.current;
+      supportReturnFocus.current = null;
+      const target =
+        trigger?.isConnected && trigger !== document.body
+          ? trigger
+          : fallback?.isConnected
+            ? fallback
+            : supportButton.current;
+      target?.focus({ preventScroll: true });
+    }
+  }, [dialog]);
+  useEffect(() => {
+    const unsubscribe = window.canopy.onShowSupport(() => showSupport());
+    // Acknowledge only after the authoritative renderer installs its listener.
+    void window.canopy
+      .supportReady()
+      .catch((error) =>
+        console.error('Could not subscribe to About requests:', error),
+      );
+    return unsubscribe;
+  }, [showSupport]);
+  const [setupConnectionId, setSetupConnectionId] = useState<string>();
+  useEffect(() => {
+    if (dialog !== 'connect' && dialog !== 'setup') return;
+    let current = true;
+    void window.canopy
+      .connections()
+      .then((value) => {
+        if (current) storeConnections(value);
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
   }, [dialog]);
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
@@ -637,6 +716,11 @@ export function App() {
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const previousVirtualTabs = useRef(new Map<string, TabState>());
+  const [refreshAnnouncement, setRefreshAnnouncement] =
+    useState<RefreshAnnouncement | null>(null);
+  const [refreshAnnouncements] = useState(
+    () => new RefreshAnnouncements(setRefreshAnnouncement),
+  );
   const refreshSchedule = useRef(new RefreshSchedule());
   const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
   const snapshotsRef = useRef(snapshots);
@@ -810,6 +894,25 @@ export function App() {
         .filter((tab) => savedSources.some((source) => sameRoot(source, tab)))
         .map((tab) => tab.id)
     : [];
+  const refreshOwner = refreshDestination(
+    workspace.activeTabId,
+    activeSavedView?.id,
+  );
+  refreshAnnouncements.activate(
+    refreshOwner,
+    activeSavedView
+      ? {
+          name: activeSavedView.name,
+          roots: savedSources.map((source) => ({
+            id: refreshRootKey(source),
+            label: `${connections.find((connection) => connection.id === source.connectionId)?.name ?? source.connectionId} · ${source.rootKey}`,
+            tabIds: allRefreshTabs
+              .filter((tab) => sameRoot(source, tab))
+              .map((tab) => tab.id),
+          })),
+        }
+      : undefined,
+  );
   const sourceTabKeys = JSON.stringify(
     workspace.tabs.map(({ id, connectionId, rootKey }) => [
       id,
@@ -851,6 +954,10 @@ export function App() {
     [activeSavedView, savedSources, viewSnapshots, currentUsers],
   );
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
+  const savingKeys =
+    snapshot?.issues
+      .filter((issue) => saving.has(`${activeTab?.connectionId}:${issue.key}`))
+      .map((issue) => issue.key) ?? [];
   const nextTaskOpen = activeTab ? Boolean(nextTaskViews[activeTab.id]) : false;
   const nextTaskCriterion = activeTab
     ? (nextTaskCriteria[activeTab.id] ?? 'rank')
@@ -1324,6 +1431,7 @@ export function App() {
     ) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       if (userRequested) manualRelationshipRefreshes.current.add(tab.id);
+      const userQueued = userRequested && refreshAnnouncements.request(tab.id);
       explicit ||= forcedRefreshes.current.has(tab.id);
       if (
         (!navigator.onLine && !demoMode) ||
@@ -1335,7 +1443,10 @@ export function App() {
       }
       if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
       if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) {
-        if (explicit && !runningExplicitRefreshes.current.has(tab.id)) {
+        if (
+          userQueued ||
+          (explicit && !runningExplicitRefreshes.current.has(tab.id))
+        ) {
           forcedRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
         }
@@ -1360,6 +1471,11 @@ export function App() {
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
       refreshSequences.current[tab.id] = sequence;
       if (explicit) runningExplicitRefreshes.current.set(tab.id, sequence);
+      const announcement = refreshAnnouncements.begin(
+        tab.id,
+        tab.rootKey,
+        mutations.confirmedSnapshot(tab.id) ?? snapshotsRef.current[tab.id],
+      );
       const epoch = mutations.beginRefresh();
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
@@ -1393,7 +1509,9 @@ export function App() {
                 refreshSequences.current[tab.id] !== sequence)
             )
               continue;
-            const previous = mutations.confirmedSnapshot(target.id);
+            const previous =
+              mutations.confirmedSnapshot(target.id) ??
+              snapshotsRef.current[target.id];
             mutations.receive(target, next, epoch);
             const confirmed = mutations.confirmedSnapshot(target.id) ?? next;
             if (manualRelationships)
@@ -1407,6 +1525,13 @@ export function App() {
                   ),
                 ],
                 new Set(),
+              );
+            if (target.id !== tab.id)
+              refreshAnnouncements.receive(
+                target.id,
+                mutations.confirmedSnapshot(target.id) ?? next,
+                previous,
+                announcement.scope,
               );
             delivered.add(target.id);
           }
@@ -1441,6 +1566,11 @@ export function App() {
           deferredRefreshes.current.add(tab.id);
         }
         if (!delivered.size) return;
+        if (delivered.has(tab.id))
+          refreshAnnouncements.complete(
+            announcement,
+            mutations.confirmedSnapshot(tab.id) ?? next,
+          );
         setConnectionErrors((current) => {
           const copy = new Set(current);
           for (const id of delivered) copy.delete(id);
@@ -1463,19 +1593,23 @@ export function App() {
         if (
           refreshSequences.current[tab.id] !== sequence ||
           !rootRefreshes.current.isCurrent(rootKey, load.generation) ||
-          !tabsRef.current.some((item) => item.id === tab.id)
+          !tabsRef.current.some((item) => item.id === tab.id) ||
+          refreshBlocked.current(tab.connectionId)
         )
           return;
         if (status?.retryAt) {
           cooldowns.current[tab.connectionId] = status.retryAt;
           setCooldownTimes({ ...cooldowns.current });
         }
+        const message = treeRefreshError(error);
+        refreshAnnouncements.fail(announcement, tab.rootKey, message);
         setConnectionErrors((current) => new Set(current).add(tab.id));
         setErrors((current) => ({
           ...current,
-          [tab.id]: error instanceof Error ? error.message : String(error),
+          [tab.id]: message,
         }));
       } finally {
+        refreshAnnouncements.end(announcement);
         mutations.endRefresh(epoch);
         if (runningExplicitRefreshes.current.get(tab.id) === sequence)
           runningExplicitRefreshes.current.delete(tab.id);
@@ -1825,6 +1959,7 @@ export function App() {
         forcedRefreshes.current.delete(id);
         manualRelationshipRefreshes.current.delete(id);
         runningExplicitRefreshes.current.delete(id);
+        refreshAnnouncements.forget(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
         setter(
@@ -2203,13 +2338,19 @@ export function App() {
         run: () => expandAll(false),
       },
       {
+        id: 'support',
+        label: 'About & Support',
+        icon: Info,
+        run: () => showSupport(),
+      },
+      {
         id: 'shortcuts',
         label: 'Keyboard shortcuts',
         icon: Keyboard,
         run: () => setDialog('shortcuts'),
       },
     ],
-    [activeTab, expandAll, refreshTab],
+    [activeTab, expandAll, refreshTab, showSupport],
   );
 
   useEffect(() => {
@@ -2326,7 +2467,12 @@ export function App() {
     (key: string, field: EditField) => {
       if (!activeTab) return;
       editSession.current++;
-      setEditor({ connectionId: activeTab.connectionId, key, field });
+      setEditor({
+        tabId: activeTab.id,
+        connectionId: activeTab.connectionId,
+        key,
+        field,
+      });
       if (field !== 'summary')
         void pickers.open(
           activeTab.connectionId,
@@ -2392,7 +2538,9 @@ export function App() {
       if (!success && field !== 'summary') {
         pickers.rejected(connectionId, key, field);
         if (activeIdRef.current === tabId && editSession.current === session)
-          setEditor((current) => current ?? { connectionId, key, field });
+          setEditor(
+            (current) => current ?? { tabId, connectionId, key, field },
+          );
       }
     },
     [activeTab, mutations, pickers],
@@ -3102,7 +3250,12 @@ export function App() {
           'CAN-111 priority',
         );
         await delay(2000);
-        setEditor({ connectionId: 'demo', key: 'CAN-111', field: 'priority' });
+        setEditor({
+          tabId: 'demo-can-100',
+          connectionId: 'demo',
+          key: 'CAN-111',
+          field: 'priority',
+        });
         tourEditor.current = true;
         await pickers.open('demo', 'CAN-111', 'priority');
         await waitFor(
@@ -3387,9 +3540,7 @@ export function App() {
     >
       <aside className="sidebar" aria-label="Canopy sidebar">
         <div className="brand">
-          <div className="brand-mark">
-            <span />
-          </div>
+          <img className="brand-mark" src="icon.svg" alt="" />
           <span>Canopy</span>
         </div>
         <button
@@ -3519,6 +3670,23 @@ export function App() {
           <Settings2 size={16} />
           <span>Settings</span>
         </button>
+        <button
+          className="sidebar-settings"
+          ref={supportButton}
+          onClick={(event) => showSupport(event.currentTarget)}
+        >
+          <Info size={16} />
+          <span>About &amp; Support</span>
+        </button>
+        {!demoMode && (
+          <button
+            className="sidebar-settings"
+            onClick={() => setDialog('setup')}
+          >
+            <LogIn size={16} />
+            <span>Setup help</span>
+          </button>
+        )}
         {!demoMode && (
           <button className="sidebar-settings" onClick={launchDemo}>
             <CircleDot size={16} />
@@ -3571,6 +3739,11 @@ export function App() {
       </aside>
 
       <main className="main">
+        <RefreshStatus
+          message={refreshAnnouncement}
+          owner={refreshOwner}
+          scope={refreshAnnouncements.scope}
+        />
         <div className="tabstrip" role="tablist" aria-label="Open issue trees">
           <button
             className="icon-button sidebar-reveal"
@@ -3769,6 +3942,7 @@ export function App() {
                   }}
                   onMoreRoots={() => setInboxRootLimit((limit) => limit + 10)}
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((tab) =>
@@ -3781,6 +3955,7 @@ export function App() {
               ) : (
                 <SavedViewsPanel
                   view={activeSavedView}
+                  refreshStatusId="refresh-status"
                   connections={connections}
                   availableRoots={availableRoots}
                   sources={savedSources}
@@ -3826,6 +4001,7 @@ export function App() {
                     }))
                   }
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((item) =>
@@ -4261,6 +4437,9 @@ export function App() {
                       errors.workspace ??
                       errors.app)}
                 </span>
+                {!demoMode && (
+                  <button onClick={() => setDialog('setup')}>Setup help</button>
+                )}
                 {errors[activeTab.id] && (
                   <button
                     onClick={() => void refreshTab(activeTab, true, true, true)}
@@ -4275,6 +4454,7 @@ export function App() {
                   </button>
                 )}
                 <button
+                  aria-label="Dismiss error"
                   onClick={() =>
                     setErrors((value) => {
                       const copy = { ...value };
@@ -4303,7 +4483,7 @@ export function App() {
               </div>
             )}
             {snapshot?.warnings.map((warning) => (
-              <div className="warning-banner" key={warning}>
+              <div className="warning-banner" key={warning} role="status">
                 <AlertCircle size={14} />
                 {warning}
               </div>
@@ -4696,6 +4876,7 @@ export function App() {
                   ) : shownTree ? (
                     <div
                       role="tree"
+                      data-tab-id={activeTab.id}
                       aria-label={`${activeTab.rootKey} issue tree`}
                       className="issue-tree"
                     >
@@ -4779,7 +4960,12 @@ export function App() {
                               : { issue, x, y, trigger: toggle },
                           );
                         }}
-                        editor={editor}
+                        editor={
+                          editor?.tabId === activeTab.id &&
+                          editor.connectionId === activeTab.connectionId
+                            ? editor
+                            : null
+                        }
                         beginEdit={beginEdit}
                         onOpenWorkflow={(key) => void openWorkflow(key)}
                         cancelEdit={() => setEditor(null)}
@@ -4874,6 +5060,11 @@ export function App() {
                   )}
                 </div>
                 <footer className="statusbar">
+                  <span className="sr-only" role="status" aria-atomic="true">
+                    {savingKeys.length > 0
+                      ? `Saving ${savingKeys.join(', ')}`
+                      : ''}
+                  </span>
                   {snapshot ? (
                     <>
                       <span>
@@ -5229,13 +5420,25 @@ export function App() {
           connections={connections}
           recentRoots={workspace.recentRoots ?? []}
           activeRoot={activeTab ?? undefined}
-          onClose={() => setDialog(null)}
-          onOpen={openTab}
+          initialConnectionId={setupConnectionId}
+          onClose={() => {
+            setSetupConnectionId(undefined);
+            setDialog(null);
+          }}
+          onOpen={(id, key) => {
+            setSetupConnectionId(undefined);
+            openTab(id, key);
+          }}
         />
       )}
       {dialog === 'connect' && (
         <ConnectDialog
           initialFocus={settingsFlow.current}
+          connections={connections}
+          onOpen={(id) => {
+            setSetupConnectionId(id);
+            setDialog('open');
+          }}
           onClose={() => setDialog(null)}
           onConnected={(value) => {
             for (const tab of allRefreshTabs)
@@ -5268,9 +5471,25 @@ export function App() {
               delete copy.app;
               return copy;
             });
-            setDialog(null);
           }}
         />
+      )}
+      {dialog === 'setup' && (
+        <Dialog
+          title="Setup help"
+          onClose={() => setDialog(null)}
+          wide
+          initialFocus
+        >
+          <SetupHelp
+            hasConnections={connections.length > 0}
+            onConnect={() => setDialog('connect')}
+            onOpen={() => {
+              setSetupConnectionId(undefined);
+              setDialog('open');
+            }}
+          />
+        </Dialog>
       )}
       {dialog === 'commands' && (
         <CommandDialog
@@ -5353,6 +5572,9 @@ export function App() {
             </button>
           </div>
         </Dialog>
+      )}
+      {dialog === 'support' && (
+        <SupportDialog onClose={() => setDialog(null)} />
       )}
       {dialog === 'appearance' && (
         <AppearanceDialog
@@ -6066,6 +6288,24 @@ function SummaryEditor({
 }) {
   const [value, setValue] = useState(issue.summary);
   const committed = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    const container = input?.parentElement;
+    const tree = container?.closest('[role="tree"]');
+    const tabId = tree?.getAttribute('data-tab-id');
+    return () => {
+      if (document.activeElement !== input) return;
+      requestAnimationFrame(() => {
+        if (
+          container?.isConnected &&
+          tree?.getAttribute('data-tab-id') === tabId &&
+          document.activeElement === document.body
+        )
+          container.querySelector<HTMLButtonElement>('button.summary')?.focus();
+      });
+    };
+  }, []);
   const submit = () => {
     if (committed.current) return;
     committed.current = true;
@@ -6078,6 +6318,7 @@ function SummaryEditor({
   };
   return (
     <input
+      ref={inputRef}
       autoFocus
       className="summary-input"
       value={value}
@@ -6583,11 +6824,43 @@ function ConnectDialog({
   initialFocus,
   onClose,
   onConnected,
+  onOpen,
+  connections,
 }: {
   onClose: () => void;
   onConnected: (connections: Connection[]) => void;
   initialFocus?: boolean;
+  onOpen: (id: string) => void;
+  connections: Connection[];
 }) {
+  const isOpen = useRef(true);
+  useEffect(() => {
+    isOpen.current = true;
+    return () => {
+      isOpen.current = false;
+    };
+  }, []);
+  const close = () => {
+    isOpen.current = false;
+    onClose();
+  };
+  const [verified, setVerified] = useState<Connection>();
+  const completed = (value: Connection[], oauth = false) => {
+    const match = verifiedSetupConnection(value, connections, {
+      provider,
+      siteUrl,
+      repositories,
+      oauth,
+    });
+    setVerified(match);
+    setToken('');
+    setGithubToken('');
+    onConnected(value);
+    if (!match)
+      setError(
+        'Connection saved. Close setup and use Open issue to choose a root on the saved connection.',
+      );
+  };
   const [siteUrl, setSiteUrl] = useState('');
   const [provider, setProvider] = useState<'jira' | 'github'>('jira');
   const [repositories, setRepositories] = useState('');
@@ -6598,6 +6871,14 @@ function ConnectDialog({
   const [busy, setBusy] = useState<'token' | 'oauth' | null>(null);
   const [error, setError] = useState('');
   const clearError = () => setError('');
+  const verify = (operation: () => Promise<Connection[]>, oauth = false) =>
+    runSetupVerification(operation, {
+      isOpen: () => isOpen.current,
+      success: (value) => completed(value, oauth),
+      failure: (reason) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      settled: () => setBusy(null),
+    });
   const connectToken = async () => {
     if (!siteUrl.trim() || !email.trim() || !token) {
       setError('Enter your Jira site, Atlassian email, and API token.');
@@ -6605,57 +6886,80 @@ function ConnectDialog({
     }
     setBusy('token');
     setError('');
-    try {
-      const value = await window.canopy.connect({
+    await verify(() =>
+      window.canopy.connect({
         siteUrl: siteUrl.trim(),
         email: email.trim(),
         token,
         scoped,
-      });
-      onConnected(value);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
+      }),
+    );
   };
   const connectOauth = async () => {
     setBusy('oauth');
     setError('');
-    try {
-      onConnected(await window.canopy.connect());
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
+    await verify(() => window.canopy.connect(), true);
   };
   const connectGithub = async () => {
     setBusy('token');
     setError('');
-    try {
-      onConnected(
-        await window.canopy.connectGithub({
-          token: githubToken,
-          repositories: repositories.split(/[\s,]+/).filter(Boolean),
-        }),
-      );
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
+    await verify(() =>
+      window.canopy.connectGithub({
+        token: githubToken,
+        repositories: repositories.split(/[\s,]+/).filter(Boolean),
+      }),
+    );
   };
+  if (verified)
+    return (
+      <Dialog title="Connection verified" onClose={close}>
+        <div className="connect-dialog">
+          <p role="status">
+            {verified.name} is saved securely. Choose a first root to start your
+            workspace.
+          </p>
+          <p>
+            {verified.provider === 'github'
+              ? 'Open a selected repository to see its issues, or enter owner/repo#number for one issue tree.'
+              : 'Enter a Jira issue key or browse URL, or search by summary to open an epic, story, or task as a root.'}
+          </p>
+          <p>
+            Closing setup keeps this connection available. You can revisit Setup
+            help from the sidebar.
+          </p>
+          <div className="dialog-footer">
+            <button className="secondary" onClick={close}>
+              Later
+            </button>
+            <button className="primary" onClick={() => onOpen(verified.id)}>
+              Open first root
+            </button>
+          </div>
+        </div>
+      </Dialog>
+    );
   return (
     <Dialog
       title={`Connect ${provider === 'github' ? 'GitHub' : 'Jira'}`}
       initialFocus={initialFocus}
-      onClose={onClose}
+      onClose={close}
       wide
     >
       <div className="connect-dialog">
+        <p className="dialog-note">
+          1. Choose provider · 2. Prepare token · 3. Verify connection · 4. Open
+          a root
+        </p>
+        {busy && (
+          <p role="status" className="dialog-note">
+            You can close setup while verification continues. A verified
+            connection may still be saved. Reopen setup to reload saved
+            connections; your workspace stays in place.
+          </p>
+        )}
         <div className="connect-provider">
           <button
+            disabled={Boolean(busy)}
             className={provider === 'jira' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('jira');
@@ -6665,6 +6969,7 @@ function ConnectDialog({
             Jira
           </button>
           <button
+            disabled={Boolean(busy)}
             className={provider === 'github' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('github');
@@ -6674,6 +6979,10 @@ function ConnectDialog({
             GitHub
           </button>
         </div>
+        <details>
+          <summary>Token permissions and verification</summary>
+          <TokenPermissions provider={provider} />
+        </details>
         {provider === 'github' ? (
           <>
             <p className="connect-lead">
@@ -6716,7 +7025,7 @@ function ConnectDialog({
                 }
                 onClick={() => void connectGithub()}
               >
-                {busy ? 'Connecting…' : 'Connect GitHub'}
+                {busy ? 'Verifying…' : 'Verify and save GitHub'}
               </button>
             </div>
           </>
@@ -6826,7 +7135,7 @@ function ConnectDialog({
                 ) : (
                   <LogIn size={15} />
                 )}
-                Connect with token
+                {busy === 'token' ? 'Verifying…' : 'Verify and save Jira'}
               </button>
               <span>or</span>
               <button
@@ -6869,11 +7178,13 @@ function OpenIssueDialog({
   onOpen: (connectionId: string, key: string) => void;
 }) {
   const [connectionId, setConnectionId] = useState(
-    initialConnectionId ??
-      (activeRoot &&
-      connections.some(({ id }) => id === activeRoot.connectionId)
+    initialConnectionId &&
+      connections.some(({ id }) => id === initialConnectionId)
+      ? initialConnectionId
+      : activeRoot &&
+          connections.some(({ id }) => id === activeRoot.connectionId)
         ? activeRoot.connectionId
-        : (connections[0]?.id ?? '')),
+        : (connections[0]?.id ?? ''),
   );
   const [query, setQuery] = useState(initialQuery);
   const [groupRepositories, setGroupRepositories] = useState(false);
@@ -7449,6 +7760,55 @@ function shortcutDisplay(shortcut = '') {
     .replaceAll('+', '');
 }
 
+function SupportDialog({ onClose }: { onClose: () => void }) {
+  const [version, setVersion] = useState<string>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void window.canopy.appVersion().then(
+      (value) => {
+        if (active) setVersion(value);
+      },
+      () => {
+        if (active) setError('Could not read the application version.');
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+  const open = async (link: SupportLink) => {
+    setError('');
+    try {
+      await window.canopy.openSupportLink(link);
+    } catch {
+      setError('Could not open the link in your browser. Try again.');
+    }
+  };
+  return (
+    <Dialog title="About & Support" onClose={onClose} compact initialFocus>
+      <div className="support-dialog">
+        <img src="icon.svg" width="80" height="80" alt="" />
+        <h3>Canopy</h3>
+        <p role="status">
+          {version ? `Version ${version}` : 'Reading version…'}
+        </p>
+        <p>A focused desktop workspace for issue trees.</p>
+        {Object.entries(supportLinks).map(([id, link]) => (
+          <button key={id} onClick={() => void open(id as SupportLink)}>
+            <ExternalLink size={15} /> {link.label}
+          </button>
+        ))}
+        {error && (
+          <p className="dialog-error" role="alert">
+            {error}
+          </p>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
 function AppearanceDialog({
   theme,
   palette,
@@ -7858,6 +8218,20 @@ function Dialog({
   initialFocus?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const returnFocus = useRef(
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
+  useLayoutEffect(() => {
+    const trigger = returnFocus.current;
+    return () => {
+      requestAnimationFrame(() => {
+        if (trigger?.isConnected && document.activeElement === document.body)
+          trigger.focus();
+      });
+    };
+  }, []);
   useEffect(() => {
     const panel = panelRef.current;
     const keydown = (event: KeyboardEvent) => {
@@ -7922,9 +8296,14 @@ function Dialog({
 
 function TreeSkeleton() {
   return (
-    <div className="skeleton" aria-label="Loading issue tree">
+    <div className="skeleton" role="status" aria-label="Loading issue tree">
+      <span className="sr-only">Loading issue tree</span>
       {[0, 1, 2, 3, 4, 5].map((item) => (
-        <div key={item} style={{ marginLeft: `${(item % 3) * 26}px` }}>
+        <div
+          key={item}
+          aria-hidden="true"
+          style={{ marginLeft: `${(item % 3) * 26}px` }}
+        >
           <span />
           <span />
           <span />

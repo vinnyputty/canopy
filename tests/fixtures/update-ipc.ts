@@ -38,9 +38,18 @@ const handlers = new Map<string, (...args: any[]) => any>();
 const requests: string[] = [],
   browsers: string[] = [],
   dialogs: unknown[] = [];
+const identity: string[] = [];
 const app = Object.assign(new EventEmitter(), {
   isPackaged: true,
   setName() {},
+  setDesktopName(name: string) {
+    assert.equal(name, 'canopy.desktop');
+    identity.push('linux');
+  },
+  setAppUserModelId(id: string) {
+    assert.equal(id, 'app.canopy.desktop');
+    identity.push('win32');
+  },
   setPath(_name: string, path: string) {
     assert.equal(path, profile);
   },
@@ -51,7 +60,9 @@ const app = Object.assign(new EventEmitter(), {
     return '0.1.0';
   },
   commandLine: { appendSwitch() {} },
+  requestSingleInstanceLock: () => true,
   whenReady: async () => {},
+  focus() {},
   quit() {},
 });
 class Window extends EventEmitter {
@@ -72,6 +83,17 @@ class Window extends EventEmitter {
     this.webContents.mainFrame.url = pathToFileURL(file).href;
     startup.enter();
   }
+  isDestroyed() {
+    return false;
+  }
+  isMinimized() {
+    return false;
+  }
+  isVisible() {
+    return true;
+  }
+  show() {}
+  focus() {}
 }
 const forbidden = () => {
   throw new Error('Forbidden external boundary');
@@ -232,22 +254,41 @@ moduleLoader._load = function (name, ...args) {
         }
         return (fs.readFile as any)(file, ...rest);
       },
-      async writeFile(file: string, ...rest: any[]) {
+      async open(file: string, flags: string, mode: number) {
         assert.ok(
           String(file).startsWith(profile! + require('node:path').sep),
           'Write outside disposable profile',
         );
-        if (String(file) === join(profile!, 'updates.json.tmp') && holdWrite) {
-          write.enter();
-          await write.wait;
-        }
-        return (fs.writeFile as any)(file, ...rest);
+        assert.equal(flags, 'wx');
+        assert.equal(mode, 0o600);
+        const handle = await fs.open(file, flags, mode);
+        const writeFile = handle.writeFile.bind(handle);
+        handle.writeFile = async (...args: Parameters<typeof writeFile>) => {
+          const prefix = join(profile!, 'updates.json.');
+          if (String(file).startsWith(prefix)) {
+            assert.match(
+              String(file).slice(prefix.length),
+              /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}\.tmp$/i,
+            );
+            if (holdWrite) {
+              write.enter();
+              await write.wait;
+            }
+          }
+          return writeFile(...args);
+        };
+        return handle;
       },
     };
   return original.call(this, name, ...args);
 };
 globalThis.fetch = forbidden;
 const source = createRequire(__filename)(process.argv[2]);
+const platform = process.env.CANOPY_IPC_PLATFORM ?? process.platform;
+assert.deepEqual(
+  identity,
+  platform === 'linux' || platform === 'win32' ? [platform] : [],
+);
 const { launch, Updates, createDemoFixture } = source;
 launch(
   async (storage: any) => ({
