@@ -429,6 +429,26 @@ export async function auditDiagnosticsFocus(app, page) {
       delete globalThis.focusExport;
     }, failure);
   try {
+    await page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    const controls = help().locator(
+      'button:enabled:visible, summary:visible, pre[aria-label="Diagnostics report"]:visible',
+    );
+    await expect(help().getByLabel('Diagnostics report')).toBeVisible();
+    const count = await controls.count();
+    await controls.first().focus();
+    for (let index = 1; index <= count; index++) {
+      await page.keyboard.press('Tab');
+      await expect(controls.nth(index % count)).toBeFocused();
+    }
+    for (let index = count - 1; index >= 0; index--) {
+      await page.keyboard.press('Shift+Tab');
+      await expect(controls.nth(index)).toBeFocused();
+    }
     for (const failure of [false, true]) {
       await save().click();
       await expect(save()).toBeDisabled();
