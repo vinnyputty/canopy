@@ -428,6 +428,8 @@ export interface CanopyAPI {
   reloadWorkspace(): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace): Promise<void>;
+  onWorkspaceFlush(handler: () => Promise<void>): void;
+  flushWorkspace(): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;
   openIssue(connectionId: string, key: string): Promise<void>;
   openLink(url: string): Promise<void>;

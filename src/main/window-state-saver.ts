@@ -49,6 +49,10 @@ export class WindowStateSaver {
       });
   }
 
+  resume() {
+    this.flushing = false;
+  }
+
   /** Drain the final state before the existing close handler approves closing. */
   async flush() {
     this.flushing = true;

@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
+let flushHandler: (() => Promise<void>) | undefined;
+let ready: () => void;
+const flushReady = new Promise<void>((resolve) => {
+  ready = resolve;
+});
 const api: CanopyAPI = {
   handoffReady: (clientId) =>
     ipcRenderer.invoke('canopy:handoffReady', clientId),
@@ -25,6 +30,14 @@ const api: CanopyAPI = {
   cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
   dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
   openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
+  onWorkspaceFlush: (handler) => {
+    flushHandler = handler;
+    ready();
+  },
+  flushWorkspace: async () => {
+    await flushReady;
+    await flushHandler!();
+  },
   diagnostics: () => ipcRenderer.invoke('canopy:diagnostics'),
   exportDiagnostics: (reviewed) =>
     ipcRenderer.invoke('canopy:exportDiagnostics', reviewed),
