@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { runInNewContext } from 'node:vm';
+import { createContext, runInContext, runInNewContext } from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { validateWorkspace } from '../src/shared/workspace-validation';
@@ -43,10 +43,11 @@ async function capture(
     source
       .replace("import { expect } from '@playwright/test';", '')
       .replaceAll('export async function', 'async function') +
-      '\nauditSelfConnections;',
+      '\ncaptureSelfConnectionWorkspace;',
     {
       window: {
         canopy: {
+          flushWorkspace: async () => {},
           loadWorkspace: () => {
             loads += 1;
             return load();
@@ -81,20 +82,13 @@ async function capture(
   );
   let error: unknown;
   try {
-    await audit(
-      {
-        evaluate: (_callback: unknown, saved: unknown) => {
-          passed = saved;
-          throw stop;
-        },
+    passed = await audit({
+      evaluate: (callback: () => unknown) => {
+        evaluations += 1;
+        return callback();
       },
-      {
-        evaluate: (callback: () => unknown) => {
-          evaluations += 1;
-          return callback();
-        },
-      },
-    );
+    });
+    throw stop;
   } catch (caught) {
     error = caught;
   }
@@ -243,15 +237,24 @@ const auditSource = ts.createSourceFile(
   true,
   ts.ScriptKind.JS,
 );
-const restoring = findNode(
+const restoration = findNode(
   auditSource,
-  (node): node is ts.TryStatement =>
-    ts.isTryStatement(node) &&
-    !!node.finallyBlock?.getText().includes('waitForTimeout(250)'),
-);
-const restoration = restoring
+  (node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) &&
+    node.name?.text === 'restoreSelfConnectionWorkspace',
+)
   .getText()
-  .replace(restoring.tryBlock.getText(), '{ await auditBody(); }');
+  .replace('export ', '');
+const auditing = findNode(
+  auditSource,
+  (node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) &&
+    node.name?.text === 'auditSelfConnections',
+);
+const auditTry = auditing.body!.statements.find(ts.isTryStatement)!;
+const auditRestoration = auditTry
+  .getText()
+  .replace(auditTry.tryBlock.getText(), '{ await auditBody(); }');
 const mainSource = sourceFile(new URL('../src/main/app.ts', import.meta.url));
 const mainSave = findNode(
   mainSource,
@@ -341,11 +344,11 @@ function restoreModel(options: Record<string, unknown> = {}) {
     canopy: {
       saveWorkspace: (value: unknown) =>
         handlers.get('canopy:saveWorkspace')!(event, value),
+      flushWorkspace: async () => {},
       loadWorkspace: () => handlers.get('canopy:loadWorkspace')!(event),
     },
   };
   const page = {
-    waitForTimeout: async (ms: number) => assert.equal(ms, 250),
     evaluate: (callback: (...args: any[]) => unknown, value: unknown) =>
       execute(`(${callback})`, { window })(value),
     reload: async () => {
@@ -408,7 +411,7 @@ function restoreModel(options: Record<string, unknown> = {}) {
   const app = {
     evaluate: (callback: (...args: any[]) => unknown, value: unknown) => {
       evaluations++;
-      if (evaluations === 2 && 'cleanupFailure' in options)
+      if (evaluations === 3 && 'cleanupFailure' in options)
         throw options.cleanupFailure;
       return execute(`(${callback})`, { globalThis: owner })(
         { ipcMain },
@@ -417,15 +420,18 @@ function restoreModel(options: Record<string, unknown> = {}) {
     },
   };
   const run = () =>
-    execute(`async () => { let failed = false; ${restoration} }`, {
-      app,
-      page,
-      workspace: saved,
-      expect,
-      auditBody: () => {
-        if ('bodyFailure' in options) throw options.bodyFailure;
+    execute(
+      `async () => { ${restoration}; let failed = false; ${auditRestoration} }`,
+      {
+        app,
+        page,
+        workspace: saved,
+        expect,
+        auditBody: () => {
+          if ('bodyFailure' in options) throw options.bodyFailure;
+        },
       },
-    })();
+    )();
   return {
     run,
     saved,
@@ -499,7 +505,7 @@ for (const primary of [
       await assert.rejects(m.run(), (error) => error === primary);
       assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
       assert.equal(m.owner.selfConnectionAudit, undefined);
-      assert.equal(m.reloads, phase === 'reloadFailure' ? 1 : 0);
+      assert.equal(m.reloads, phase === 'saveFailure' ? 0 : 1);
     });
   test(`primary audit failure ${String(primary)} survives restoration failure`, async () => {
     const m = restoreModel({
@@ -523,4 +529,488 @@ test('cleanup failure refuses an otherwise successful restoration', async () => 
   const cleanupFailure = new Error('cleanup failed');
   const m = restoreModel({ cleanupFailure });
   await assert.rejects(m.run(), (error) => error === cleanupFailure);
+});
+
+const renderer = readFileSync(
+  new URL('../src/renderer/App.tsx', import.meta.url),
+  'utf8',
+);
+const saveStart = renderer.indexOf(
+  '    (value: Workspace, transferFlush = false) => {',
+);
+const saveEnd = renderer.indexOf('\n    [],', saveStart);
+const flushStart =
+  renderer.indexOf('window.canopy.onWorkspaceFlush(') +
+  'window.canopy.onWorkspaceFlush('.length;
+const flushEnd = renderer.indexOf('\n    });', flushStart) + '\n    }'.length;
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function lifecycle(
+  options: {
+    flushFailure?: unknown;
+    failFlush?: boolean;
+    failFlushAt?: number;
+    completeAudit?: boolean;
+    lateReloadSave?: boolean;
+    saveFailure?: boolean;
+    reloadFailure?: boolean;
+    remoteFailure?: boolean;
+    assertionFailure?: boolean;
+    installFailure?: boolean;
+    auditFailure?: unknown;
+  } = {},
+) {
+  const saved = {
+    ...workspace(['CAN-100', 'CAN-106']),
+    activeTabId: 'can-106',
+    tabs: [
+      { ...tab('CAN-100'), view: { filters: { assignee: 'alex' } } },
+      { ...tab('CAN-106'), view: { hideDone: true, scrollTop: 124 } },
+    ],
+    rootViews: { second: { hideDone: true, scrollTop: 124 } },
+  };
+  let persisted: unknown = workspace(['CAN-100']);
+  let rendered = saved;
+  let gate: ReturnType<typeof deferred> | undefined;
+  let hydrated:
+    | {
+        held: ReturnType<typeof deferred>;
+        started: ReturnType<typeof deferred>;
+      }
+    | undefined;
+  let reloads = 0;
+  let flushes = 0;
+  let resets = 0;
+  let timerCancelled = false;
+  const failure = new Error('cleanup failure');
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const originalSave = (_event: unknown, value: unknown) => {
+    if (options.saveFailure) throw failure;
+    persisted = structuredClone(value);
+  };
+  handlers.set('canopy:saveWorkspace', originalSave);
+  handlers.set('canopy:loadWorkspace', () => structuredClone(persisted));
+  for (const channel of [
+    'connections',
+    'connect',
+    'currentUser',
+    'tree',
+    'cachedUsers',
+    'assignees',
+    'validateAssignee',
+    'update',
+  ]) {
+    handlers.set(`canopy:${channel}`, () => {});
+  }
+  const originals = new Map(handlers);
+  const call = (name: string, ...args: unknown[]) =>
+    handlers.get(`canopy:${name}`)!(null, ...args);
+  const refs = {
+    workspaceLoaded: { current: true },
+    workspaceRef: { current: rendered },
+    workspaceTransferBusy: { current: false },
+    workspaceTransferCommitted: { current: false },
+    workspaceSaveTimer: { current: 42 as number | null },
+  };
+  const context = {
+    ...refs,
+    demoResetting: { current: false },
+    pendingWorkspaceSave: { current: Promise.resolve() },
+    scrollPositions: { current: {} },
+    withScrollPositions: (value: unknown) => value,
+    setErrors: () => {},
+    window: {
+      clearTimeout: () => {
+        timerCancelled = true;
+      },
+      canopy: {
+        loadWorkspace: () => call('loadWorkspace'),
+        saveWorkspace: async (value: unknown) => {
+          const pending = gate;
+          gate = undefined;
+          if (pending === hydrated?.held) hydrated?.started.resolve();
+          if (pending) await pending.promise;
+          return call('saveWorkspace', value);
+        },
+        flushWorkspace: async () => {
+          flushes += 1;
+          if (options.failFlush || options.failFlushAt === flushes)
+            throw options.flushFailure;
+          await flush();
+        },
+      },
+    },
+    document: {
+      querySelectorAll: () =>
+        rendered.tabs.map((item) => ({
+          querySelector: () => ({ textContent: item.rootKey }),
+          getAttribute: () =>
+            item.id === rendered.activeTabId ? 'true' : 'false',
+        })),
+    },
+    console: { log: () => {} },
+  };
+  // Run the renderer's actual queue and flush callbacks against the IPC fixture.
+  const save = runInNewContext(
+    renderer
+      .slice(saveStart, saveEnd)
+      .trim()
+      .replace(/,$/, '')
+      .replace('(value: Workspace,', '(value,'),
+    context,
+  );
+  const flush = runInNewContext(
+    renderer
+      .slice(flushStart, flushEnd)
+      .replace('let saved: Workspace;', 'let saved;'),
+    { ...context, saveWorkspace: save },
+  );
+  const main = {
+    canopySmoke: {
+      tree: () => ({
+        issues: [
+          { key: 'CAN-100', assignee: { id: 'alex', name: 'Alex Morgan' } },
+        ],
+      }),
+      validateAssignee: () => ({}),
+      update: () => ({}),
+      remoteUpdate: () => {
+        resets += 1;
+        if (options.remoteFailure) throw failure;
+      },
+    },
+  };
+  let installFailure = options.installFailure;
+  const ipcMain = {
+    _invokeHandlers: handlers,
+    removeHandler: (channel: string) => handlers.delete(channel),
+    handle: (channel: string, handler: (...args: any[]) => unknown) => {
+      handlers.set(channel, handler);
+      if (installFailure && channel === 'canopy:currentUser') {
+        installFailure = false;
+        throw options.auditFailure;
+      }
+    },
+  };
+  const functions = runInNewContext(
+    source
+      .replace("import { expect } from '@playwright/test';", '')
+      .replaceAll('export async function', 'async function') +
+      '\nexpect.poll = callback => ({toBe: async value => { if (await callback() !== value) throw Error(\"poll mismatch\"); }});\n({captureSelfConnectionWorkspace, restoreSelfConnectionWorkspace, auditSelfConnections});',
+    {
+      expect: (locator: { role: string; name?: string; index?: number }) => ({
+        toBeDefined: () => assert.notEqual(locator, undefined),
+        toHaveText: async (roots: string[]) =>
+          assert.deepEqual(
+            rendered.tabs.map((item) => item.rootKey),
+            Array.from(roots),
+          ),
+        toHaveAttribute: async (key: string, value: string) =>
+          assert.equal(
+            key === 'data-tab-id'
+              ? rendered.tabs[locator.index!].id
+              : String(
+                  rendered.tabs[locator.index!].id === rendered.activeTabId,
+                ),
+            value,
+          ),
+        toHaveCount: async (count: number) => {
+          assert.equal(rendered.tabs.length, count);
+          if (options.assertionFailure) throw failure;
+        },
+        toBeDisabled: async () => {},
+        toBeEnabled: async () => {},
+        toBeHidden: async () => {},
+        toContainText: async () => {},
+        toEqual: (value: unknown) =>
+          assert.deepEqual(
+            JSON.parse(JSON.stringify(locator)),
+            JSON.parse(JSON.stringify(value)),
+          ),
+        toBeVisible: async () => {
+          const active = rendered.tabs.find(
+            (item) => item.id === rendered.activeTabId,
+          )!;
+          assert.equal(locator.name, `${active.rootKey} issue tree`);
+        },
+      }),
+    },
+  );
+  let connection = 'demo';
+  const locator = (role: string, args?: { name?: string }): any => ({
+    role,
+    ...args,
+    fill: async () => {},
+    press: async () => {},
+    nth: (index: number) => ({
+      index,
+      click: () => {
+        connection = index ? 'other' : 'demo';
+      },
+    }),
+    click: () => {
+      if (!options.completeAudit) throw options.auditFailure;
+      if (args?.name === 'Verify and save Jira') {
+        call('connect');
+        void call('currentUser', 'demo');
+      }
+      if (args?.name === 'Assign to me') {
+        const account = connection === 'other' ? 'sam' : 'jordan';
+        call('validateAssignee', connection, 'CAN-100', account, true);
+        call('update', connection, 'CAN-100', { assigneeId: account });
+      }
+    },
+  });
+  const page = {
+    getByLabel: (name: string) => locator('label', { name }),
+    getByPlaceholder: (name: string) => locator('placeholder', { name }),
+    evaluate: (callback: (...args: any[]) => unknown, value?: unknown) =>
+      runInNewContext(`(${callback.toString()})(value)`, { ...context, value }),
+    reload: async () => {
+      reloads += 1;
+      if (options.reloadFailure) throw failure;
+      // An old renderer write during navigation must not overwrite the capture.
+      if (options.lateReloadSave !== false)
+        await context.window.canopy.saveWorkspace(workspace(['FIXTURE']));
+      rendered = call('loadWorkspace') as typeof saved;
+      refs.workspaceRef.current = rendered;
+      if (hydrated) gate = hydrated.held;
+    },
+    getByRole: locator,
+    locator: () => ({}),
+  };
+  const mainContext = createContext({ ...main, ipcMain });
+  const app = {
+    evaluate: (callback: (...args: any[]) => unknown, value?: unknown) => {
+      mainContext.value = value;
+      return runInContext(
+        `(${callback.toString()})({ipcMain}, value)`,
+        mainContext,
+      );
+    },
+  };
+  return {
+    saved,
+    render: (value: typeof saved) => {
+      rendered = value;
+      refs.workspaceRef.current = value;
+    },
+    holdReloadSave: () => {
+      hydrated = { held: deferred(), started: deferred() };
+      return hydrated;
+    },
+    page,
+    app,
+    functions,
+    handlers,
+    originals,
+    failure,
+    persisted: () => persisted,
+    rendered: () => rendered,
+    stats: () => ({ reloads, flushes, resets, timerCancelled }),
+    fixture: () => {
+      mainContext.selfConnectionAudit = { handlers: new Map(originals) };
+      handlers.set('canopy:saveWorkspace', () => {});
+      rendered = { ...saved, ...workspace(['FIXTURE']) } as typeof saved;
+      refs.workspaceRef.current = rendered;
+    },
+    hold: () => {
+      gate = deferred();
+      return gate;
+    },
+    save,
+    auditPresent: () => Boolean(mainContext.selfConnectionAudit),
+  };
+}
+
+test('settled capture waits for queued writes and preserves current active root and view state', async () => {
+  const h = lifecycle();
+  h.originals.get('canopy:saveWorkspace')!(null, h.saved);
+  const current = {
+    ...h.saved,
+    activeTabId: 'can-100',
+    tabs: h.saved.tabs.slice(0, 1),
+  };
+  h.render(current);
+  const held = h.hold();
+  const oldSave = h.save(h.saved);
+  await Promise.resolve();
+  let finished = false;
+  const capturing = h.functions
+    .captureSelfConnectionWorkspace(h.page)
+    .then((value: unknown) => {
+      finished = true;
+      return value;
+    });
+  await Promise.resolve();
+  assert.equal(finished, false);
+  held.resolve();
+  await oldSave;
+  assert.deepEqual(await capturing, current);
+  assert.deepEqual(h.persisted(), current);
+  assert.equal(h.stats().timerCancelled, true);
+});
+
+test('restoration drains pending fixture saves and protects the complete workspace during reload', async () => {
+  const h = lifecycle();
+  h.fixture();
+  const fixtureSave = h.handlers.get('canopy:saveWorkspace');
+  const hydrated = h.holdReloadSave();
+  const held = h.hold();
+  const pending = h.save(workspace(['FIXTURE']));
+  await Promise.resolve();
+  const restoring = h.functions.restoreSelfConnectionWorkspace(
+    h.app,
+    h.page,
+    h.saved,
+  );
+  await Promise.resolve();
+  assert.equal(h.handlers.get('canopy:saveWorkspace'), fixtureSave);
+  assert.equal(h.stats().reloads, 0);
+  held.resolve();
+  await pending;
+  await hydrated.started.promise;
+  assert.notEqual(
+    h.handlers.get('canopy:saveWorkspace'),
+    h.originals.get('canopy:saveWorkspace'),
+  );
+  assert.equal(h.auditPresent(), true);
+  hydrated.held.resolve();
+  await restoring;
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.equal(h.stats().flushes, 2);
+  assert.equal(h.stats().resets, 1);
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
+});
+
+test('capture refuses a failed flush without loading or installing the fixture', async () => {
+  for (const primary of [
+    new Error('flush failed'),
+    undefined,
+    null,
+    false,
+    0,
+    '',
+  ]) {
+    const h = lifecycle({ failFlush: true, flushFailure: primary });
+    let rejected = false;
+    try {
+      await h.functions.auditSelfConnections(h.app, h.page);
+    } catch (error) {
+      rejected = true;
+      assert.equal(error, primary);
+    }
+    assert.equal(rejected, true);
+    assert.deepEqual(h.handlers, h.originals);
+    assert.equal(h.stats().reloads, 0);
+    assert.equal(h.auditPresent(), false);
+  }
+});
+
+test('restoration releases every handler after flush, save, reload, assertion or fixture-reset failures', async () => {
+  for (const options of [
+    { failFlush: true, flushFailure: null },
+    { failFlushAt: 1, flushFailure: null },
+    { failFlushAt: 1, flushFailure: null, remoteFailure: true },
+    { failFlushAt: 2, flushFailure: null },
+    { saveFailure: true },
+    { reloadFailure: true },
+    { assertionFailure: true },
+    { remoteFailure: true },
+  ]) {
+    const h = lifecycle(options);
+    h.fixture();
+    let rejected = false;
+    try {
+      await h.functions.restoreSelfConnectionWorkspace(h.app, h.page, h.saved);
+    } catch (error) {
+      rejected = true;
+      assert.equal(
+        error,
+        options.failFlush || options.failFlushAt ? null : h.failure,
+      );
+    }
+    assert.equal(rejected, true);
+    assert.deepEqual(h.handlers, h.originals);
+    assert.equal(h.auditPresent(), false);
+    if (options.failFlush || options.remoteFailure) {
+      assert.deepEqual(h.persisted(), h.saved);
+      assert.deepEqual(h.rendered(), h.saved);
+    }
+  }
+});
+
+test('audit preserves raw assertion and partial-installation failures across failed cleanup', async () => {
+  for (const primary of [
+    new Error('audit failed'),
+    undefined,
+    null,
+    false,
+    0,
+    '',
+  ]) {
+    for (const installFailure of [false, true]) {
+      const h = lifecycle({
+        auditFailure: primary,
+        installFailure,
+        remoteFailure: true,
+      });
+      let rejected = false;
+      try {
+        await h.functions.auditSelfConnections(h.app, h.page);
+      } catch (error) {
+        rejected = true;
+        assert.equal(error, primary);
+      }
+      assert.equal(rejected, true);
+      assert.deepEqual(h.handlers, h.originals);
+      assert.equal(h.auditPresent(), false);
+    }
+  }
+});
+
+test('a completed audit reports restoration failure and restores the original handlers', async () => {
+  const h = lifecycle({ completeAudit: true, remoteFailure: true });
+  await assert.rejects(
+    h.functions.auditSelfConnections(h.app, h.page),
+    (error: unknown) => error === h.failure,
+  );
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
+});
+
+test('restoration explicitly persists the capture when navigation has no late renderer save', async () => {
+  const h = lifecycle({ lateReloadSave: false });
+  h.fixture();
+  await h.functions.restoreSelfConnectionWorkspace(h.app, h.page, h.saved);
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.deepEqual(h.handlers, h.originals);
+});
+
+test('a completed audit restores the full workspace and returns successfully', async () => {
+  const h = lifecycle({ completeAudit: true });
+  await h.functions.auditSelfConnections(h.app, h.page);
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
+});
+
+test('restoration also completes when fixture installation never created handler state', async () => {
+  const h = lifecycle({ lateReloadSave: false });
+  await h.functions.restoreSelfConnectionWorkspace(h.app, h.page, h.saved);
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
 });
