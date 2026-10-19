@@ -70,6 +70,8 @@ const app = Object.assign(new EventEmitter(), {
 class Window extends EventEmitter {
   destroyed = false;
   minimized = false;
+  visible = true;
+  shows = 0;
   webContents = Object.assign(new EventEmitter(), {
     mainFrame: { url: '' },
     isCrashed: () => false,
@@ -121,7 +123,13 @@ class Window extends EventEmitter {
     restores++;
     this.minimized = false;
   }
-  show() {}
+  isVisible() {
+    return this.visible;
+  }
+  show() {
+    this.shows++;
+    this.visible = true;
+  }
   focus() {
     focuses++;
   }
@@ -249,6 +257,34 @@ const send = (name: string) =>
   if (scenario === 'early-quit') {
     assert.throws(() => invoke('handoffReady'), /closing/);
     assert.equal(sent.length, 0);
+    return;
+  }
+  if (scenario === 'visibility') {
+    assert.equal(win.shows, 0, 'Startup preserves an already mapped window');
+    const initialFocuses = focuses;
+    app.emit('activate');
+    await tick();
+    assert.equal(win.shows, 0, 'Focusing a visible window must not remap it');
+    assert.equal(focuses, initialFocuses + 1);
+    win.visible = false;
+    app.emit('activate');
+    await tick();
+    assert.equal(win.shows, 1, 'Activation reveals a hidden window');
+    win.minimized = true;
+    win.visible = false;
+    send('reveal');
+    await tick();
+    assert.equal(restores, 1);
+    assert.equal(win.minimized, false);
+    assert.equal(win.visible, true);
+    assert.equal(win.shows, 2);
+    const beforeQuitFocuses = focuses;
+    app.emit('before-quit');
+    win.visible = false;
+    app.emit('activate');
+    await tick();
+    assert.equal(win.shows, 2, 'Quit refuses visibility changes');
+    assert.equal(focuses, beforeQuitFocuses);
     return;
   }
   if (scenario === 'copy-sink') {
