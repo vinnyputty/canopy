@@ -1,4 +1,5 @@
 import { relationshipFailure } from '../shared/relationships';
+import { TreeLoad, type TreeLoadOptions } from './tree-load';
 import type {
   AssigneePage,
   Choice,
@@ -159,34 +160,46 @@ export class GithubProvider {
     const { repo, number } = this.assertSelected(key);
     return `/repos/${repo}/issues/${number}${suffix}`;
   }
-  private async all(path: string): Promise<any[]> {
+  private async all(
+    path: string,
+    load?: TreeLoad,
+    accept?: (batch: any[]) => void,
+  ): Promise<any[]> {
     const items: any[] = [];
     for (let page = 1; page <= 100; page++) {
       const separator = path.includes('?') ? '&' : '?';
-      const batch = await this.request(
-        `${path}${separator}per_page=100&page=${page}`,
-      );
+      const fetch = () =>
+        this.request(
+          `${path}${separator}per_page=100&page=${page}`,
+          load?.options.signal ? { signal: load.options.signal } : undefined,
+        );
+      const batch = await (load ? load.read(fetch) : fetch());
       if (!Array.isArray(batch))
         throw new Error('GitHub returned an invalid page.');
-      items.push(...batch);
+      if (accept) accept(batch);
+      else items.push(...batch);
       if (batch.length < 100) return items;
     }
     throw new Error('GitHub returned more than 10,000 issues for this view.');
   }
   private async childMetadata(
     candidates: { key: string; nodeId: string }[],
+    load?: TreeLoad,
   ): Promise<ChildMetadata[]> {
     const metadata: ChildMetadata[] = [];
     for (let start = 0; start < candidates.length; start += 100) {
       const batch = candidates.slice(start, start + 100);
-      const result = await this.request('/graphql', {
-        method: 'POST',
-        body: JSON.stringify({
-          query:
-            'query($ids:[ID!]!){nodes(ids:$ids){... on Issue{parent{url} subIssuesSummary{total}}}}',
-          variables: { ids: batch.map((item) => item.nodeId) },
-        }),
-      });
+      const fetch = () =>
+        this.request('/graphql', {
+          signal: load?.options.signal,
+          method: 'POST',
+          body: JSON.stringify({
+            query:
+              'query($ids:[ID!]!){nodes(ids:$ids){... on Issue{parent{url} subIssuesSummary{total}}}}',
+            variables: { ids: batch.map((item) => item.nodeId) },
+          }),
+        });
+      const result = await (load ? load.read(fetch) : fetch());
       if (result.errors?.length || !Array.isArray(result.data?.nodes))
         throw new Error('GitHub could not load sub-issue metadata.');
       if (result.data.nodes.length !== batch.length)
@@ -205,134 +218,122 @@ export class GithubProvider {
     }
     return metadata;
   }
-  private async repositoryTree(repo: string): Promise<TreeSnapshot> {
-    if (!this.selected.has(repo))
-      throw new Error(
-        `Repository ${repo} is outside this GitHub connection. Add it to the connection and token selection.`,
-      );
-    const listed = (await this.all(`/repos/${repo}/issues?state=all`)).filter(
-      (raw) => !raw.pull_request,
-    );
-    const issues = new Map<string, Issue>();
-    for (const raw of listed) {
-      const issue = parseIssue(raw, repo);
-      issues.set(issue.key, issue);
-    }
-    const metadata = await this.childMetadata(
-      listed.map((raw) => ({ key: rawKey(raw), nodeId: raw.node_id })),
-    );
-    for (const item of metadata) {
-      const issue = issues.get(item.key)!;
-      if (item.parentKey && issues.has(item.parentKey))
-        issue.parentKey = item.parentKey;
-    }
-    const warnings: string[] = [];
-    let frontier = metadata
-      .filter((item) => item.count > 0)
-      .map((item) => item.key);
-    while (frontier.length) {
-      const candidates: { key: string; nodeId: string }[] = [];
-      for (const parent of frontier) {
-        const children = await this.all(this.path(parent, '/sub_issues'));
-        for (const child of children) {
-          const key = rawKey(child);
-          if (!this.selected.has(parts(key).repo)) {
-            warnings.push(
-              `${key} is outside the selected repositories. Add that repository to read this subtree.`,
-            );
-            continue;
-          }
-          const existing = issues.get(key);
-          if (existing) {
-            existing.parentKey = parent;
-            continue;
-          }
-          const issue = parseIssue(child, parent);
-          issues.set(key, issue);
-          candidates.push({ key, nodeId: child.node_id });
-        }
-      }
-      frontier = (await this.childMetadata(candidates))
-        .filter((item) => item.count > 0)
-        .map((item) => item.key);
-    }
+  private repositoryRoot(repo: string): Issue {
     return {
-      rootKey: repo,
-      issues: [
-        {
-          id: `repository:${repo}`,
-          key: repo,
-          summary: 'Repository',
-          type: 'Repository',
-          priority: null,
-          assignee: null,
-          status: { id: 'repository', name: 'Repository', category: 'new' },
-          links: [],
-        },
-        ...issues.values(),
-      ],
-      fetchedAt: Date.now(),
-      warnings,
-      ranking: {
-        state: 'unsupported',
-        reason: 'GitHub issues have no Jira rank.',
-        issueKeys: [],
-      },
+      id: `repository:${repo}`,
+      key: repo,
+      summary: 'Repository',
+      type: 'Repository',
+      priority: null,
+      assignee: null,
+      status: { id: 'repository', name: 'Repository', category: 'new' },
+      links: [],
     };
   }
-  async tree(rootKey: string): Promise<TreeSnapshot> {
-    if (!githubRootKey(rootKey).includes('#'))
-      return this.repositoryTree(githubRepository(rootKey));
-    const root = githubKey(rootKey);
-    const raw = await this.request(this.path(root));
-    if (raw.pull_request)
-      throw new Error('This reference is a pull request. Open a GitHub issue.');
-    const issues = [parseIssue(raw)];
-    const seen = new Set([root]);
-    const warnings: string[] = [];
-    let frontier = [root];
-    while (frontier.length) {
-      const next: string[] = [];
-      const candidates: { key: string; nodeId: string }[] = [];
-      for (const parent of frontier) {
-        const children = await this.all(this.path(parent, '/sub_issues'));
-        for (const child of children) {
-          const key = rawKey(child);
-          if (seen.has(key)) {
-            warnings.push(`Ignored duplicate or cyclic child ${key}.`);
-            continue;
-          }
-          seen.add(key);
-          if (!this.selected.has(parts(key).repo)) {
-            warnings.push(
-              `${key} is outside the selected repositories. Add that repository to read this subtree.`,
-            );
-            continue;
-          }
-          issues.push(parseIssue(child, parent));
-          if (typeof child.node_id === 'string')
-            candidates.push({ key, nodeId: child.node_id });
-          else next.push(key);
-        }
-      }
-      next.push(
-        ...(await this.childMetadata(candidates))
-          .filter((item) => item.count > 0)
-          .map((item) => item.key),
+  async tree(
+    rootKey: string,
+    options: TreeLoadOptions = {},
+  ): Promise<TreeSnapshot> {
+    const root = githubRootKey(rootKey);
+    const repoRoot = !root.includes('#');
+    const load = new TreeLoad(options);
+    if (repoRoot && !this.selected.has(root))
+      throw new Error(
+        `Repository ${root} is outside this GitHub connection. Add it to the connection and token selection.`,
       );
-      frontier = next;
-    }
-    return {
+    const raw = repoRoot
+      ? undefined
+      : await load.read(() =>
+          this.request(this.path(root), { signal: options.signal }),
+        );
+    if (raw?.pull_request)
+      throw new Error('This reference is a pull request. Open a GitHub issue.');
+    const first = repoRoot ? this.repositoryRoot(root) : parseIssue(raw);
+    const issues = new Map<string, Issue>([[root, first]]);
+    const warnings: string[] = [];
+    const snapshot = (): TreeSnapshot => ({
       rootKey: root,
-      issues,
+      issues: [...issues.values()],
       fetchedAt: Date.now(),
-      warnings,
+      warnings: [...warnings],
       ranking: {
         state: 'unsupported',
         reason: 'GitHub issues have no Jira rank.',
         issueKeys: [],
       },
+    });
+    const progress = () => load.emit(snapshot);
+    progress();
+    const accept = (
+      batch: any[],
+      parent: string,
+      candidates: { key: string; nodeId: string }[],
+      fallback: string[],
+    ) => {
+      for (const raw of batch) {
+        if (raw.pull_request) continue;
+        const key = rawKey(raw);
+        if (!this.selected.has(parts(key).repo)) {
+          warnings.push(
+            `${key} is outside the selected repositories. Add that repository to read this subtree.`,
+          );
+          continue;
+        }
+        const existing = issues.get(key);
+        if (existing) {
+          if (repoRoot && key !== root) existing.parentKey = parent;
+          else warnings.push(`Ignored duplicate or cyclic child ${key}.`);
+          continue;
+        }
+        load.checkSize(issues.size);
+        issues.set(key, parseIssue(raw, parent));
+        if (typeof raw.node_id === 'string')
+          candidates.push({ key, nodeId: raw.node_id });
+        else fallback.push(key);
+      }
+      progress();
     };
+    try {
+      let frontier = [root];
+      if (repoRoot) {
+        const candidates: { key: string; nodeId: string }[] = [];
+        const fallback: string[] = [];
+        await this.all(`/repos/${root}/issues?state=all`, load, (batch) =>
+          accept(batch, root, candidates, fallback),
+        );
+        const metadata = await this.childMetadata(candidates, load);
+        for (const item of metadata) {
+          if (item.parentKey && issues.has(item.parentKey))
+            issues.get(item.key)!.parentKey = item.parentKey;
+        }
+        frontier = [
+          ...fallback,
+          ...metadata.filter((item) => item.count > 0).map((item) => item.key),
+        ];
+        progress();
+      }
+      const walked = new Set<string>();
+      while (frontier.length) {
+        const candidates: { key: string; nodeId: string }[] = [];
+        const fallback: string[] = [];
+        for (const parent of frontier) {
+          if (walked.has(parent)) continue;
+          walked.add(parent);
+          await this.all(this.path(parent, '/sub_issues'), load, (batch) =>
+            accept(batch, parent, candidates, fallback),
+          );
+        }
+        frontier = [
+          ...fallback,
+          ...(await this.childMetadata(candidates, load))
+            .filter((item) => item.count > 0)
+            .map((item) => item.key),
+        ];
+      }
+      return snapshot();
+    } catch (error) {
+      return load.partial(root, [...issues.values()], warnings, error);
+    }
   }
   async olderComments(key: string, page: number): Promise<CommentPage> {
     if (!Number.isSafeInteger(page) || page < 1)

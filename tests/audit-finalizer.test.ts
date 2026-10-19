@@ -45,7 +45,7 @@ test('healthy finalization accepts omitted primary and always-present undefined'
         effects.push('evidence');
       },
     });
-    assert.deepEqual(effects, ['shutdown', 'remove', 'evidence']);
+    assert.deepEqual(effects, ['shutdown', 'evidence', 'remove']);
   }
 });
 
@@ -196,14 +196,16 @@ const declarations = palette.statements
     (node) =>
       ts.isVariableStatement(node) &&
       node.declarationList.declarations.some((declaration) =>
-        ['failure', 'failed'].includes(declaration.name.getText()),
+        ['failure', 'failed', 'auditSettled', 'auditRetained'].includes(
+          declaration.name.getText(),
+        ),
       ),
   )
   .map((node) => node.getText())
   .join('\n');
 const runFlow = new Function(
   'context',
-  `return (async () => { const {owner, deadline, finishAudit, audit, record, directory, evidence, log, mkdir, rm, writeFile, join} = context; let app; let page; ${declarations}\n${flow.getText()} })();`,
+  `return (async () => { const {owner, deadline, finishAudit, audit, record, directory, evidence, log, mkdir, rm, writeFile, join} = context; let app; let page = context.page; ${declarations}\n${flow.getText()} })();`,
 );
 for (const mode of ['healthy', ...values]) {
   test(`actual palette finalizer handles ${String(mode)} without false PASS or healthy failure`, async () => {
@@ -234,3 +236,58 @@ for (const mode of ['healthy', ...values]) {
       assert.ok(effects.some((line) => line.startsWith('FAIL ')));
   });
 }
+
+test('actual palette failure DOM timeout settles before finalizer and preserves primary with profile cleanup', async () => {
+  const primary = new Error('controlled palette failure');
+  const effects: string[] = [];
+  const result = await rejected(() =>
+    runFlow({
+      owner: owner(),
+      deadline,
+      finishAudit,
+      page: {
+        isClosed: () => false,
+        screenshot: noop,
+        locator: (selector: string) => {
+          assert.equal(selector, 'body');
+          return {
+            innerText: ({ timeout }: { timeout: number }) =>
+              new Promise((_resolve, reject) => {
+                setTimeout(() => {
+                  effects.push('DOM settled');
+                  reject(new Error('body locator timed out'));
+                }, timeout + 20);
+              }),
+          };
+        },
+      },
+      audit: async () => {
+        throw primary;
+      },
+      record: (line: string) => effects.push(line),
+      directory: 'controlled',
+      evidence: 'controlled',
+      log: [],
+      join,
+      mkdir: noop,
+      writeFile: noop,
+      rm: async () => {
+        effects.push('remove');
+      },
+    }),
+  );
+  assert.ok(result.error instanceof AggregateError);
+  assert.equal(result.error.cause, primary);
+  assert.equal(result.error.errors[0], primary);
+  assert.ok(effects.includes('DOM settled'));
+  assert.ok(
+    effects.includes('remove'),
+    'settled diagnostic permits owned profile removal',
+  );
+  assert.ok(
+    effects.some(
+      (line) =>
+        line.includes('Failure DOM') && line.includes('body locator timed out'),
+    ),
+  );
+});

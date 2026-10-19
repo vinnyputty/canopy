@@ -237,7 +237,11 @@ export async function auditAccessibility(app, page, evidence) {
     .click();
   await page.locator('.tree-view-menu > summary').press('Escape');
   await expect(
-    page.getByRole('tree').locator(':scope > [data-tree-key="CAN-101"]'),
+    page
+      .getByRole('tree')
+      .locator(
+        '[role="treeitem"][aria-level="1"][data-tree-key="CAN-101"]:not([role="treeitem"] [role="treeitem"])',
+      ),
   ).toHaveCount(1);
   const sourceTabId = await page.getByRole('tree').getAttribute('data-tab-id');
   expect(sourceTabId).not.toBeNull();

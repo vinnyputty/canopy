@@ -138,8 +138,7 @@ async function probe(
           },
           close: async () => {
             calls.push('close');
-            if (mode === 'hang' || mode === 'refuse')
-              await new Promise(() => {});
+            if (mode === 'hang' || mode === 'refuse') await held;
             else {
               if (child.connected)
                 await new Promise<void>((resolve, reject) => {
@@ -187,7 +186,17 @@ async function probe(
     failed = true;
     error = caught;
   }
-  return { primary, profile, error, failed, calls, children, owners, removals };
+  return {
+    primary,
+    profile,
+    error,
+    failed,
+    calls,
+    children,
+    owners,
+    removals,
+    release,
+  };
 }
 
 for (const primary of [new Error('assertion'), 0, false, null, undefined]) {
@@ -200,7 +209,7 @@ for (const primary of [new Error('assertion'), 0, false, null, undefined]) {
   });
 }
 
-test('a hung close fails after qualified forced shutdown', async (t) => {
+test('a hung close retains its profile after qualified forced shutdown', async (t) => {
   const check = await probe(t, { mode: 'hang' });
   assert.equal((check.error as AggregateError).errors[0], check.primary);
   assert.ok(
@@ -213,7 +222,19 @@ test('a hung close fails after qualified forced shutdown', async (t) => {
       /Abnormal audit exit/.test(error.message),
     ),
   );
-  assert.equal(check.removals, 1);
+  assert.equal(check.removals, 0);
+  await stat(check.profile);
+  assert.equal(check.owners[0].operationsSettled, false);
+  assert.equal(check.owners[0].retained, true);
+  assert.ok(
+    check.children[0].exitCode !== null ||
+      check.children[0].signalCode !== null,
+  );
+  check.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(check.owners[0].operationsSettled, true);
+  assert.equal((await check.owners[0].shutdown()).terminated, false);
+  await stat(check.profile);
 });
 
 test(

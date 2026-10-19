@@ -2,6 +2,7 @@ import {
   issueRelationships,
   relationshipFailure,
 } from '../shared/relationships';
+import { TreeLoad, TreeBudgetError, type TreeLoadOptions } from './tree-load';
 import { JiraConsistency } from './jira-consistency';
 import { isIP } from 'node:net';
 
@@ -325,15 +326,25 @@ export class JiraProvider {
 
   constructor(private readonly request: JiraRequest) {}
 
-  async tree(rootKey: string): Promise<TreeSnapshot> {
+  async tree(
+    rootKey: string,
+    options: TreeLoadOptions = {},
+  ): Promise<TreeSnapshot> {
+    const load = new TreeLoad(options);
     const normalizedRoot = rootKey.trim();
     if (!normalizedRoot) throw new Error('An issue key is required.');
 
     const recent = this.consistency.snapshot();
     let root: Issue;
     try {
-      root = await this.getIssue(normalizedRoot);
+      root = await load.read(() =>
+        this.getIssue(normalizedRoot, options.signal),
+      );
     } catch (error) {
+      if (options.signal?.aborted)
+        throw new Error(
+          'Loading cancelled before any issues were received. Refresh to retry.',
+        );
       throw this.contextError(
         `Unable to open Jira issue ${normalizedRoot}. It may not exist or you may not have access`,
         error,
@@ -346,112 +357,154 @@ export class JiraProvider {
     let frontier = [root.key];
     let rankOrderingAvailable = true;
 
-    while (frontier.length > 0) {
-      const nextFrontier: string[] = [];
-      for (
-        let offset = 0;
-        offset < frontier.length;
-        offset += PARENT_BATCH_SIZE
-      ) {
-        const parents = frontier.slice(offset, offset + PARENT_BATCH_SIZE);
-        const parentClause = `parent in (${parents.map(quoteJql).join(', ')})`;
-        let children: JiraIssue[];
-        if (rankOrderingAvailable) {
-          try {
-            children = await this.searchAll(
-              `${parentClause} ORDER BY Rank ASC`,
+    const progress = () =>
+      load.emit(() => ({
+        rootKey: root.key,
+        issues: [...issues],
+        fetchedAt: Date.now(),
+        warnings: [...warnings],
+      }));
+    progress();
+    try {
+      while (frontier.length > 0) {
+        const nextFrontier: string[] = [];
+        for (
+          let offset = 0;
+          offset < frontier.length;
+          offset += PARENT_BATCH_SIZE
+        ) {
+          const parents = frontier.slice(offset, offset + PARENT_BATCH_SIZE);
+          const parentClause = `parent in (${parents.map(quoteJql).join(', ')})`;
+          const accept = async (page: JiraIssue[]) => {
+            for (const raw of page) {
+              const child = await this.consistentIssue(
+                raw,
+                recent,
+                options.signal,
+                load,
+              );
+              if (child && this.created.has(child.key)) {
+                const saved = this.created.get(child.key)!;
+                if (child.parentKey !== saved.issue.parentKey)
+                  this.created.delete(child.key);
+                else this.created.set(child.key, { ...saved, issue: child });
+              }
+              if (!child?.parentKey || !parents.includes(child.parentKey))
+                continue;
+              if (visited.has(child.key)) {
+                warnings.push(
+                  `Ignored duplicate or cyclic child ${child.key}.`,
+                );
+                continue;
+              }
+              load.checkSize(issues.length);
+              visited.add(child.key);
+              issues.push(child);
+              nextFrontier.push(child.key);
+              progress();
+            }
+          };
+          if (rankOrderingAvailable) {
+            try {
+              await this.searchAll(
+                `${parentClause} ORDER BY Rank ASC`,
+                options.signal,
+                accept,
+                load,
+              );
+            } catch (error) {
+              if (!rankFieldUnavailable(error)) throw error;
+              rankOrderingAvailable = false;
+              warnings.push(
+                'Rank ordering is unavailable for this Jira site; children are ordered by issue key.',
+              );
+              await this.searchAll(
+                `${parentClause} ORDER BY key ASC`,
+                options.signal,
+                accept,
+                load,
+              );
+            }
+          } else {
+            await this.searchAll(
+              `${parentClause} ORDER BY key ASC`,
+              options.signal,
+              accept,
+              load,
             );
-          } catch (error) {
-            if (!rankFieldUnavailable(error)) throw error;
-            rankOrderingAvailable = false;
-            warnings.push(
-              'Rank ordering is unavailable for this Jira site; children are ordered by issue key.',
-            );
-            children = await this.searchAll(`${parentClause} ORDER BY key ASC`);
           }
-        } else {
-          children = await this.searchAll(`${parentClause} ORDER BY key ASC`);
-        }
 
-        for (const raw of children) {
-          const child = await this.consistentIssue(raw, recent);
-          if (child && this.created.has(child.key)) {
-            const saved = this.created.get(child.key)!;
-            if (child.parentKey !== saved.issue.parentKey)
-              this.created.delete(child.key);
-            else this.created.set(child.key, { ...saved, issue: child });
-          }
-          if (!child?.parentKey || !parents.includes(child.parentKey)) continue;
-          if (visited.has(child.key)) {
-            warnings.push(`Ignored duplicate or cyclic child ${child.key}.`);
-            continue;
-          }
-          visited.add(child.key);
-          issues.push(child);
-          nextFrontier.push(child.key);
-        }
-        for (const [key, entry] of this.created) {
-          if (Date.now() - entry.at > 5 * 60_000) {
-            this.created.delete(key);
-            continue;
-          }
-          if (
-            !parents.includes(entry.issue.parentKey ?? '') ||
-            visited.has(key)
-          )
-            continue;
-          let child: Issue;
-          try {
-            child = await this.getIssue(key);
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message.startsWith(
-                `Unable to load Jira issue ${key}: Jira returned 404.`,
-              )
-            ) {
+          for (const [key, entry] of this.created) {
+            if (Date.now() - entry.at > 5 * 60_000) {
               this.created.delete(key);
               continue;
             }
-            throw error;
+            if (
+              !parents.includes(entry.issue.parentKey ?? '') ||
+              visited.has(key)
+            )
+              continue;
+            let child: Issue;
+            try {
+              child = await load.read(() => this.getIssue(key, options.signal));
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                error.message.startsWith(
+                  `Unable to load Jira issue ${key}: Jira returned 404.`,
+                )
+              ) {
+                this.created.delete(key);
+                continue;
+              }
+              throw error;
+            }
+            if (child.parentKey !== entry.issue.parentKey) {
+              this.created.delete(key);
+              continue;
+            }
+            this.created.set(key, { ...entry, issue: child });
+            load.checkSize(issues.length);
+            visited.add(child.key);
+            issues.push(child);
+            nextFrontier.push(child.key);
+            progress();
           }
-          if (child.parentKey !== entry.issue.parentKey) {
-            this.created.delete(key);
-            continue;
-          }
-          this.created.set(key, { ...entry, issue: child });
-          visited.add(child.key);
-          issues.push(child);
-          nextFrontier.push(child.key);
         }
+        frontier = nextFrontier;
       }
-      frontier = nextFrontier;
-    }
 
-    const ranking = rankOrderingAvailable
-      ? await this.rankingPermissions(
-          issues.filter((issue) => issue.key !== root.key),
-        )
-      : {
-          state: 'unsupported' as const,
-          reason: 'Jira Rank is unavailable for this tree.',
-          issueKeys: [],
-        };
-    const reconciled = this.consistency.rank(issues, recent);
-    return {
-      rootKey: root.key,
-      issues: reconciled.issues,
-      ...(reconciled.parents.length
-        ? { reconcilingRankParents: reconciled.parents }
-        : {}),
-      fetchedAt: Date.now(),
-      warnings,
-      ranking,
-    };
+      const ranking = rankOrderingAvailable
+        ? await this.rankingPermissions(
+            issues.filter((issue) => issue.key !== root.key),
+            options.signal,
+            load,
+          )
+        : {
+            state: 'unsupported' as const,
+            reason: 'Jira Rank is unavailable for this tree.',
+            issueKeys: [],
+          };
+      const reconciled = this.consistency.rank(issues, recent);
+      return {
+        rootKey: root.key,
+        issues: reconciled.issues,
+        ...(reconciled.parents.length
+          ? { reconcilingRankParents: reconciled.parents }
+          : {}),
+        fetchedAt: Date.now(),
+        warnings,
+        ranking,
+      };
+    } catch (error) {
+      return load.partial(root.key, issues, warnings, error);
+    }
   }
 
   private async rankingPermissions(
     issues: Issue[],
+    signal?: AbortSignal,
+    load?: TreeLoad,
   ): Promise<NonNullable<TreeSnapshot['ranking']>> {
     if (!issues.length)
       return {
@@ -466,18 +519,23 @@ export class JiraProvider {
         const ids = batch.map((issue) => Number(issue.id));
         if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0))
           throw new Error('Jira returned invalid issue IDs.');
-        const result = await this.call(
-          '/rest/api/3/permissions/check',
-          jsonInit('POST', {
-            projectPermissions: [
-              {
-                issues: ids,
-                permissions: ['SCHEDULE_ISSUES', 'EDIT_ISSUES'],
-              },
-            ],
-          }),
-          'check ranking permissions',
-        );
+        const fetch = () =>
+          this.call(
+            '/rest/api/3/permissions/check',
+            {
+              ...jsonInit('POST', {
+                projectPermissions: [
+                  {
+                    issues: ids,
+                    permissions: ['SCHEDULE_ISSUES', 'EDIT_ISSUES'],
+                  },
+                ],
+              }),
+              signal,
+            },
+            'check ranking permissions',
+          );
+        const result = await (load ? load.read(fetch) : fetch());
         if (!Array.isArray(result?.projectPermissions))
           throw new Error('Jira returned invalid ranking permissions.');
         const grants = ['SCHEDULE_ISSUES', 'EDIT_ISSUES'].map(
@@ -502,7 +560,12 @@ export class JiraProvider {
             issueKeys: [],
           };
     } catch (error) {
-      if (error instanceof JiraRateLimitError) throw error;
+      if (
+        error instanceof JiraRateLimitError ||
+        error instanceof TreeBudgetError ||
+        signal?.aborted
+      )
+        throw error;
       return {
         state: 'unknown',
         reason:
@@ -1406,11 +1469,14 @@ export class JiraProvider {
     raw: JiraIssue,
     recent: ReturnType<JiraConsistency['snapshot']>,
     signal?: AbortSignal,
+    load?: TreeLoad,
   ) {
     const issue = this.observeIssue(raw);
     if (!this.consistency.disagrees(issue, recent)) return issue;
     try {
-      return await this.getIssue(issue.key, signal);
+      return await (load
+        ? load.read(() => this.getIssue(issue.key, signal))
+        : this.getIssue(issue.key, signal));
     } catch (error) {
       // Auth's status-specific message survives the contextual request wrapper.
       if (
@@ -1437,9 +1503,10 @@ export class JiraProvider {
   private async searchPage(
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    budget?: TreeLoad,
   ) {
     const reconcileIssues = this.consistency.ids();
-    const load = () =>
+    const fetch = () =>
       this.call(
         '/rest/api/3/search/jql',
         {
@@ -1453,6 +1520,7 @@ export class JiraProvider {
         },
         'search Jira issues',
       );
+    const load = () => (budget ? budget.read(fetch) : fetch());
     try {
       return await load();
     } catch (error) {
@@ -1474,20 +1542,32 @@ export class JiraProvider {
     }
   }
 
-  private async searchAll(jql: string): Promise<JiraIssue[]> {
+  private async searchAll(
+    jql: string,
+    signal?: AbortSignal,
+    accept?: (page: JiraIssue[]) => Promise<void>,
+    load?: TreeLoad,
+  ): Promise<JiraIssue[]> {
     const issues: JiraIssue[] = [];
     const seenTokens = new Set<string>();
     let nextPageToken: string | undefined;
     do {
-      const page = await this.searchPage({
-        jql,
-        fields: ISSUE_FIELDS,
-        maxResults: SEARCH_PAGE_SIZE,
-        ...(nextPageToken ? { nextPageToken } : {}),
-      });
+      const fetch = () =>
+        this.searchPage(
+          {
+            jql,
+            fields: ISSUE_FIELDS,
+            maxResults: SEARCH_PAGE_SIZE,
+            ...(nextPageToken ? { nextPageToken } : {}),
+          },
+          signal,
+          load,
+        );
+      const page = await fetch();
       if (!Array.isArray(page?.issues))
         throw new Error('Jira search returned an invalid response.');
-      issues.push(...page.issues);
+      if (accept) await accept(page.issues);
+      else issues.push(...page.issues);
 
       const token =
         typeof page.nextPageToken === 'string' && page.nextPageToken

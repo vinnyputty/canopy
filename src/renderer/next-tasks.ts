@@ -47,7 +47,11 @@ export function nextTasks(
   if (!root) return [];
   const byKey = new Map(snapshot.issues.map((issue) => [issue.key, issue]));
   const tasks: NextTask[] = [];
-  const visit = (node: IssueNode, parents: Issue[], rankPath: number[]) => {
+  const pending: { node: IssueNode; parents: Issue[]; rankPath: number[] }[] = [
+    { node: root, parents: [], rankPath: [] },
+  ];
+  while (pending.length) {
+    const { node, parents, rankPath } = pending.pop()!;
     const { issue } = node;
     if (
       issue.status.category !== 'done' &&
@@ -69,11 +73,13 @@ export function nextTasks(
         ),
       });
     }
-    node.children.forEach((child, index) =>
-      visit(child, [...parents, issue], [...rankPath, index]),
-    );
-  };
-  visit(root, [], []);
+    for (let index = node.children.length - 1; index >= 0; index--)
+      pending.push({
+        node: node.children[index],
+        parents: [...parents, issue],
+        rankPath: [...rankPath, index],
+      });
+  }
 
   const criterionOrder = (a: NextTask, b: NextTask) => {
     switch (criterion) {

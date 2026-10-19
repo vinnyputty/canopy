@@ -1,4 +1,7 @@
 import type { SupportLink } from './support';
+export const MAX_TREE_ISSUES = 20_000;
+export const MAX_TREE_CALLS = 5_000;
+
 export type Choice = { id: string; name: string };
 export type Status = Choice & { category: 'new' | 'indeterminate' | 'done' };
 export type Connection = {
@@ -106,6 +109,7 @@ export type SearchPage = {
 };
 export type SearchOptions = { requestId: string; nextPageToken?: string };
 export type TreeSnapshot = {
+  incomplete?: { reason: string; calls: number };
   rootKey: string;
   issues: Issue[];
   fetchedAt: number;
@@ -271,7 +275,15 @@ export interface CanopyAPI {
   connectGithub(input: GithubConnectionInput): Promise<Connection[]>;
   disconnect(connectionId: string): Promise<void>;
   syncStatus(connectionId: string): Promise<{ retryAt: number | null }>;
-  tree(connectionId: string, rootKey: string): Promise<TreeSnapshot>;
+  tree(
+    connectionId: string,
+    rootKey: string,
+    requestId?: string,
+  ): Promise<TreeSnapshot>;
+  cancelTree(connectionId: string, requestId: string): Promise<void>;
+  onTreeProgress(
+    callback: (requestId: string, snapshot: TreeSnapshot) => void,
+  ): () => void;
   preview(connectionId: string, key: string): Promise<IssuePreview>;
   relationships(
     connectionId: string,
