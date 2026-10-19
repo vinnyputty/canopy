@@ -5475,7 +5475,12 @@ export function App() {
         />
       )}
       {dialog === 'setup' && (
-        <Dialog title="Setup help" onClose={() => setDialog(null)} wide>
+        <Dialog
+          title="Setup help"
+          onClose={() => setDialog(null)}
+          wide
+          initialFocus
+        >
           <SetupHelp
             hasConnections={connections.length > 0}
             onConnect={() => setDialog('connect')}

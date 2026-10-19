@@ -29,6 +29,7 @@ export async function auditSetup(app, page) {
       handlers: new Map(),
       attempts: 0,
       rootReads: [],
+      failTree: false,
     });
     state.saveDialog = dialog.showSaveDialog;
     state.exportMode = 'cancel';
@@ -64,6 +65,7 @@ export async function auditSetup(app, page) {
     }));
     replace('search', () => ({ issues: [] }));
     replace('tree', (_event, id, rootKey) => {
+      if (state.failTree) throw new Error('Fixture setup help error');
       state.rootReads.push({ id, rootKey });
       return {
         rootKey,
@@ -160,6 +162,60 @@ export async function auditSetup(app, page) {
         ),
       )
       .toBe('todo');
+    for (const banner of [false, true]) {
+      if (banner) {
+        await app.evaluate(() => {
+          globalThis.setupAudit.failTree = true;
+        });
+        await page.reload();
+        await expect(page.getByRole('alert')).toContainText(
+          'Fixture setup help error',
+        );
+      }
+      const trigger = (banner ? page.getByRole('alert') : sidebar).getByRole(
+        'button',
+        { name: 'Setup help', exact: true },
+      );
+      for (const dismissal of ['close', 'escape', 'backdrop']) {
+        await trigger.focus();
+        await trigger.press('Enter');
+        const help = page.getByRole('dialog', {
+          name: 'Setup help',
+          exact: true,
+        });
+        const close = help.getByRole('button', {
+          name: 'Close dialog',
+          exact: true,
+        });
+        await expect(close).toBeFocused();
+        const controls = help.locator('button:visible, summary:visible');
+        await page.keyboard.press('Shift+Tab');
+        await expect(controls.last()).toBeFocused();
+        await page.keyboard.press('Tab');
+        await expect(close).toBeFocused();
+        for (let index = 1; index < (await controls.count()); index++) {
+          await page.keyboard.press('Tab');
+          await expect(controls.nth(index)).toBeFocused();
+        }
+        await page.keyboard.press('Tab');
+        await expect(close).toBeFocused();
+        if (dismissal === 'close') await close.click();
+        else if (dismissal === 'escape') await page.keyboard.press('Escape');
+        else
+          await page
+            .locator('.dialog-backdrop')
+            .click({ position: { x: 2, y: 2 } });
+        await expect(help).toHaveCount(0);
+        await expect(trigger).toBeFocused();
+      }
+    }
+    await app.evaluate(() => {
+      globalThis.setupAudit.failTree = false;
+    });
+    await page.reload();
+    await expect(
+      page.getByRole('tree', { name: 'OTHER-1 issue tree' }),
+    ).toBeVisible();
     const before = await page.evaluate(() => window.canopy.loadWorkspace());
     let attempts = 0;
     for (const [method, provider, failure] of [
@@ -326,7 +382,7 @@ export async function auditSetup(app, page) {
       .getByRole('button', { name: 'Close dialog', exact: true })
       .click();
     console.log(
-      'Setup regressions passed: dismissal, late results, workspace, canonical reconnect, reviewed diagnostics save/cancel/failure.',
+      'Setup regressions passed: help initial focus, keyboard containment, dismissal and focus restoration, late results, workspace, canonical reconnect, reviewed diagnostics save/cancel/failure.',
     );
   } finally {
     await app.evaluate(({ ipcMain, dialog }) => {
@@ -461,13 +517,23 @@ export async function auditDiagnosticsFocus(app, page) {
     await settle();
     await expect(save()).toBeEnabled();
     expect(await page.evaluate(() => window.focusFrames.pending.size)).toBe(1);
+    const exportFocusFrame = await page.evaluate(
+      () => [...window.focusFrames.pending.keys()][0],
+    );
     await help()
       .getByRole('button', { name: 'Close dialog', exact: true })
       .evaluate((button) => button.click());
     await expect(help()).toHaveCount(0);
-    expect(await page.evaluate(() => window.focusFrames.pending.size)).toBe(0);
+    expect(
+      await page.evaluate(
+        (frame) => window.focusFrames.pending.has(frame),
+        exportFocusFrame,
+      ),
+    ).toBe(false);
     await page.evaluate(() => {
       window.focusFrames.restore();
+      for (const callback of window.focusFrames.pending.values())
+        requestAnimationFrame(callback);
       delete window.focusFrames;
     });
     await page
