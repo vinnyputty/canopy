@@ -1,5 +1,8 @@
+import * as authoringLifecycle from './audit-lifecycle.mjs';
 import { auditInbox } from './smoke-inbox.mjs';
+import { auditAuthoring } from './smoke-authoring.mjs';
 import { _electron as electron, expect } from '@playwright/test';
+import { auditAccessibility } from './smoke-accessibility.mjs';
 import { auditSidebar } from './smoke-sidebar.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
@@ -50,6 +53,49 @@ const pageErrors = [];
 const recentOutput = [];
 let smokeFailure;
 let cleanupFailure;
+async function auditOrdinalTabs(page, modifier) {
+  const tabs = page.getByRole('tab');
+  const roots = await tabs.locator('.tab-label b').allTextContents();
+  expect(roots).toContain('CAN-100');
+  expect(roots).toContain('CAN-200');
+  expect(roots.length).toBeLessThan(9);
+  for (const [shortcut, index] of [
+    [1, 0],
+    [9, 0],
+    [2, 1],
+  ]) {
+    await page.keyboard.press(`${modifier}+${shortcut}`);
+    await expect(tabs.locator('.tab-label b')).toHaveText(roots);
+    await expect(tabs.nth(index)).toHaveAttribute('aria-selected', 'true');
+    await expect(
+      page.getByRole('tree', {
+        name: `${roots[index]} issue tree`,
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.locator('.issue-preview')).toHaveCount(0);
+  }
+}
+
+async function retainAuditTabs(page) {
+  const labels = page.getByRole('tab').locator('.tab-label b');
+  const roots = await labels.allTextContents();
+  expect(roots.filter((root) => root === 'CAN-100')).toHaveLength(1);
+  expect(roots.filter((root) => root === 'CAN-200')).toHaveLength(1);
+  // Earlier subtree navigation can retain an incidental root. The close/reopen
+  // and reorder audit below explicitly starts with its two known roots.
+  for (const root of roots.filter(
+    (root) => !['CAN-100', 'CAN-200'].includes(root),
+  ))
+    await page
+      .getByRole('button', { name: `Close ${root}`, exact: true })
+      .click();
+  await expect(labels).toHaveText(
+    roots.filter((root) => ['CAN-100', 'CAN-200'].includes(root)),
+  );
+  await expect(page.getByRole('tab')).toHaveCount(2);
+}
+
 async function waitForSavedWorkspace(check) {
   await expect
     .poll(
@@ -160,7 +206,18 @@ async function launch(production = false, fixtureEnv = {}) {
 
 async function close() {
   if (!app) return;
-  await app.close();
+  if (smokeFailure) {
+    // Failed fixtures may retain a crashed/hung renderer or a native close
+    // warning. Preserve the assertion failure and terminate only this launch.
+    const process = app.process();
+    if (process.exitCode === null && process.signalCode === null)
+      process.kill('SIGKILL');
+    await expect
+      .poll(() => process.exitCode !== null || process.signalCode !== null, {
+        timeout: 5000,
+      })
+      .toBe(true);
+  } else await app.close();
   app = undefined;
   page = undefined;
 }
@@ -855,7 +912,10 @@ async function auditMutations() {
     page.getByRole('tab', { name: new RegExp(root) }).click();
   const dismissError = async (text) => {
     await expect(page.getByRole('alert')).toContainText(text);
-    await page.getByRole('alert').getByRole('button').click();
+    await page
+      .getByRole('alert')
+      .getByRole('button', { name: 'Dismiss error', exact: true })
+      .click();
   };
   const undo = async (name) => {
     const button = page.getByRole('button', { name, exact: true });
@@ -1294,7 +1354,10 @@ async function auditMutationViews() {
           .length,
     ),
   ).toBe(rankCalls);
-  await page.getByRole('alert').getByRole('button').click();
+  await page
+    .getByRole('alert')
+    .getByRole('button', { name: 'Dismiss error', exact: true })
+    .click();
   await app.evaluate(() => {
     globalThis.canopySmoke.rankingState = undefined;
   });
@@ -1409,6 +1472,21 @@ try {
     recursive: true,
     force: true,
   });
+  if (process.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY === '1') {
+    await launch();
+    await auditAccessibility(
+      app,
+      page,
+      join(workspace, '.cache', 'accessibility'),
+    );
+    expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
+    await close();
+    await rm(userData, { recursive: true, force: true });
+    console.log(
+      'Canopy observed accessibility barrier regressions passed. Native qualification remains separate.',
+    );
+    process.exit(0);
+  }
   if (process.env.CANOPY_SMOKE_SIDEBAR_ONLY === '1') {
     await auditSidebarSample();
     expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
@@ -2284,7 +2362,12 @@ try {
   await page
     .getByRole('menuitem', { name: 'In Progress', exact: true })
     .click();
-  await expect(issue('CAN-111').getByText('In Progress')).toBeVisible();
+  await expect(
+    issue('CAN-111').getByRole('button', {
+      name: 'Edit status for CAN-111',
+      exact: true,
+    }),
+  ).toHaveText('In Progress');
 
   // Enter edits a focused summary; Escape cancels without saving on blur.
   await issue('CAN-111')
@@ -2363,12 +2446,8 @@ try {
   );
   await page.keyboard.press('Escape');
   await expect(issue('CAN-200')).toBeFocused();
-  await page.keyboard.press(`${modifier}+1`);
-  await expect(tree).toBeVisible();
-  await expect(page.locator('.issue-preview')).toHaveCount(0);
-  await page.keyboard.press(`${modifier}+9`);
-  await expect(tree).toBeVisible();
-  await page.keyboard.press(`${modifier}+2`);
+  await auditOrdinalTabs(page, modifier);
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
   await expect(
     page.getByRole('tree', { name: 'CAN-200 issue tree' }),
   ).toBeVisible();
@@ -2408,6 +2487,7 @@ try {
   ).toBeHidden();
 
   // Favorites are independent from open tabs; reopening retains complete state.
+  await retainAuditTabs(page);
   const firstTab = page.getByRole('tab', { name: /CAN-100/ });
   const secondTab = page.getByRole('tab', { name: /CAN-200/ });
   await firstTab.click();
@@ -2420,9 +2500,16 @@ try {
   ).toBeVisible();
   await firstTab.click({ button: 'middle' });
   await expect(firstTab).toHaveCount(0);
+  await expect(page.getByRole('tab').locator('.tab-label b')).toHaveText([
+    'CAN-200',
+  ]);
   await expect(pinnedRoots).toBeVisible();
   await page.keyboard.press(`${modifier}+Shift+t`);
   await expect(firstTab).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab').locator('.tab-label b')).toHaveText([
+    'CAN-200',
+    'CAN-100',
+  ]);
   await expect(issue('CAN-111')).toHaveAttribute('aria-selected', 'true');
   await expect(
     page.locator('.linked-panel').getByText('CAN-200'),
@@ -2433,6 +2520,10 @@ try {
 
   // Drag order is durable; keyboard reordering is also available.
   await firstTab.dragTo(secondTab);
+  await expect(page.getByRole('tab').locator('.tab-label b')).toHaveText([
+    'CAN-100',
+    'CAN-200',
+  ]);
   await expect(page.getByRole('tab').first()).toContainText('CAN-100');
   await firstTab.focus();
   await page.keyboard.press('Alt+Shift+ArrowRight');
@@ -2702,7 +2793,9 @@ try {
   await resizeWindow(600);
   // The earlier error assertion is complete. Its banner is transient across
   // restart, so remove it before testing restoration under an unchanged layout.
-  await page.locator('.error-banner button').click();
+  await page
+    .getByRole('button', { name: 'Dismiss error', exact: true })
+    .click();
   await expect(page.locator('.error-banner')).toHaveCount(0);
   // Exercise the gutter-free geometry used by overlay scrollbars on macOS.
   await setScrollbars('none');
@@ -3204,11 +3297,11 @@ try {
       await expectIssueBefore(first, second);
       await header.click();
       await expectIssueBefore(second, first);
-      await expect(
-        issue('CAN-110').locator(
-          ':scope > [role="group"] > [data-tree-key="CAN-111"]',
-        ),
-      ).toBeVisible();
+      await expect(issue('CAN-111')).toHaveAttribute(
+        'data-tree-parent',
+        'CAN-110',
+      );
+      await expect(issue('CAN-111')).toBeVisible();
     }
     await page.locator('.view-settings > summary').click();
     await page.getByLabel('Sort by', { exact: true }).selectOption('rank');
@@ -3416,11 +3509,11 @@ try {
       page.getByText('Priority order could not be loaded:', { exact: false }),
     ).toHaveCount(0);
     await expectIssueBefore('CAN-111', 'CAN-112');
-    await expect(
-      issue('CAN-110').locator(
-        ':scope > [role="group"] > [data-tree-key="CAN-111"]',
-      ),
-    ).toBeVisible();
+    await expect(issue('CAN-111')).toHaveAttribute(
+      'data-tree-parent',
+      'CAN-110',
+    );
+    await expect(issue('CAN-111')).toBeVisible();
     expect(
       JSON.parse(await readFile(join(userData, 'rank-attempts.json'), 'utf8')),
     ).toBe(0);
@@ -3449,6 +3542,18 @@ try {
   await launch();
   await auditPalette(app, page);
   await auditSearch(app, page);
+  // Search ends on a missing root. Persist the refresh fixture's active tab
+  // before its reload rather than relying on an unfinished debounce.
+  await page.getByRole('tab', { name: /CAN-200/ }).click();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await waitForSavedWorkspace((saved) =>
+    saved.tabs.some(
+      (tab) => tab.id === saved.activeTabId && tab.rootKey === 'CAN-200',
+    ),
+  );
   await auditRefresh(app, page, resizeWindow);
 
   await page.getByTitle('Disconnect Canopy demo').click();
@@ -3544,6 +3649,7 @@ try {
   await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
+  await auditAuthoring(appPath, executablePath, env, authoringLifecycle);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
   console.log(

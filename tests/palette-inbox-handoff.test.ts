@@ -5,8 +5,10 @@ import type { TabState, TreeSnapshot, Workspace } from '../src/shared/types';
 import { demoSeeds } from '../src/main/demo-provider';
 import { viewSources } from '../src/renderer/saved-views';
 import { rootView } from '../src/renderer/table-view';
+import { withScrollPositions } from '../src/renderer/scroll-position';
 import { paletteIssueTab } from '../src/renderer/navigation-palette';
 import { activateTab, sameRoot, visit } from '../src/renderer/workspace';
+import { handoffNavigation } from '../src/renderer/work-handoff';
 import { callback, execute, findNode, sourceFile } from './source-probe';
 
 const source = sourceFile(
@@ -34,7 +36,11 @@ function attribute(tag: string, name: string) {
 }
 function harness(
   initialInbox = true,
-  options: { tabs?: TabState[]; snapshots?: Record<string, TreeSnapshot> } = {},
+  options: {
+    tabs?: TabState[];
+    snapshots?: Record<string, TreeSnapshot>;
+    confirmedSnapshots?: Record<string, TreeSnapshot>;
+  } = {},
 ) {
   const tab: TabState = {
     id: 'source',
@@ -57,10 +63,17 @@ function harness(
     },
     sort: { column: 'key' as const, direction: 'asc' as const },
   };
+  const handoffView = {
+    ...requested,
+    id: 'handoff-view',
+    name: 'Handoff destination',
+    roots: [{ connectionId: 'fixture', rootKey: 'CAN-1' }],
+    connectionIds: ['fixture'],
+  };
   let workspace: Workspace = {
     tabs: options.tabs ?? [tab],
     activeTabId: tab.id,
-    savedViews: [requested],
+    savedViews: [requested, handoffView],
     activeSavedViewId: 'previous-view',
     shortcuts: {},
     theme: 'dark',
@@ -68,6 +81,7 @@ function harness(
   };
   let inboxOpen = initialInbox;
   let selected: unknown = { connectionId: 'fixture', key: 'OLD-1' };
+  let previewOpen = true;
   let dialog: unknown = 'commands';
   let reveal: unknown;
   let history = { back: [] as TabState[], forward: [] as TabState[] };
@@ -123,6 +137,49 @@ function harness(
       reveal = value;
     },
   });
+  const handoffCall = findNode(
+    source,
+    (node): node is ts.CallExpression =>
+      ts.isCallExpression(node) &&
+      node.expression.getText() === 'useWorkHandoff',
+  );
+  const confirmedSnapshots = options.confirmedSnapshots ?? {
+    [tab.id]: {
+      rootKey: 'CAN-1',
+      fetchedAt: 1,
+      warnings: [],
+      issues: [],
+    },
+  };
+  const handoff = execute(handoffCall.arguments[1].getText(), {
+    handoffNavigation,
+    connectionsRef: {
+      current: [
+        {
+          id: 'fixture',
+          name: 'Fixture Jira',
+          provider: 'jira',
+          url: 'https://example.invalid',
+        },
+      ],
+    },
+    workspaceRef,
+    allRefreshTabs: workspace.tabs,
+    confirmedSnapshots,
+    crypto: { randomUUID: () => 'handoff-id' },
+    setInboxOpen: setters.setInboxOpen,
+    setSelectedViewIssue: setters.setSelectedViewIssue,
+    setPreviewOpen: (value: boolean) => {
+      previewOpen = value;
+    },
+    setWorkspace: setters.setWorkspace,
+    navigate,
+    setNextTaskViews: () => {},
+    navigationReveal,
+    setReveal: (value: unknown) => {
+      reveal = value;
+    },
+  });
   const sidebar = execute(attribute('SidebarWork', 'onSelectView'), setters);
   const visible = () =>
     execute(callback(source, 'activeSavedView'), {
@@ -134,6 +191,9 @@ function harness(
   const save = execute(callback(source, 'saveWorkspace'), {
     useCallback: (fn: unknown) => fn,
     demoResetting: { current: false },
+    withScrollPositions,
+    scrollPositions: { current: new Map<string, number>() },
+    workspaceTransferBusy: { current: false },
     pendingWorkspaceSave: { current: Promise.resolve() },
     window: {
       canopy: {
@@ -150,6 +210,8 @@ function harness(
     },
     tab,
     requested,
+    handoffView,
+    handoff,
     palette,
     sidebar,
     visible,
@@ -157,6 +219,7 @@ function harness(
       inboxOpen,
       workspace,
       selected,
+      previewOpen,
       dialog,
       reveal,
       navigationReveal: navigationReveal.current,
@@ -178,6 +241,35 @@ for (const inbox of [true, false]) {
     assert.equal(h.state().workspace.tabs[0], h.tab);
   });
 }
+
+for (const inbox of [true, false]) {
+  test(`actual work handoff selects a confirmed saved view from ${inbox ? 'Inbox' : 'root'}`, () => {
+    const h = harness(inbox);
+    const originalTab = h.state().workspace.tabs[0];
+    h.handoff({ kind: 'view', view: h.handoffView.id });
+    assert.equal(h.state().workspace.activeSavedViewId, h.handoffView.id);
+    assert.equal(h.visible(), h.handoffView);
+    assert.equal(h.state().inboxOpen, false);
+    assert.equal(h.state().selected, null);
+    assert.equal(h.state().previewOpen, false);
+    assert.equal(h.state().workspace.activeTabId, originalTab.id);
+    assert.equal(h.state().workspace.tabs[0], originalTab);
+    assert.equal(originalTab.connectionId, 'fixture');
+    assert.equal(originalTab.rootKey, 'CAN-1');
+  });
+}
+
+test('actual work handoff refuses a saved view without confirmed root snapshots', () => {
+  const h = harness(true, { confirmedSnapshots: {} });
+  assert.throws(
+    () => h.handoff({ kind: 'view', view: h.handoffView.id }),
+    /Saved view is unavailable/,
+  );
+  assert.equal(h.state().inboxOpen, true);
+  assert.equal(h.state().workspace.activeSavedViewId, 'previous-view');
+  assert.notEqual(h.state().selected, null);
+  assert.equal(h.state().previewOpen, true);
+});
 
 test('actual sidebar saved-view handoff agrees with palette visibility and selection', () => {
   const h = harness();

@@ -1,3 +1,4 @@
+import { MAX_TREE_ISSUES } from '../shared/types';
 import type {
   CanopyAPI,
   EditOptions,
@@ -37,6 +38,7 @@ export type MutationView = {
   snapshots: Record<string, TreeSnapshot>;
   confirmedSnapshots: Record<string, TreeSnapshot>;
   saving: Set<string>;
+  evicted: Set<string>;
   undoLabel?: string;
   undoBusy: boolean;
 };
@@ -104,6 +106,80 @@ function optimisticFields(
 export class Mutations {
   revision = 0;
   private bases: Record<string, TreeSnapshot> = {};
+  private protectedSnapshots = new Set<string>();
+  private evicted = new Set<string>();
+  private snapshotSizes = new Map<string, number>();
+  private serializedSizes = new WeakMap<TreeSnapshot | Issue, number>();
+  protectSnapshots(ids: string[]) {
+    this.protectedSnapshots = new Set(ids);
+    this.publish();
+  }
+  isEvicted(id: string) {
+    return this.evicted.has(id);
+  }
+  private measureSnapshot(id: string) {
+    const tab = this.tabs.get(id);
+    const owners = new Set([
+      this.bases[id],
+      this.rendered[id],
+      ...(tab ? (this.sharedSnapshots?.(tab) ?? []) : []),
+    ]);
+    const issues = new Set<Issue>();
+    let bytes = 0;
+    for (const snapshot of owners) {
+      if (!snapshot) continue;
+      bytes += this.serializedSize(snapshot);
+      for (const issue of snapshot.issues) issues.add(issue);
+    }
+    // Displayed ordering graphs may still own issues from an older refresh.
+    // Exact issue aliases are already covered by the snapshot records above.
+    for (const issue of tab ? (this.displayedIssues?.(tab) ?? []) : []) {
+      if (issues.has(issue)) continue;
+      bytes += this.serializedSize(issue);
+      issues.add(issue);
+    }
+    this.snapshotSizes.set(id, bytes);
+  }
+  private serializedSize(value: TreeSnapshot | Issue) {
+    // Snapshots/issues are immutable. Weak keys cache accounting work without
+    // retaining a second issue store after its consumers release it.
+    let bytes = this.serializedSizes.get(value);
+    if (bytes === undefined) {
+      if ('issues' in value) {
+        // Preserve the exact JSON envelope and array separators, reusing sizes
+        // of immutable issues shared by refreshed/optimistic snapshots.
+        bytes = new TextEncoder().encode(
+          JSON.stringify({ ...value, issues: [] }),
+        ).byteLength;
+        for (const issue of value.issues) bytes += this.serializedSize(issue);
+        bytes += Math.max(0, value.issues.length - 1);
+      } else {
+        bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      }
+      this.serializedSizes.set(value, bytes);
+    }
+    return bytes;
+  }
+  private boundSnapshots() {
+    let bytes = [...this.snapshotSizes.values()].reduce(
+      (sum, size) => sum + size,
+      0,
+    );
+    for (const [id, size] of this.snapshotSizes) {
+      if (bytes <= this.snapshotBudget) break;
+      const tab = this.tabs.get(id);
+      if (
+        this.protectedSnapshots.has(id) ||
+        (tab && this.pending(tab.connectionId))
+      )
+        continue;
+      delete this.bases[id];
+      delete this.rendered[id];
+      this.snapshotSizes.delete(id);
+      this.evicted.add(id);
+      bytes -= size;
+    }
+  }
   private tabs = new Map<string, TabState>();
   private entries: Entry[] = [];
   private completed: Completed[] = [];
@@ -146,6 +222,9 @@ export class Mutations {
       issue: Issue,
       fields: string[],
     ) => void,
+    private snapshotBudget = 64 * 1024 * 1024,
+    private sharedSnapshots?: (tab: TabState) => (TreeSnapshot | undefined)[],
+    private displayedIssues?: (tab: TabState) => Iterable<Issue>,
   ) {}
 
   beginRefresh() {
@@ -171,6 +250,40 @@ export class Mutations {
   }
   receive(tab: TabState, snapshot: TreeSnapshot, revision: number) {
     this.tabs.set(tab.id, tab);
+    // A partial refresh cannot confirm remote deletion or drop cached descendants.
+    const previous =
+      this.bases[tab.id] ??
+      [...this.tabs.values()]
+        .filter(
+          (other) =>
+            other.connectionId === tab.connectionId &&
+            other.rootKey === tab.rootKey,
+        )
+        .map((other) => this.bases[other.id])
+        .find(Boolean);
+    if (snapshot.incomplete && previous) {
+      const loaded = new Map(
+        snapshot.issues.map((issue) => [issue.key, issue]),
+      );
+      const existing = new Set(previous.issues.map((issue) => issue.key));
+      const added = snapshot.issues.filter((issue) => !existing.has(issue.key));
+      const available = Math.max(0, MAX_TREE_ISSUES - previous.issues.length);
+      snapshot = {
+        ...snapshot,
+        ...(added.length > available
+          ? {
+              incomplete: {
+                ...snapshot.incomplete,
+                reason: `${snapshot.incomplete.reason} Cached issues retained; additional issues exceed the tree budget. Open a smaller subtree.`,
+              },
+            }
+          : {}),
+        issues: [
+          ...previous.issues.map((issue) => loaded.get(issue.key) ?? issue),
+          ...added.slice(0, available),
+        ],
+      };
+    }
     for (const [owner, entry] of this.created) {
       if (Date.now() - entry.at > 5 * 60_000) {
         this.created.delete(owner);
@@ -194,7 +307,17 @@ export class Mutations {
       if (done.connectionId === tab.connectionId && done.revision > revision)
         snapshot = applyChange(snapshot, done.change);
     this.bases[tab.id] = snapshot;
+    this.evicted.delete(tab.id);
+    this.snapshotSizes.delete(tab.id);
     this.publish();
+  }
+  adopt(tab: TabState, fromId: string) {
+    const snapshot = this.bases[fromId];
+    if (snapshot && !this.bases[tab.id]) {
+      if (this.protectedSnapshots.has(fromId))
+        this.protectedSnapshots.add(tab.id);
+      this.receive(tab, snapshot, this.revision);
+    }
   }
   confirmedSnapshot(id: string) {
     return this.bases[id];
@@ -211,10 +334,14 @@ export class Mutations {
           ...this.bases[id],
           issues: [...this.bases[id].issues, issue],
         };
+    for (const [id, tab] of this.tabs)
+      if (tab.connectionId === connectionId) this.measureSnapshot(id);
     this.publish();
   }
   forget(id: string) {
     this.tabs.delete(id);
+    this.snapshotSizes.delete(id);
+    this.evicted.delete(id);
     delete this.bases[id];
     this.publish();
   }
@@ -232,13 +359,19 @@ export class Mutations {
       for (const entry of this.entries)
         if (entry.connectionId === this.tabs.get(id)?.connectionId)
           snapshot = applyChange(snapshot, entry.change);
-      snapshots[id] = reconcileSnapshot(this.rendered[id], snapshot);
+      snapshots[id] =
+        snapshot === this.rendered[id]
+          ? snapshot
+          : reconcileSnapshot(this.rendered[id], snapshot);
     }
     this.rendered = snapshots;
+    for (const id of Object.keys(this.bases)) this.measureSnapshot(id);
+    this.boundSnapshots();
     const last = this.history.at(-1);
     this.changed({
       snapshots,
       confirmedSnapshots: { ...this.bases },
+      evicted: new Set(this.evicted),
       saving: new Set(
         this.entries.map(
           (entry) => `${entry.connectionId}:${entry.change.key}`,
@@ -258,6 +391,8 @@ export class Mutations {
     for (const [id, tab] of this.tabs)
       if (tab.connectionId === connectionId && this.bases[id])
         this.bases[id] = applyChange(this.bases[id], change);
+    for (const [id, tab] of this.tabs)
+      if (tab.connectionId === connectionId) this.measureSnapshot(id);
     if (change.fields) {
       const issue = this.find(connectionId, change.key);
       if (issue)
@@ -289,7 +424,10 @@ export class Mutations {
         const confirmed = await execute(entry);
         this.confirm(connectionId, confirmed);
         entry.change = confirmed;
-        if (record && !entry.undoUnavailable) this.history.push(entry);
+        if (record && !entry.undoUnavailable) {
+          this.history.push(entry);
+          this.boundHistory();
+        }
         return true;
       } catch (error) {
         this.revision++;
@@ -334,6 +472,22 @@ export class Mutations {
       record,
       token,
     );
+  }
+  private boundHistory() {
+    let bytes = 0;
+    let count = 0;
+    this.history = this.history
+      .reverse()
+      .filter((entry) => {
+        // Tokens belong to open bulk sessions and are released by discardHistory.
+        if (entry.token) return true;
+        const size = new TextEncoder().encode(JSON.stringify(entry)).byteLength;
+        if (count >= 100 || bytes + size > 2_000_000) return false;
+        count++;
+        bytes += size;
+        return true;
+      })
+      .reverse();
   }
   discardHistory(token: symbol) {
     this.history = this.history.filter((entry) => entry.token !== token);

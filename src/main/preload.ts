@@ -1,6 +1,22 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { CanopyAPI } from '../shared/types';
 const api: CanopyAPI = {
+  handoffReady: (clientId) =>
+    ipcRenderer.invoke('canopy:handoffReady', clientId),
+  handoffAck: (session, id, result) =>
+    ipcRenderer.invoke('canopy:handoffAck', session, id, result),
+  handoffCancel: (session) =>
+    ipcRenderer.invoke('canopy:handoffCancel', session),
+  onHandoff: (callback) => {
+    const listener = (
+      _event: unknown,
+      state: import('../shared/types').HandoffState,
+    ) => callback(state);
+    ipcRenderer.on('canopy:handoff', listener);
+    return () => {
+      ipcRenderer.removeListener('canopy:handoff', listener);
+    };
+  },
   updateState: () => ipcRenderer.invoke('canopy:updateState'),
   updatePreferences: (value) =>
     ipcRenderer.invoke('canopy:updatePreferences', value),
@@ -9,6 +25,25 @@ const api: CanopyAPI = {
   cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
   dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
   openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
+  diagnostics: () => ipcRenderer.invoke('canopy:diagnostics'),
+  exportDiagnostics: (reviewed) =>
+    ipcRenderer.invoke('canopy:exportDiagnostics', reviewed),
+  supportReady: () => ipcRenderer.invoke('canopy:supportReady'),
+  appVersion: () => ipcRenderer.invoke('canopy:appVersion'),
+  openSupportLink: (link) => ipcRenderer.invoke('canopy:openSupportLink', link),
+  onShowSupport: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('canopy:showSupport', listener);
+    return () => ipcRenderer.removeListener('canopy:showSupport', listener);
+  },
+  authoringOptions: (id, key) =>
+    ipcRenderer.invoke('canopy:authoringOptions', id, key),
+  previewParent: (id, key, parent) =>
+    ipcRenderer.invoke('canopy:previewParent', id, key, parent),
+  author: (id, key, action) =>
+    ipcRenderer.invoke('canopy:author', id, key, action),
+  openAttachment: (id, key, attachment) =>
+    ipcRenderer.invoke('canopy:openAttachment', id, key, attachment),
   demoMode: () => ipcRenderer.invoke('canopy:demoMode'),
   demoTimeScale: () => ipcRenderer.invoke('canopy:demoTimeScale'),
   launchDemo: () => ipcRenderer.invoke('canopy:launchDemo'),
@@ -20,7 +55,21 @@ const api: CanopyAPI = {
   connectGithub: (input) => ipcRenderer.invoke('canopy:connectGithub', input),
   disconnect: (id) => ipcRenderer.invoke('canopy:disconnect', id),
   syncStatus: (id) => ipcRenderer.invoke('canopy:syncStatus', id),
-  tree: (id, key) => ipcRenderer.invoke('canopy:tree', id, key),
+  tree: (id, key, requestId) =>
+    ipcRenderer.invoke('canopy:tree', id, key, requestId),
+  cancelTree: (id, requestId) =>
+    ipcRenderer.invoke('canopy:cancelTree', id, requestId),
+  onTreeProgress: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      requestId: string,
+      snapshot: import('../shared/types').TreeSnapshot,
+    ) => callback(requestId, snapshot);
+    ipcRenderer.on('canopy:treeProgress', listener);
+    return () => {
+      ipcRenderer.removeListener('canopy:treeProgress', listener);
+    };
+  },
   preview: (id, key) => ipcRenderer.invoke('canopy:preview', id, key),
   relationships: (id, key, requestId) =>
     ipcRenderer.invoke('canopy:relationships', id, key, requestId),
@@ -63,6 +112,21 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:rank', id, key, before, position),
   priorityOrder: (id, keys) =>
     ipcRenderer.invoke('canopy:priorityOrder', id, keys),
+  prepareWorkspaceExport: () =>
+    ipcRenderer.invoke('canopy:prepareWorkspaceExport'),
+  exportWorkspace: (token) =>
+    ipcRenderer.invoke('canopy:exportWorkspace', token),
+  chooseWorkspaceBackup: () =>
+    ipcRenderer.invoke('canopy:chooseWorkspaceBackup'),
+  previewWorkspaceImport: (backup, mapping, mode) =>
+    ipcRenderer.invoke('canopy:previewWorkspaceImport', backup, mapping, mode),
+  applyWorkspaceImport: (token) =>
+    ipcRenderer.invoke('canopy:applyWorkspaceImport', token),
+  canUndoWorkspaceImport: () =>
+    ipcRenderer.invoke('canopy:canUndoWorkspaceImport'),
+  rollbackWorkspaceImport: () =>
+    ipcRenderer.invoke('canopy:rollbackWorkspaceImport'),
+  reloadWorkspace: () => ipcRenderer.invoke('canopy:reloadWorkspace'),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
   saveWorkspace: (workspace) =>
     ipcRenderer.invoke('canopy:saveWorkspace', workspace),

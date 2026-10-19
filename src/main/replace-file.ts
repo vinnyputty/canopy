@@ -1,5 +1,32 @@
-import { rename } from 'node:fs/promises';
+import { open, rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+
+/** Replace saved state without reusing temporary files left by an earlier launch. */
+export async function writeSavedFile(
+  destination: string,
+  contents: string,
+  beforeMove?: () => void,
+) {
+  const temporary = `${destination}.${randomUUID()}.tmp`;
+  const file = await open(temporary, 'wx', 0o600);
+  try {
+    try {
+      await file.writeFile(contents);
+    } finally {
+      await file.close();
+    }
+    await replaceFile(
+      temporary,
+      destination,
+      process.platform,
+      undefined,
+      beforeMove,
+    );
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
 
 /** Keep the existing file intact while Windows releases a temporary file lock. */
 export async function replaceFile(
@@ -7,9 +34,13 @@ export async function replaceFile(
   destination: string,
   platform = process.platform,
   move = rename,
+  beforeMove?: () => void,
 ): Promise<void> {
   const backoff = [25, 50, 100, 200, 250, 250];
   for (let attempt = 0; ; attempt += 1) {
+    // Recheck approval after any asynchronous staging or lock retry, then
+    // invoke the native rename in the same JavaScript turn.
+    beforeMove?.();
     try {
       await move(source, destination);
       return;

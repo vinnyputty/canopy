@@ -45,7 +45,7 @@ test('healthy finalization accepts omitted primary and always-present undefined'
         effects.push('evidence');
       },
     });
-    assert.deepEqual(effects, ['shutdown', 'remove', 'evidence']);
+    assert.deepEqual(effects, ['shutdown', 'evidence', 'remove']);
   }
 });
 
@@ -196,7 +196,9 @@ const declarations = palette.statements
     (node) =>
       ts.isVariableStatement(node) &&
       node.declarationList.declarations.some((declaration) =>
-        ['failure', 'failed'].includes(declaration.name.getText()),
+        ['failure', 'failed', 'auditSettled', 'auditRetained'].includes(
+          declaration.name.getText(),
+        ),
       ),
   )
   .map((node) => node.getText())

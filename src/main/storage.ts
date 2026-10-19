@@ -1,8 +1,10 @@
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
+import type { Workspace } from '../shared/types';
+import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { safeStorage } from 'electron';
 import { linuxCredentialStorageError } from './credentials';
-import { replaceFile } from './replace-file';
+import { writeSavedFile } from './replace-file';
 
 export class Storage {
   private pending: Promise<void> = Promise.resolve();
@@ -19,15 +21,36 @@ export class Storage {
       );
     }
   }
+  private async persist(name: string, contents: string, validate?: () => void) {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const file = join(this.directory, `${name}.json`);
+    await writeSavedFile(file, contents, validate);
+  }
+
   write(name: string, value: unknown): Promise<void> {
     const contents = JSON.stringify(value);
     const task = this.pending
       .catch(() => {})
+      .then(() => this.persist(name, contents));
+    this.pending = task;
+    return task;
+  }
+  replaceWorkspace(
+    expected: Workspace,
+    next: Workspace,
+    validate?: () => void,
+  ): Promise<void> {
+    const contents = JSON.stringify(next);
+    const task = this.pending
+      .catch(() => {})
       .then(async () => {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
-        const file = join(this.directory, `${name}.json`);
-        await writeFile(`${file}.tmp`, contents, { mode: 0o600 });
-        await replaceFile(`${file}.tmp`, file);
+        validate?.();
+        const current = await this.read<Workspace>('workspace');
+        if (!isDeepStrictEqual(current, JSON.parse(JSON.stringify(expected))))
+          throw new Error(
+            'Workspace changed after preview; review the import again.',
+          );
+        await this.persist('workspace', contents, validate);
       });
     this.pending = task;
     return task;
@@ -57,7 +80,7 @@ export class Storage {
       ) as T;
     } catch {
       throw new Error(
-        'Saved credentials could not be unlocked using this OS account.',
+        'Saved credentials could not be unlocked using this OS account. Unlock the keychain and restart Canopy with the original OS account. Keep a backup of saved credentials; do not delete them to retry.',
       );
     }
   }

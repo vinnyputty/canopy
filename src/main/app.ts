@@ -1,9 +1,19 @@
-import { validTriage } from '../shared/triage';
+import { WorkHandoffQueue } from './work-handoff';
 import {
   issueRelationships,
   relationshipKinds,
   relationshipFailure,
 } from '../shared/relationships';
+import { supportLinks, supportUrl } from '../shared/support';
+import { isDeepStrictEqual } from 'node:util';
+import {
+  WorkspaceTransfer,
+  readBackupFile,
+  writeBackupFile,
+} from './workspace-transfer';
+import type { WorkspaceBackup, ImportMode } from '../shared/workspace-backup';
+import { validateWorkspace } from '../shared/workspace-validation';
+import { authoringAction } from '../shared/authoring';
 import { Providers } from './providers';
 import {
   app,
@@ -17,12 +27,12 @@ import {
 } from 'electron';
 import { join } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import type {
   Connection,
+  TreeSnapshot,
   IssuePatch,
   Workspace,
   TokenConnectionInput,
@@ -30,6 +40,7 @@ import type {
   ChildIssueInput,
 } from '../shared/types';
 import { Auth } from './auth';
+import { diagnosticReport, exportDiagnosticReport } from './diagnostics';
 import { JiraProvider, jiraRemoteLinkUrl } from './jira';
 import {
   GithubProvider,
@@ -41,33 +52,37 @@ import {
 import { Storage } from './storage';
 import { Updates } from './updates';
 import { restoreWindow, type WindowState } from './window-state';
+import { WindowStateSaver } from './window-state-saver';
 import { configureLinuxCredentialStore } from './credentials';
 import { demoWorkspace } from './demo';
-import {
-  recoverWorkspaceViews,
-  validSavedViews,
-  validViewMap,
-  validRootView,
-  validReading,
-} from '../shared/views';
+import { recoverWorkspaceViews } from '../shared/views';
 
 app.setName('Canopy');
+if (process.platform === 'win32') app.setAppUserModelId('app.canopy.desktop');
+if (process.platform === 'linux') app.setDesktopName('canopy.desktop');
 configureLinuxCredentialStore((store) =>
   app.commandLine.appendSwitch('password-store', store),
 );
 if (process.env.CANOPY_USER_DATA)
   app.setPath('userData', process.env.CANOPY_USER_DATA);
-if (process.env.CANOPY_DEMO_TEMP === '1' && process.env.CANOPY_USER_DATA) {
-  const directory = process.env.CANOPY_USER_DATA;
-  process.on('exit', () => {
-    try {
-      rmSync(directory, { recursive: true, force: true });
-    } catch {
-      // The launching app also removes this directory after the demo exits.
-    }
-  });
-}
 let window: BrowserWindow | null = null;
+const handoffs = new WorkHandoffQueue(() => {
+  if (window && !window.isDestroyed()) {
+    try {
+      window.webContents.send('canopy:handoff', {
+        session: '',
+        rejected: true,
+      });
+    } catch {
+      handoffs.cancel();
+    }
+  }
+});
+let resetHandoffCancellation = () => {};
+let focusRequested = false;
+let focusWindow = () => {
+  focusRequested = true;
+};
 const html = join(__dirname, 'renderer/index.html');
 function text(value: unknown, limit = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit)
@@ -156,152 +171,7 @@ function childInput(value: unknown): ChildIssueInput {
       : {}),
   };
 }
-function workspace(value: Workspace) {
-  if (
-    !value ||
-    !Array.isArray(value.tabs) ||
-    value.tabs.length > 100 ||
-    !['system', 'light', 'dark'].includes(value.theme) ||
-    (value.palette !== undefined &&
-      !['default', 'ocean', 'forest'].includes(value.palette)) ||
-    typeof value.sidebarCollapsed !== 'boolean' ||
-    typeof value.shortcuts !== 'object' ||
-    !value.shortcuts
-  )
-    throw new Error('Invalid workspace.');
-  if (
-    (value.rootViews !== undefined && !validViewMap(value.rootViews)) ||
-    (value.viewDefaults !== undefined && !validViewMap(value.viewDefaults))
-  )
-    throw new Error('Invalid table view.');
-  if (value.reading !== undefined && !validReading(value.reading))
-    throw new Error('Invalid reading settings.');
-  if (value.triage !== undefined && !validTriage(value.triage))
-    throw new Error('Invalid inbox preferences.');
-  if (value.savedViews !== undefined && !validSavedViews(value.savedViews))
-    throw new Error('Invalid saved issue view.');
-  for (const [name, minimum, maximum] of [
-    ['sidebarWidth', 180, 400],
-    ['previewWidth', 300, 720],
-  ] as const) {
-    if (
-      value[name] !== undefined &&
-      (!Number.isFinite(value[name]) ||
-        value[name]! < minimum ||
-        value[name]! > maximum)
-    )
-      throw new Error('Invalid pane width.');
-  }
-  for (const roots of [value.pinnedRoots, value.recentRoots]) {
-    if (roots !== undefined && (!Array.isArray(roots) || roots.length > 1000))
-      throw new Error('Invalid saved roots.');
-    for (const root of roots ?? []) {
-      text(root.connectionId);
-      if (
-        typeof root.rootKey !== 'string' ||
-        (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(root.rootKey) &&
-          !/^[-\w.]+\/[-\w.]+#\d+$/i.test(root.rootKey) &&
-          !/^[-\w.]+\/[-\w.]+$/i.test(root.rootKey))
-      )
-        throw new Error('Invalid root key.');
-      if (
-        root.summary !== undefined &&
-        (typeof root.summary !== 'string' || root.summary.length > 10000)
-      )
-        throw new Error('Invalid root summary.');
-    }
-  }
-  if (
-    value.closedTabs !== undefined &&
-    (!Array.isArray(value.closedTabs) || value.closedTabs.length > 20)
-  )
-    throw new Error('Invalid closed tabs.');
-  for (const tab of [...value.tabs, ...(value.closedTabs ?? [])]) {
-    if (tab.view !== undefined && !validRootView(tab.view))
-      throw new Error('Invalid saved table view.');
-    if (
-      tab.linkedExpanded !== undefined &&
-      (!Array.isArray(tab.linkedExpanded) ||
-        tab.linkedExpanded.length > 100_000 ||
-        !tab.linkedExpanded.every(
-          (key) => typeof key === 'string' && key.length < 500,
-        ))
-    )
-      throw new Error('Invalid linked expansion state.');
-    text(tab.id);
-    text(tab.connectionId);
-    if (
-      typeof tab.rootKey !== 'string' ||
-      (!/^[A-Z][A-Z0-9_]*-\d+$/i.test(tab.rootKey) &&
-        !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.rootKey) &&
-        !/^[-\w.]+\/[-\w.]+$/i.test(tab.rootKey))
-    )
-      throw new Error('Invalid root key.');
-    if (
-      !Array.isArray(tab.expanded) ||
-      tab.expanded.length > 100_000 ||
-      !tab.expanded.every((k) => typeof k === 'string' && k.length < 500) ||
-      typeof tab.hideDone !== 'boolean' ||
-      !Number.isFinite(tab.scrollTop)
-    )
-      throw new Error('Invalid tab state.');
-    if (
-      tab.focusKey !== undefined &&
-      !/^[A-Z][A-Z0-9_]*-\d+$/i.test(tab.focusKey) &&
-      !/^[-\w.]+\/[-\w.]+#\d+$/i.test(tab.focusKey) &&
-      !/^[-\w.]+\/[-\w.]+$/i.test(tab.focusKey)
-    )
-      throw new Error('Invalid focus key.');
-    if (tab.filters !== undefined) {
-      if (
-        !tab.filters ||
-        typeof tab.filters !== 'object' ||
-        Array.isArray(tab.filters)
-      )
-        throw new Error('Invalid filters.');
-      if (
-        tab.filters.assignee !== undefined &&
-        !['me', 'unassigned'].includes(tab.filters.assignee)
-      )
-        throw new Error('Invalid assignee filter.');
-      if (tab.filters.status !== undefined) text(tab.filters.status);
-      if (tab.filters.priority !== undefined) text(tab.filters.priority);
-    }
-  }
-  if (JSON.stringify(value).length > 4_000_000)
-    throw new Error('Workspace is too large to save.');
-  if (value.seenRoots !== undefined) {
-    if (
-      !value.seenRoots ||
-      typeof value.seenRoots !== 'object' ||
-      Array.isArray(value.seenRoots) ||
-      Object.keys(value.seenRoots).length > 12
-    )
-      throw new Error('Invalid last-seen roots.');
-    for (const root of Object.values(value.seenRoots)) {
-      if (
-        !root ||
-        !Number.isSafeInteger(root.touchedAt) ||
-        !root.issues ||
-        typeof root.issues !== 'object' ||
-        Array.isArray(root.issues) ||
-        Object.keys(root.issues).length > 1000
-      )
-        throw new Error('Invalid last-seen root.');
-      for (const issue of Object.values(root.issues)) {
-        if (
-          !issue ||
-          !Number.isSafeInteger(issue.seenAt) ||
-          !issue.fields ||
-          typeof issue.fields !== 'object' ||
-          Array.isArray(issue.fields)
-        )
-          throw new Error('Invalid last-seen issue.');
-      }
-    }
-  }
-  return value;
-}
+
 type Fixture = {
   updates?: Updates;
   syncStatus?(): { retryAt: number | null };
@@ -331,6 +201,8 @@ async function start(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
 ) {
+  if (process.platform === 'darwin' && !app.isPackaged)
+    app.dock?.setIcon(join(__dirname, 'branding/icons/512x512.png'));
   const storage = new Storage(app.getPath('userData'));
   const auth = new Auth(storage, (url) => shell.openExternal(url));
   let authError: string | undefined;
@@ -407,6 +279,7 @@ async function start(
       ? githubRootUrl(value)
       : `${connection.url}/browse/${encodeURIComponent(value)}`;
   };
+  const trees = new Map<string, AbortController>();
   const searches = new Map<string, AbortController>();
   const cancelSearch = (id: string, requestId: string) => {
     const owner = JSON.stringify([text(id), text(requestId)]);
@@ -424,7 +297,66 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let reviewedDiagnostics: string | undefined;
+  let creatingWindow: Promise<void> | null = null;
+  let supportPending = false;
+  let supportSubscriber: BrowserWindow | null = null;
+  const deliverSupport = () => {
+    if (
+      supportPending &&
+      window &&
+      supportSubscriber === window &&
+      !window.isDestroyed()
+    ) {
+      supportPending = false;
+      window.webContents.send('canopy:showSupport');
+    }
+  };
+  const transfer = new WorkspaceTransfer(
+    demoMode
+      ? {
+          read: async <T>() => structuredClone(demoWorkspaceState) as T,
+          replaceWorkspace: async (expected, next, validate) => {
+            validate?.();
+            if (
+              !isDeepStrictEqual(
+                JSON.parse(JSON.stringify(demoWorkspaceState)),
+                JSON.parse(JSON.stringify(expected)),
+              )
+            )
+              throw new Error('Workspace changed after preview; review again.');
+            demoWorkspaceState = structuredClone(next);
+          },
+        }
+      : storage,
+    connections,
+  );
   const handlers: Record<string, (...args: any[]) => unknown> = {
+    handoffReady: (clientId: unknown) => {
+      if (
+        typeof clientId !== 'string' ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(
+          clientId,
+        )
+      )
+        throw new Error('Invalid handoff owner.');
+      if (quitting || closingWindow || !window || window.isDestroyed())
+        throw new Error('Canopy is closing.');
+      const owner = window;
+      resetHandoffCancellation();
+      return handoffs.ready((state) => {
+        if (window === owner && !owner.isDestroyed()) {
+          try {
+            owner.webContents.send('canopy:handoff', state);
+          } catch {
+            handoffs.cancel();
+          }
+        }
+      }, clientId);
+    },
+    handoffAck: (session: unknown, id: unknown, result: unknown) =>
+      handoffs.acknowledge(session, id, result),
+    handoffCancel: (session: unknown) => handoffs.cancel(text(session, 128)),
     updateState: () => updates.snapshot(),
     updatePreferences: (value: unknown) => updates.preferences(value),
     checkUpdates: (background: unknown) => {
@@ -436,6 +368,42 @@ async function start(
     dismissUpdateNotice: () => updates.dismiss(),
     openRelease: (tag: unknown) =>
       updates.open(tag, (url) => shell.openExternal(url)),
+    diagnostics: () => {
+      let credentialStorage: 'available' | 'unavailable' | 'unlock-failed' =
+        authError ? 'unlock-failed' : 'available';
+      try {
+        storage.assertSecure();
+      } catch {
+        credentialStorage = 'unavailable';
+      }
+      reviewedDiagnostics = diagnosticReport({
+        version: app.getVersion(),
+        platform: process.platform,
+        demoMode,
+        credentialStorage,
+        connections: connections(),
+        retryAt: (connection) =>
+          connection.provider === 'github'
+            ? auth.githubSyncStatus(connection.id).retryAt
+            : auth.syncStatus(connection.id).retryAt,
+      });
+      return reviewedDiagnostics;
+    },
+    exportDiagnostics: (reviewed: unknown) =>
+      exportDiagnosticReport(reviewed, reviewedDiagnostics, async () => {
+        const result = await dialog.showSaveDialog(window!, {
+          title: 'Export reviewed diagnostics',
+          defaultPath: 'canopy-diagnostics.json',
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        return result.canceled ? undefined : result.filePath;
+      }),
+    supportReady: () => {
+      supportSubscriber = window;
+      deliverSupport();
+    },
+    appVersion: () => app.getVersion(),
+    openSupportLink: (link: unknown) => shell.openExternal(supportUrl(link)),
     demoMode: () => demoMode,
     demoTimeScale: () => {
       const scale = Number(process.env.CANOPY_DEMO_TIME_SCALE ?? 1);
@@ -531,10 +499,11 @@ async function start(
     disconnect: async (id: string) => {
       if (demoMode) throw new Error('Close the demo to manage connections.');
       text(id);
-      for (const [owner, controller] of searches) {
+      for (const [owner, controller] of [...searches, ...trees]) {
         if (JSON.parse(owner)[0] === id) {
           controller.abort();
           searches.delete(owner);
+          trees.delete(owner);
         }
       }
       for (const [owner, controller] of relationshipRequests) {
@@ -563,8 +532,37 @@ async function start(
           ? auth.githubSyncStatus(id)
           : auth.syncStatus(id);
     },
-    tree: (id: string, root: string) =>
-      provider(id).tree(normalizedRoot(id, root)),
+    tree: async (id: string, root: string, requestId?: string) => {
+      const client = provider(id);
+      const key = normalizedRoot(id, root);
+      if (requestId === undefined) return client.tree(key);
+      const owner = JSON.stringify([text(id), text(requestId)]);
+      trees.get(owner)?.abort();
+      const controller = new AbortController();
+      trees.set(owner, controller);
+      try {
+        return await client.tree(key, {
+          signal: controller.signal,
+          progress: (snapshot: TreeSnapshot) => {
+            if (
+              trees.get(owner) === controller &&
+              window &&
+              !window.isDestroyed()
+            )
+              window.webContents.send(
+                'canopy:treeProgress',
+                requestId,
+                snapshot,
+              );
+          },
+        });
+      } finally {
+        if (trees.get(owner) === controller) trees.delete(owner);
+      }
+    },
+    cancelTree: (id: string, requestId: string) => {
+      trees.get(JSON.stringify([text(id), text(requestId)]))?.abort();
+    },
     priorityOrder: (id: string, keys: unknown) => {
       if (!Array.isArray(keys) || keys.length > 1000)
         throw new Error('Invalid priority representatives.');
@@ -612,6 +610,71 @@ async function start(
       return client.olderComments(normalized(id, issue), page);
     },
     issueUrl: (id: string, issue: string) => issueUrl(id, issue),
+    authoringOptions: (id: string, issue: string) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Authoring is unavailable for demo issues.');
+      return client.authoring.options(normalized(id, issue));
+    },
+    previewParent: (id: string, issue: string, parent: string | null) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Parent changes are unavailable for demo issues.');
+      return client.authoring.plan(
+        normalized(id, issue),
+        parent === null ? null : normalized(id, parent),
+      );
+    },
+    author: (id: string, issue: string, value: unknown) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Authoring is unavailable for demo issues.');
+      const action = authoringAction(value);
+      const issueKey = normalized(id, issue);
+      if (action.kind === 'parent') {
+        action.plan.key = normalized(id, action.plan.key);
+        if (action.plan.key !== issueKey)
+          throw new Error('Preview belongs to a different issue.');
+        if (action.plan.parentKey)
+          action.plan.parentKey = normalized(id, action.plan.parentKey);
+        if (action.plan.previousParent)
+          action.plan.previousParent = normalized(
+            id,
+            action.plan.previousParent,
+          );
+      }
+      return client.authoring.write(issueKey, action);
+    },
+    openAttachment: async (id: string, issue: string, attachmentId: string) => {
+      const client = provider(id);
+      if (!(client instanceof JiraProvider || client instanceof GithubProvider))
+        throw new Error('Attachments are unavailable for demo issues.');
+      const options = await client.authoring.options(normalized(id, issue));
+      const attachment = options.attachments.find(
+        (item) => item.id === text(attachmentId),
+      );
+      if (!attachment)
+        throw new Error('Attachment is unavailable. Refresh and try again.');
+      const connection = connections().find((item) => item.id === id)!;
+      const url =
+        client instanceof JiraProvider
+          ? new URL(
+              `/rest/api/3/attachment/content/${encodeURIComponent(attachment.id)}`,
+              connection.url,
+            )
+          : new URL(attachment.url);
+      if (
+        url.protocol !== 'https:' ||
+        url.username ||
+        url.password ||
+        (client instanceof GithubProvider &&
+          !['github.com', 'user-images.githubusercontent.com'].includes(
+            url.hostname,
+          ))
+      )
+        throw new Error('Invalid attachment URL.');
+      await shell.openExternal(url.href);
+    },
     development: (id: string, issue: string) =>
       provider(id).development(normalized(id, issue)),
     openDevelopmentLink: (id: string, url: string) => {
@@ -730,13 +793,43 @@ async function start(
         position,
       );
     },
+    prepareWorkspaceExport: () => transfer.prepareExport(),
+    exportWorkspace: async (token: string) => {
+      const contents = transfer.exportContents(text(token));
+      const result = await dialog.showSaveDialog({
+        title: 'Export reviewed workspace backup',
+        defaultPath: 'canopy-workspace.json',
+        filters: [{ name: 'Workspace backup', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePath) return false;
+      await writeBackupFile(result.filePath, contents, app.getPath('userData'));
+      return true;
+    },
+    chooseWorkspaceBackup: async () => {
+      const result = await dialog.showOpenDialog({
+        title: 'Preview workspace backup',
+        properties: ['openFile'],
+        filters: [{ name: 'Workspace backup', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePaths[0]) return null;
+      return readBackupFile(result.filePaths[0]);
+    },
+    previewWorkspaceImport: (
+      backup: WorkspaceBackup,
+      mapping: Record<string, string>,
+      mode: ImportMode,
+    ) => transfer.preview(backup, mapping, mode),
+    applyWorkspaceImport: (token: string) => transfer.apply(text(token)),
+    canUndoWorkspaceImport: () => transfer.canUndo(),
+    rollbackWorkspaceImport: () => transfer.rollback(),
+    reloadWorkspace: () => window?.webContents.reload(),
     loadWorkspace: async () => {
       if (demoMode) return structuredClone(demoWorkspaceState);
       const saved = await storage.read<Workspace>('workspace');
       return saved ? recoverWorkspaceViews(saved) : null;
     },
     saveWorkspace: (value: Workspace) => {
-      const valid = workspace(value);
+      const valid = validateWorkspace(value);
       if (demoMode) {
         demoWorkspaceState = structuredClone(valid);
         return;
@@ -778,6 +871,7 @@ async function start(
       return handler(...args);
     });
   let quitting = false;
+  let closingWindow: Promise<void> | undefined;
   app.on('before-quit', () => {
     quitting = true;
     updates.cancel();
@@ -795,7 +889,14 @@ async function start(
       minWidth: Math.min(920, saved?.bounds.width ?? 920),
       minHeight: Math.min(600, saved?.bounds.height ?? 600),
       ...(saved?.bounds ?? {}),
+      show: !saved?.maximized,
       title: demoMode ? 'Canopy — Demo' : 'Canopy',
+      icon: join(
+        __dirname,
+        process.platform === 'win32'
+          ? 'branding/icon.ico'
+          : 'branding/icons/256x256.png',
+      ),
       backgroundColor: '#141719',
       titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
       webPreferences: {
@@ -807,20 +908,47 @@ async function start(
       },
     });
     const created = window;
+    let initialLoad = true;
+    let handoffCanceled = false;
+    const cancelHandoffs = () => {
+      if (handoffCanceled || window !== created) return;
+      handoffCanceled = true;
+      handoffs.cancel();
+    };
+    resetHandoffCancellation = () => {
+      handoffCanceled = false;
+    };
     created.webContents.on('did-start-navigation', (details) => {
-      if (details.isMainFrame && !details.isSameDocument)
-        clearRelationshipRequests();
+      if (!details.isMainFrame || details.isSameDocument) return;
+      // Reload/navigation can destroy the renderer before its cancellation IPC
+      // arrives. Release the departing document's provider reads in main too.
+      for (const controller of trees.values()) controller.abort();
+      trees.clear();
+      clearRelationshipRequests();
+      if (!initialLoad) cancelHandoffs();
     });
-    created.webContents.on('render-process-gone', clearRelationshipRequests);
+    created.webContents.on('render-process-gone', () => {
+      clearRelationshipRequests();
+      cancelHandoffs();
+    });
+    created.webContents.on('did-start-loading', () => {
+      if (window === created) supportSubscriber = null;
+    });
     created.webContents.on('destroyed', () => {
+      cancelHandoffs();
       updates.cancel();
+      for (const controller of trees.values()) controller.abort();
+      trees.clear();
       for (const controller of searches.values()) controller.abort();
       searches.clear();
       clearRelationshipRequests();
     });
-    if (saved?.maximized) created.maximize();
-    let savingWindow: Promise<void> = Promise.resolve();
+    const windowStateSaver = new WindowStateSaver(
+      (state) => storage.write('window', state),
+      (error) => console.error('Could not save window state:', error),
+    );
     let closeApproved = false;
+    let closing = false;
     const saveBounds = () => {
       if (
         demoMode ||
@@ -829,13 +957,10 @@ async function start(
         created.isFullScreen()
       )
         return;
-      savingWindow = storage.write('window', {
+      windowStateSaver.update({
         bounds: created.getNormalBounds(),
         maximized: created.isMaximized(),
       } satisfies WindowState);
-      void savingWindow.catch((error) =>
-        console.error('Could not save window state:', error),
-      );
     };
     created.on('resize', saveBounds);
     created.on('move', saveBounds);
@@ -843,16 +968,32 @@ async function start(
     created.on('unmaximize', saveBounds);
     created.on('close', (event) => {
       if (closeApproved) return;
+      handoffCanceled = true;
+      handoffs.pause();
       event.preventDefault();
+      if (closing) return;
+      closing = true;
+      let resolveClosing!: () => void;
+      closingWindow = new Promise<void>((resolve) => {
+        resolveClosing = resolve;
+      });
+      const finishClosing = () => {
+        closingWindow = undefined;
+        resolveClosing();
+      };
+      created.once('closed', finishClosing);
       saveBounds();
-      void savingWindow
-        .catch(() => {})
-        .finally(() => {
-          closeApproved = true;
-          if (quitting) app.quit();
-          else created.close();
-        });
+      void windowStateSaver.flush().finally(() => {
+        closeApproved = true;
+        if (quitting) app.quit();
+        else if (!created.isDestroyed()) created.close();
+      });
     });
+    if (saved?.maximized) {
+      // X11 must receive maximized state before mapping to retain normal bounds.
+      created.maximize();
+      created.show();
+    }
     window.webContents.on('before-input-event', (event, input) => {
       const modifier =
         process.platform === 'darwin' ? input.meta : input.control;
@@ -872,10 +1013,36 @@ async function start(
     window.webContents.session.setPermissionRequestHandler(
       (_wc, _permission, callback) => callback(false),
     );
-    window.on('closed', () => {
-      window = null;
+    created.on('closed', () => {
+      for (const controller of trees.values()) controller.abort();
+      trees.clear();
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+        handoffs.resume(true);
+      }
     });
-    await window.loadFile(html);
+    try {
+      await created.loadFile(html);
+      initialLoad = false;
+    } catch (error) {
+      if (window === created) {
+        window = null;
+        supportSubscriber = null;
+        if (!created.isDestroyed()) created.destroy();
+      }
+      throw error;
+    }
+  };
+  const ensureWindow = async (): Promise<void> => {
+    if (closingWindow) await closingWindow;
+    if (quitting) return;
+    if (creatingWindow) return creatingWindow;
+    if (window) return Promise.resolve();
+    creatingWindow = createWindow().finally(() => {
+      creatingWindow = null;
+    });
+    return creatingWindow;
   };
   const openDemoFromMenu = () =>
     void Promise.resolve(handlers.launchDemo()).catch((error: unknown) =>
@@ -884,6 +1051,20 @@ async function start(
         error instanceof Error ? error.message : String(error),
       ),
     );
+  const showSupport = () => {
+    supportPending = true;
+    void ensureWindow()
+      .then(() => {
+        if (!window || quitting) return;
+        if (window.isMinimized()) window.restore();
+        window.show();
+        window.focus();
+        deliverSupport();
+      })
+      .catch((error: Error) =>
+        dialog.showErrorBox('Could not open About & Support', error.message),
+      );
+  };
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       ...(process.platform === 'darwin'
@@ -891,7 +1072,7 @@ async function start(
             {
               label: 'Canopy',
               submenu: [
-                { role: 'about' as const },
+                { label: 'About Canopy', click: showSupport },
                 ...(!demoMode
                   ? [
                       {
@@ -923,6 +1104,24 @@ async function start(
             },
           ]),
       {
+        label: 'Help',
+        submenu: [
+          { label: 'About & Support', click: showSupport },
+          ...Object.values(supportLinks).map(({ label, url }) => ({
+            label,
+            click: () =>
+              void shell
+                .openExternal(url)
+                .catch((error: Error) =>
+                  dialog.showErrorBox(
+                    'Could not open support link',
+                    error.message,
+                  ),
+                ),
+          })),
+        ],
+      },
+      {
         label: 'Edit',
         submenu: [
           { role: 'undo' },
@@ -946,15 +1145,75 @@ async function start(
       },
     ]),
   );
-  await createWindow();
-  app.on('activate', () => {
-    if (!window) void createWindow();
-  });
+  const showWindow = async () => {
+    await ensureWindow();
+    if (quitting) return;
+    if (window && !window.isDestroyed()) {
+      if (window.isMinimized()) window.restore();
+      window.show();
+      if (process.platform === 'darwin') app.focus({ steal: true });
+      window.focus();
+    }
+  };
+  await showWindow();
+  let pendingFocusRequests = 0;
+  focusWindow = () => {
+    pendingFocusRequests += 1;
+    focusRequested = true;
+    void showWindow()
+      .catch((error) =>
+        dialog.showErrorBox('Canopy could not open', (error as Error).message),
+      )
+      .finally(() => {
+        pendingFocusRequests -= 1;
+        focusRequested = pendingFocusRequests > 0;
+      });
+  };
+  if (focusRequested) focusWindow();
+  app.on('activate', focusWindow);
 }
 export function launch(
   createFixture?: (storage: Storage) => Promise<Fixture | undefined>,
   demoMode = false,
+  handoffArguments: string[] = [],
 ) {
+  // Electron scopes this lock to userData, including isolated demo/smoke profiles.
+  // Acquire it before readiness or reading any profile state.
+  const boundedArgs =
+    handoffArguments.length <= 2 &&
+    handoffArguments.every(
+      (arg) => typeof arg === 'string' && arg.length <= 2048,
+    )
+      ? handoffArguments
+      : ['--invalid-canopy-command'];
+  if (
+    !app.requestSingleInstanceLock({
+      canopyArguments: boundedArgs,
+      canopyMode: demoMode ? 'demo' : 'main',
+    })
+  ) {
+    app.quit();
+    return;
+  }
+  app.on('before-quit', () => handoffs.pause());
+  app.on('will-quit', () => handoffs.stop());
+  handoffs.receive(boundedArgs);
+  app.on('second-instance', (_event, _argv, _directory, data: unknown) => {
+    if (data !== undefined) {
+      if (
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length !== 2 ||
+        !('canopyArguments' in data) ||
+        !('canopyMode' in data) ||
+        data.canopyMode !== (demoMode ? 'demo' : 'main')
+      )
+        handoffs.reject();
+      else handoffs.receive(data.canopyArguments);
+    }
+    focusWindow();
+  });
   app
     .whenReady()
     .then(() => start(createFixture, demoMode))
@@ -963,6 +1222,7 @@ export function launch(
       app.quit();
     });
   app.on('window-all-closed', () => {
-    if (demoMode || process.platform !== 'darwin') app.quit();
+    if ((demoMode || process.platform !== 'darwin') && !focusRequested)
+      app.quit();
   });
 }

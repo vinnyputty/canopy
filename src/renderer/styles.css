@@ -19,10 +19,11 @@
   --border: #d9dde4;
   --border-soft: #e7e9ed;
   --text: #1e2430;
-  --muted: #626b79;
-  --faint: #9299a6;
+  --muted: #576171;
+  --faint: #576171;
   --accent: #2d6db5;
   --accent-hover: #245b99;
+  --on-accent: #ffffff;
   --danger: #bd3c47;
   --warning: #865c13;
   --brand-from: #5a93d4;
@@ -45,9 +46,10 @@
   --border-soft: #2c3036;
   --text: #e4e7eb;
   --muted: #a1a8b3;
-  --faint: #747c88;
+  --faint: #a1a8b3;
   --accent: #67a0df;
   --accent-hover: #79afe8;
+  --on-accent: #17191d;
   --danger: #e06a73;
   --warning: #e8bd76;
   --brand-from: #5a93d4;
@@ -68,9 +70,10 @@
     --border-soft: #2c3036;
     --text: #e4e7eb;
     --muted: #a1a8b3;
-    --faint: #747c88;
+    --faint: #a1a8b3;
     --accent: #67a0df;
     --accent-hover: #79afe8;
+    --on-accent: #17191d;
     --danger: #e06a73;
     --warning: #e8bd76;
     --brand-from: #5a93d4;
@@ -91,9 +94,10 @@
   --border-soft: #d7e5e8;
   --text: #17303b;
   --muted: #49616c;
-  --faint: #647b84;
+  --faint: #49616c;
   --accent: #096b83;
   --accent-hover: #07566b;
+  --on-accent: #ffffff;
   --danger: #ae3547;
   --warning: #865809;
   --brand-from: #2799ae;
@@ -117,6 +121,7 @@
   --faint: #8caab4;
   --accent: #8cdaed;
   --accent-hover: #ade9f5;
+  --on-accent: #10252e;
   --danger: #ff929c;
   --warning: #ecc078;
   --brand-from: #41b6cb;
@@ -136,9 +141,10 @@
   --border-soft: #e0e8d9;
   --text: #263329;
   --muted: #58695a;
-  --faint: #718171;
+  --faint: #58695a;
   --accent: #3d7133;
   --accent-hover: #315d29;
+  --on-accent: #ffffff;
   --danger: #af3944;
   --warning: #80560c;
   --brand-from: #7cae65;
@@ -162,6 +168,7 @@
   --faint: #9fb69e;
   --accent: #b0e19d;
   --accent-hover: #cdf0c0;
+  --on-accent: #1b261f;
   --danger: #ff979d;
   --warning: #eac17b;
   --brand-from: #8ac47a;
@@ -185,6 +192,7 @@
     --faint: #8caab4;
     --accent: #8cdaed;
     --accent-hover: #ade9f5;
+    --on-accent: #10252e;
     --danger: #ff929c;
     --warning: #ecc078;
     --brand-from: #41b6cb;
@@ -206,6 +214,7 @@
     --faint: #9fb69e;
     --accent: #b0e19d;
     --accent-hover: #cdf0c0;
+    --on-accent: #1b261f;
     --danger: #ff979d;
     --warning: #eac17b;
     --brand-from: #8ac47a;
@@ -360,38 +369,25 @@ select:focus-visible,
   padding-left: 78px;
 }
 .brand-mark {
-  width: 18px;
-  height: 18px;
-  position: relative;
-  border-radius: 5px;
-  background: linear-gradient(145deg, var(--brand-from), var(--brand-to));
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.3);
+  width: 22px;
+  height: 22px;
 }
-.brand-mark:before,
-.brand-mark:after,
-.brand-mark span {
-  content: '';
-  position: absolute;
-  background: white;
-  border-radius: 50%;
-  width: 3px;
-  height: 3px;
+.support-dialog {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+  text-align: center;
 }
-.brand-mark:before {
-  left: 4px;
-  top: 4px;
-  box-shadow:
-    5px 3px white,
-    1px 8px white;
+.support-dialog h3,
+.support-dialog p {
+  margin: 0;
 }
-.brand-mark:after {
-  width: 1px;
-  height: 9px;
-  left: 6px;
-  top: 5px;
-  border-radius: 0;
-  background: rgba(255, 255, 255, 0.8);
-  transform: rotate(-30deg);
+.support-dialog button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .sidebar-toggle {
   position: absolute;
@@ -799,12 +795,13 @@ select:focus-visible,
 }
 .toolbar {
   min-height: 46px;
-  flex: 0 0 46px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 0 12px 0 17px;
+  gap: 8px 12px;
+  padding: 8px 12px 8px 17px;
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg);
 }
@@ -826,6 +823,7 @@ select:focus-visible,
 }
 .toolbar-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
 }
@@ -1415,8 +1413,9 @@ select:focus-visible,
   opacity: 1;
 }
 .statusbar {
-  height: 23px;
-  flex: 0 0 23px;
+  min-height: 23px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -1524,7 +1523,7 @@ select:focus-visible,
 }
 .primary {
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .primary:hover:not(:disabled) {
   background: var(--accent-hover);
@@ -1707,7 +1706,7 @@ kbd {
 .dialog {
   width: min(520px, calc(100vw - 36px));
   max-height: min(650px, calc(100vh - 80px));
-  overflow: hidden;
+  overflow: auto;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--panel-raised);
@@ -2278,7 +2277,7 @@ kbd {
   *,
   *:before,
   *:after {
-    animation-duration: 0.001ms !important;
+    animation: none !important;
     transition-duration: 0.001ms !important;
   }
 }
@@ -2447,7 +2446,15 @@ kbd {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: calc(43px + var(--branch-depth) * 23px);
+  left: 43px;
+  width: calc(1px + var(--branch-depth) * 23px);
+  background: repeating-linear-gradient(
+    to right,
+    var(--border) 0,
+    var(--border) 1px,
+    transparent 1px,
+    transparent 23px
+  );
   border-left: 1px solid var(--border);
   pointer-events: none;
   z-index: 1;
@@ -3160,4 +3167,107 @@ kbd {
 .palette-detail small {
   color: var(--muted);
   margin-top: 3px;
+}
+
+.setup-help details,
+.setup-permissions p {
+  margin: 12px 0;
+}
+.setup-help dt {
+  font-weight: 600;
+  margin-top: 14px;
+}
+.setup-help dd {
+  margin: 4px 0 0;
+  line-height: 1.5;
+}
+.setup-help summary,
+.connect-dialog summary {
+  cursor: pointer;
+}
+.setup-permissions code {
+  overflow-wrap: anywhere;
+}
+.diagnostics-report {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.setup-help,
+.connect-dialog {
+  max-height: min(590px, calc(100vh - 130px));
+  overflow-y: auto;
+}
+.setup-help {
+  padding: 15px 17px 17px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.setup-help .connect-actions {
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+.connect-dialog > details {
+  margin-bottom: 14px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.diagnostics-report {
+  user-select: text;
+}
+
+/* Viewport gaps carry layout only; logical membership stays in the row model. */
+[data-row-window] {
+  overflow-anchor: none;
+}
+[data-window-row] {
+  display: flow-root;
+}
+.saved-view-list [data-window-row] {
+  padding-bottom: 5px;
+}
+
+.rich-authoring label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 10px 0;
+}
+.rich-authoring textarea {
+  min-height: 110px;
+  resize: vertical;
+  width: 100%;
+}
+.rich-authoring input,
+.rich-authoring textarea,
+.rich-authoring select {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+.rich-authoring pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rich-authoring button {
+  margin: 3px;
+}
+.rich-authoring .authoring-recovery label {
+  flex-direction: row;
+  align-items: center;
+}
+
+.work-brief-dialog textarea {
+  display: block;
+  width: 100%;
+  min-height: 100px;
+  margin-top: 6px;
+  resize: vertical;
 }

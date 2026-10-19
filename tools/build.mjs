@@ -1,7 +1,9 @@
 import { build } from 'esbuild';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, writeFile } from 'node:fs/promises';
 
 await mkdir('dist/renderer', { recursive: true });
+await cp('assets/branding', 'dist/branding', { recursive: true });
+await cp('assets/branding/icon.svg', 'dist/renderer/icon.svg');
 await Promise.all([
   build({
     entryPoints: ['src/main/index.ts'],
@@ -29,6 +31,33 @@ await Promise.all([
     target: 'node22',
     external: ['electron'],
     outfile: 'dist/update-audit-main.cjs',
+  }),
+  build({
+    entryPoints: ['tests/fixtures/window-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    external: ['electron'],
+    outfile: 'dist/window-main.cjs',
+  }),
+  build({
+    entryPoints: ['tests/fixtures/performance-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    external: ['electron'],
+    outfile: 'dist/performance-main.cjs',
+  }),
+  build({
+    entryPoints: ['tests/fixtures/handoff-main.ts'],
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    external: ['electron'],
+    outfile: 'dist/handoff-audit-main.cjs',
   }),
   build({
     entryPoints: ['src/main/preload.ts'],

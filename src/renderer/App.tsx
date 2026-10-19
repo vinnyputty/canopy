@@ -1,6 +1,12 @@
 import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
 import { recoverTriage } from '../shared/triage';
 import { InboxPanel } from './InboxPanel';
+import { WindowedRows, type RowWindow } from './WindowedRows';
+import {
+  handoffNavigation,
+  useWorkHandoff,
+  HANDOFF_REJECTION,
+} from './work-handoff';
 import {
   relationshipChangedKeys,
   relationshipDestination,
@@ -15,6 +21,20 @@ import {
   movePaletteSelection,
   type PaletteEntry,
 } from './navigation-palette';
+import {
+  runSetupVerification,
+  verifiedSetupConnection,
+} from './connection-setup';
+import { SetupHelp, TokenPermissions } from './SetupHelp';
+import { supportLinks, type SupportLink } from '../shared/support';
+import { withScrollPositions } from './scroll-position';
+import { WorkspaceBackupPanel } from './WorkspaceBackupPanel';
+import {
+  DEFAULT_COPY_TEMPLATE,
+  COPY_PLACEHOLDERS,
+  validateCopyTemplate,
+  renderCopyTemplate,
+} from '../shared/copy-template';
 import { IssueSearch, type SearchState } from './issue-search';
 import {
   Pickers,
@@ -32,6 +52,7 @@ import React, {
 } from 'react';
 import {
   AlertCircle,
+  Info,
   ArrowLeft,
   ArrowRight,
   Pin,
@@ -89,6 +110,8 @@ import {
   ancestorPath,
   expansionKeys,
   childCounts,
+  treeCounts,
+  visibleRows,
   indexTree,
   type IssueNode,
 } from './tree';
@@ -147,7 +170,15 @@ import {
   readingStyle,
 } from './table-view';
 import { Mutations } from './mutations';
-import { RefreshSchedule, RootRefreshGate } from './refresh';
+import {
+  refreshDestination,
+  treeRefreshError,
+  RefreshAnnouncements,
+  type RefreshAnnouncement,
+  RefreshSchedule,
+  RootRefreshGate,
+} from './refresh';
+import { RefreshStatus } from './RefreshStatus';
 import {
   configuredRoots,
   sourceTabId,
@@ -228,11 +259,35 @@ function refreshRootKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {
 }
 export function App() {
   const updates = useUpdates();
-  const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const [workspace, storeWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const scrollPositions = useRef(new Map<string, number>());
+  const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const setWorkspace = useCallback(
+    (update: React.SetStateAction<Workspace>) => {
+      storeWorkspace((current) => {
+        if (typeof update !== 'function') return update;
+        const overlaid = withScrollPositions(current, scrollPositions.current);
+        const next = update(overlaid);
+        return next === overlaid ? current : next;
+      });
+    },
+    [],
+  );
+  useEffect(() => {
+    const retained = new Set(
+      [...workspace.tabs, ...(workspace.closedTabs ?? [])].map((tab) => tab.id),
+    );
+    for (const id of scrollPositions.current.keys())
+      if (!retained.has(id)) scrollPositions.current.delete(id);
+  }, [workspace.tabs, workspace.closedTabs]);
+  useEffect(() => () => clearTimeout(scrollSaveTimer.current), []);
   const [selectedViewIssue, setSelectedViewIssue] = useState<string | null>(
     null,
   );
   const [connections, storeConnections] = useState<Connection[]>([]);
+  const [snapshotEvictions, setSnapshotEvictions] = useState(new Set<string>());
   const [snapshots, setSnapshots] = useState<Record<string, TreeSnapshot>>({});
   const [confirmedSnapshots, setConfirmedSnapshots] = useState<
     Record<string, TreeSnapshot>
@@ -241,6 +296,8 @@ export function App() {
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [ready, setReady] = useState(false);
+  const [handoffHydrated, setHandoffHydrated] = useState(false);
+  const [handoffEnabled, setHandoffEnabled] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   const demoTimeScale = useRef(1);
   const [tour, setTour] = useState<{
@@ -262,7 +319,10 @@ export function App() {
     | 'shortcuts'
     | 'appearance'
     | 'settings'
+    | 'backup'
     | 'connect'
+    | 'setup'
+    | 'support'
     | null
   >(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
@@ -273,6 +333,63 @@ export function App() {
       settingsTrigger.current?.focus();
     }
   }, [dialog]);
+  const [setupConnectionId, setSetupConnectionId] = useState<string>();
+  useEffect(() => {
+    if (dialog !== 'connect' && dialog !== 'setup') return;
+    let current = true;
+    void window.canopy
+      .connections()
+      .then((value) => {
+        if (current) storeConnections(value);
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [dialog]);
+  const supportButton = useRef<HTMLButtonElement>(null);
+  const supportReturnFocus = useRef<{
+    trigger: HTMLElement | null;
+    fallback: HTMLElement | null;
+  } | null>(null);
+  const showSupport = useCallback((trigger?: HTMLElement) => {
+    if (!supportReturnFocus.current) {
+      supportReturnFocus.current = {
+        fallback: settingsFlow.current
+          ? settingsTrigger.current
+          : supportButton.current,
+        trigger:
+          trigger ??
+          (document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null),
+      };
+    }
+    setDialog('support');
+  }, []);
+  useLayoutEffect(() => {
+    if (dialog === null && supportReturnFocus.current) {
+      const { trigger, fallback } = supportReturnFocus.current;
+      supportReturnFocus.current = null;
+      const target =
+        trigger?.isConnected && trigger !== document.body
+          ? trigger
+          : fallback?.isConnected
+            ? fallback
+            : supportButton.current;
+      target?.focus({ preventScroll: true });
+    }
+  }, [dialog]);
+  useEffect(() => {
+    const unsubscribe = window.canopy.onShowSupport(() => showSupport());
+    // Acknowledge only after the authoritative renderer installs its listener.
+    void window.canopy
+      .supportReady()
+      .catch((error) =>
+        console.error('Could not subscribe to About requests:', error),
+      );
+    return unsubscribe;
+  }, [showSupport]);
   const [appearancePreview, setAppearancePreview] = useState<{
     theme: Workspace['theme'];
     palette: NonNullable<Workspace['palette']>;
@@ -300,13 +417,19 @@ export function App() {
   const [history, setHistory] = useState<Navigation>({ back: [], forward: [] });
   const historyRef = useRef(history);
   const workspaceRef = useRef(workspace);
+  const workspaceTransferBusy = useRef(false);
+  const [workspaceTransferActive, setWorkspaceTransferActive] = useState(false);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
   const demoResetting = useRef(false);
   const appearanceSaving = useRef(false);
+  const workspaceLoaded = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
-  workspaceRef.current = workspace;
+  workspaceRef.current = withScrollPositions(
+    workspace,
+    scrollPositions.current,
+  );
   connectionsRef.current = connections;
   historyRef.current = history;
   const [sidebarSession, setSidebarSession] = useState(emptySidebarSession);
@@ -637,6 +760,11 @@ export function App() {
   const displayedTrees = useRef(new Map<string, IssueNode | null>());
   const attemptedLoads = useRef(new Set<string>());
   const previousVirtualTabs = useRef(new Map<string, TabState>());
+  const [refreshAnnouncement, setRefreshAnnouncement] =
+    useState<RefreshAnnouncement | null>(null);
+  const [refreshAnnouncements] = useState(
+    () => new RefreshAnnouncements(setRefreshAnnouncement),
+  );
   const refreshSchedule = useRef(new RefreshSchedule());
   const rootRefreshes = useRef(new RootRefreshGate<TreeSnapshot>());
   const snapshotsRef = useRef(snapshots);
@@ -693,6 +821,12 @@ export function App() {
             }
           }
           relationshipConfirmedSnapshots.current = view.confirmedSnapshots;
+          setSnapshotEvictions(view.evicted);
+          for (const id of view.evicted) {
+            const tab = tabsRef.current.find((tab) => tab.id === id);
+            if (tab) rootRefreshes.current.releaseSnapshot(refreshRootKey(tab));
+            displayedTrees.current.delete(id);
+          }
           setSnapshots(view.snapshots);
           setConfirmedSnapshots(view.confirmedSnapshots);
           setSaving(view.saving);
@@ -709,6 +843,17 @@ export function App() {
               fields.map((field) => field[0].toUpperCase() + field.slice(1)),
             ),
           })),
+        undefined,
+        (tab) => [rootRefreshes.current.snapshot(refreshRootKey(tab))],
+        function* (tab) {
+          const root = displayedTrees.current.get(tab.id);
+          const pending = root ? [root] : [];
+          while (pending.length) {
+            const node = pending.pop()!;
+            yield node.issue;
+            pending.push(...node.children);
+          }
+        },
       ),
   );
   const editSession = useRef(0);
@@ -793,6 +938,8 @@ export function App() {
       })),
     [savedSources],
   );
+  const sourceTabsRef = useRef(sourceTabs);
+  sourceTabsRef.current = sourceTabs;
   activeIdRef.current = activeSavedView
     ? (sourceTabs[0]?.id ?? null)
     : workspace.activeTabId;
@@ -810,6 +957,25 @@ export function App() {
         .filter((tab) => savedSources.some((source) => sameRoot(source, tab)))
         .map((tab) => tab.id)
     : [];
+  const refreshOwner = refreshDestination(
+    workspace.activeTabId,
+    activeSavedView?.id,
+  );
+  refreshAnnouncements.activate(
+    refreshOwner,
+    activeSavedView
+      ? {
+          name: activeSavedView.name,
+          roots: savedSources.map((source) => ({
+            id: refreshRootKey(source),
+            label: `${connections.find((connection) => connection.id === source.connectionId)?.name ?? source.connectionId} · ${source.rootKey}`,
+            tabIds: allRefreshTabs
+              .filter((tab) => sameRoot(source, tab))
+              .map((tab) => tab.id),
+          })),
+        }
+      : undefined,
+  );
   const sourceTabKeys = JSON.stringify(
     workspace.tabs.map(({ id, connectionId, rootKey }) => [
       id,
@@ -851,6 +1017,10 @@ export function App() {
     [activeSavedView, savedSources, viewSnapshots, currentUsers],
   );
   const snapshot = activeTab ? snapshots[activeTab.id] : undefined;
+  const savingKeys =
+    snapshot?.issues
+      .filter((issue) => saving.has(`${activeTab?.connectionId}:${issue.key}`))
+      .map((issue) => issue.key) ?? [];
   const nextTaskOpen = activeTab ? Boolean(nextTaskViews[activeTab.id]) : false;
   const nextTaskCriterion = activeTab
     ? (nextTaskCriteria[activeTab.id] ?? 'rank')
@@ -876,10 +1046,13 @@ export function App() {
       if (!root) return current;
       return {
         ...current,
-        seenRoots: boundRoots({
-          ...current.seenRoots,
-          [rootKey]: markIssueSeen(root, issue, Date.now()),
-        }),
+        seenRoots: boundRoots(
+          {
+            ...current.seenRoots,
+            [rootKey]: markIssueSeen(root, issue, Date.now()),
+          },
+          current.seenRoots ?? {},
+        ),
       };
     });
   };
@@ -1019,7 +1192,11 @@ export function App() {
     (patch: Partial<RootView>) => {
       if (!activeTab) return;
       setWorkspace((current) => setRootView(current, activeTab, patch));
-      if (patch.assumeMatchingStatusTransitions && snapshot)
+      if (
+        patch.assumeMatchingStatusTransitions &&
+        snapshot &&
+        !snapshot.incomplete
+      )
         void pickers.prime(
           activeTab.connectionId,
           activeTab.rootKey,
@@ -1057,6 +1234,22 @@ export function App() {
   useEffect(() => {
     tabsRef.current = allRefreshTabs;
   }, [allRefreshTabs]);
+  const protectedSnapshotIds = JSON.stringify([
+    ...Object.keys(bulkOperations),
+    ...(childParent ? [childParent.tabId] : []),
+    ...(multiSelection ? [multiSelection.tabId] : []),
+    ...(activeSavedView
+      ? activeViewSourceIdsRef.current
+      : activeTab
+        ? [activeTab.id]
+        : []),
+    ...allRefreshTabs
+      .filter((tab) => editor?.connectionId === tab.connectionId)
+      .map((tab) => tab.id),
+  ]);
+  useEffect(() => {
+    mutations.protectSnapshots(JSON.parse(protectedSnapshotIds));
+  }, [mutations, protectedSnapshotIds]);
   useEffect(() => {
     if (activeSavedView?.filters.assignee !== 'me') return;
     let live = true;
@@ -1215,6 +1408,7 @@ export function App() {
       .then(([nextConnections, saved, isDemo, timeScale]) => {
         if (!live) return;
         demoTimeScale.current = timeScale;
+        workspaceLoaded.current = true;
         setDemoMode(isDemo);
         document.title = isDemo ? 'Canopy — Demo' : 'Canopy';
         setConnections(nextConnections);
@@ -1265,6 +1459,7 @@ export function App() {
                 },
           ),
         );
+        setHandoffHydrated(true);
       })
       .catch((error) =>
         setErrors((value) => ({
@@ -1285,21 +1480,40 @@ export function App() {
       appearancePreview?.palette ?? workspace.palette ?? 'default';
   }, [workspace.theme, workspace.palette, appearancePreview]);
 
-  const saveWorkspace = useCallback((value: Workspace) => {
-    if (demoResetting.current) return Promise.resolve();
-    const save = pendingWorkspaceSave.current
-      .catch(() => {})
-      .then(() => {
-        if (!demoResetting.current) return window.canopy.saveWorkspace(value);
-      });
-    pendingWorkspaceSave.current = save;
-    return save;
-  }, []);
+  const saveWorkspace = useCallback(
+    (value: Workspace, transferFlush = false) => {
+      if (demoResetting.current) return Promise.resolve();
+      const allowed = () => {
+        if (workspaceTransferBusy.current && !transferFlush)
+          throw new Error(
+            'Workspace transfer is in progress; wait for reload.',
+          );
+      };
+      try {
+        allowed();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      const save = pendingWorkspaceSave.current
+        .catch(() => {})
+        .then(() => {
+          allowed();
+          if (!demoResetting.current)
+            return window.canopy.saveWorkspace(
+              withScrollPositions(value, scrollPositions.current),
+            );
+        });
+      pendingWorkspaceSave.current = save;
+      return save;
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !workspaceLoaded.current) return;
     const timer = window.setTimeout(() => {
       workspaceSaveTimer.current = null;
+      if (workspaceTransferBusy.current) return;
       void saveWorkspace(workspace).catch((error) => {
         setErrors((value) => ({
           ...value,
@@ -1315,16 +1529,74 @@ export function App() {
     };
   }, [workspace, ready, saveWorkspace]);
 
+  const cancelledTrees = useRef(new Set<string>());
+  const treeRequests = useRef(new Map<string, { id: string; epoch: number }>());
+  const treeMounted = useRef(true);
+  useEffect(() => {
+    treeMounted.current = true;
+    const unsubscribe = window.canopy.onTreeProgress((requestId, next) => {
+      for (const [root, request] of treeRequests.current) {
+        if (request.id !== requestId) continue;
+        for (const target of tabsRef.current.filter(
+          (tab) => refreshRootKey(tab) === root,
+        )) {
+          if (refreshBlocked.current(target.connectionId)) continue;
+          // Refreshes retain the last cached tree until the final response.
+          if (
+            !snapshotsRef.current[target.id] ||
+            snapshotsRef.current[target.id].incomplete?.reason ===
+              'Loading more issues…'
+          )
+            mutations.receive(target, next, request.epoch);
+        }
+      }
+    });
+    const dispose = () => {
+      if (!treeMounted.current) return;
+      treeMounted.current = false;
+      unsubscribe();
+      rootRefreshes.current.clear();
+      for (const [root, request] of treeRequests.current) {
+        const [connectionId] = JSON.parse(root);
+        void window.canopy.cancelTree(connectionId, request.id);
+      }
+      treeRequests.current.clear();
+    };
+    window.addEventListener('beforeunload', dispose);
+    return () => {
+      window.removeEventListener('beforeunload', dispose);
+      dispose();
+    };
+  }, [mutations]);
+  const cancelTree = useCallback((tab: TabState) => {
+    const root = refreshRootKey(tab);
+    cancelledTrees.current.add(root);
+    rootRefreshes.current.invalidateQueued(root);
+    const request = treeRequests.current.get(root);
+    if (request) void window.canopy.cancelTree(tab.connectionId, request.id);
+  }, []);
+
   const refreshTab = useCallback(
     async (
       tab: TabState,
       quiet = false,
       explicit = false,
       userRequested = false,
+      retryCancelled = false,
     ) => {
       if (!tabsRef.current.some((item) => item.id === tab.id)) return;
       if (userRequested) manualRelationshipRefreshes.current.add(tab.id);
+      const userQueued = userRequested && refreshAnnouncements.request(tab.id);
       explicit ||= forcedRefreshes.current.has(tab.id);
+      if (retryCancelled) cancelledTrees.current.delete(refreshRootKey(tab));
+      if (cancelledTrees.current.has(refreshRootKey(tab))) return;
+      if (
+        mutations.isEvicted(tab.id) &&
+        !explicit &&
+        activeIdRef.current !== tab.id &&
+        !activeViewSourceIdsRef.current.includes(tab.id)
+      )
+        return;
       if (
         (!navigator.onLine && !demoMode) ||
         refreshBlocked.current(tab.connectionId)
@@ -1335,20 +1607,40 @@ export function App() {
       }
       if ((cooldowns.current[tab.connectionId] ?? 0) > Date.now()) return;
       if (!refreshSchedule.current.begin(tab.id, Date.now(), explicit)) {
-        if (explicit && !runningExplicitRefreshes.current.has(tab.id)) {
+        if (
+          userQueued ||
+          (explicit && !runningExplicitRefreshes.current.has(tab.id))
+        ) {
           forcedRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
         }
         return;
       }
+      const epoch = mutations.beginRefresh();
       const rootKey = refreshRootKey(tab);
       const load = rootRefreshes.current.load(
         rootKey,
         explicit,
         !snapshotsRef.current[tab.id],
-        () => window.canopy.tree(tab.connectionId, tab.rootKey),
+        () => {
+          if (
+            !treeMounted.current ||
+            cancelledTrees.current.has(rootKey) ||
+            !tabsRef.current.some((item) => refreshRootKey(item) === rootKey)
+          )
+            throw new Error('Tree request cancelled before dispatch.');
+          const id = crypto.randomUUID();
+          treeRequests.current.set(rootKey, { id, epoch });
+          return window.canopy
+            .tree(tab.connectionId, tab.rootKey, id)
+            .finally(() => {
+              if (treeRequests.current.get(rootKey)?.id === id)
+                treeRequests.current.delete(rootKey);
+            });
+        },
       );
       if ('due' in load) {
+        mutations.endRefresh(epoch);
         refreshSchedule.current.defer(tab.id, load.due);
         return;
       }
@@ -1360,17 +1652,31 @@ export function App() {
       const sequence = (refreshSequences.current[tab.id] ?? 0) + 1;
       refreshSequences.current[tab.id] = sequence;
       if (explicit) runningExplicitRefreshes.current.set(tab.id, sequence);
-      const epoch = mutations.beginRefresh();
+      const announcement = refreshAnnouncements.begin(
+        tab.id,
+        tab.rootKey,
+        mutations.confirmedSnapshot(tab.id) ?? snapshotsRef.current[tab.id],
+      );
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
       try {
         const next = await load.promise;
+        if (next.incomplete) {
+          const status = await window.canopy
+            .syncStatus(tab.connectionId)
+            .catch(() => null);
+          if (status?.retryAt) {
+            cooldowns.current[tab.connectionId] = status.retryAt;
+            setCooldownTimes({ ...cooldowns.current });
+          }
+        }
         const targets = load.started
           ? tabsRef.current.filter((item) => refreshRootKey(item) === rootKey)
           : [tab];
         if (
           rootRefreshes.current.isCurrent(rootKey, load.generation) &&
           !refreshBlocked.current(tab.connectionId) &&
+          !next.incomplete &&
           connectionsRef.current.find((item) => item.id === tab.connectionId)
             ?.provider === 'jira' &&
           targets.some(
@@ -1393,7 +1699,9 @@ export function App() {
                 refreshSequences.current[tab.id] !== sequence)
             )
               continue;
-            const previous = mutations.confirmedSnapshot(target.id);
+            const previous =
+              mutations.confirmedSnapshot(target.id) ??
+              snapshotsRef.current[target.id];
             mutations.receive(target, next, epoch);
             const confirmed = mutations.confirmedSnapshot(target.id) ?? next;
             if (manualRelationships)
@@ -1408,23 +1716,35 @@ export function App() {
                 ],
                 new Set(),
               );
+            if (target.id !== tab.id)
+              refreshAnnouncements.receive(
+                target.id,
+                mutations.confirmedSnapshot(target.id) ?? next,
+                previous,
+                announcement.scope,
+              );
             delivered.add(target.id);
           }
           if (delivered.size) {
             const confirmed =
               mutations.confirmedSnapshot(delivered.values().next().value!) ??
               next;
+            if (mutations.confirmedSnapshot(delivered.values().next().value!))
+              rootRefreshes.current.replaceSnapshot(rootKey, confirmed);
             setWorkspace((current) => {
               const seenKey = seenRootKey(tab.connectionId, tab.rootKey);
               return {
                 ...current,
-                seenRoots: boundRoots({
-                  ...current.seenRoots,
-                  [seenKey]: seedOrExtend(
-                    current.seenRoots?.[seenKey],
-                    confirmed,
-                  ),
-                }),
+                seenRoots: boundRoots(
+                  {
+                    ...current.seenRoots,
+                    [seenKey]: seedOrExtend(
+                      current.seenRoots?.[seenKey],
+                      confirmed,
+                    ),
+                  },
+                  current.seenRoots ?? {},
+                ),
               };
             });
           }
@@ -1439,8 +1759,18 @@ export function App() {
           )
             manualRelationshipRefreshes.current.add(tab.id);
           deferredRefreshes.current.add(tab.id);
+          if (rootRefreshes.current.isCurrent(rootKey, load.generation))
+            rootRefreshes.current.releaseSnapshot(rootKey);
+        } else {
+          if (rootRefreshes.current.isCurrent(rootKey, load.generation))
+            rootRefreshes.current.releaseSnapshot(rootKey);
         }
         if (!delivered.size) return;
+        if (delivered.has(tab.id))
+          refreshAnnouncements.complete(
+            announcement,
+            mutations.confirmedSnapshot(tab.id) ?? next,
+          );
         setConnectionErrors((current) => {
           const copy = new Set(current);
           for (const id of delivered) copy.delete(id);
@@ -1463,19 +1793,23 @@ export function App() {
         if (
           refreshSequences.current[tab.id] !== sequence ||
           !rootRefreshes.current.isCurrent(rootKey, load.generation) ||
-          !tabsRef.current.some((item) => item.id === tab.id)
+          !tabsRef.current.some((item) => item.id === tab.id) ||
+          refreshBlocked.current(tab.connectionId)
         )
           return;
         if (status?.retryAt) {
           cooldowns.current[tab.connectionId] = status.retryAt;
           setCooldownTimes({ ...cooldowns.current });
         }
+        const message = treeRefreshError(error);
+        refreshAnnouncements.fail(announcement, tab.rootKey, message);
         setConnectionErrors((current) => new Set(current).add(tab.id));
         setErrors((current) => ({
           ...current,
-          [tab.id]: error instanceof Error ? error.message : String(error),
+          [tab.id]: message,
         }));
       } finally {
+        refreshAnnouncements.end(announcement);
         mutations.endRefresh(epoch);
         if (runningExplicitRefreshes.current.get(tab.id) === sequence)
           runningExplicitRefreshes.current.delete(tab.id);
@@ -1656,9 +1990,11 @@ export function App() {
   const restoreScroll = useCallback((tab: TabState) => {
     const element = scrollRef.current;
     if (!element) return;
-    element.scrollTop = tab.scrollTop;
+    const savedTop = scrollPositions.current.get(tab.id) ?? tab.scrollTop;
+    element.scrollTop = savedTop;
     const scrollTop = element.scrollTop;
-    if (scrollTop === tab.scrollTop) return;
+    if (scrollTop === savedTop) return;
+    scrollPositions.current.set(tab.id, scrollTop);
     // Chromium can clamp without emitting another scroll event after a layout
     // restoration. Save the actual offset even while native events are guarded.
     setWorkspace((current) => {
@@ -1694,6 +2030,7 @@ export function App() {
   }, [activeTab, Boolean(snapshot), restoreScroll]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
+    if (patch.scrollTop !== undefined) scrollPositions.current.delete(tabId);
     setWorkspace((current) => {
       const tab = current.tabs.find((tab) => tab.id === tabId);
       const next =
@@ -1719,6 +2056,7 @@ export function App() {
     if (!restoring) setHistory(visit(historyRef.current, from, tab));
     pendingScrollRestore.current =
       current.tabs.find((item) => sameRoot(item, tab))?.id ?? tab.id;
+    if (restoring) scrollPositions.current.delete(pendingScrollRestore.current);
     setWorkspace((value) => ({
       ...activateTab(value, tab, restoring),
       activeSavedViewId: null,
@@ -1803,17 +2141,22 @@ export function App() {
 
   const forgetTabs = useCallback(
     (ids: string[]) => {
-      for (const tab of workspaceRef.current.tabs.filter((item) =>
-        ids.includes(item.id),
-      )) {
-        if (
-          !tabsRef.current.some(
-            (other) =>
-              !ids.includes(other.id) &&
-              refreshRootKey(other) === refreshRootKey(tab),
-          )
-        )
+      const removed = tabsRef.current.filter((tab) => ids.includes(tab.id));
+      const survivors = tabsRef.current.filter((tab) => !ids.includes(tab.id));
+      // A saved-view root remains owned when its real tab closes. Materialize
+      // that consumer before releasing the tab or dispatching queued work.
+      for (const source of sourceTabsRef.current)
+        if (!survivors.some((tab) => sameRoot(tab, source)))
+          survivors.push(source);
+      tabsRef.current = survivors;
+      for (const tab of removed) {
+        const owners = survivors.filter((other) => sameRoot(other, tab));
+        for (const owner of owners) mutations.adopt(owner, tab.id);
+        if (!owners.length) {
+          cancelTree(tab);
           rootRefreshes.current.forget(refreshRootKey(tab));
+          cancelledTrees.current.delete(refreshRootKey(tab));
+        }
       }
       for (const id of ids) {
         mutations.forget(id);
@@ -1825,6 +2168,7 @@ export function App() {
         forcedRefreshes.current.delete(id);
         manualRelationshipRefreshes.current.delete(id);
         runningExplicitRefreshes.current.delete(id);
+        refreshAnnouncements.forget(id);
       }
       for (const setter of [setLoading, setRefreshing, setConnectionErrors])
         setter(
@@ -1836,7 +2180,7 @@ export function App() {
         ),
       );
     },
-    [mutations],
+    [mutations, cancelTree],
   );
 
   useEffect(() => {
@@ -1850,15 +2194,20 @@ export function App() {
     );
     previousVirtualTabs.current = virtualTabs;
     if (!removed.length) return;
-    for (const tab of removed)
+    for (const tab of removed) {
+      for (const owner of allRefreshTabs.filter((item) => sameRoot(item, tab)))
+        mutations.adopt(owner, tab.id);
       if (
         !allRefreshTabs.some(
           (item) => refreshRootKey(item) === refreshRootKey(tab),
         )
-      )
+      ) {
+        cancelTree(tab);
         rootRefreshes.current.forget(refreshRootKey(tab));
+      }
+    }
     forgetTabs(removed.map((tab) => tab.id));
-  }, [allRefreshTabs, forgetTabs]);
+  }, [allRefreshTabs, forgetTabs, cancelTree, mutations]);
 
   const closeTabIds = useCallback(
     (ids: string[]) => {
@@ -2188,7 +2537,8 @@ export function App() {
         id: 'refresh',
         label: 'Refresh current tree',
         icon: RefreshCw,
-        run: () => activeTab && void refreshTab(activeTab, true, true, true),
+        run: () =>
+          activeTab && void refreshTab(activeTab, true, true, true, true),
       },
       {
         id: 'expandAll',
@@ -2203,18 +2553,28 @@ export function App() {
         run: () => expandAll(false),
       },
       {
+        id: 'support',
+        label: 'About & Support',
+        icon: Info,
+        run: () => showSupport(),
+      },
+      {
         id: 'shortcuts',
         label: 'Keyboard shortcuts',
         icon: Keyboard,
         run: () => setDialog('shortcuts'),
       },
     ],
-    [activeTab, expandAll, refreshTab],
+    [activeTab, expandAll, refreshTab, showSupport],
   );
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
+      if (workspaceTransferBusy.current) {
+        event.preventDefault();
+        return;
+      }
       if (workBrief) return;
       const command = Object.keys(workspace.shortcuts).find((id) =>
         matchesShortcut(event, workspace.shortcuts[id]),
@@ -2478,7 +2838,7 @@ export function App() {
   );
   const tasks = useMemo(
     () =>
-      snapshot
+      snapshot && nextTaskOpen
         ? nextTasks(
             snapshot,
             activeConnection?.provider ?? 'jira',
@@ -2500,6 +2860,7 @@ export function App() {
         : [],
     [
       snapshot,
+      nextTaskOpen,
       activeConnection?.provider,
       nextTaskCriterion,
       activeTab?.id,
@@ -2567,26 +2928,11 @@ export function App() {
   const expandedSet = new Set(
     filtering ? expansionKeys(shownTree) : (activeTab?.expanded ?? []),
   );
+  if (editor && editor.connectionId === activeTab?.connectionId)
+    for (const node of ancestorPath(shownTree, editor.key))
+      expandedSet.add(node.issue.key);
   const linkedSet = new Set(activeTab?.linkedExpanded ?? []);
-  const counts = useMemo(() => {
-    const result = new Map<string, ReturnType<typeof childCounts>>();
-    const visit = (node: IssueNode): number => {
-      const descendants = node.children.reduce(
-        (sum, child) => sum + 1 + visit(child),
-        0,
-      );
-      result.set(node.issue.key, {
-        open: node.children.filter(
-          (child) => child.issue.status.category !== 'done',
-        ).length,
-        total: node.children.length,
-        descendants,
-      });
-      return descendants;
-    };
-    if (tree) visit(tree);
-    return result;
-  }, [tree]);
+  const counts = useMemo(() => treeCounts(tree), [tree]);
   const breadcrumb = ancestorPath(
     tree,
     activeTab?.selectedKey ?? activeTab?.focusKey,
@@ -3247,6 +3593,58 @@ export function App() {
     setReveal({ tabId: tab.id, key });
   };
 
+  useEffect(() => {
+    if (
+      handoffHydrated &&
+      ready &&
+      (allRefreshTabs.every((tab) =>
+        refreshSchedule.current.hasSettled(tab.id),
+      ) ||
+        !online)
+    )
+      setHandoffEnabled(true);
+  }, [handoffHydrated, ready, allRefreshTabs, loading, refreshing, online]);
+  useWorkHandoff(
+    handoffEnabled,
+    (intent) => {
+      const data = allRefreshTabs.flatMap((tab) =>
+        confirmedSnapshots[tab.id]
+          ? [
+              {
+                connectionId: tab.connectionId,
+                snapshot: confirmedSnapshots[tab.id],
+              },
+            ]
+          : [],
+      );
+      const target = handoffNavigation(
+        intent,
+        connectionsRef.current,
+        workspaceRef.current,
+        data,
+        () => crypto.randomUUID(),
+      );
+      if (target.kind === 'view') {
+        setInboxOpen(false);
+        setSelectedViewIssue(null);
+        setPreviewOpen(false);
+        setWorkspace((current) => ({
+          ...current,
+          activeSavedViewId: target.viewId,
+        }));
+      } else {
+        navigate(target.tab);
+        setNextTaskViews((current) => ({ ...current, [target.tab.id]: false }));
+        navigationReveal.current = {
+          tabId: target.tab.id,
+          key: target.tab.selectedKey!,
+        };
+        setReveal({ tabId: target.tab.id, key: target.tab.selectedKey! });
+      }
+    },
+    () => setErrors((current) => ({ ...current, app: HANDOFF_REJECTION })),
+  );
+
   const previewPane = previewOpen ? (
     previewRoute && previewKey ? (
       <IssuePreview
@@ -3300,6 +3698,12 @@ export function App() {
           setWorkspace((current) => ({ ...current, previewWidth }))
         }
         onClose={closePreview}
+        onAuthoringChanged={() => {
+          for (const tab of allRefreshTabs.filter(
+            (tab) => tab.connectionId === previewRoute.connectionId,
+          ))
+            void refreshTab(tab);
+        }}
         onChanged={(issue) => {
           mutations.acceptConfirmedLabels(previewRoute.connectionId, issue);
           for (const tab of allRefreshTabs.filter((tab) =>
@@ -3313,14 +3717,21 @@ export function App() {
           void openExternal(previewRoute.connectionId, key)
         }
         onCopyKeySummary={(issue) => void copyIssueText(issue, 'key-summary')}
-        onWorkBrief={(preview) =>
+        onWorkBrief={(preview) => {
+          if (preview.issue.key !== previewRoute.key) {
+            setErrors((current) => ({
+              ...current,
+              app: 'The returned issue does not match the requested issue.',
+            }));
+            return;
+          }
           setWorkBrief({
             connectionId: previewRoute.connectionId,
-            issueKey: preview.issue.key,
+            issueKey: previewRoute.key,
             provider: previewRoute.provider,
             knownIssues:
-              snapshots[sourceTabId(previewRoute, workspace.tabs)]?.issues ??
-              [],
+              confirmedSnapshots[sourceTabId(previewRoute, workspace.tabs)]
+                ?.issues ?? [],
             preview,
             relationships:
               relationshipGraphs[
@@ -3329,8 +3740,8 @@ export function App() {
                   preview.issue.key,
                 )
               ],
-          })
-        }
+          });
+        }}
         onOpenComment={(commentId) => {
           void window.canopy
             .openComment(previewRoute.connectionId, previewKey, commentId)
@@ -3387,9 +3798,7 @@ export function App() {
     >
       <aside className="sidebar" aria-label="Canopy sidebar">
         <div className="brand">
-          <div className="brand-mark">
-            <span />
-          </div>
+          <img className="brand-mark" src="icon.svg" alt="" />
           <span>Canopy</span>
         </div>
         <button
@@ -3511,7 +3920,9 @@ export function App() {
         <button
           className="sidebar-settings"
           ref={settingsTrigger}
+          disabled={workspaceTransferActive}
           onClick={() => {
+            if (workspaceTransferBusy.current) return;
             settingsFlow.current = true;
             setDialog('settings');
           }}
@@ -3519,6 +3930,23 @@ export function App() {
           <Settings2 size={16} />
           <span>Settings</span>
         </button>
+        <button
+          className="sidebar-settings"
+          ref={supportButton}
+          onClick={(event) => showSupport(event.currentTarget)}
+        >
+          <Info size={16} />
+          <span>About &amp; Support</span>
+        </button>
+        {!demoMode && (
+          <button
+            className="sidebar-settings"
+            onClick={() => setDialog('setup')}
+          >
+            <LogIn size={16} />
+            <span>Setup help</span>
+          </button>
+        )}
         {!demoMode && (
           <button className="sidebar-settings" onClick={launchDemo}>
             <CircleDot size={16} />
@@ -3571,6 +3999,11 @@ export function App() {
       </aside>
 
       <main className="main">
+        <RefreshStatus
+          message={refreshAnnouncement}
+          owner={refreshOwner}
+          scope={refreshAnnouncements.scope}
+        />
         <div className="tabstrip" role="tablist" aria-label="Open issue trees">
           <button
             className="icon-button sidebar-reveal"
@@ -3769,18 +4202,20 @@ export function App() {
                   }}
                   onMoreRoots={() => setInboxRootLimit((limit) => limit + 10)}
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((tab) =>
                         sameRoot(tab, source),
                       );
-                      if (tab) void refreshTab(tab, true, true, true);
+                      if (tab) void refreshTab(tab, true, true, true, true);
                     }
                   }}
                 />
               ) : (
                 <SavedViewsPanel
                   view={activeSavedView}
+                  refreshStatusId="refresh-status"
                   connections={connections}
                   availableRoots={availableRoots}
                   sources={savedSources}
@@ -3790,7 +4225,15 @@ export function App() {
                     savedSources
                       .map((source) => [
                         source.id,
-                        errors[sourceTabId(source, workspace.tabs)],
+                        errors[sourceTabId(source, workspace.tabs)] ??
+                          (snapshotEvictions.has(
+                            sourceTabId(source, workspace.tabs),
+                          )
+                            ? 'Snapshot released to keep memory bounded. Reload when online; unread baselines are retained.'
+                            : undefined) ??
+                          (viewSnapshots[source.id]?.incomplete
+                            ? `Incomplete results: ${viewSnapshots[source.id].incomplete!.reason}`
+                            : undefined),
                       ])
                       .filter(([, error]) => error),
                   )}
@@ -3800,12 +4243,20 @@ export function App() {
                   loading={
                     new Set(
                       savedSources
-                        .filter((source) =>
-                          loading.has(sourceTabId(source, workspace.tabs)),
+                        .filter(
+                          (source) =>
+                            loading.has(sourceTabId(source, workspace.tabs)) ||
+                            refreshing.has(sourceTabId(source, workspace.tabs)),
                         )
                         .map((source) => source.id),
                     )
                   }
+                  onCancel={() => {
+                    for (const tab of allRefreshTabs.filter((tab) =>
+                      savedSources.some((source) => sameRoot(source, tab)),
+                    ))
+                      cancelTree(tab);
+                  }}
                   onSelect={setSelectedViewIssue}
                   onOpen={openSavedResult}
                   onChange={(view) =>
@@ -3826,12 +4277,13 @@ export function App() {
                     }))
                   }
                   onRefresh={() => {
+                    if (!refreshAnnouncements.requestView()) return;
                     setIdentityRetry((value) => value + 1);
                     for (const source of savedSources) {
                       const tab = allRefreshTabs.find((item) =>
                         sameRoot(item, source),
                       );
-                      if (tab) void refreshTab(tab, true, true, true);
+                      if (tab) void refreshTab(tab, true, true, true, true);
                     }
                   }}
                 />
@@ -3949,7 +4401,9 @@ export function App() {
                     refreshing.has(activeTab.id) ||
                     (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                   }
-                  onClick={() => void refreshTab(activeTab, true, true, true)}
+                  onClick={() =>
+                    void refreshTab(activeTab, true, true, true, true)
+                  }
                   title="Refresh"
                 >
                   <RefreshCw
@@ -3967,13 +4421,16 @@ export function App() {
                       );
                       setWorkspace((current) => ({
                         ...current,
-                        seenRoots: boundRoots({
-                          ...current.seenRoots,
-                          [rootKey]: markRootSeen(
-                            confirmedSnapshot,
-                            current.seenRoots?.[rootKey],
-                          ),
-                        }),
+                        seenRoots: boundRoots(
+                          {
+                            ...current.seenRoots,
+                            [rootKey]: markRootSeen(
+                              confirmedSnapshot,
+                              current.seenRoots?.[rootKey],
+                            ),
+                          },
+                          current.seenRoots ?? {},
+                        ),
                       }));
                     }}
                   >
@@ -4246,9 +4703,9 @@ export function App() {
                 {activeTab.focusKey && <span>Focused subtree</span>}
               </nav>
             }
-            {(errors[activeTab.id] ||
+            {(errors.workspace ||
+              errors[activeTab.id] ||
               errors.edit ||
-              errors.workspace ||
               errors.app ||
               (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow) && (
               <div className="error-banner" role="alert">
@@ -4256,14 +4713,19 @@ export function App() {
                 <span>
                   {(cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                     ? `${activeConnection?.provider === 'github' ? 'GitHub' : 'Jira'} rate limit reached. Refresh resumes after ${new Date(cooldownTimes[activeTab.connectionId]).toLocaleTimeString()}.`
-                    : (errors.edit ??
+                    : (errors.workspace ??
+                      errors.edit ??
                       errors[activeTab.id] ??
-                      errors.workspace ??
                       errors.app)}
                 </span>
+                {!demoMode && (
+                  <button onClick={() => setDialog('setup')}>Setup help</button>
+                )}
                 {errors[activeTab.id] && (
                   <button
-                    onClick={() => void refreshTab(activeTab, true, true, true)}
+                    onClick={() =>
+                      void refreshTab(activeTab, true, true, true, true)
+                    }
                     disabled={
                       (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
@@ -4275,12 +4737,13 @@ export function App() {
                   </button>
                 )}
                 <button
+                  aria-label="Dismiss error"
                   onClick={() =>
                     setErrors((value) => {
                       const copy = { ...value };
+                      delete copy.workspace;
                       delete copy.edit;
                       delete copy[activeTab.id];
-                      delete copy.workspace;
                       delete copy.app;
                       return copy;
                     })
@@ -4302,8 +4765,48 @@ export function App() {
                 <small>⌘Z / Ctrl+Z</small>
               </div>
             )}
+            {snapshot &&
+              snapshot.issues.some(
+                (issue) => !activeSeenRoot?.issues[issue.key],
+              ) && (
+                <div className="error-banner" role="status">
+                  Unread tracking covers only retained baselines (up to 12
+                  roots, 1,000 issues per root and 2 MB). Existing unread
+                  baselines are kept; other issues have no change baseline. Once
+                  a limit is reached, new roots or issues cannot be tracked.
+                  Closing tabs or marking issues seen does not release space.
+                </div>
+              )}
+            {(loading.has(activeTab.id) ||
+              refreshing.has(activeTab.id) ||
+              snapshot?.incomplete) && (
+              <div className="error-banner" role="status">
+                <span>
+                  {snapshot?.incomplete
+                    ? `Incomplete results: ${snapshot.incomplete.reason}`
+                    : 'Loading issues… Cached issues remain readable.'}
+                </span>
+                {loading.has(activeTab.id) || refreshing.has(activeTab.id) ? (
+                  <button onClick={() => cancelTree(activeTab)}>
+                    Cancel load
+                  </button>
+                ) : (
+                  <button
+                    disabled={
+                      !online ||
+                      (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                    }
+                    onClick={() =>
+                      void refreshTab(activeTab, true, true, true, true)
+                    }
+                  >
+                    Retry load
+                  </button>
+                )}
+              </div>
+            )}
             {snapshot?.warnings.map((warning) => (
-              <div className="warning-banner" key={warning}>
+              <div className="warning-banner" key={warning} role="status">
                 <AlertCircle size={14} />
                 {warning}
               </div>
@@ -4675,14 +5178,40 @@ export function App() {
                       pendingScrollRestore.current === activeTab.id
                     )
                       return;
-                    updateTab(activeTab.id, {
-                      scrollTop: event.currentTarget.scrollTop,
-                    });
+                    scrollPositions.current.set(
+                      activeTab.id,
+                      event.currentTarget.scrollTop,
+                    );
+                    workspaceRef.current = withScrollPositions(
+                      workspaceRef.current,
+                      scrollPositions.current,
+                    );
+                    clearTimeout(scrollSaveTimer.current);
+                    scrollSaveTimer.current = setTimeout(() => {
+                      void saveWorkspace(workspaceRef.current).catch(
+                        (error: unknown) => {
+                          setErrors((current) => ({
+                            ...current,
+                            workspace: `Couldn’t save workspace: ${String(error)}`,
+                          }));
+                        },
+                      );
+                    }, 180);
                   }}
                 >
                   <TableHeader view={view} update={updateView} />
                   {loading.has(activeTab.id) && !snapshot ? (
                     <TreeSkeleton />
+                  ) : snapshotEvictions.has(activeTab.id) && !snapshot ? (
+                    <EmptyState
+                      icon={AlertCircle}
+                      title="Snapshot released to keep memory bounded"
+                      detail="Unread baselines are retained. Reload this tree when online; open drafts and the current view are protected."
+                      action="Reload tree"
+                      onAction={() =>
+                        void refreshTab(activeTab, false, true, true, true)
+                      }
+                    />
                   ) : errors[activeTab.id] && !snapshot ? (
                     <EmptyState
                       icon={AlertCircle}
@@ -4690,16 +5219,18 @@ export function App() {
                       detail={errors[activeTab.id]}
                       action="Try again"
                       onAction={() =>
-                        void refreshTab(activeTab, false, true, true)
+                        void refreshTab(activeTab, false, true, true, true)
                       }
                     />
                   ) : shownTree ? (
                     <div
                       role="tree"
+                      data-tab-id={activeTab.id}
                       aria-label={`${activeTab.rootKey} issue tree`}
                       className="issue-tree"
                     >
                       <TreeRows
+                        key={activeTab.id}
                         provider={activeConnection?.provider ?? 'jira'}
                         node={shownTree}
                         currentUser={currentUsers[activeTab.connectionId]}
@@ -4779,7 +5310,11 @@ export function App() {
                               : { issue, x, y, trigger: toggle },
                           );
                         }}
-                        editor={editor}
+                        editor={
+                          editor?.connectionId === activeTab.connectionId
+                            ? editor
+                            : null
+                        }
                         beginEdit={beginEdit}
                         onOpenWorkflow={(key) => void openWorkflow(key)}
                         cancelEdit={() => setEditor(null)}
@@ -4874,6 +5409,11 @@ export function App() {
                   )}
                 </div>
                 <footer className="statusbar">
+                  <span className="sr-only" role="status" aria-atomic="true">
+                    {savingKeys.length > 0
+                      ? `Saving ${savingKeys.join(', ')}`
+                      : ''}
+                  </span>
                   {snapshot ? (
                     <>
                       <span>
@@ -5174,7 +5714,7 @@ export function App() {
                 connectionId: activeTab.connectionId,
                 issueKey: rowMenu.issue.key,
                 provider: activeConnection?.provider ?? 'jira',
-                knownIssues: snapshot?.issues ?? [],
+                knownIssues: confirmedSnapshots[activeTab.id]?.issues ?? [],
                 relationships:
                   relationshipGraphs[
                     relationshipIdentity(
@@ -5188,7 +5728,14 @@ export function App() {
         />
       )}
       {workBrief && (
-        <WorkBriefDialog {...workBrief} onClose={() => setWorkBrief(null)} />
+        <WorkBriefDialog
+          {...workBrief}
+          copyTemplate={workspace.copyTemplate}
+          onTemplate={(copyTemplate) =>
+            setWorkspace((value) => ({ ...value, copyTemplate }))
+          }
+          onClose={() => setWorkBrief(null)}
+        />
       )}
       {childParent && (
         <CreateChildDialog
@@ -5229,13 +5776,25 @@ export function App() {
           connections={connections}
           recentRoots={workspace.recentRoots ?? []}
           activeRoot={activeTab ?? undefined}
-          onClose={() => setDialog(null)}
-          onOpen={openTab}
+          initialConnectionId={setupConnectionId}
+          onClose={() => {
+            setSetupConnectionId(undefined);
+            setDialog(null);
+          }}
+          onOpen={(id, key) => {
+            setSetupConnectionId(undefined);
+            openTab(id, key);
+          }}
         />
       )}
       {dialog === 'connect' && (
         <ConnectDialog
           initialFocus={settingsFlow.current}
+          connections={connections}
+          onOpen={(id) => {
+            setSetupConnectionId(id);
+            setDialog('open');
+          }}
           onClose={() => setDialog(null)}
           onConnected={(value) => {
             for (const tab of allRefreshTabs)
@@ -5268,9 +5827,20 @@ export function App() {
               delete copy.app;
               return copy;
             });
-            setDialog(null);
           }}
         />
+      )}
+      {dialog === 'setup' && (
+        <Dialog title="Setup help" onClose={() => setDialog(null)} wide>
+          <SetupHelp
+            hasConnections={connections.length > 0}
+            onConnect={() => setDialog('connect')}
+            onOpen={() => {
+              setSetupConnectionId(undefined);
+              setDialog('open');
+            }}
+          />
+        </Dialog>
       )}
       {dialog === 'commands' && (
         <CommandDialog
@@ -5345,6 +5915,7 @@ export function App() {
             }
             onAppearance={() => setDialog('appearance')}
             onShortcuts={() => setDialog('shortcuts')}
+            onBackup={() => setDialog('backup')}
             onConnect={() => setDialog('connect')}
           />
           <div className="dialog-footer">
@@ -5352,6 +5923,61 @@ export function App() {
               Done
             </button>
           </div>
+        </Dialog>
+      )}
+      {dialog === 'support' && (
+        <SupportDialog onClose={() => setDialog(null)} />
+      )}
+      {dialog === 'backup' && (
+        <Dialog
+          title="Workspace backup and transfer"
+          dismissible={!workspaceTransferActive}
+          onClose={() => {
+            if (!workspaceTransferBusy.current) setDialog(null);
+          }}
+          initialFocus
+          wide
+        >
+          <WorkspaceBackupPanel
+            connections={connections}
+            flush={async () => {
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+              }
+              await saveWorkspace(workspaceRef.current);
+            }}
+            onApply={async (operation) => {
+              if (workspaceTransferBusy.current)
+                throw new Error(
+                  'Workspace transfer is in progress; wait for reload.',
+                );
+              workspaceTransferBusy.current = true;
+              let transferred = false;
+              setWorkspaceTransferActive(true);
+              if (workspaceSaveTimer.current !== null) {
+                window.clearTimeout(workspaceSaveTimer.current);
+                workspaceSaveTimer.current = null;
+              }
+              try {
+                // This is the only save admitted after the persistence barrier closes.
+                await saveWorkspace(workspaceRef.current, true);
+                await operation();
+                transferred = true;
+                await window.canopy.reloadWorkspace();
+              } catch (error) {
+                if (!transferred) {
+                  workspaceTransferBusy.current = false;
+                  setWorkspaceTransferActive(false);
+                  throw error;
+                }
+                throw new Error(
+                  'Workspace transferred, but reload failed. Restart Canopy before editing.',
+                  { cause: error },
+                );
+              }
+            }}
+          />
         </Dialog>
       )}
       {dialog === 'appearance' && (
@@ -5521,7 +6147,76 @@ type RowsProps = {
   focusNeighbor: (key: string, direction: -1 | 1, extend?: boolean) => void;
 };
 
-function TreeRows(props: RowsProps) {
+export function TreeRows(props: RowsProps) {
+  const api = useRef<RowWindow | null>(null);
+  const expanded = useMemo(() => {
+    if (!props.editor) return props.expanded;
+    // An open editor owns its row even if a collapse action hides its ancestry.
+    const next = new Set(props.expanded);
+    for (const node of ancestorPath(props.node, props.editor.key))
+      next.add(node.issue.key);
+    return next;
+  }, [props.node, props.expanded, props.editor?.key]);
+  const rows = useMemo(
+    () => visibleRows(props.node, expanded),
+    [props.node, expanded],
+  );
+  const ids = useMemo(() => rows.map((row) => row.node.issue.key), [rows]);
+  const focus = (key: string, extend = false) => {
+    const element = api.current?.ensure(key);
+    if (!element) return;
+    props.suppressFocus.current = true;
+    if (extend) {
+      props.onMultiSelect(key, true, false);
+    } else props.onSelect(key);
+    element
+      .querySelector<HTMLElement>('[data-tree-key]')
+      ?.focus({ preventScroll: true });
+    props.suppressFocus.current = false;
+  };
+  return (
+    <WindowedRows
+      ids={ids}
+      api={api}
+      scrollSelector=".tree-scroll"
+      pinned={[
+        props.selectedKey,
+        props.editor?.key,
+        props.menuKey,
+        props.dragKey,
+        props.revealedKey,
+      ]}
+      renderRow={(index) => {
+        const { node, depth, position, siblings } = rows[index];
+        return (
+          <TreeRow
+            {...props}
+            node={node}
+            depth={props.depth + depth}
+            expanded={expanded}
+            position={position}
+            siblings={siblings}
+            focusDestination={focus}
+            edgeKeys={[ids[0], ids.at(-1)!]}
+            focusNeighbor={(key, direction, extend) => {
+              const target = ids[ids.indexOf(key) + direction];
+              if (target) focus(target, extend);
+            }}
+          />
+        );
+      }}
+    />
+  );
+}
+
+function TreeRow(
+  props: RowsProps & {
+    position: number;
+    siblings: number;
+    focusDestination: (key: string, extend?: boolean) => void;
+    edgeKeys: [string, string];
+  },
+) {
   const {
     node,
     depth,
@@ -5570,6 +6265,21 @@ function TreeRows(props: RowsProps) {
       const rect = event.currentTarget.getBoundingClientRect();
       props.onContextMenu(issue, rect.left + 30, rect.top + 30);
       return;
+    }
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      props.focusDestination(
+        props.edgeKeys[event.key === 'Home' ? 0 : 1],
+        event.shiftKey,
+      );
+    }
+    if (event.key === 'ArrowRight' && open && node.children.length) {
+      event.preventDefault();
+      props.focusDestination(node.children[0].issue.key);
+    }
+    if (event.key === 'ArrowLeft' && !open && issue.parentKey) {
+      event.preventDefault();
+      props.focusDestination(issue.parentKey);
     }
     if (event.key === 'ArrowDown') {
       event.preventDefault();
@@ -5835,6 +6545,12 @@ function TreeRows(props: RowsProps) {
   return (
     <div
       role="treeitem"
+      className={depth > 0 ? 'tree-branch' : undefined}
+      style={{ '--branch-depth': depth - 1 } as React.CSSProperties}
+      data-tree-parent={issue.parentKey}
+      aria-level={depth + 1}
+      aria-posinset={props.position}
+      aria-setsize={props.siblings}
       aria-expanded={hasChildren ? open : undefined}
       aria-label={`${issue.key}: ${issue.summary}`}
       aria-selected={
@@ -5983,22 +6699,6 @@ function TreeRows(props: RowsProps) {
           provider={props.provider}
         />
       )}
-      {hasChildren && open && (
-        <div
-          role="group"
-          className="tree-branch"
-          style={{ '--branch-depth': depth } as React.CSSProperties}
-        >
-          {node.children.map((child) => (
-            <TreeRows
-              key={child.issue.key}
-              {...props}
-              node={child}
-              depth={depth + 1}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -6066,6 +6766,24 @@ function SummaryEditor({
 }) {
   const [value, setValue] = useState(issue.summary);
   const committed = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    const container = input?.parentElement;
+    const tree = container?.closest('[role="tree"]');
+    const tabId = tree?.getAttribute('data-tab-id');
+    return () => {
+      if (document.activeElement !== input) return;
+      requestAnimationFrame(() => {
+        if (
+          container?.isConnected &&
+          tree?.getAttribute('data-tab-id') === tabId &&
+          document.activeElement === document.body
+        )
+          container.querySelector<HTMLButtonElement>('button.summary')?.focus();
+      });
+    };
+  }, []);
   const submit = () => {
     if (committed.current) return;
     committed.current = true;
@@ -6078,6 +6796,7 @@ function SummaryEditor({
   };
   return (
     <input
+      ref={inputRef}
       autoFocus
       className="summary-input"
       value={value}
@@ -6452,6 +7171,7 @@ function StatusEditor({
                   ? 'This transition requires fields that Canopy does not edit yet.'
                   : undefined
               }
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => save(choice.id)}
             >
               <span className="status-transition-label">
@@ -6472,6 +7192,7 @@ function StatusEditor({
                   choices.every((value) => value.requiresFields)
                 }
                 aria-label={`Open ${issue.key} in Jira for ${choice.name}`}
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={openWorkflow}
               >
                 Open in Jira
@@ -6489,6 +7210,7 @@ function StatusEditor({
               )}
               role="menuitem"
               title="Each step is checked in Jira before it runs. Undo may stop if a reverse transition is unavailable."
+              onMouseDown={(event) => event.preventDefault()}
               onClick={() => savePath(path)}
             >
               <span>
@@ -6583,11 +7305,43 @@ function ConnectDialog({
   initialFocus,
   onClose,
   onConnected,
+  onOpen,
+  connections,
 }: {
   onClose: () => void;
   onConnected: (connections: Connection[]) => void;
   initialFocus?: boolean;
+  onOpen: (id: string) => void;
+  connections: Connection[];
 }) {
+  const isOpen = useRef(true);
+  useEffect(() => {
+    isOpen.current = true;
+    return () => {
+      isOpen.current = false;
+    };
+  }, []);
+  const close = () => {
+    isOpen.current = false;
+    onClose();
+  };
+  const [verified, setVerified] = useState<Connection>();
+  const completed = (value: Connection[], oauth = false) => {
+    const match = verifiedSetupConnection(value, connections, {
+      provider,
+      siteUrl,
+      repositories,
+      oauth,
+    });
+    setVerified(match);
+    setToken('');
+    setGithubToken('');
+    onConnected(value);
+    if (!match)
+      setError(
+        'Connection saved. Close setup and use Open issue to choose a root on the saved connection.',
+      );
+  };
   const [siteUrl, setSiteUrl] = useState('');
   const [provider, setProvider] = useState<'jira' | 'github'>('jira');
   const [repositories, setRepositories] = useState('');
@@ -6598,6 +7352,14 @@ function ConnectDialog({
   const [busy, setBusy] = useState<'token' | 'oauth' | null>(null);
   const [error, setError] = useState('');
   const clearError = () => setError('');
+  const verify = (operation: () => Promise<Connection[]>, oauth = false) =>
+    runSetupVerification(operation, {
+      isOpen: () => isOpen.current,
+      success: (value) => completed(value, oauth),
+      failure: (reason) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      settled: () => setBusy(null),
+    });
   const connectToken = async () => {
     if (!siteUrl.trim() || !email.trim() || !token) {
       setError('Enter your Jira site, Atlassian email, and API token.');
@@ -6605,57 +7367,80 @@ function ConnectDialog({
     }
     setBusy('token');
     setError('');
-    try {
-      const value = await window.canopy.connect({
+    await verify(() =>
+      window.canopy.connect({
         siteUrl: siteUrl.trim(),
         email: email.trim(),
         token,
         scoped,
-      });
-      onConnected(value);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
+      }),
+    );
   };
   const connectOauth = async () => {
     setBusy('oauth');
     setError('');
-    try {
-      onConnected(await window.canopy.connect());
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
+    await verify(() => window.canopy.connect(), true);
   };
   const connectGithub = async () => {
     setBusy('token');
     setError('');
-    try {
-      onConnected(
-        await window.canopy.connectGithub({
-          token: githubToken,
-          repositories: repositories.split(/[\s,]+/).filter(Boolean),
-        }),
-      );
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(null);
-    }
+    await verify(() =>
+      window.canopy.connectGithub({
+        token: githubToken,
+        repositories: repositories.split(/[\s,]+/).filter(Boolean),
+      }),
+    );
   };
+  if (verified)
+    return (
+      <Dialog title="Connection verified" onClose={close}>
+        <div className="connect-dialog">
+          <p role="status">
+            {verified.name} is saved securely. Choose a first root to start your
+            workspace.
+          </p>
+          <p>
+            {verified.provider === 'github'
+              ? 'Open a selected repository to see its issues, or enter owner/repo#number for one issue tree.'
+              : 'Enter a Jira issue key or browse URL, or search by summary to open an epic, story, or task as a root.'}
+          </p>
+          <p>
+            Closing setup keeps this connection available. You can revisit Setup
+            help from the sidebar.
+          </p>
+          <div className="dialog-footer">
+            <button className="secondary" onClick={close}>
+              Later
+            </button>
+            <button className="primary" onClick={() => onOpen(verified.id)}>
+              Open first root
+            </button>
+          </div>
+        </div>
+      </Dialog>
+    );
   return (
     <Dialog
       title={`Connect ${provider === 'github' ? 'GitHub' : 'Jira'}`}
       initialFocus={initialFocus}
-      onClose={onClose}
+      onClose={close}
       wide
     >
       <div className="connect-dialog">
+        <p className="dialog-note">
+          1. Choose provider · 2. Prepare token · 3. Verify connection · 4. Open
+          a root
+        </p>
+        {busy && (
+          <p role="status" className="dialog-note">
+            You can close setup while verification continues. A verified
+            connection may still be saved. Reopen setup to reload saved
+            connections; your workspace stays in place.
+          </p>
+        )}
         <div className="connect-provider">
           <button
+            disabled={Boolean(busy)}
             className={provider === 'jira' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('jira');
@@ -6665,6 +7450,7 @@ function ConnectDialog({
             Jira
           </button>
           <button
+            disabled={Boolean(busy)}
             className={provider === 'github' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('github');
@@ -6674,6 +7460,10 @@ function ConnectDialog({
             GitHub
           </button>
         </div>
+        <details>
+          <summary>Token permissions and verification</summary>
+          <TokenPermissions provider={provider} />
+        </details>
         {provider === 'github' ? (
           <>
             <p className="connect-lead">
@@ -6716,7 +7506,7 @@ function ConnectDialog({
                 }
                 onClick={() => void connectGithub()}
               >
-                {busy ? 'Connecting…' : 'Connect GitHub'}
+                {busy ? 'Verifying…' : 'Verify and save GitHub'}
               </button>
             </div>
           </>
@@ -6826,7 +7616,7 @@ function ConnectDialog({
                 ) : (
                   <LogIn size={15} />
                 )}
-                Connect with token
+                {busy === 'token' ? 'Verifying…' : 'Verify and save Jira'}
               </button>
               <span>or</span>
               <button
@@ -6869,11 +7659,13 @@ function OpenIssueDialog({
   onOpen: (connectionId: string, key: string) => void;
 }) {
   const [connectionId, setConnectionId] = useState(
-    initialConnectionId ??
-      (activeRoot &&
-      connections.some(({ id }) => id === activeRoot.connectionId)
+    initialConnectionId &&
+      connections.some(({ id }) => id === initialConnectionId)
+      ? initialConnectionId
+      : activeRoot &&
+          connections.some(({ id }) => id === activeRoot.connectionId)
         ? activeRoot.connectionId
-        : (connections[0]?.id ?? '')),
+        : (connections[0]?.id ?? ''),
   );
   const [query, setQuery] = useState(initialQuery);
   const [groupRepositories, setGroupRepositories] = useState(false);
@@ -7449,6 +8241,55 @@ function shortcutDisplay(shortcut = '') {
     .replaceAll('+', '');
 }
 
+function SupportDialog({ onClose }: { onClose: () => void }) {
+  const [version, setVersion] = useState<string>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void window.canopy.appVersion().then(
+      (value) => {
+        if (active) setVersion(value);
+      },
+      () => {
+        if (active) setError('Could not read the application version.');
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+  const open = async (link: SupportLink) => {
+    setError('');
+    try {
+      await window.canopy.openSupportLink(link);
+    } catch {
+      setError('Could not open the link in your browser. Try again.');
+    }
+  };
+  return (
+    <Dialog title="About & Support" onClose={onClose} compact initialFocus>
+      <div className="support-dialog">
+        <img src="icon.svg" width="80" height="80" alt="" />
+        <h3>Canopy</h3>
+        <p role="status">
+          {version ? `Version ${version}` : 'Reading version…'}
+        </p>
+        <p>A focused desktop workspace for issue trees.</p>
+        {Object.entries(supportLinks).map(([id, link]) => (
+          <button key={id} onClick={() => void open(id as SupportLink)}>
+            <ExternalLink size={15} /> {link.label}
+          </button>
+        ))}
+        {error && (
+          <p className="dialog-error" role="alert">
+            {error}
+          </p>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
 function AppearanceDialog({
   theme,
   palette,
@@ -7699,6 +8540,8 @@ function WorkBriefDialog({
   preview,
   relationships,
   onClose,
+  copyTemplate,
+  onTemplate,
 }: {
   connectionId: string;
   issueKey: string;
@@ -7707,8 +8550,36 @@ function WorkBriefDialog({
   preview?: IssuePreviewData;
   relationships?: IssueRelationships;
   onClose: () => void;
+  copyTemplate?: string;
+  onTemplate: (template: string | undefined) => void;
 }) {
   const [brief, setBrief] = useState('');
+  const [custom, setCustom] = useState(false);
+  const [template, setTemplate] = useState(
+    copyTemplate ?? DEFAULT_COPY_TEMPLATE,
+  );
+  const [context, setContext] = useState<{
+    issue: Issue;
+    sourceUrl?: string;
+  } | null>(null);
+  let sharedText = brief;
+  let templateError = '';
+  if (custom) {
+    sharedText = '';
+    try {
+      if (context)
+        sharedText = renderCopyTemplate(
+          template,
+          context.issue,
+          provider,
+          context.sourceUrl,
+        );
+    } catch {
+      templateError =
+        'Use only the listed placeholders and plain text. The source URL must identify this issue without credentials or query parameters.';
+    }
+  }
+
   const [error, setError] = useState('');
   const [partial, setPartial] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -7716,6 +8587,7 @@ function WorkBriefDialog({
   useEffect(() => {
     let live = true;
     setBrief('');
+    setContext(null);
     setError('');
     setPartial(false);
     setCopied(false);
@@ -7733,6 +8605,20 @@ function WorkBriefDialog({
     ]).then(([details, sourceUrl, inspected]) => {
       if (!live) return;
       try {
+        const confirmedIssue =
+          details.status === 'fulfilled'
+            ? details.value.issue
+            : knownIssues.find((issue) => issue.key === issueKey);
+        if (confirmedIssue && confirmedIssue.key !== issueKey)
+          throw new Error(
+            'The returned issue does not match the requested issue.',
+          );
+        if (confirmedIssue)
+          setContext({
+            issue: confirmedIssue,
+            sourceUrl:
+              sourceUrl.status === 'fulfilled' ? sourceUrl.value : undefined,
+          });
         setBrief(
           issueWorkBrief({
             preview: details.status === 'fulfilled' ? details.value : undefined,
@@ -7786,7 +8672,7 @@ function WorkBriefDialog({
   ]);
   const copy = async () => {
     try {
-      await window.canopy.copyText(brief);
+      await window.canopy.copyText(sharedText);
       setCopied(true);
       setError('');
     } catch (reason) {
@@ -7804,6 +8690,62 @@ function WorkBriefDialog({
         <p className="dialog-note">
           Review the exact Markdown before copying it.
         </p>
+        <label>
+          Copy format{' '}
+          <select
+            aria-label="Copy format"
+            value={custom ? 'custom' : 'brief'}
+            onChange={(event) => {
+              setCustom(event.target.value === 'custom');
+              setCopied(false);
+            }}
+          >
+            <option value="brief">Work brief</option>
+            <option value="custom">Custom issue context</option>
+          </select>
+        </label>
+        {custom && (
+          <>
+            <label>
+              Copy template
+              <textarea
+                aria-label="Copy template"
+                value={template}
+                maxLength={4000}
+                onChange={(event) => {
+                  setTemplate(event.target.value);
+                  setCopied(false);
+                }}
+              />
+            </label>
+            <p>
+              Allowed placeholders:{' '}
+              {COPY_PLACEHOLDERS.map((name) => `{{${name}}}`).join(', ')}.
+              Values come from issue details and the source URL. Account data,
+              credentials, comments and descriptions are excluded.
+            </p>
+            <p>
+              Issue text and your template can contain sensitive information.
+              Review the exact text before copying and choose where to paste it.
+            </p>
+            <button
+              disabled={!validateCopyTemplate(template)}
+              onClick={() => onTemplate(template)}
+            >
+              Save template
+            </button>
+            <button
+              onClick={() => {
+                setTemplate(DEFAULT_COPY_TEMPLATE);
+                onTemplate(undefined);
+                setCopied(false);
+              }}
+            >
+              Reset template
+            </button>
+          </>
+        )}
+        {templateError && <p role="alert">{templateError}</p>}
         {error && (
           <p role="alert" className="dialog-error">
             {error}
@@ -7815,11 +8757,11 @@ function WorkBriefDialog({
             fetches issue relationships.
           </p>
         )}
-        {brief ? (
+        {sharedText ? (
           <pre aria-label="Work brief Markdown" tabIndex={0}>
-            {brief}
+            {sharedText}
           </pre>
-        ) : !error ? (
+        ) : !error && !templateError ? (
           <p role="status">Loading work brief…</p>
         ) : null}
         <div className="dialog-footer">
@@ -7831,10 +8773,10 @@ function WorkBriefDialog({
           {copied && <span role="status">Copied</span>}
           <button
             className="primary"
-            disabled={!brief}
+            disabled={!sharedText}
             onClick={() => void copy()}
           >
-            Copy work brief
+            {custom ? 'Copy issue context' : 'Copy work brief'}
           </button>
         </div>
       </div>
@@ -7849,6 +8791,7 @@ function Dialog({
   compact,
   wide,
   initialFocus,
+  dismissible = true,
 }: {
   title: string;
   onClose: () => void;
@@ -7856,13 +8799,28 @@ function Dialog({
   compact?: boolean;
   wide?: boolean;
   initialFocus?: boolean;
+  dismissible?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const returnFocus = useRef(
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
+  useLayoutEffect(() => {
+    const trigger = returnFocus.current;
+    return () => {
+      requestAnimationFrame(() => {
+        if (trigger?.isConnected && document.activeElement === document.body)
+          trigger.focus();
+      });
+    };
+  }, []);
   useEffect(() => {
     const panel = panelRef.current;
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        onClose();
+        if (dismissible) onClose();
         return;
       }
       if (event.key !== 'Tab' || !panel) return;
@@ -7884,7 +8842,7 @@ function Dialog({
     };
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
-  }, [onClose]);
+  }, [onClose, dismissible]);
   return (
     <div
       className="dialog-backdrop"
@@ -7892,7 +8850,7 @@ function Dialog({
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           event.preventDefault();
-          onClose();
+          if (dismissible) onClose();
         }
       }}
     >
@@ -7909,6 +8867,7 @@ function Dialog({
             className="icon-button"
             onClick={onClose}
             aria-label="Close dialog"
+            disabled={!dismissible}
             autoFocus={initialFocus}
           >
             <X size={16} />
@@ -7922,9 +8881,14 @@ function Dialog({
 
 function TreeSkeleton() {
   return (
-    <div className="skeleton" aria-label="Loading issue tree">
+    <div className="skeleton" role="status" aria-label="Loading issue tree">
+      <span className="sr-only">Loading issue tree</span>
       {[0, 1, 2, 3, 4, 5].map((item) => (
-        <div key={item} style={{ marginLeft: `${(item % 3) * 26}px` }}>
+        <div
+          key={item}
+          aria-hidden="true"
+          style={{ marginLeft: `${(item % 3) * 26}px` }}
+        >
           <span />
           <span />
           <span />

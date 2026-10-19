@@ -121,6 +121,11 @@ export function viewSources(
   return [...selected.values()];
 }
 
+const collator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base',
+});
+
 export function viewResults(
   view: SavedIssueView,
   sources: ViewSource[],
@@ -174,10 +179,7 @@ export function viewResults(
     }
   };
   return [...found.values()].sort((a, b) => {
-    const order = property(a).localeCompare(property(b), undefined, {
-      numeric: true,
-      sensitivity: 'base',
-    });
+    const order = collator.compare(property(a), property(b));
     return (
       (view.sort.direction === 'asc' ? order : -order) ||
       a.issue.key.localeCompare(b.issue.key) ||
