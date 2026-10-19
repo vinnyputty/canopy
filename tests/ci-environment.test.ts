@@ -24,6 +24,19 @@ async function run(
   parent: Record<string, string | undefined>,
 ) {
   const calls: Call[] = [];
+  const capture = (
+    command: string,
+    args: string[],
+    options: { env: Record<string, string>; cwd: string },
+  ) => {
+    calls.push({
+      command,
+      args: Array.from(args),
+      env: { ...options.env },
+      cwd: options.cwd,
+    });
+    return { status: 0 };
+  };
   await runInNewContext(`(async () => { ${body} })()`, {
     process: {
       platform,
@@ -42,19 +55,8 @@ async function run(
     },
     runCimModuleControls: () => {},
     runCimContextControls: async () => {},
-    spawnSync: (
-      command: string,
-      args: string[],
-      options: { env: Record<string, string>; cwd: string },
-    ) => {
-      calls.push({
-        command,
-        args: Array.from(args),
-        env: { ...options.env },
-        cwd: options.cwd,
-      });
-      return { status: 0 };
-    },
+    spawnSync: capture,
+    runPackagedCheck: capture,
   });
   const testCall = calls.find((call) => call.args.includes('test'));
   assert.ok(testCall);

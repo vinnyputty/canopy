@@ -11,7 +11,14 @@ const source = readFileSync(
     new URL('../tools/portable-check.mjs', import.meta.url),
   'utf8',
 );
-const body = source.slice(source.indexOf('const directory ='));
+const setup = source.indexOf('const directory =');
+const guarded = source.indexOf('try {', setup);
+const launcher = source.indexOf('for (const [script, ...args] of [', guarded);
+assert.ok(setup >= 0 && guarded > setup && launcher > guarded);
+// Exercise the exact launcher loop, bounds and alternate-cwd cleanup. The
+// packaged source controls execute separately in the full portable target.
+const body =
+  source.slice(setup, guarded + 'try {'.length) + source.slice(launcher);
 
 async function run(
   platform: string,
