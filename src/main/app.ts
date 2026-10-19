@@ -435,7 +435,7 @@ async function start(
           if (demoLaunch === launch) demoLaunch = null;
           void rm(childDirectory, { recursive: true, force: true });
           if (window && !window.isDestroyed()) {
-            window.show();
+            if (!window.isVisible()) window.show();
             window.focus();
           }
         });
@@ -1057,7 +1057,7 @@ async function start(
       .then(() => {
         if (!window || quitting) return;
         if (window.isMinimized()) window.restore();
-        window.show();
+        if (!window.isVisible()) window.show();
         window.focus();
         deliverSupport();
       })
@@ -1150,7 +1150,7 @@ async function start(
     if (quitting) return;
     if (window && !window.isDestroyed()) {
       if (window.isMinimized()) window.restore();
-      window.show();
+      if (!window.isVisible()) window.show();
       if (process.platform === 'darwin') app.focus({ steal: true });
       window.focus();
     }

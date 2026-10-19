@@ -41,6 +41,7 @@ after(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 for (const scenario of [
+  'visibility',
   'loser',
   'early-quit',
   'fifo',

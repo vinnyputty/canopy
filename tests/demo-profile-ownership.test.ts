@@ -97,7 +97,14 @@ for (const winner of [false, true]) {
   }
 }
 
-for (const outcome of ['exit', 'throw', 'error'] as const) {
+for (const outcome of [
+  'exit',
+  'exit-visible',
+  'exit-hidden',
+  'exit-destroyed',
+  'throw',
+  'error',
+] as const) {
   test(`demo parent removes only its mkdtemp directory on child ${outcome}`, async (t) => {
     const holder = await mkdtemp(join(tmpdir(), 'canopy-owned-'));
     t.after(() => rm(holder, { recursive: true, force: true }));
@@ -108,12 +115,23 @@ for (const outcome of ['exit', 'throw', 'error'] as const) {
     let owned = '';
     const removed: Promise<void>[] = [];
     const child = Object.assign(new EventEmitter(), { unref() {} });
+    let shows = 0;
+    let focuses = 0;
+    const window =
+      outcome === 'exit'
+        ? null
+        : {
+            isDestroyed: () => outcome === 'exit-destroyed',
+            isVisible: () => outcome !== 'exit-hidden',
+            show: () => shows++,
+            focus: () => focuses++,
+          };
     const launchDemo = runInNewContext(
       compile(`(${demo.initializer.getText(source)})`),
       {
         demoMode: false,
         demoLaunch: null,
-        window: null,
+        window,
         process: {
           execPath: process.execPath,
           env: {
@@ -150,7 +168,7 @@ for (const outcome of ['exit', 'throw', 'error'] as const) {
         },
       },
     ) as () => Promise<void>;
-    if (outcome === 'exit') {
+    if (outcome.startsWith('exit')) {
       await launchDemo();
       await writeFile(join(owned, 'sentinel'), 'active child');
       assert.equal(removed.length, 0, 'Live child profile must remain');
@@ -159,6 +177,11 @@ for (const outcome of ['exit', 'throw', 'error'] as const) {
         'active child',
       );
       child.emit('exit', 0);
+      assert.equal(shows, outcome === 'exit-hidden' ? 1 : 0);
+      assert.equal(
+        focuses,
+        ['exit-visible', 'exit-hidden'].includes(outcome) ? 1 : 0,
+      );
     } else {
       await assert.rejects(launchDemo(), /Synthetic spawn failure/);
     }
