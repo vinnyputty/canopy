@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import React, { act } from 'react';
+import React, { act, startTransition, Suspense } from 'react';
 import { RichAuthoring } from '../src/renderer/RichAuthoring';
-import { draftKey } from '../src/renderer/authoring-drafts';
+import {
+  beginAuthoringAttempt,
+  draftKey,
+  endAuthoringAttempt,
+} from '../src/renderer/authoring-drafts';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 
@@ -71,9 +75,22 @@ async function fixture() {
   const { createRoot } = await import('react-dom/client');
   const host = window.document.querySelector('#host')!;
   const root = createRoot(host);
-  const render = async (connectionId = 'account', issueKey = 'team/a#1') =>
-    act(async () =>
-      root.render(
+  const pending = new Promise<never>(() => {});
+  let suspended = 0;
+  function Gate({ suspend }: { suspend: boolean }) {
+    if (suspend) {
+      suspended++;
+      throw pending;
+    }
+    return null;
+  }
+  const pane = (connectionId: string, issueKey: string, suspend = false) =>
+    React.createElement(
+      Suspense,
+      { fallback: 'Waiting for another pane' },
+      React.createElement(
+        React.Fragment,
+        null,
         React.createElement(RichAuthoring, {
           connectionId,
           issueKey,
@@ -86,8 +103,11 @@ async function fixture() {
           },
           onPreview() {},
         }),
+        React.createElement(Gate, { suspend }),
       ),
     );
+  const render = async (connectionId = 'account', issueKey = 'team/a#1') =>
+    act(async () => root.render(pane(connectionId, issueKey)));
   const button = (name: string) =>
     [...host.querySelectorAll('button')].find(
       (node: any) => node.textContent === name,
@@ -103,6 +123,29 @@ async function fixture() {
     writes,
     requests,
     render,
+    async suspend(connectionId: string, issueKey: string) {
+      const before = suspended;
+      await act(async () => {
+        startTransition(() => root.render(pane(connectionId, issueKey, true)));
+      });
+      assert.ok(suspended > before, 'the foreign pane reached Suspense');
+      assert.doesNotMatch(host.textContent!, /Waiting for another pane/);
+    },
+    retainRetry() {
+      const node = button('Retry saving draft');
+      assert.ok(node);
+      const propsKey = Object.keys(node).find((key) =>
+        key.startsWith('__reactProps$'),
+      );
+      assert.ok(propsKey);
+      const retry = (
+        node as unknown as Record<string, { onClick: () => void }>
+      )[propsKey].onClick;
+      return async () => act(async () => retry());
+    },
+    async unmount() {
+      await act(async () => root.unmount());
+    },
     button,
     click,
     browser: () => browser,
@@ -266,5 +309,105 @@ test('a failed pre-request draft save stays local through retry and explicit rev
     assert.equal(f.requests.length, 1);
   } finally {
     await f.close();
+  }
+});
+
+test('the committed pane can retry a save while a foreign account or issue render is suspended and discarded', async () => {
+  for (const [connectionId, issueKey] of [
+    ['other-account', 'team/a#1'],
+    ['account', 'team/a#2'],
+  ]) {
+    const f = await fixture();
+    const key = draftKey('account', 'team/a#1');
+    const foreignKey = draftKey(connectionId, issueKey);
+    const foreignRaw = '{foreign unreadable draft';
+    f.storage.set(foreignKey, foreignRaw);
+    try {
+      await f.render();
+      await f.click('Edit and discuss');
+      f.failWrite(true);
+      await f.edit('Committed unsent text');
+      assert.match(f.host.textContent!, /Could not save draft/);
+      f.failWrite(false);
+      await f.suspend(connectionId, issueKey);
+      await f.click('Retry saving draft');
+      const saved = f.storage.get(key);
+      assert.ok(
+        saved,
+        'the committed pane persisted its retry during suspension',
+      );
+      assert.equal(JSON.parse(saved).comment, 'Committed unsent text');
+      assert.doesNotMatch(f.host.textContent!, /Could not save draft/);
+      assert.equal(f.storage.get(foreignKey), foreignRaw);
+      assert.ok(f.writes.length > 0);
+      assert.ok(f.writes.every((written) => written === key));
+      assert.deepEqual(f.requests, []);
+      await f.render();
+      await f.edit('Saved after discarding the foreign render');
+      assert.equal(
+        JSON.parse(f.storage.get(key)!).comment,
+        'Saved after discarding the foreign render',
+      );
+      assert.equal(f.storage.get(foreignKey), foreignRaw);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test('real authoring DOM retained retries refuse after committed ownership changes, recovery failure and unmount', async () => {
+  for (const mode of ['account', 'issue', 'recovery', 'unmount']) {
+    const f = await fixture();
+    const key = draftKey('account', 'team/a#1');
+    try {
+      await f.render();
+      await f.click('Edit and discuss');
+      await f.edit('Original saved bytes');
+      f.failWrite(true);
+      await f.edit('Stale unsent retry');
+      const retry = f.retainRetry();
+      f.failWrite(false);
+      if (mode === 'account' || mode === 'issue') {
+        await f.render(
+          mode === 'account' ? 'other-account' : 'account',
+          mode === 'issue' ? 'team/a#2' : 'team/a#1',
+        );
+        await f.edit('New owner saved text');
+        const saved = f.storage.get(
+          draftKey(
+            mode === 'account' ? 'other-account' : 'account',
+            mode === 'issue' ? 'team/a#2' : 'team/a#1',
+          ),
+        );
+        assert.ok(saved, `${mode}: the committed new owner can save`);
+        assert.equal(JSON.parse(saved).comment, 'New owner saved text');
+      } else if (mode === 'recovery') {
+        f.storage.set(key, '{original invalid bytes');
+        await act(async () => {
+          assert.equal(
+            beginAuthoringAttempt('account', 'team/a#1', 'other-pane'),
+            true,
+          );
+          endAuthoringAttempt('account', 'team/a#1', 'other-pane');
+        });
+        assert.match(f.host.textContent!, /Draft recovery failed/);
+      } else await f.unmount();
+      const before = new Map(f.storage);
+      const writes = [...f.writes];
+      await retry();
+      assert.deepEqual(
+        f.storage,
+        before,
+        `${mode}: retained retry preserves bytes`,
+      );
+      assert.deepEqual(
+        f.writes,
+        writes,
+        `${mode}: retained retry cannot write`,
+      );
+      assert.deepEqual(f.requests, []);
+    } finally {
+      await f.close();
+    }
   }
 });
