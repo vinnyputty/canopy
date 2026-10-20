@@ -411,7 +411,9 @@ export function CreateChildDialog({
                 ? 'Check the parent in Jira before creating another child; this issue may already exist.'
                 : fields?.unsupported
                   ? 'Continue in Jira to complete the required fields.'
-                  : 'Required fields must be complete before creating a child.'}
+                  : fields && options?.types.length
+                    ? 'Required fields must be complete before creating a child.'
+                    : ''}
           </p>
           <div className="dialog-footer">
             <button type="button" onClick={onOpenJira}>

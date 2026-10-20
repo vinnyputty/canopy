@@ -139,8 +139,14 @@ export function SavedViewsPanel(props: Props) {
               return (
                 <div key={connection.id} className="saved-source-group">
                   <strong>
-                    {connection.provider === 'github' ? 'GitHub' : 'Jira'} ·{' '}
-                    {connection.name}
+                    {connection.provider === 'github'
+                      ? 'GitHub'
+                      : connection.provider === 'jira'
+                        ? 'Jira'
+                        : connection.provider === 'demo'
+                          ? 'Demo'
+                          : 'Unknown provider'}{' '}
+                    · {connection.name}
                   </strong>
                   <label>
                     <input
@@ -402,7 +408,9 @@ export function SavedViewsPanel(props: Props) {
                       ? 'GitHub'
                       : connection?.provider === 'jira'
                         ? 'Jira'
-                        : 'Unknown provider'}{' '}
+                        : connection?.provider === 'demo'
+                          ? 'Demo'
+                          : 'Unknown provider'}{' '}
                     · {connection?.name ?? result.source.connectionId} ·{' '}
                     {result.source.rootKey} · {result.issue.status.name}
                   </small>

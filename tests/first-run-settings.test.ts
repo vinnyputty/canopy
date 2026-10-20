@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import React, { act } from 'react';
 import ts from 'typescript';
 import { Settings } from '../src/renderer/Settings';
+import { WorkspaceBackupPanel } from '../src/renderer/WorkspaceBackupPanel';
 import { openIssueError } from '../src/renderer/open-issue-error';
 import { DEFAULT_READING } from '../src/shared/views';
 import {
@@ -15,6 +16,62 @@ import {
 } from './source-probe';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
+
+test('workspace backup privacy warning is visible while detailed contents stay collapsed', async () => {
+  const dom = new JSDOM('<div id="host"></div>', { pretendToBeVisual: true });
+  const previous = new Map<string, PropertyDescriptor | undefined>();
+  for (const [key, value] of Object.entries({
+    window: Object.assign(dom.window, {
+      canopy: { canUndoWorkspaceImport: async () => false },
+    }),
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  })) {
+    previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+  }
+  const { createRoot } = await import('react-dom/client');
+  const host = dom.window.document.querySelector('#host')! as HTMLElement;
+  const root = createRoot(host);
+  try {
+    await act(async () =>
+      root.render(
+        React.createElement(WorkspaceBackupPanel, {
+          connections: [],
+          flush: async () => {},
+          onApply: async () => {},
+        }),
+      ),
+    );
+    const contents = host.querySelector<HTMLDetailsElement>(
+      'details.backup-contents',
+    )!;
+    const notice = [...host.querySelectorAll('p')].find((paragraph) =>
+      paragraph.textContent?.includes(
+        'Backups can contain private project names',
+      ),
+    );
+    assert.ok(notice, 'privacy warning renders before the details disclosure');
+    assert.equal(notice.parentElement, host.firstElementChild);
+    assert.equal(
+      contents.open,
+      false,
+      'the detailed disclosure remains collapsed',
+    );
+    assert.match(notice.textContent!, /saved filter text/);
+    assert.match(notice.textContent!, /copy template text/);
+    assert.match(notice.textContent!, /connection metadata/);
+    assert.match(notice.textContent!, /Store backup files privately/);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    for (const [key, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
 
 test('only the confirmed openIssue transport envelope is removed', () => {
   const prefix = "Error invoking remote method 'canopy:openIssue': Error: ";

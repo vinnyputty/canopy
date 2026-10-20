@@ -51,6 +51,11 @@ export function WorkspaceBackupPanel({
         Move your workspace layout and preferences between machines. Review the
         file before exporting or applying an import.
       </p>
+      <p>
+        Backups can contain private project names, saved filter text, copy
+        template text, and connection metadata such as names and server URLs.
+        Store backup files privately.
+      </p>
       <details className="backup-contents">
         <summary>What’s included and what stays private</summary>
         <p>

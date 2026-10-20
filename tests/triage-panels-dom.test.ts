@@ -242,6 +242,22 @@ test('saved views expose active filters, provider context and partial-result gui
     connectionId: 'github',
     rootKey: 'org/repo',
   };
+  const demo = {
+    ...connection,
+    id: 'demo',
+    name: 'Sample workspace',
+    provider: 'demo' as const,
+  };
+  const demoSource = {
+    id: 'demo-root',
+    connectionId: 'demo',
+    rootKey: 'DEMO-1',
+  };
+  const missingSource = {
+    id: 'missing-root',
+    connectionId: 'missing',
+    rootKey: 'MISSING-1',
+  };
   const html = renderToStaticMarkup(
     React.createElement(SavedViewsPanel, {
       view: {
@@ -257,12 +273,14 @@ test('saved views expose active filters, provider context and partial-result gui
         },
         sort: { column: 'key', direction: 'asc' },
       },
-      connections: [connection, github],
-      availableRoots: [source, githubSource],
-      sources: [source, githubSource],
+      connections: [connection, github, demo],
+      availableRoots: [source, githubSource, demoSource],
+      sources: [source, githubSource, demoSource, missingSource],
       results: [
         { issue: issue('A-1'), source },
         { issue: issue('org/repo#7'), source: githubSource },
+        { issue: issue('DEMO-1'), source: demoSource },
+        { issue: issue('MISSING-1'), source: missingSource },
       ],
       selected: JSON.stringify(['work', 'A-1']),
       errors: { root: 'Offline; retained snapshot' },
@@ -281,9 +299,39 @@ test('saved views expose active filters, provider context and partial-result gui
   assert.match(html, /results may be incomplete/);
   assert.match(html, /Jira/);
   assert.match(html, /GitHub/);
+  assert.match(html, /Demo/);
+  assert.match(html, /Unknown provider/);
+  assert.match(html, /<strong>Demo · Sample workspace<\/strong>/);
+  assert.match(html, /<small>Demo · Sample workspace · DEMO-1/);
+  assert.match(html, /<small>Unknown provider · missing · MISSING-1/);
   assert.match(html, /Engineering/);
   assert.match(html, /aria-current="true"/);
   assert.match(html, /Open A-1 in tree/);
+});
+
+test('bulk triage context names supported providers and unknown providers accurately', () => {
+  for (const [provider, label] of [
+    ['github', 'GitHub'],
+    ['jira', 'Jira'],
+    ['demo', 'Demo'],
+    ['other', 'Unknown provider'],
+  ] as const) {
+    const html = renderToStaticMarkup(
+      React.createElement(BulkTriage, {
+        api: {} as never,
+        connection: { ...connection, provider } as typeof connection,
+        issues: [],
+        operation: null,
+        update: async () => true,
+        undo: async () => true,
+        canUndo: () => true,
+        onClear() {},
+        onOperation() {},
+        copy: async () => true,
+      }),
+    );
+    assert.match(html, new RegExp(`${label} · Work account`));
+  }
 });
 
 test('bulk results retain titles, failure reasons, Retry and eligible Undo', () => {

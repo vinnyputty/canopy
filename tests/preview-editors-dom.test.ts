@@ -4,7 +4,12 @@ import { test } from 'node:test';
 import React, { act } from 'react';
 import { IssuePreview } from '../src/renderer/IssuePreview';
 import { CreateChildDialog } from '../src/renderer/CreateChildDialog';
-import type { CanopyAPI, Issue } from '../src/shared/types';
+import type {
+  CanopyAPI,
+  ChildCreateOptions,
+  ChildCreateFields,
+  Issue,
+} from '../src/shared/types';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 const issue: Issue = {
@@ -314,6 +319,10 @@ test('child dialog traps initial focus, handles Escape, restores focus, and offe
     await f.click('Open parent in Jira');
     assert.equal(f.browser(), 1);
     assert.match(f.host.textContent!, /Create this child in Jira/);
+    assert.equal(
+      f.host.querySelector('.create-child-form > [role="status"]')?.textContent,
+      '',
+    );
     assert.equal(f.button('Create child').disabled, true);
     await f.key(dialog, 'Escape');
     assert.equal(f.closed(), 1);
@@ -483,6 +492,105 @@ test('child creation keeps saving and partial outcomes legible and blocks duplic
     assert.equal(f.browser(), 1);
     await f.key(dialog, 'Escape');
     assert.equal(f.closed(), 1);
+  } finally {
+    await f.close();
+  }
+});
+
+const childOptions: ChildCreateOptions = {
+  project: { id: 'p', name: 'Project' },
+  parent: { id: '1', name: 'Parent' },
+  types: [{ id: 'task', name: 'Task' }],
+};
+const childFields: ChildCreateFields = {
+  description: false,
+  descriptionRequired: false,
+  assignee: false,
+  assigneeRequired: false,
+  priority: false,
+  priorityRequired: false,
+  priorities: [],
+};
+
+test('child form guidance waits for options and required fields to load', async () => {
+  const options = deferred<ChildCreateOptions>();
+  const fields = deferred<ChildCreateFields>();
+  const f = await fixture({
+    childCreateOptions: () => options.promise,
+    childCreateFields: () => fields.promise,
+  });
+  const status = () =>
+    f.host
+      .querySelectorAll('.create-child-form > [role="status"]')
+      .item(
+        f.host.querySelectorAll('.create-child-form > [role="status"]').length -
+          1,
+      )?.textContent;
+  try {
+    await f.child();
+    assert.match(f.host.textContent!, /Loading Jira creation options/);
+    assert.equal(status(), '');
+    await act(async () => options.resolve(childOptions));
+    assert.equal(status(), '');
+    assert.equal(f.button('Create child').disabled, true);
+    await act(async () => fields.resolve(childFields));
+    assert.equal(
+      status(),
+      'Required fields must be complete before creating a child.',
+    );
+    await f.editTitle('A ready child');
+    assert.equal(f.button('Create child').disabled, false);
+  } finally {
+    await f.close();
+  }
+});
+
+for (const failure of ['options', 'fields'] as const) {
+  test(`child ${failure} load failure does not request unavailable required fields`, async () => {
+    const f = await fixture({
+      childCreateOptions: async () => {
+        if (failure === 'options') throw new Error('Options unavailable');
+        return childOptions;
+      },
+      childCreateFields: async () => {
+        throw new Error('Fields unavailable');
+      },
+    });
+    try {
+      await f.child();
+      assert.match(
+        f.host.querySelector('[role="alert"]')!.textContent!,
+        /unavailable/,
+      );
+      assert.equal(
+        f.host.querySelector('.create-child-form > [role="status"]')
+          ?.textContent,
+        '',
+      );
+      assert.equal(f.button('Create child').disabled, true);
+      assert.ok(f.button('Retry Jira options'));
+    } finally {
+      await f.close();
+    }
+  });
+}
+
+test('unsupported child fields retain the provider completion guidance', async () => {
+  const f = await fixture({
+    childCreateOptions: async () => childOptions,
+    childCreateFields: async () => ({
+      ...childFields,
+      unsupported: 'Complete the custom fields in Jira.',
+    }),
+  });
+  try {
+    await f.child();
+    assert.match(f.host.textContent!, /Complete the custom fields in Jira/);
+    assert.equal(
+      f.host.querySelector('.create-child-form > [role="status"]')?.textContent,
+      'Continue in Jira to complete the required fields.',
+    );
+    assert.equal(f.button('Create child').disabled, true);
   } finally {
     await f.close();
   }

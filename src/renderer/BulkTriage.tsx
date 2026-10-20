@@ -299,8 +299,14 @@ export function BulkTriage({
         )}
       </header>
       <p className="bulk-context">
-        {connection.provider === 'github' ? 'GitHub' : 'Jira'} ·{' '}
-        {connection.name} · Changes are checked for each issue before saving.
+        {connection.provider === 'github'
+          ? 'GitHub'
+          : connection.provider === 'jira'
+            ? 'Jira'
+            : connection.provider === 'demo'
+              ? 'Demo'
+              : 'Unknown provider'}{' '}
+        · {connection.name} · Changes are checked for each issue before saving.
       </p>
       {issues.length > 1 && (
         <>
