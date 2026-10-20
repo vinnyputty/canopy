@@ -441,104 +441,108 @@ export function InboxPanel(props: Props) {
         </label>
       </div>
       <div className="inbox-items">
-        {visibleItems.map((item) => (
-          <article
-            className="inbox-item"
-            key={triageIdentity(item.source.connectionId, item.issue.key)}
-          >
-            <button className="inbox-open" onClick={() => props.onOpen(item)}>
-              {item.issue.key} {item.issue.summary}
-            </button>
-            <p>
-              {item.reasons.map((reason) => (
-                <span className="inbox-reason" key={reason}>
-                  {reason}
-                </span>
-              ))}
-              {item.blockerUnknown &&
-                ' · Blocker coverage unknown / incomplete'}
-            </p>
-            <p className="inbox-source">
-              {
-                props.connections.find(
-                  (connection) => connection.id === item.source.connectionId,
-                )?.provider
-              }{' '}
-              ·{' '}
-              {
-                props.connections.find(
-                  (connection) => connection.id === item.source.connectionId,
-                )?.name
-              }{' '}
-              · {item.source.connectionId} · roots:{' '}
-              {item.roots.map((root) => root.rootKey).join(', ')}
-            </p>
-            <p className="inbox-timestamp">
-              Last confirmed update:{' '}
-              {item.issue.updated &&
-              Number.isFinite(Date.parse(item.issue.updated))
-                ? new Date(item.issue.updated).toLocaleString()
-                : 'Unavailable'}{' '}
-              · confirmed fetch {new Date(item.fetchedAt).toLocaleString()}
-            </p>
-            <div className="inbox-actions">
-              <button
-                onClick={() => {
-                  for (const root of item.roots) props.onSeen(item.issue, root);
-                  action(item.source.connectionId, item.issue.key, 'seen');
-                }}
-              >
-                Mark seen
-              </button>{' '}
-              <button
-                onClick={() =>
-                  action(
-                    item.source.connectionId,
-                    item.issue.key,
-                    item.pinned ? 'unpin' : 'pin',
-                  )
-                }
-              >
-                {item.pinned ? 'Unpin' : 'Pin'}
-              </button>{' '}
-              {item.snoozedUntil ? (
-                <>
-                  <span>
-                    Snoozed until{' '}
-                    {new Date(item.snoozedUntil).toLocaleString()}{' '}
+        {visibleItems.map((item) => {
+          const connection = props.connections.find(
+            (connection) => connection.id === item.source.connectionId,
+          );
+          const provider =
+            connection?.provider === 'github'
+              ? 'GitHub'
+              : connection?.provider === 'jira'
+                ? 'Jira'
+                : connection?.provider === 'demo'
+                  ? 'Demo'
+                  : 'Unknown provider';
+          return (
+            <article
+              className="inbox-item"
+              key={triageIdentity(item.source.connectionId, item.issue.key)}
+            >
+              <button className="inbox-open" onClick={() => props.onOpen(item)}>
+                {item.issue.key} {item.issue.summary}
+              </button>
+              <p>
+                {item.reasons.map((reason) => (
+                  <span className="inbox-reason" key={reason}>
+                    {reason}
                   </span>
-                  <button
-                    onClick={() =>
-                      action(item.source.connectionId, item.issue.key, 'wake')
-                    }
-                  >
-                    Wake now
-                  </button>
-                </>
-              ) : (
-                <select
-                  aria-label={`Snooze ${item.issue.key}`}
-                  value=""
-                  onChange={(event) =>
+                ))}
+                {item.blockerUnknown &&
+                  ' · Blocker coverage unknown / incomplete'}
+              </p>
+              <p className="inbox-source">
+                {provider} · {connection?.name ?? item.source.connectionId} ·{' '}
+                {item.source.connectionId} · roots:{' '}
+                {item.roots.map((root) => root.rootKey).join(', ')}
+              </p>
+              <p className="inbox-timestamp">
+                Last confirmed update:{' '}
+                {item.issue.updated &&
+                Number.isFinite(Date.parse(item.issue.updated))
+                  ? new Date(item.issue.updated).toLocaleString()
+                  : 'Unavailable'}{' '}
+                · confirmed fetch {new Date(item.fetchedAt).toLocaleString()}
+              </p>
+              <div className="inbox-actions">
+                <button
+                  onClick={() => {
+                    for (const root of item.roots)
+                      props.onSeen(item.issue, root);
+                    action(item.source.connectionId, item.issue.key, 'seen');
+                  }}
+                >
+                  Mark seen
+                </button>{' '}
+                <button
+                  onClick={() =>
                     action(
                       item.source.connectionId,
                       item.issue.key,
-                      'snooze',
-                      Number(event.target.value),
+                      item.pinned ? 'unpin' : 'pin',
                     )
                   }
                 >
-                  <option value="" disabled>
-                    Snooze…
-                  </option>
-                  <option value={60 * 60 * 1000}>1 hour</option>
-                  <option value={24 * 60 * 60 * 1000}>24 hours</option>
-                  <option value={7 * 24 * 60 * 60 * 1000}>7 days</option>
-                </select>
-              )}
-            </div>
-          </article>
-        ))}
+                  {item.pinned ? 'Unpin' : 'Pin'}
+                </button>{' '}
+                {item.snoozedUntil ? (
+                  <>
+                    <span>
+                      Snoozed until{' '}
+                      {new Date(item.snoozedUntil).toLocaleString()}{' '}
+                    </span>
+                    <button
+                      onClick={() =>
+                        action(item.source.connectionId, item.issue.key, 'wake')
+                      }
+                    >
+                      Wake now
+                    </button>
+                  </>
+                ) : (
+                  <select
+                    aria-label={`Snooze ${item.issue.key}`}
+                    value=""
+                    onChange={(event) =>
+                      action(
+                        item.source.connectionId,
+                        item.issue.key,
+                        'snooze',
+                        Number(event.target.value),
+                      )
+                    }
+                  >
+                    <option value="" disabled>
+                      Snooze…
+                    </option>
+                    <option value={60 * 60 * 1000}>1 hour</option>
+                    <option value={24 * 60 * 60 * 1000}>24 hours</option>
+                    <option value={7 * 24 * 60 * 60 * 1000}>7 days</option>
+                  </select>
+                )}
+              </div>
+            </article>
+          );
+        })}
       </div>
       {!visibleItems.length && (
         <div className="inbox-empty" role="status">

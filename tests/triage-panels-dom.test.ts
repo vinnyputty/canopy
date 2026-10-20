@@ -230,6 +230,66 @@ test('inbox filters preserve local actions and recover focus only when the actio
   }
 });
 
+test('inbox source lines name providers and retain identity when account names are missing', () => {
+  for (const [provider, label, name] of [
+    ['github', 'GitHub', 'Work account'],
+    ['jira', 'Jira', 'Work account'],
+    ['demo', 'Demo', 'Work account'],
+    ['other', 'Unknown provider', 'Work account'],
+    ['jira', 'Jira', undefined],
+  ] as const) {
+    const html = renderToStaticMarkup(
+      React.createElement(InboxPanel, {
+        workspace: initial,
+        inspection: {} as InboxInspection,
+        graphs: {},
+        busy: false,
+        connections: [{ ...connection, provider, name } as typeof connection],
+        sources: [
+          source,
+          { id: 'missing', connectionId: 'missing', rootKey: 'M-1' },
+        ],
+        totalRoots: 2,
+        snapshots: {
+          root: {
+            rootKey: 'A-1',
+            fetchedAt: 1,
+            warnings: [],
+            issues: [issue('A-1')],
+          },
+          missing: {
+            rootKey: 'M-1',
+            fetchedAt: 1,
+            warnings: [],
+            issues: [issue('M-1')],
+          },
+        },
+        errors: {},
+        identityErrors: {},
+        users: { work: { id: 'me' } },
+        loading: new Set<string>(),
+        now: 1,
+        onChange() {},
+        onSeen() {},
+        onOpen() {},
+        onRefresh() {},
+        onMoreRoots() {},
+      }),
+    );
+    const document = new JSDOM(html).window.document;
+    const sources = document.querySelectorAll('.inbox-source');
+    assert.equal(sources.length, 1);
+    assert.equal(
+      sources[0].textContent,
+      `${label} · ${name ?? 'work'} · work · roots: A-1`,
+    );
+    assert.doesNotMatch(
+      document.querySelector('.inbox-items')!.textContent!,
+      /M-1/,
+    );
+  }
+});
+
 test('saved views expose active filters, provider context and partial-result guidance', () => {
   const github = {
     ...connection,

@@ -267,7 +267,7 @@ export async function auditInbox(app, page) {
         }),
       })
       .filter({
-        has: page.getByText('github · Work · work · roots: org/repo#1', {
+        has: page.getByText('GitHub · Work · work · roots: org/repo#1', {
           exact: true,
         }),
       });
@@ -280,7 +280,7 @@ export async function auditInbox(app, page) {
         }),
       })
       .filter({
-        has: page.getByText('github · Other · other · roots: org/repo#1', {
+        has: page.getByText('GitHub · Other · other · roots: org/repo#1', {
           exact: true,
         }),
       });
@@ -344,7 +344,7 @@ export async function auditInbox(app, page) {
         has: page.getByRole('button', { name: 'A-1 Sample A-1', exact: true }),
       })
       .filter({
-        has: page.getByText('jira · Jira · jira · roots: A-1', {
+        has: page.getByText('Jira · Jira · jira · roots: A-1', {
           exact: true,
         }),
       });

@@ -1043,6 +1043,9 @@ summary:focus-visible,
 .issue-row:focus-within {
   z-index: 2;
 }
+.issue-row:has(.field-cell.editing) {
+  z-index: 9;
+}
 .issue-row :is(button, [role='button']):focus-visible {
   outline: 2px solid var(--selected-border);
   outline-offset: -2px;
