@@ -110,7 +110,7 @@ async function run(
       readdir: async (directory: string) => {
         if (
           options.evidenceFailure === 'listing' &&
-          directory.endsWith('.cache/accessibility')
+          directory === join(workspace, '.cache/accessibility')
         ) {
           throw new Error('fixture evidence listing failure');
         }
@@ -125,13 +125,13 @@ async function run(
       readFile: async (file: string) => {
         if (
           options.evidenceFailure === 'missing' &&
-          file.endsWith('.cache/preview.png')
+          file === join(workspace, '.cache/preview.png')
         ) {
           throw new Error(`ENOENT: ${file}`);
         }
         if (
           options.evidenceFailure === 'read' &&
-          file.endsWith('.cache/tree.png')
+          file === join(workspace, '.cache/tree.png')
         ) {
           throw new Error('fixture evidence read failure');
         }
@@ -142,7 +142,7 @@ async function run(
       writeFile: async (file: string, contents: string) => {
         if (
           options.evidenceFailure === 'write' &&
-          file.endsWith('ui-review-evidence.json')
+          file === join(workspace, '.cache/ui-review-evidence.json')
         ) {
           throw new Error('fixture manifest write failure');
         }
