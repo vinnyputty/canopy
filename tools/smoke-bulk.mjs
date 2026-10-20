@@ -89,7 +89,7 @@ export async function auditBulk(app, page, modifier) {
       minimum: window.getMinimumSize(),
     };
     window.setMinimumSize(800, 480);
-    window.setSize(1040, 600);
+    window.setSize(1040, 560);
     return state;
   });
   await expect
@@ -97,10 +97,16 @@ export async function auditBulk(app, page, modifier) {
       page.locator('.tree-scroll').evaluate((tree) => {
         const header = tree.querySelector('.column-head');
         const row = tree.querySelector('.issue-row');
+        const bounds = tree.getBoundingClientRect();
+        const parentBounds = tree
+          .closest('.tree-with-preview')
+          .getBoundingClientRect();
         return (
+          bounds.top >= parentBounds.top &&
+          bounds.bottom <= Math.min(parentBounds.bottom, window.innerHeight) &&
           tree.clientHeight >=
-          header.getBoundingClientRect().height +
-            row.getBoundingClientRect().height
+            header.getBoundingClientRect().height +
+              row.getBoundingClientRect().height
         );
       }),
     )

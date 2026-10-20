@@ -1003,8 +1003,7 @@ summary:focus-visible,
   padding-left: 47px;
 }
 .tree-scroll {
-  /* Keep a row reachable beneath the sticky header and horizontal scrollbar. */
-  min-height: calc(28px + var(--row-height) + 18px);
+  min-height: 0;
   flex: 1;
   overflow: auto;
   scrollbar-color: var(--faint) transparent;
@@ -2664,7 +2663,8 @@ kbd {
 .tree-with-preview {
   display: flex;
   flex: 1;
-  min-height: 0;
+  /* Reserve a row, sticky header, status bar, and horizontal scrollbar. */
+  min-height: calc(28px + var(--row-height) + 23px + 18px);
   min-width: 0;
   overflow: hidden;
 }
