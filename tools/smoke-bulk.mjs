@@ -82,9 +82,37 @@ export async function auditBulk(app, page, modifier) {
   await expect(
     results.locator('li').filter({ hasText: 'CAN-101' }),
   ).toContainText('Saved');
+  const windowState = await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    const state = {
+      bounds: window.getBounds(),
+      minimum: window.getMinimumSize(),
+    };
+    window.setMinimumSize(800, 480);
+    window.setSize(1040, 600);
+    return state;
+  });
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((tree) => {
+        const header = tree.querySelector('.column-head');
+        const row = tree.querySelector('.issue-row');
+        return (
+          tree.clientHeight >=
+          header.getBoundingClientRect().height +
+            row.getBoundingClientRect().height
+        );
+      }),
+    )
+    .toBe(true);
   await row('CAN-110')
     .getByRole('button', { name: 'Keep the details in sync' })
     .click();
+  await app.evaluate(({ BrowserWindow }, state) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    window.setBounds(state.bounds);
+    window.setMinimumSize(...state.minimum);
+  }, windowState);
   await expect(bulk).toContainText('Bulk triage results');
   await expect(results.locator('li')).toHaveCount(2);
   await page.getByRole('button', { name: 'Open issue' }).first().click();

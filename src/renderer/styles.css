@@ -1003,7 +1003,8 @@ summary:focus-visible,
   padding-left: 47px;
 }
 .tree-scroll {
-  min-height: 0;
+  /* Keep a row reachable beneath the sticky header and horizontal scrollbar. */
+  min-height: calc(28px + var(--row-height) + 18px);
   flex: 1;
   overflow: auto;
   scrollbar-color: var(--faint) transparent;
