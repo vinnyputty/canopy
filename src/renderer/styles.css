@@ -515,7 +515,7 @@ summary:focus-visible,
   gap: 7px;
   padding: 5px 0 10px;
 }
-.saved-source-group label:not(:first-child) {
+.saved-source-group label ~ label {
   margin-left: 20px;
 }
 .saved-source-group small {
@@ -555,15 +555,17 @@ summary:focus-visible,
   text-align: left;
   padding: calc((var(--row-height) - 22px) / 2) 12px;
   display: grid;
-  grid-template-columns: 115px minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 4px 12px;
   background: transparent;
 }
 .saved-view-choice.selected {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--selected-border);
+  outline-offset: -2px;
+  background: var(--selected);
 }
 .saved-view-choice small {
-  grid-column: 2;
+  grid-column: 1 / -1;
   color: var(--muted);
 }
 .saved-view-open {
@@ -3173,8 +3175,10 @@ kbd {
 .bulk-triage li {
   margin: 4px 0;
 }
-.bulk-results li span {
+.bulk-results .bulk-result-actions {
   margin-left: auto;
+  display: flex;
+  gap: var(--space-2);
 }
 .bulk-preview,
 .bulk-results {
@@ -3762,5 +3766,241 @@ kbd {
     top: 64px;
     width: auto;
     max-height: calc(100vh - 80px);
+  }
+}
+
+.saved-view-header {
+  flex-wrap: wrap;
+}
+.saved-view-page {
+  line-height: var(--line-height-body);
+}
+.saved-view-page button,
+.saved-view-page select,
+.saved-view-page input:not([type='checkbox']) {
+  min-height: var(--control-height);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  padding: var(--space-1) var(--space-2);
+  color: var(--text);
+  background: var(--panel);
+  max-width: 100%;
+}
+.saved-view-page :is(button, select, input, summary):focus-visible,
+.bulk-triage :is(button, select, input):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.saved-view-page button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.saved-view-summary,
+.inbox-overview {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.saved-view-summary > span,
+.inbox-overview > span {
+  color: var(--muted);
+}
+.saved-view-filter-summary {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.saved-view-filter-summary span,
+.inbox-reason {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--panel-raised);
+  font-size: var(--font-size-caption);
+}
+.saved-view-page .saved-view-choice {
+  border: 0;
+  padding: calc((var(--row-height) - 22px) / 2) var(--space-3);
+  background: transparent;
+}
+.saved-view-page .saved-view-choice.selected {
+  background: var(--selected);
+}
+.saved-view-page .saved-view-choice:hover:not(.selected),
+.inbox-item:hover {
+  background: var(--panel-raised);
+}
+.saved-view-choice .saved-view-key {
+  color: var(--muted);
+  font-size: min(var(--font-size-caption), var(--tree-font-size));
+  align-self: baseline;
+}
+.saved-view-choice .saved-view-title {
+  font-weight: 600;
+  font-size: var(--tree-font-size);
+  line-height: var(--line-height-heading);
+}
+.saved-view-page .saved-view-open {
+  margin: var(--space-2);
+  font-size: var(--font-size-caption);
+  text-decoration: none;
+}
+.saved-view-choice small,
+.saved-view-form,
+.saved-view-header,
+.saved-source-group {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.saved-view-form label {
+  flex-wrap: wrap;
+}
+.saved-view-form input:not([type='checkbox']),
+.saved-view-form select {
+  min-width: 0;
+}
+.saved-view-notice,
+.inbox-empty {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--panel-raised);
+  padding: var(--space-4);
+}
+.inbox-source-details {
+  margin-bottom: var(--space-4);
+  border-block: 1px solid var(--border-soft);
+  padding-block: var(--space-3);
+  color: var(--muted);
+}
+.inbox-source-details summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+}
+.inbox-coverage li + li {
+  margin-top: var(--space-3);
+}
+.inbox-inspection-actions,
+.inbox-filters,
+.inbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.inbox-inspection-actions {
+  margin-bottom: var(--space-4);
+}
+.inbox-filters {
+  justify-content: space-between;
+}
+.inbox-filters label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.inbox-item {
+  padding: var(--space-3) var(--space-4);
+  background: var(--panel);
+}
+.inbox-item .inbox-open {
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-heading);
+  border: 0;
+  padding: 0;
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+.inbox-reason {
+  margin: 0 var(--space-1) var(--space-1) 0;
+}
+.inbox-source,
+.inbox-timestamp {
+  color: var(--muted);
+  font-size: var(--font-size-caption);
+}
+.inbox-actions {
+  margin-top: var(--space-3);
+}
+.inbox-empty {
+  margin-top: var(--space-4);
+}
+.inbox-empty p {
+  margin-bottom: 0;
+  color: var(--muted);
+}
+.bulk-triage {
+  padding: var(--space-3) var(--space-4);
+  line-height: var(--line-height-body);
+}
+.bulk-triage header {
+  flex-wrap: wrap;
+}
+.bulk-context,
+.bulk-preview > p,
+.bulk-results > p {
+  color: var(--muted);
+  margin: var(--space-2) 0;
+}
+.bulk-triage :is(button, select, input) {
+  min-height: var(--control-height);
+  border-color: var(--control-border);
+  border-radius: var(--radius-control);
+  max-width: 100%;
+}
+.bulk-controls label {
+  flex-wrap: wrap;
+}
+.bulk-triage ul {
+  list-style: none;
+  padding: 0;
+}
+.bulk-triage li {
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border-soft);
+  overflow-wrap: anywhere;
+}
+.bulk-results .bulk-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+}
+.bulk-result-issue {
+  flex: 1 1 180px;
+  min-width: 0;
+  display: grid;
+}
+.bulk-result-issue b {
+  font-size: var(--font-size-caption);
+  color: var(--muted);
+}
+.bulk-result-state {
+  flex: 1 1 140px;
+}
+.bulk-result-issue > span {
+  font-weight: 600;
+}
+.bulk-result-failed .bulk-result-state,
+.bulk-result-undo-failed .bulk-result-state,
+.bulk-unavailable {
+  color: var(--danger);
+}
+@media (max-width: 700px) {
+  .saved-view-page {
+    padding: var(--space-4);
+  }
+  .saved-view-result {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .saved-view-page .saved-view-open {
+    justify-self: start;
+    margin-top: 0;
+  }
+  .saved-view-choice .saved-view-title {
+    grid-column: 1 / -1;
   }
 }

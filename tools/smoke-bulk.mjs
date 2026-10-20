@@ -64,7 +64,9 @@ export async function auditBulk(app, page, modifier) {
     globalThis.canopySmoke.hold('bulk-failure', 'update', 'CAN-106'),
   );
   await bulk.getByRole('button', { name: 'Apply to 2 issues' }).click();
-  await expect(bulk.getByText('Results', { exact: true })).toBeVisible();
+  await expect(bulk.locator('.bulk-results > strong')).toHaveText(
+    'Results · Working…',
+  );
   await expect
     .poll(() =>
       app.evaluate(() => globalThis.canopySmoke.started('bulk-failure')),
