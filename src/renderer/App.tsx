@@ -1455,6 +1455,7 @@ export function App() {
                 }
               : {
                   ...EMPTY_WORKSPACE,
+                  reading: { ...DEFAULT_READING },
                   savedViews: starterViews().map((view) => ({
                     ...view,
                     connectionIds: nextConnections.map(

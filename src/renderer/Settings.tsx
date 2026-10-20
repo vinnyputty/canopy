@@ -65,7 +65,7 @@ export function Settings({
           className="secondary"
           onClick={() => onReading({ ...DEFAULT_READING })}
         >
-          Reset reading to Medium / Compact
+          Reset reading to Medium / Comfortable
         </button>
         <p>
           Root View controls keep columns, sorting, and filters separate.
