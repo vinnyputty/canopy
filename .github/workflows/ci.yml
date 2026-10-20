@@ -16,6 +16,11 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ runner.os }}
           repository-cache: true
+      - name: Install Linux font fallbacks
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
       - run: bazel run //:ci
       - name: Upload UI review evidence
         uses: actions/upload-artifact@v7.0.1

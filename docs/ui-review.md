@@ -22,9 +22,11 @@ CANOPY_SMOKE_ACCESSIBILITY_ONLY=1 bazel run //:smoke
 CANOPY_SMOKE_TYPOGRAPHY_ONLY=1 bazel run //:smoke
 ```
 
-The typography pass records screenshots and font/layout measurements in `.cache/typography/`. The accessibility pass records screenshots and rendered contrast measurements in `.cache/accessibility/`. Full smoke captures `.cache/tree.png` and `.cache/preview.png`. These are Chromium/sample-app observations, not native screen-reader or OS accessibility qualification.
+The typography pass records screenshots and font/layout measurements in `.cache/typography/`. The accessibility pass records screenshots of the complete Electron content area, including at 200% zoom, and rendered contrast measurements in `.cache/accessibility/`. Full smoke captures `.cache/tree.png` and `.cache/preview.png`. These are Chromium/sample-app observations, not native screen-reader or OS accessibility qualification.
 
 ## CI evidence
+
+The headless Linux runner installs Noto CJK fonts to exercise multilingual system fallback. This does not replace validation with the fonts installed on a native desktop.
 
 Each successful macOS, Windows, and Linux CI job uploads a separate `ui-review-<platform>` artifact, retained for 14 days. It contains only `.cache/typography/`, `.cache/accessibility/`, `.cache/tree.png`, `.cache/preview.png`, and `.cache/ui-review-evidence.json`. The manifest identifies the source revision and runner platform and records the hashes and sizes of included evidence files. Smoke failure diagnostics remain in the separate failure artifact; release packages remain in the existing package artifact.
 

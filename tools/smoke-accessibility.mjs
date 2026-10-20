@@ -12,7 +12,13 @@ export async function auditAccessibility(app, page, evidence) {
   await page.clock.install();
   await page.reload();
   const capture = async (name) => {
-    await page.screenshot({ path: join(evidence, `${name}.png`) });
+    // Playwright synchronizes painting; native capture preserves zoomed bounds.
+    await page.screenshot();
+    const png = await app.evaluate(async ({ BrowserWindow }) => {
+      const image = await BrowserWindow.getAllWindows()[0].capturePage();
+      return image.toPNG().toString('base64');
+    });
+    await writeFile(join(evidence, `${name}.png`), Buffer.from(png, 'base64'));
     await writeFile(
       join(evidence, `${name}.aria.txt`),
       await page.locator('body').ariaSnapshot(),
@@ -970,6 +976,25 @@ export async function auditAccessibility(app, page, evidence) {
       );
     expect(overflow).toEqual([]);
     await capture('zoom200-toolbar');
+    const main = page.locator('main.main');
+    await main.hover();
+    await page.mouse.wheel(0, 2000);
+    await expect
+      .poll(() => main.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    await expect
+      .poll(() =>
+        page.locator('.tree-scroll').evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return bounds.top >= 0 && bounds.bottom <= innerHeight;
+        }),
+      )
+      .toBe(true);
+    await capture('zoom200-tree');
+    await main.evaluate((element) => element.scrollTo({ top: 0 }));
+    await expect
+      .poll(() => main.evaluate((element) => element.scrollTop))
+      .toBe(0);
     await page.locator('.view-settings > summary').click();
     const viewPanel = page.locator('.view-panel');
     await expect(viewPanel).toBeVisible();
