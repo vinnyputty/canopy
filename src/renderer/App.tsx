@@ -26,6 +26,7 @@ import {
   verifiedSetupConnection,
 } from './connection-setup';
 import { SetupHelp, TokenPermissions } from './SetupHelp';
+import { openIssueError } from './open-issue-error';
 import { supportLinks, type SupportLink } from '../shared/support';
 import { withScrollPositions } from './scroll-position';
 import { WorkspaceBackupPanel } from './WorkspaceBackupPanel';
@@ -2392,7 +2393,7 @@ export function App() {
           return;
         setErrors((current) => ({
           ...current,
-          app: `Couldn’t open ${key}: ${error instanceof Error ? error.message : String(error)}`,
+          app: `Couldn’t open ${key}: ${openIssueError(error)}`,
         }));
       }
     },
@@ -2411,7 +2412,7 @@ export function App() {
       } catch (error) {
         setErrors((current) => ({
           ...current,
-          app: `Couldn’t open ${key}: ${error instanceof Error ? error.message : String(error)}`,
+          app: `Couldn’t open ${key}: ${openIssueError(error)}`,
         }));
       }
     },
@@ -3389,7 +3390,7 @@ export function App() {
       try {
         show(
           0,
-          'This is a local sample workspace. We’ll follow one issue tree, then leave it ready for you.',
+          'Explore a local sample with no account needed. Pause anytime to try an action; Resume continues the tour.',
           6000,
         );
         highlight(
@@ -3598,7 +3599,8 @@ export function App() {
         setTour({
           phase: 'complete',
           step: 7,
-          caption: 'Tour complete. The sample tree is yours to explore.',
+          caption:
+            'Tour complete. Explore the sample, open Settings for reading and shortcuts, or Close demo to return to your workspace.',
         });
       } catch (error) {
         if (signal.aborted) return;
@@ -3841,6 +3843,9 @@ export function App() {
         </header>
         <div className="preview-content">
           <p role="status">Select an issue to preview.</p>
+          <p>
+            Choose a row in the tree to read its description and comments here.
+          </p>
         </div>
       </aside>
     )
@@ -5350,6 +5355,14 @@ export function App() {
                         void refreshTab(activeTab, false, true, true, true)
                       }
                     />
+                  ) : !online && !demoMode && !snapshot ? (
+                    <EmptyState
+                      icon={AlertCircle}
+                      title="You’re offline"
+                      detail="Connect to the internet, then use Refresh to load this tree. Your saved roots and settings stay here."
+                      action="Setup help"
+                      onAction={() => setDialog('setup')}
+                    />
                   ) : errors[activeTab.id] && !snapshot ? (
                     <EmptyState
                       icon={AlertCircle}
@@ -5501,14 +5514,18 @@ export function App() {
                     <EmptyState
                       icon={Search}
                       title="No matching issues"
-                      detail="Try another search or clear the filters."
+                      detail="Try another search or clear the filters for this root. Other roots keep their filters."
                       action="Clear search and filters"
                       onAction={() => {
                         setQueries((current) => ({
                           ...current,
                           [activeTab.id]: '',
                         }));
-                        updateTab(activeTab.id, { filters: {} });
+                        updateTab(activeTab.id, {
+                          filters: {},
+                          hideDone: false,
+                        });
+                        searchRef.current?.focus({ preventScroll: true });
                       }}
                     />
                   ) : tree && activeTab.hideDone ? (
@@ -5631,6 +5648,9 @@ export function App() {
             onOpen={() => setDialog('open')}
             onConnect={() => setDialog('connect')}
             onDemo={launchDemo}
+            onHelp={() => setDialog('setup')}
+            onShortcuts={() => setDialog('shortcuts')}
+            loading={!ready}
             demoMode={demoMode}
             hasConnections={connections.length > 0}
             error={errors.app ?? errors.workspace}
@@ -7594,9 +7614,10 @@ function ConnectDialog({
             connections; your workspace stays in place.
           </p>
         )}
-        <div className="connect-provider">
+        <div className="connect-provider" role="group" aria-label="Provider">
           <button
             disabled={Boolean(busy)}
+            aria-pressed={provider === 'jira'}
             className={provider === 'jira' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('jira');
@@ -7607,6 +7628,7 @@ function ConnectDialog({
           </button>
           <button
             disabled={Boolean(busy)}
+            aria-pressed={provider === 'github'}
             className={provider === 'github' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('github');
@@ -7635,7 +7657,8 @@ function ConnectDialog({
               />
               <small>
                 Enter the repositories selected for this connection, separated
-                by commas or spaces. Canopy verifies issue access before saving.
+                by commas or spaces. Use one owner per connection. Canopy
+                verifies issue access before saving.
               </small>
             </label>
             <label>
@@ -8503,7 +8526,7 @@ function AppearanceDialog({
       <div className="appearance-dialog">
         <p>
           Choose a palette and appearance. Changes preview throughout the window
-          until you save.
+          until you save. Cancel restores your saved appearance.
         </p>
         <fieldset className="appearance-modes">
           <legend>Appearance</legend>
@@ -9038,7 +9061,9 @@ function Dialog({
 function TreeSkeleton() {
   return (
     <div className="skeleton" role="status" aria-label="Loading issue tree">
-      <span className="sr-only">Loading issue tree</span>
+      <p className="loading-tree-copy">
+        Loading issue tree… You can cancel the load above.
+      </p>
       {[0, 1, 2, 3, 4, 5].map((item) => (
         <div
           key={item}
@@ -9084,6 +9109,9 @@ function Welcome({
   onOpen,
   onConnect,
   onDemo,
+  onHelp,
+  onShortcuts,
+  loading,
   demoMode,
   hasConnections,
   error,
@@ -9091,34 +9119,35 @@ function Welcome({
   onOpen: () => void;
   onConnect: () => void;
   onDemo: () => void;
+  onHelp: () => void;
+  onShortcuts: () => void;
+  loading: boolean;
   demoMode: boolean;
   hasConnections: boolean;
   error?: string;
 }) {
-  return (
-    <div className="welcome">
-      <div className="welcome-art">
-        <div className="branch branch-one">
-          <i />
-          <i />
-          <i />
-        </div>
-        <div className="branch branch-two">
-          <i />
-          <i />
+  if (loading)
+    return (
+      <div className="welcome" role="status">
+        <div className="welcome-copy">
+          <h1>Opening your workspace…</h1>
+          <p>Loading saved connections and roots.</p>
         </div>
       </div>
+    );
+  return (
+    <div className="welcome">
       <div className="welcome-copy">
-        <div className="eyebrow">ISSUES, IN CONTEXT</div>
         <h1>See the whole tree.</h1>
         <p>
-          Explore epics, stories, tasks, and subtasks together. Make quick
-          changes without losing your place.
+          {hasConnections || demoMode
+            ? 'Choose an issue or repository to explore its hierarchy. Your saved roots are in the sidebar.'
+            : 'Keep related issues together. Explore a hierarchy, update work, and keep your place across Jira and GitHub.'}
         </p>
         {error && (
-          <div className="welcome-error">
+          <div className="welcome-error" role="alert">
             <AlertCircle size={15} />
-            {error}
+            <span>{error} Open Setup help for connection recovery steps.</span>
           </div>
         )}
         <div className="welcome-actions">
@@ -9147,9 +9176,41 @@ function Welcome({
             </button>
           )}
         </div>
+        {!hasConnections && !demoMode && (
+          <div className="welcome-guide">
+            <h2>Start with your work, or explore a sample</h2>
+            <dl>
+              <div>
+                <dt>Jira Cloud</dt>
+                <dd>Your site URL, Atlassian email, and API token.</dd>
+              </div>
+              <div>
+                <dt>GitHub</dt>
+                <dd>
+                  A fine-grained token and the repositories you want to open.
+                </dd>
+              </div>
+              <div>
+                <dt>Try demo</dt>
+                <dd>
+                  A separate sample workspace with a guided tour. No account
+                  needed.
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+        <div className="welcome-help">
+          <button className="secondary" onClick={onHelp}>
+            Setup help
+          </button>
+          <button className="secondary" onClick={onShortcuts}>
+            Keyboard shortcuts
+          </button>
+        </div>
         <span className="welcome-hint">
-          Tip: Press <kbd>{shortcutDisplay(PLATFORM_SHORTCUTS.quickOpen)}</kbd>{' '}
-          to open an issue from anywhere.
+          Open an issue anytime with{' '}
+          <kbd>{shortcutDisplay(PLATFORM_SHORTCUTS.quickOpen)}</kbd>.
         </span>
       </div>
     </div>

@@ -48,21 +48,28 @@ export function WorkspaceBackupPanel({
   return (
     <div className="settings-content">
       <p>
-        Backup includes server URLs and names, connection IDs, root keys and
-        summaries, favorites, recent and closed roots, saved view names and
-        filters, appearance, reading, pane sizes, keyboard shortcuts, and the
-        copy template. Copy templates can contain private text. These metadata
-        may reveal private project names, issue titles, account identifiers in
-        saved filters, and workflow details. Store the file privately. Repeated
-        closed-root history is exported once per root; open roots take
-        precedence.
+        Move your workspace layout and preferences between machines. Review the
+        file before exporting or applying an import.
       </p>
-      <p>
-        Credentials and tokens, issue snapshots, comments, descriptions, and
-        seen baselines are always excluded. Sensitive cache transfer is
-        unavailable. Reconnect on the destination machine before importing;
-        Canopy never creates credentials from a backup.
-      </p>
+      <details className="backup-contents">
+        <summary>What’s included and what stays private</summary>
+        <p>
+          Backup includes server URLs and names, connection IDs, root keys and
+          summaries, favorites, recent and closed roots, saved view names and
+          filters, appearance, reading, pane sizes, keyboard shortcuts, and the
+          copy template. Copy templates can contain private text. These metadata
+          may reveal private project names, issue titles, account identifiers in
+          saved filters, and workflow details. Store the file privately.
+          Repeated closed-root history is exported once per root; open roots
+          take precedence.
+        </p>
+        <p>
+          Credentials and tokens, issue snapshots, comments, descriptions, and
+          seen baselines are always excluded. Sensitive cache transfer is
+          unavailable. Reconnect on the destination machine before importing;
+          Canopy never creates credentials from a backup.
+        </p>
+      </details>
       <fieldset disabled={busy}>
         <legend>Export</legend>
         <button

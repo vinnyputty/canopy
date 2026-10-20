@@ -10,6 +10,14 @@ Spacing uses `--space-1` through `--space-6`: 4, 8, 12, 16, 24, and 32px. Shared
 
 Fresh workspaces and Reading reset use Medium / Comfortable. Saved workspaces without reading settings retain Medium / Compact unless a valid legacy view supplies another choice. Explicit global reading wins over legacy view preferences. The guided demo explicitly starts with Medium / Comfortable. Reading controls persist immediately and root resets preserve them.
 
+## First run and settings
+
+The welcome surface uses a single readable column with visible Connect, Try demo, Setup help, and Keyboard shortcuts actions. Provider requirements are shown before setup; token permission details link to the provider’s token settings. The demo opens a separate sample workspace without credentials. Startup displays a loading status before offering connection actions. Offline trees explain how to reconnect; filtered empty results clear the current root’s search, filters, and hidden completed issues and return focus to Find in tree.
+
+Settings groups Reading, Appearance, Workspace and help, then Updates. Reading and update preferences save immediately. Appearance previews throughout the window; Save persists it, Cancel restores the saved theme and palette, and Reset appearance previews System / Default until Save. Backup metadata details remain available before reviewing export or import.
+
+The tour’s opening caption explains Pause and Resume; its completion caption points to Settings and Close demo. Existing tour targets and accessible action labels remain stable.
+
 ## Verification
 
 After obtaining exclusive desktop ownership, run:
@@ -23,3 +31,5 @@ bazel run //:smoke
 The typography check launches the production app with fresh data, checks Comfortable, then launches the fixture with saved data lacking reading settings and checks Compact. It exercises all six size/spacing combinations with a long multilingual issue title, captures screenshots under `.cache/typography/`, records actual Chromium platform fonts (including fallback glyph fonts), checks native font use in controls, and verifies reading persistence after restart. It uses temporary owned profile data.
 
 The accessibility check captures all palette/theme combinations, focus states, and rendered contrast measurements under `.cache/accessibility/`. Inspect these screenshots for clipped badges, disabled controls, long text, narrow windows, and focus visibility. Full smoke covers navigation, editor/picker errors, cancellation, focus restoration, and reading reset. These checks must also run on Windows and Linux; a macOS result does not qualify their font fallback rendering or desktop interactions.
+
+First-run/settings desktop acceptance remains pending until exclusive GUI access is allocated. Run `bazel run //:smoke_github` for isolated setup dismissal, failed verification/retry, and diagnostics; `bazel run //:smoke` for settings save/cancel, focus restore, reading persistence, empty and offline states; and `bazel run //:demo_check` for pause/resume/seek/reset/exit. Inspect fresh welcome and connected empty workspace, provider setup, Settings, help, backup, and update states at narrow sizes and all palettes/themes. Repeat on Windows and Linux (Linux GUI automation uses `xvfb-run`) before claiming native validation.

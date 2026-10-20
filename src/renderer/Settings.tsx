@@ -21,7 +21,7 @@ export function Settings({
 }) {
   return (
     <div className="settings-content">
-      {updates}
+      <p className="settings-intro">Make this workspace comfortable for you.</p>
       <fieldset>
         <legend>Reading</legend>
         <p>
@@ -72,23 +72,43 @@ export function Settings({
           Resetting a root keeps these reading settings.
         </p>
       </fieldset>
-      <button className="secondary" onClick={onAppearance}>
-        Appearance
-      </button>
-      <button className="secondary" onClick={onShortcuts}>
-        Keyboard shortcuts
-      </button>
-      <button className="secondary" onClick={onConnect}>
-        Connection setup
-      </button>
-      <button className="secondary" onClick={onBackup}>
-        Workspace backup and transfer
-      </button>
-      <p>
-        Appearance resets to System / Default before saving. Keyboard shortcuts
-        can restore defaults. Connections are managed in the sidebar; reading
-        reset keeps connections and credentials.
-      </p>
+      <fieldset>
+        <legend>Appearance</legend>
+        <p>
+          Preview theme and palette changes, then Save to keep them. Cancel
+          restores your saved appearance.
+        </p>
+        <button className="secondary" onClick={onAppearance}>
+          Appearance
+        </button>
+      </fieldset>
+      <fieldset className="settings-resources">
+        <legend>Workspace and help</legend>
+        <div>
+          <button className="secondary" onClick={onConnect}>
+            Connection setup
+          </button>
+          <p>
+            Connect Jira or GitHub, check token permissions, or recover access.
+          </p>
+        </div>
+        <div>
+          <button className="secondary" onClick={onShortcuts}>
+            Keyboard shortcuts
+          </button>
+          <p>Browse shortcuts, customize keys, or restore defaults.</p>
+        </div>
+        <div>
+          <button className="secondary" onClick={onBackup}>
+            Workspace backup and transfer
+          </button>
+          <p>
+            Review metadata before exporting or importing. Credentials stay on
+            this machine.
+          </p>
+        </div>
+      </fieldset>
+      {updates}
     </div>
   );
 }

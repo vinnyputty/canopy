@@ -325,7 +325,9 @@ try {
   ).toHaveCount(0);
   await page.getByRole('button', { name: 'Reset and replay' }).click();
   await expect(
-    page.getByText('Tour complete. The sample tree is yours to explore.'),
+    page.getByText(
+      'Tour complete. Explore the sample, open Settings for reading and shortcuts, or Close demo to return to your workspace.',
+    ),
   ).toBeVisible({ timeout: 70000 });
   const final = await page.evaluate(async () => {
     const issues = (await window.canopy.tree('demo', 'CAN-100')).issues;
@@ -355,7 +357,9 @@ try {
   await page.getByRole('button', { name: 'Next demo step' }).click();
   await expect(page.getByText('Step 7 of 7')).toBeVisible();
   await expect(
-    page.getByText('Tour complete. The sample tree is yours to explore.'),
+    page.getByText(
+      'Tour complete. Explore the sample, open Settings for reading and shortcuts, or Close demo to return to your workspace.',
+    ),
   ).toBeVisible({ timeout: 20000 });
   await page.locator('[data-tree-key="CAN-110"]').focus();
   await page.keyboard.press('ArrowLeft');
