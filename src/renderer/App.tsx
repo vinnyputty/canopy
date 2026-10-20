@@ -6470,7 +6470,7 @@ function TreeRow(
         className="issue-cell"
         style={{ '--depth': depth } as React.CSSProperties}
       >
-        {rankable && (
+        {rankable ? (
           <button
             className="grab"
             draggable={props.rankingEnabled}
@@ -6497,25 +6497,31 @@ function TreeRow(
           >
             <GripVertical size={14} />
           </button>
+        ) : (
+          <span className="grab-placeholder" aria-hidden="true" />
         )}
-        <button
-          className={cx('disclosure', !hasChildren && 'placeholder')}
-          aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
-          tabIndex={hasChildren ? 0 : -1}
-          disabled={props.expansionLocked}
-          title={
-            props.expansionLocked
-              ? 'Matching paths expand automatically'
-              : undefined
-          }
-          onClick={() =>
-            hasChildren && !props.expansionLocked && onToggle(issue.key)
-          }
-        >
-          {hasChildren &&
-            (open ? <ChevronDown size={15} /> : <ChevronRight size={15} />)}
-        </button>
+        {hasChildren ? (
+          <button
+            className="disclosure"
+            aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
+            aria-expanded={open}
+            disabled={props.expansionLocked}
+            title={
+              props.expansionLocked
+                ? 'Matching paths expand automatically'
+                : undefined
+            }
+            onClick={() =>
+              hasChildren && !props.expansionLocked && onToggle(issue.key)
+            }
+          >
+            {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          </button>
+        ) : (
+          <span className="disclosure placeholder" aria-hidden="true" />
+        )}
         <span
+          title={issue.type}
           className={cx(
             'type-icon',
             `type-${issue.type.toLowerCase().replace(/\s/g, '-')}`,
@@ -6596,6 +6602,7 @@ function TreeRow(
             className={cx('link-count', linksOpen && 'active')}
             onClick={() => props.onToggleLinks(issue.key)}
             aria-expanded={linksOpen}
+            aria-label={`${linksOpen ? 'Hide' : 'Show'} ${issue.links.length} linked issue${issue.links.length === 1 ? '' : 's'} for ${issue.key}`}
             title={`${issue.links.length} linked issue${issue.links.length === 1 ? '' : 's'}`}
           >
             <Link2 size={12} />
@@ -6769,6 +6776,10 @@ function TreeRow(
           (props.selectedKeys.size > 0
             ? props.selectedKeys.has(issue.key)
             : selectedKey === issue.key) && 'selected',
+          props.selectedKeys.size > 1 &&
+            props.selectedKeys.has(issue.key) &&
+            'multi-selected',
+          props.editor?.key === issue.key && 'editing',
           props.revealedKey === issue.key && 'revealed',
           props.rankingEnabled &&
             dragKey &&

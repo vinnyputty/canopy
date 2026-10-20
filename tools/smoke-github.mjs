@@ -561,7 +561,9 @@ export async function auditGithub(app, page) {
         name: 'Related links',
         exact: true,
       });
-      await expect(related).toContainText('Visible results');
+      await expect(related.getByRole('heading', { level: 4 })).toHaveText(
+        'Related links 1 visible',
+      );
       await expect(related).toContainText('team/a#1 relates to team/b#2');
       await expect(related).toContainText('team/b issue 2');
       await expect(related).toContainText(

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
@@ -92,6 +93,123 @@ export const rowProps = (
     focusNeighbor: () => {},
   };
 };
+
+test('tree controls reserve the same gutter and expose only eligible expansion and ranking', () => {
+  const { JSDOM } = createRequire(import.meta.url)('jsdom');
+  const props = rowProps(3);
+  const render = () =>
+    new JSDOM(renderToStaticMarkup(React.createElement(TreeRows, props))).window
+      .document;
+  let document = render();
+  const row = (key: string) =>
+    document.querySelector(`[data-tree-key="${key}"] > .issue-row`)!;
+  assert.ok(row('D-0').querySelector('.grab-placeholder[aria-hidden="true"]'));
+  assert.equal(row('D-0').querySelector('.grab'), null);
+  assert.ok(row('D-1').querySelector('.grab:not(:disabled)'));
+  assert.ok(
+    row('D-2').querySelector('.disclosure.placeholder[aria-hidden="true"]'),
+  );
+  assert.equal(row('D-2').querySelector('button.disclosure'), null);
+  assert.equal(
+    row('D-1').querySelector('.disclosure')?.getAttribute('aria-expanded'),
+    'true',
+  );
+  props.expanded.delete('D-1');
+  document = render();
+  assert.equal(
+    row('D-1').querySelector('.disclosure')?.getAttribute('aria-expanded'),
+    'false',
+  );
+  assert.ok(
+    row('D-1')
+      .querySelector('.child-count')
+      ?.textContent?.includes('1/1 children'),
+  );
+  props.expansionLocked = true;
+  props.rankingEnabled = false;
+  document = render();
+  assert.ok(row('D-1').querySelector('button.disclosure:disabled'));
+  assert.ok(row('D-1').querySelector('.grab:disabled[draggable="false"]'));
+  props.rankableKeys.clear();
+  document = render();
+  assert.ok(row('D-1').querySelector('.grab-placeholder'));
+  assert.equal(row('D-1').querySelector('.grab'), null);
+});
+
+test('rows distinguish single selection, selection ranges and the active inline editor', () => {
+  const { JSDOM } = createRequire(import.meta.url)('jsdom');
+  const props = rowProps(3);
+  const render = () =>
+    new JSDOM(renderToStaticMarkup(React.createElement(TreeRows, props))).window
+      .document;
+  let document = render();
+  assert.equal(document.querySelectorAll('.issue-row.selected').length, 1);
+  assert.equal(
+    document.querySelectorAll('.issue-row.multi-selected, .issue-row.editing')
+      .length,
+    0,
+  );
+  props.selectedKeys = new Set(['D-1', 'D-2']);
+  props.editor = {
+    tabId: 'tree',
+    connectionId: 'demo',
+    key: 'D-2',
+    field: 'summary',
+  };
+  document = render();
+  assert.equal(
+    document.querySelectorAll('.issue-row.selected.multi-selected').length,
+    2,
+  );
+  assert.equal(document.querySelectorAll('.issue-row.editing').length, 1);
+  assert.ok(
+    document.querySelector('[data-tree-key="D-2"] .issue-row.editing input'),
+  );
+  assert.equal(
+    document
+      .querySelector('[data-tree-key="D-0"]')
+      ?.getAttribute('aria-selected'),
+    'false',
+  );
+  props.selectedKeys = new Set(['D-2']);
+  props.editor = null;
+  document = render();
+  assert.equal(document.querySelectorAll('.issue-row.selected').length, 1);
+  assert.equal(
+    document.querySelectorAll('.issue-row.multi-selected, .issue-row.editing')
+      .length,
+    0,
+  );
+});
+
+test('linked expansion names its target and exposes the expanded state', () => {
+  const { JSDOM } = createRequire(import.meta.url)('jsdom');
+  const props = rowProps(1);
+  const render = () =>
+    new JSDOM(renderToStaticMarkup(React.createElement(TreeRows, props))).window
+      .document;
+  assert.equal(render().querySelector('.link-count'), null);
+  props.node.issue.links = [
+    { key: 'D-9', summary: 'Linked work', relationship: 'blocks' },
+  ];
+  let document = render();
+  assert.equal(
+    document.querySelector('.link-count')?.getAttribute('aria-label'),
+    'Show 1 linked issue for D-0',
+  );
+  assert.equal(document.querySelector('.linked-panel'), null);
+  props.linkedExpanded.add('D-0');
+  document = render();
+  assert.equal(
+    document.querySelector('.link-count')?.getAttribute('aria-label'),
+    'Hide 1 linked issue for D-0',
+  );
+  assert.equal(
+    document.querySelector('.link-count')?.getAttribute('aria-expanded'),
+    'true',
+  );
+  assert.ok(document.querySelector('.linked-panel .open-linked'));
+});
 
 test('actual rich React rows expose the complete deep logical count with a bounded initial viewport', () => {
   const html = renderToStaticMarkup(
