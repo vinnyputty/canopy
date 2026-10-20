@@ -1,5 +1,9 @@
 # Workspace controls
 
+The sidebar separates active tabs, pinned roots, saved views, recent roots, parked roots, and connections. Each root includes its provider and connection; tab headers also show connection names. Tabs scroll horizontally while Open issue and the window drag area stay available. Selected destinations have a persistent accent edge; keyboard focus has an outline.
+
+The tree toolbar groups view options, hierarchy expansion, and sync/commands. **Tree actions** contains depth, linked-issue, selected-branch, and subtree commands. **Commands** opens the command palette. Search and filters show an active-state strip; **Reset filters** clears search, assignee/status/priority filters, and Hide done/closed for the current root, restores its saved expansion, and returns keyboard focus to Find in tree. Other tabs retain their settings.
+
 ## Settings and reading scope
 
 Sidebar **Settings** exposes Updates, Reading, Appearance, keyboard shortcuts, and connection setup. [Update preferences](updates.md) persist independently of issue workspace state; notices default off. Reading changes apply immediately to all tabs, newly opened roots, reopened tabs, and saved-view results, and save with the workspace. Fresh workspaces start with Medium / Comfortable; existing saved preferences are preserved. **Reset reading to Medium / Comfortable** resets only text size and row spacing. Appearance reset previews System / Default until saved; shortcut reset restores the keyboard defaults. Manage existing connections in the sidebar.

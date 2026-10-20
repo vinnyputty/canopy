@@ -400,8 +400,8 @@ summary:focus-visible,
   transition: transform 150ms ease;
 }
 .brand {
-  height: 39px;
-  flex: 0 0 39px;
+  height: 49px;
+  flex: 0 0 49px;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -442,7 +442,7 @@ summary:focus-visible,
 .sidebar-toggle {
   position: absolute;
   right: 6px;
-  top: 6px;
+  top: 11px;
   -webkit-app-region: no-drag;
 }
 .sidebar-body {
@@ -764,8 +764,8 @@ summary:focus-visible,
   flex-direction: column;
 }
 .tabstrip {
-  height: 39px;
-  flex: 0 0 39px;
+  min-height: 49px;
+  flex: 0 0 auto;
   display: flex;
   align-items: stretch;
   background: var(--panel);
@@ -780,9 +780,20 @@ summary:focus-visible,
 .sidebar-is-collapsed .sidebar-reveal {
   display: inline-grid;
 }
+.tabstrip-scroll {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  -webkit-app-region: no-drag;
+}
 .top-tab {
-  min-width: 122px;
-  max-width: 185px;
+  flex: 0 0 190px;
+  min-width: 150px;
+  max-width: 220px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -810,6 +821,7 @@ summary:focus-visible,
   opacity: 0;
 }
 .top-tab:hover > button,
+.top-tab:focus-within > button,
 .top-tab.active > button {
   opacity: 1;
 }
@@ -842,6 +854,7 @@ summary:focus-visible,
 }
 .window-drag {
   flex: 1;
+  min-width: 28px;
 }
 .toolbar {
   min-height: 46px;
@@ -3115,6 +3128,12 @@ kbd {
 .sidebar-organization {
   display: flex;
   justify-content: flex-end;
+  padding: 0 4px 8px;
+}
+.sidebar-organization button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .sidebar-root {
   min-width: 0;
@@ -3123,6 +3142,38 @@ kbd {
 .sidebar-root-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  padding: 0 4px 3px;
+}
+.sidebar-root-actions .icon-button {
+  width: 24px;
+  height: 24px;
+}
+.sidebar-root:has(.side-tab.active) {
+  background: var(--selected);
+  box-shadow: inset 3px 0 var(--selected-border);
+}
+.sidebar-root .side-tab.active {
+  background: transparent;
+}
+.sidebar-work .side-tab.active,
+.sidebar .side-tab[aria-current='page'] {
+  box-shadow: inset 3px 0 var(--selected-border);
+}
+.sidebar-root:has(.side-tab.active) .side-tab {
+  box-shadow: none;
+}
+.sidebar .side-tab:focus-visible,
+.top-tab:focus-visible,
+.tabstrip button:focus-visible,
+.workspace-toolbar :is(button, summary, input):focus-visible,
+.tree-navigation :is(button, summary, input, select):focus-visible,
+.tree-breadcrumb button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sidebar-root + .sidebar-root {
+  margin-top: 4px;
 }
 .sidebar-root .side-tab small {
   max-width: 100%;
@@ -3134,7 +3185,7 @@ kbd {
   font-size: var(--font-size-caption);
 }
 
-.sidebar-work .side-heading h2 {
+.sidebar .side-heading h2 {
   flex: 1;
   font: inherit;
   margin: 0;
@@ -3356,4 +3407,157 @@ kbd {
 .dialog
   :is(input:not([type='radio']):not([type='checkbox']), textarea, select) {
   border-color: var(--control-border);
+}
+
+.sidebar .side-heading {
+  height: auto;
+  min-height: 32px;
+  justify-content: space-between;
+  gap: 6px;
+  letter-spacing: normal;
+  font-size: 11px;
+}
+.sidebar-work .side-tabs {
+  margin-bottom: 18px;
+}
+.sidebar-work .side-tab {
+  padding: 7px 9px;
+}
+.sidebar-work .side-tab > span {
+  gap: 2px;
+}
+.sidebar-work .sidebar-empty {
+  margin: 0 8px 12px;
+  padding: 0;
+  line-height: 1.5;
+}
+.sidebar .connections {
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+.tab-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.tab-identity b {
+  flex-shrink: 0;
+}
+.tab-connection {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.workspace-toolbar {
+  padding: 10px 16px;
+  gap: 10px;
+}
+.toolbar-location {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.toolbar-location .crumb {
+  margin-left: 6px;
+}
+.workspace-toolbar .toolbar-actions {
+  gap: 8px;
+}
+.toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  min-width: min-content;
+  max-width: 100%;
+}
+.toolbar-group + .toolbar-group {
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+.workspace-toolbar .tool-button,
+.workspace-toolbar .checkbox {
+  height: auto;
+  min-height: 30px;
+  font-size: 12px;
+}
+.workspace-toolbar .tool-button {
+  white-space: nowrap;
+}
+.tree-navigation .tree-search {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-raised);
+}
+.tree-navigation select {
+  min-height: 30px;
+}
+.tree-navigation .tree-view-menu {
+  margin-left: auto;
+}
+.tree-navigation .tree-view-menu summary {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel-raised);
+}
+.tree-filter-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 4px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+.tree-filter-state button {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.tree-breadcrumb {
+  gap: 6px;
+  padding: 7px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.tree-breadcrumb > * {
+  flex-shrink: 0;
+}
+.tree-breadcrumb button {
+  padding: 3px 5px;
+  border-radius: 4px;
+}
+.tree-breadcrumb button[aria-current='location'] {
+  color: var(--text);
+  font-weight: 600;
+  background: var(--hover);
+}
+.tree-breadcrumb .breadcrumb-label {
+  margin-right: 5px;
+}
+.workspace-toolbar .view-panel,
+.tree-navigation .tree-view-menu > div {
+  max-width: calc(100vw - 32px);
+  max-height: min(520px, 65vh);
+  overflow-y: auto;
+}
+@media (max-width: 900px) {
+  .workspace-toolbar .toolbar-actions {
+    width: 100%;
+  }
+  .workspace-toolbar .view-panel {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    top: 64px;
+    width: auto;
+    max-height: calc(100vh - 80px);
+  }
 }

@@ -949,16 +949,48 @@ export async function auditAccessibility(app, page, evidence) {
     await capture('zoom200-settings-done');
     await done.press('Enter');
     await expect(settings).toBeFocused();
+    const overflow = await page
+      .locator('.toolbar button')
+      .evaluateAll((elements) =>
+        elements.flatMap((element) => {
+          const bounds = element.getBoundingClientRect();
+          return element.checkVisibility() &&
+            bounds.width &&
+            bounds.right > innerWidth
+            ? [
+                {
+                  name:
+                    element.getAttribute('aria-label') || element.textContent,
+                  right: bounds.right,
+                  viewport: innerWidth,
+                },
+              ]
+            : [];
+        }),
+      );
+    expect(overflow).toEqual([]);
+    await capture('zoom200-toolbar');
+    await page.locator('.view-settings > summary').click();
+    const viewPanel = page.locator('.view-panel');
+    await expect(viewPanel).toBeVisible();
     expect(
-      await page
-        .locator('.toolbar button')
+      await viewPanel.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.left >= 0 && bounds.right <= innerWidth;
+      }),
+    ).toBe(true);
+    expect(
+      await viewPanel
+        .locator('button')
         .evaluateAll((elements) =>
-          elements
-            .filter((e) => e.getBoundingClientRect().width)
-            .every((e) => e.getBoundingClientRect().right <= innerWidth),
+          elements.every(
+            (element) => element.getBoundingClientRect().right <= innerWidth,
+          ),
         ),
     ).toBe(true);
-    await capture('zoom200-toolbar');
+    await capture('zoom200-view-menu');
+    await page.locator('.view-settings > summary').press('Escape');
+    await expect(viewPanel).toBeHidden();
   } finally {
     await app.evaluate(({ BrowserWindow }, bounds) => {
       const window = BrowserWindow.getAllWindows()[0];

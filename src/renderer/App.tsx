@@ -909,6 +909,17 @@ export function App() {
     : workspace.savedViews?.find(
         (item) => item.id === workspace.activeSavedViewId,
       );
+  const tabOrder = workspace.tabs.map((tab) => tab.id).join('\0');
+  useEffect(() => {
+    if (activeSavedView) return;
+    const tab = document.querySelector<HTMLElement>('.top-tab.active');
+    const strip = tab?.parentElement;
+    if (!tab || !strip) return;
+    const left = tab.offsetLeft;
+    if (left < strip.scrollLeft) strip.scrollLeft = left;
+    else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth)
+      strip.scrollLeft = left + tab.offsetWidth - strip.clientWidth;
+  }, [activeTab?.id, tabOrder, activeSavedView?.id]);
   const availableRoots = useMemo(
     () => configuredRoots(workspace, connections),
     [
@@ -3891,6 +3902,7 @@ export function App() {
           <SidebarWork
             workspace={workspace}
             connections={connections}
+            inactive={inboxOpen}
             session={sidebarSession}
             onOrganize={organize}
             onOpen={(root) => void openTab(root.connectionId, root.rootKey)}
@@ -4063,7 +4075,7 @@ export function App() {
           owner={refreshOwner}
           scope={refreshAnnouncements.scope}
         />
-        <div className="tabstrip" role="tablist" aria-label="Open issue trees">
+        <div className="tabstrip">
           <button
             className="icon-button sidebar-reveal"
             aria-label="Show sidebar"
@@ -4073,125 +4085,145 @@ export function App() {
           >
             <Menu size={17} />
           </button>
-          {workspace.tabs.map((tab) => (
-            <div
-              key={tab.id}
-              role="tab"
-              data-tab-id={tab.id}
-              title={`${tab.rootKey}: ${tab.summary ?? ''} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable site'}`}
-              draggable
-              onDragStart={(event) => {
-                draggedTab.current = tab.id;
-                event.dataTransfer.setData('application/x-canopy-tab', tab.id);
-                event.dataTransfer.effectAllowed = 'move';
-              }}
-              onDragEnd={() => {
-                draggedTab.current = null;
-              }}
-              onDragOver={(event) => {
-                if (draggedTab.current) {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = 'move';
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                const source = draggedTab.current;
-                if (source)
-                  setWorkspace((current) =>
-                    reorderTab(current, source, tab.id),
+          <div
+            className="tabstrip-scroll"
+            role="tablist"
+            aria-label="Open issue trees"
+          >
+            {workspace.tabs.map((tab) => (
+              <div
+                key={tab.id}
+                role="tab"
+                data-tab-id={tab.id}
+                title={`${tab.rootKey}: ${tab.summary ?? ''} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable site'}`}
+                draggable
+                onDragStart={(event) => {
+                  draggedTab.current = tab.id;
+                  event.dataTransfer.setData(
+                    'application/x-canopy-tab',
+                    tab.id,
                   );
-                draggedTab.current = null;
-              }}
-              onAuxClick={(event) => {
-                if (event.button === 1) {
+                  event.dataTransfer.effectAllowed = 'move';
+                }}
+                onDragEnd={() => {
+                  draggedTab.current = null;
+                }}
+                onDragOver={(event) => {
+                  if (draggedTab.current) {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                  }
+                }}
+                onDrop={(event) => {
                   event.preventDefault();
-                  closeTab(tab.id);
-                }
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setTabMenu({
-                  id: tab.id,
-                  x: Math.min(event.clientX, window.innerWidth - 220),
-                  y: Math.min(event.clientY, window.innerHeight - 245),
-                });
-              }}
-              aria-selected={tab.id === activeTab?.id}
-              tabIndex={tab.id === activeTab?.id ? 0 : -1}
-              className={cx('top-tab', tab.id === activeTab?.id && 'active')}
-              onClick={() => selectTab(tab.id)}
-              onKeyDown={(event) => {
-                if (event.target !== event.currentTarget) return;
-                if (
-                  event.key === 'ContextMenu' ||
-                  (event.shiftKey && event.key === 'F10')
-                ) {
+                  const source = draggedTab.current;
+                  if (source)
+                    setWorkspace((current) =>
+                      reorderTab(current, source, tab.id),
+                    );
+                  draggedTab.current = null;
+                }}
+                onAuxClick={(event) => {
+                  if (event.button === 1) {
+                    event.preventDefault();
+                    closeTab(tab.id);
+                  }
+                }}
+                onContextMenu={(event) => {
                   event.preventDefault();
-                  const rect = event.currentTarget.getBoundingClientRect();
                   setTabMenu({
                     id: tab.id,
-                    x: Math.min(rect.left, window.innerWidth - 220),
-                    y: rect.bottom,
+                    x: Math.min(event.clientX, window.innerWidth - 220),
+                    y: Math.min(event.clientY, window.innerHeight - 245),
                   });
-                  return;
-                }
-                if (
-                  event.altKey &&
-                  event.shiftKey &&
-                  ['ArrowLeft', 'ArrowRight'].includes(event.key)
-                ) {
-                  event.preventDefault();
-                  const index = workspace.tabs.findIndex(
-                    (item) => item.id === tab.id,
-                  );
-                  const target =
-                    workspace.tabs[
-                      index + (event.key === 'ArrowLeft' ? -1 : 1)
-                    ];
-                  if (target)
-                    setWorkspace((current) =>
-                      reorderTab(current, tab.id, target.id),
+                }}
+                aria-selected={!activeSavedView && tab.id === activeTab?.id}
+                tabIndex={tab.id === activeTab?.id ? 0 : -1}
+                className={cx(
+                  'top-tab',
+                  !activeSavedView && tab.id === activeTab?.id && 'active',
+                )}
+                onClick={() => selectTab(tab.id)}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
+                  if (
+                    event.key === 'ContextMenu' ||
+                    (event.shiftKey && event.key === 'F10')
+                  ) {
+                    event.preventDefault();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setTabMenu({
+                      id: tab.id,
+                      x: Math.min(rect.left, window.innerWidth - 220),
+                      y: rect.bottom,
+                    });
+                    return;
+                  }
+                  if (
+                    event.altKey &&
+                    event.shiftKey &&
+                    ['ArrowLeft', 'ArrowRight'].includes(event.key)
+                  ) {
+                    event.preventDefault();
+                    const index = workspace.tabs.findIndex(
+                      (item) => item.id === tab.id,
                     );
-                  return;
-                }
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  selectTab(tab.id);
-                }
-                if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-                  event.preventDefault();
-                  const direction = event.key === 'ArrowLeft' ? -1 : 1;
-                  selectRelativeTab(direction);
-                  const tabs = [
-                    ...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>(
-                      '[role="tab"]',
-                    ),
-                  ];
-                  const index = tabs.indexOf(event.currentTarget);
-                  tabs[
-                    (index + direction + tabs.length) % tabs.length
-                  ]?.focus();
-                }
-              }}
-            >
-              <CircleDot size={14} />
-              <span className="tab-label">
-                <b>{tab.rootKey}</b>
-                <small>{tab.summary ?? 'Loading…'}</small>
-              </span>
-              {refreshing.has(tab.id) && <Loader2 className="spin" size={12} />}
-              <button
-                aria-label={`Close ${tab.rootKey}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  closeTab(tab.id);
+                    const target =
+                      workspace.tabs[
+                        index + (event.key === 'ArrowLeft' ? -1 : 1)
+                      ];
+                    if (target)
+                      setWorkspace((current) =>
+                        reorderTab(current, tab.id, target.id),
+                      );
+                    return;
+                  }
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    selectTab(tab.id);
+                  }
+                  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                    event.preventDefault();
+                    const direction = event.key === 'ArrowLeft' ? -1 : 1;
+                    selectRelativeTab(direction);
+                    const tabs = [
+                      ...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>(
+                        '[role="tab"]',
+                      ),
+                    ];
+                    const index = tabs.indexOf(event.currentTarget);
+                    tabs[
+                      (index + direction + tabs.length) % tabs.length
+                    ]?.focus();
+                  }
                 }}
               >
-                <X size={13} />
-              </button>
-            </div>
-          ))}
+                <CircleDot size={14} />
+                <span className="tab-label">
+                  <span className="tab-identity">
+                    <b>{tab.rootKey}</b>
+                    <span className="tab-connection">
+                      {connections.find((item) => item.id === tab.connectionId)
+                        ?.name ?? 'Unavailable connection'}
+                    </span>
+                  </span>
+                  <small>{tab.summary ?? 'Loading…'}</small>
+                </span>
+                {refreshing.has(tab.id) && (
+                  <Loader2 className="spin" size={12} />
+                )}
+                <button
+                  aria-label={`Close ${tab.rootKey}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    closeTab(tab.id);
+                  }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
           <button
             className="new-tab"
             aria-label="Open issue"
@@ -4353,156 +4385,183 @@ export function App() {
         )}
         {activeTab && !activeSavedView && (
           <>
-            <header className="toolbar">
-              <button
-                className="icon-button"
-                aria-label="Back"
-                title="Back (Alt+←)"
-                disabled={!history.back.length}
-                onClick={() => navigateHistory('back')}
+            <header className="toolbar workspace-toolbar">
+              <div
+                className="toolbar-location"
+                role="group"
+                aria-label="Tree navigation"
               >
-                <ArrowLeft size={16} />
-              </button>
-              <button
-                className="icon-button"
-                aria-label="Forward"
-                title="Forward (Alt+→)"
-                disabled={!history.forward.length}
-                onClick={() => navigateHistory('forward')}
-              >
-                <ArrowRight size={16} />
-              </button>
-              <div className="crumb">
-                <span>
-                  {
-                    connections.find(
-                      (item) => item.id === activeTab.connectionId,
-                    )?.name
-                  }
-                </span>
-                <ChevronRight size={14} />
-                <strong>{activeTab.rootKey}</strong>
+                <button
+                  className="icon-button"
+                  aria-label="Back"
+                  title="Back (Alt+←)"
+                  disabled={!history.back.length}
+                  onClick={() => navigateHistory('back')}
+                >
+                  <ArrowLeft size={16} />
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label="Forward"
+                  title="Forward (Alt+→)"
+                  disabled={!history.forward.length}
+                  onClick={() => navigateHistory('forward')}
+                >
+                  <ArrowRight size={16} />
+                </button>
+                <div className="crumb">
+                  <span>
+                    {
+                      connections.find(
+                        (item) => item.id === activeTab.connectionId,
+                      )?.name
+                    }
+                  </span>
+                  <ChevronRight size={14} />
+                  <strong>{activeTab.rootKey}</strong>
+                </div>
               </div>
               <div className="toolbar-actions">
-                <button
-                  className={cx('tool-button', nextTaskOpen && 'active')}
-                  aria-pressed={nextTaskOpen}
-                  onClick={() =>
-                    setNextTaskViews((current) => ({
-                      ...current,
-                      [activeTab.id]: !current[activeTab.id],
-                    }))
-                  }
+                <div
+                  className="toolbar-group"
+                  role="group"
+                  aria-label="View options"
                 >
-                  Next tasks
-                </button>
-                <ViewSettings
-                  view={view}
-                  provider={activeConnection?.provider}
-                  update={updateView}
-                  useDefault={() =>
-                    setWorkspace((current) =>
-                      defaultRootView(current, activeTab),
-                    )
-                  }
-                  reset={() => {
-                    setEditor(null);
-                    setDragKey(null);
-                    setWorkspace((current) =>
-                      resetRootView(current, activeTab),
-                    );
-                  }}
-                />
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={activeTab.hideDone}
-                    onChange={(event) =>
-                      updateTab(activeTab.id, {
-                        hideDone: event.target.checked,
-                      })
+                  <button
+                    className={cx('tool-button', nextTaskOpen && 'active')}
+                    aria-pressed={nextTaskOpen}
+                    onClick={() =>
+                      setNextTaskViews((current) => ({
+                        ...current,
+                        [activeTab.id]: !current[activeTab.id],
+                      }))
                     }
+                  >
+                    Next tasks
+                  </button>
+                  <ViewSettings
+                    view={view}
+                    provider={activeConnection?.provider}
+                    update={updateView}
+                    useDefault={() =>
+                      setWorkspace((current) =>
+                        defaultRootView(current, activeTab),
+                      )
+                    }
+                    reset={() => {
+                      setEditor(null);
+                      setDragKey(null);
+                      setWorkspace((current) =>
+                        resetRootView(current, activeTab),
+                      );
+                    }}
                   />
-                  <span>
-                    {activeConnection?.provider === 'github'
-                      ? 'Hide closed'
-                      : 'Hide done'}
-                  </span>
-                </label>
-                <span className="separator" />
-                <button
-                  className="tool-button"
-                  disabled={filtering}
-                  onClick={(event) =>
-                    expandAll(false, event.altKey || event.detail > 1)
-                  }
-                  onDoubleClick={() => expandAll(false, true)}
-                  title="Collapse all; double-click or Alt-click to include linked issues"
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={activeTab.hideDone}
+                      onChange={(event) =>
+                        updateTab(activeTab.id, {
+                          hideDone: event.target.checked,
+                        })
+                      }
+                    />
+                    <span>
+                      {activeConnection?.provider === 'github'
+                        ? 'Hide closed'
+                        : 'Hide done'}
+                    </span>
+                  </label>
+                </div>
+                <div
+                  className="toolbar-group"
+                  role="group"
+                  aria-label="Tree expansion"
                 >
-                  <ChevronsDownUp size={15} />
-                  <span>Collapse</span>
-                </button>
-                <button
-                  className="tool-button"
-                  disabled={filtering}
-                  onClick={(event) =>
-                    expandAll(true, event.altKey || event.detail > 1)
-                  }
-                  onDoubleClick={() => expandAll(true, true)}
-                  title="Expand all; double-click or Alt-click to include linked issues"
-                >
-                  <ChevronsUpDown size={15} />
-                  <span>Expand</span>
-                </button>
-                <button
-                  className="icon-button"
-                  disabled={
-                    refreshing.has(activeTab.id) ||
-                    (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
-                  }
-                  onClick={() =>
-                    void refreshTab(activeTab, true, true, true, true)
-                  }
-                  title="Refresh"
-                >
-                  <RefreshCw
-                    className={cx(refreshing.has(activeTab.id) && 'spin')}
-                    size={16}
-                  />
-                </button>
-                {unreadCount > 0 && confirmedSnapshot && (
                   <button
                     className="tool-button"
-                    onClick={() => {
-                      const rootKey = seenRootKey(
-                        activeTab.connectionId,
-                        activeTab.rootKey,
-                      );
-                      setWorkspace((current) => ({
-                        ...current,
-                        seenRoots: boundRoots(
-                          {
-                            ...current.seenRoots,
-                            [rootKey]: markRootSeen(
-                              confirmedSnapshot,
-                              current.seenRoots?.[rootKey],
-                            ),
-                          },
-                          current.seenRoots ?? {},
-                        ),
-                      }));
-                    }}
+                    disabled={filtering}
+                    onClick={(event) =>
+                      expandAll(false, event.altKey || event.detail > 1)
+                    }
+                    onDoubleClick={() => expandAll(false, true)}
+                    title="Collapse all; double-click or Alt-click to include linked issues"
                   >
-                    Mark root seen ({unreadCount})
+                    <ChevronsDownUp size={15} />
+                    <span>Collapse</span>
                   </button>
-                )}
-                <button
-                  className="icon-button"
-                  onClick={() => setDialog('commands')}
-                  title="More commands"
+                  <button
+                    className="tool-button"
+                    disabled={filtering}
+                    onClick={(event) =>
+                      expandAll(true, event.altKey || event.detail > 1)
+                    }
+                    onDoubleClick={() => expandAll(true, true)}
+                    title="Expand all; double-click or Alt-click to include linked issues"
+                  >
+                    <ChevronsUpDown size={15} />
+                    <span>Expand</span>
+                  </button>
+                </div>
+                <div
+                  className="toolbar-group"
+                  role="group"
+                  aria-label="Sync and commands"
                 >
-                  <MoreHorizontal size={17} />
-                </button>
+                  <button
+                    className="tool-button"
+                    aria-label="Refresh"
+                    disabled={
+                      refreshing.has(activeTab.id) ||
+                      (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                    }
+                    onClick={() =>
+                      void refreshTab(activeTab, true, true, true, true)
+                    }
+                    title="Refresh"
+                  >
+                    <RefreshCw
+                      className={cx(refreshing.has(activeTab.id) && 'spin')}
+                      size={16}
+                    />
+                    <span>Refresh</span>
+                  </button>
+                  {unreadCount > 0 && confirmedSnapshot && (
+                    <button
+                      className="tool-button"
+                      onClick={() => {
+                        const rootKey = seenRootKey(
+                          activeTab.connectionId,
+                          activeTab.rootKey,
+                        );
+                        setWorkspace((current) => ({
+                          ...current,
+                          seenRoots: boundRoots(
+                            {
+                              ...current.seenRoots,
+                              [rootKey]: markRootSeen(
+                                confirmedSnapshot,
+                                current.seenRoots?.[rootKey],
+                              ),
+                            },
+                            current.seenRoots ?? {},
+                          ),
+                        }));
+                      }}
+                    >
+                      Mark root seen ({unreadCount})
+                    </button>
+                  )}
+                  <button
+                    className="tool-button"
+                    onClick={() => setDialog('commands')}
+                    title="Command palette"
+                    aria-label="More commands"
+                  >
+                    <MoreHorizontal size={17} />
+                    <span>Commands</span>
+                  </button>
+                </div>
               </div>
             </header>
             <div className="tree-navigation">
@@ -4722,15 +4781,35 @@ export function App() {
                 </button>
               </div>
             )}
-            {filtering && (
-              <div className="identity-hint">
-                Matching paths are expanded automatically. Clear search and
-                filters to restore your expansion.
+            {(filtering || activeTab.hideDone) && (
+              <div className="tree-filter-state">
+                <span>
+                  {filtering
+                    ? 'Search or filters active · Matching paths expanded'
+                    : activeConnection?.provider === 'github'
+                      ? 'Closed issues hidden'
+                      : 'Done issues hidden'}
+                </span>
+                <button
+                  className="tool-button"
+                  onClick={() => {
+                    setQueries((current) => ({
+                      ...current,
+                      [activeTab.id]: '',
+                    }));
+                    updateTab(activeTab.id, { filters: {}, hideDone: false });
+                    searchRef.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  Reset filters
+                </button>
               </div>
             )}
             {
               <nav className="tree-breadcrumb" aria-label="Issue ancestry">
+                <span className="breadcrumb-label">Location</span>
                 <button
+                  aria-current={!activeTab.focusKey ? 'location' : undefined}
                   onClick={() => {
                     updateTab(activeTab.id, { focusKey: undefined });
                     scrollRef.current?.scrollTo({ top: 0 });
@@ -6114,7 +6193,7 @@ function Connections({
   return (
     <section className="connections">
       <div className="side-heading">
-        <span>CONNECTIONS</span>
+        <h2>Connections</h2>
         {!demoMode && (
           <button
             className="icon-button"
@@ -6132,6 +6211,7 @@ function Connections({
           <span>
             <b>{connection.name}</b>
             <small>
+              {connection.provider === 'github' ? 'GitHub' : 'Jira'} ·{' '}
               {connection.provider === 'github'
                 ? connection.repositories?.join(', ')
                 : (connection.accountName ?? connection.url)}

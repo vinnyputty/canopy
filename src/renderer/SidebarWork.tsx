@@ -23,6 +23,7 @@ import {
 export function SidebarWork({
   workspace,
   connections,
+  inactive = false,
   session,
   onOrganize,
   onOpen,
@@ -33,6 +34,7 @@ export function SidebarWork({
 }: {
   workspace: Workspace;
   connections: Connection[];
+  inactive?: boolean;
   session: SidebarSession;
   onOrganize: (action: OrganizationAction) => void;
   onOpen: (root: RootReference) => void;
@@ -96,7 +98,10 @@ export function SidebarWork({
     const identity = rootIdentity(root);
     const pinned = workspace.pinnedRoots?.some((item) => sameRoot(item, root));
     const selected =
-      !workspace.activeSavedViewId && active && sameRoot(active, root);
+      !inactive &&
+      !workspace.activeSavedViewId &&
+      active &&
+      sameRoot(active, root);
     const name = `${root.rootKey} · ${context(root)}`;
     const attributes = (action: string) => ({
       'data-sidebar-focus': `${section}:${identity}:${action}`,
@@ -197,14 +202,14 @@ export function SidebarWork({
           }
           onClick={() => organize({ type: 'undo' })}
         >
-          Undo
+          <RotateCcw size={13} /> Undo
         </button>
         <span role="status" className="sr-only">
           {session.announcement}
         </span>
       </div>
       {heading(
-        'ACTIVE TABS',
+        'Active tabs',
         roots.active.length,
         <button
           className="icon-button"
@@ -222,14 +227,14 @@ export function SidebarWork({
           <p className="sidebar-empty">No active roots in the sidebar.</p>
         )}
       </nav>
-      {heading('PINNED ROOTS', roots.pinned.length)}
+      {heading('Pinned roots', roots.pinned.length)}
       <nav aria-label="Pinned roots">
         <ul className="side-tabs">
           {roots.pinned.map((root, index) => rootRow(root, 'pinned', index))}
         </ul>
       </nav>
       {heading(
-        'SAVED VIEWS',
+        'Saved views',
         workspace.savedViews?.length ?? 0,
         <button
           className="icon-button"
@@ -253,9 +258,11 @@ export function SidebarWork({
             return (
               <li key={view.id}>
                 <button
-                  className={`side-tab ${view.id === workspace.activeSavedViewId ? 'active' : ''}`}
+                  className={`side-tab ${!inactive && view.id === workspace.activeSavedViewId ? 'active' : ''}`}
                   aria-current={
-                    view.id === workspace.activeSavedViewId ? 'page' : undefined
+                    !inactive && view.id === workspace.activeSavedViewId
+                      ? 'page'
+                      : undefined
                   }
                   aria-label={`Saved view: ${view.name}`}
                   aria-describedby={`sidebar-view-context-${view.id}`}
@@ -274,13 +281,13 @@ export function SidebarWork({
           })}
         </ul>
       </nav>
-      {heading('RECENT ROOTS', roots.recent.length)}
+      {heading('Recent roots', roots.recent.length)}
       <nav aria-label="Recent roots">
         <ul className="side-tabs">
           {roots.recent.map((root, index) => rootRow(root, 'recent', index))}
         </ul>
       </nav>
-      {heading('PARKED ROOTS', roots.parked.length)}
+      {heading('Parked roots', roots.parked.length)}
       <p className="sidebar-empty">
         Parking lasts until restart. Tabs stay open; saved views keep their
         roots.
