@@ -85,6 +85,12 @@ export function UpdateSettings({ updates }: { updates: UpdateControls }) {
         Downloads and installation are started by you on the official GitHub
         Release page. Canopy never downloads or installs updates automatically.
       </p>
+      {!state && (
+        <p>
+          Update information is unavailable. Choose Check for updates to try
+          again.
+        </p>
+      )}
       {state && (
         <>
           <p>

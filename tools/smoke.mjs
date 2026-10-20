@@ -354,6 +354,154 @@ async function auditSettingsKeyboard() {
     'Settings keyboard checks passed: initial focus, Tab/Shift+Tab containment, close restoration, and destination focus.',
   );
 }
+async function auditTypography() {
+  const evidence = join(workspace, '.cache', 'typography');
+  await mkdir(evidence, { recursive: true });
+  await launch(true);
+  await expectReading('Text size', 'medium');
+  await expectReading('Row spacing', 'comfortable');
+  await close();
+  const persisted = {
+    tabs: [
+      {
+        id: 'sample',
+        connectionId: 'demo',
+        rootKey: 'CAN-100',
+        expanded: ['CAN-100'],
+        hideDone: false,
+        scrollTop: 0,
+      },
+    ],
+    activeTabId: 'sample',
+    shortcuts: {},
+    theme: 'light',
+    sidebarCollapsed: false,
+  };
+  await writeFile(join(userData, 'workspace.json'), JSON.stringify(persisted));
+  await launch();
+  await expectReading('Row spacing', 'compact');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '30px',
+  );
+  await app.evaluate(async () => {
+    await globalThis.canopySmoke.update('CAN-101', {
+      summary:
+        'Readable workspace — 日本語の課題 · العربية · Français · 한국어 · A long title with enough detail to exercise truncation and keep its actions reachable',
+    });
+  });
+  await page.reload();
+  await expect(page.locator('.issue-tree')).toBeVisible();
+  const measurements = [];
+  for (const textSize of ['small', 'medium', 'large']) {
+    for (const spacing of ['compact', 'comfortable']) {
+      await changeReading('Text size', textSize);
+      await changeReading('Row spacing', spacing);
+      await expect(page.locator('.issue-tree')).toHaveCSS(
+        'font-size',
+        `${{ small: 11, medium: 13, large: 15 }[textSize]}px`,
+      );
+      await expect(page.locator('.issue-row').first()).toHaveCSS(
+        'min-height',
+        spacing === 'compact' ? '30px' : '40px',
+      );
+      measurements.push(
+        await page.locator('.issue-tree').evaluate(
+          (tree, reading) => ({
+            ...reading,
+            fontFamily: getComputedStyle(tree).fontFamily,
+            fontSize: getComputedStyle(tree).fontSize,
+            rowHeight: getComputedStyle(tree.querySelector('.issue-row'))
+              .height,
+            text: tree.textContent,
+          }),
+          { textSize, spacing },
+        ),
+      );
+      await page.screenshot({
+        path: join(evidence, `${textSize}-${spacing}.png`),
+      });
+    }
+  }
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByLabel('Row spacing', { exact: true }).focus();
+  await page.screenshot({ path: join(evidence, 'settings-focus.png') });
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    const { root } = await session.send('DOM.getDocument');
+    const fonts = [];
+    for (const selector of [
+      '.dialog > header h2',
+      '.settings-content legend',
+      '.settings-content select',
+      '[data-tree-key="CAN-101"] .summary',
+    ]) {
+      const { nodeId } = await session.send('DOM.querySelector', {
+        nodeId: root.nodeId,
+        selector,
+      });
+      expect(nodeId, selector).toBeGreaterThan(0);
+      const rendered = await session.send('CSS.getPlatformFontsForNode', {
+        nodeId,
+      });
+      fonts.push({ selector, ...rendered });
+      expect(
+        rendered.fonts.some((font) => font.glyphCount > 0),
+        selector,
+      ).toBe(true);
+      expect(
+        rendered.fonts.some((font) => font.isCustomFont),
+        selector,
+      ).toBe(false);
+      if (process.platform === 'darwin')
+        expect(
+          rendered.fonts.some((font) => /SF|AppleSystem/.test(font.familyName)),
+          selector,
+        ).toBe(true);
+    }
+    const controls = await page
+      .getByLabel('Row spacing', { exact: true })
+      .evaluate((control) => ({
+        fontFamily: getComputedStyle(control).fontFamily,
+        fontSize: getComputedStyle(control).fontSize,
+        focusOutline: getComputedStyle(control).outline,
+      }));
+    expect(controls.fontFamily).toContain('system-ui');
+    expect(controls.focusOutline).toContain('solid');
+    await writeFile(
+      join(evidence, 'measurements.json'),
+      JSON.stringify(
+        {
+          platform: process.platform,
+          arch: process.arch,
+          measurements,
+          fonts,
+          controls,
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    await session.detach();
+  }
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await waitForSavedWorkspace(
+    (saved) =>
+      saved.reading?.textSize === 'large' &&
+      saved.reading.spacing === 'comfortable',
+  );
+  await close();
+  await launch();
+  await expectReading('Text size', 'large');
+  await expectReading('Row spacing', 'comfortable');
+  console.log(
+    'Typography Electron checks passed: fresh startup, implicit legacy Compact, all six reading combinations, multilingual content, native platform fonts, focus, and relaunch persistence.',
+  );
+}
+
 async function auditReadingMigration() {
   const rootView = {
     columns: ['issue', 'priority', 'assignee', 'status'],
@@ -547,7 +695,7 @@ async function auditGlobalReading() {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page
     .getByRole('button', {
-      name: 'Reset reading to Medium / Compact',
+      name: 'Reset reading to Medium / Comfortable',
       exact: true,
     })
     .click();
@@ -555,17 +703,17 @@ async function auditGlobalReading() {
   await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '13px');
   await expect(page.locator('.issue-row').first()).toHaveCSS(
     'min-height',
-    '30px',
+    '40px',
   );
   await page
     .getByRole('button', { name: 'Saved view: New view', exact: true })
     .click();
   await expect(result).toHaveCSS('font-size', '13px');
-  await expect(result).toHaveCSS('padding-top', '4px');
+  await expect(result).toHaveCSS('padding-top', '9px');
   await waitForSavedWorkspace(
     (saved) =>
       saved.reading?.textSize === 'medium' &&
-      saved.reading.spacing === 'compact' &&
+      saved.reading.spacing === 'comfortable' &&
       saved.savedViews.some(
         (view) =>
           view.id === saved.activeSavedViewId &&
@@ -582,7 +730,7 @@ async function auditGlobalReading() {
       .first(),
   ).toHaveCSS('font-size', '13px');
   await expectReading('Text size', 'medium');
-  await expectReading('Row spacing', 'compact');
+  await expectReading('Row spacing', 'comfortable');
   await page.getByRole('tab', { name: /CAN-100/ }).click();
   await changeReading('Text size', 'large');
   await changeReading('Row spacing', 'comfortable');
@@ -1472,6 +1620,13 @@ try {
     recursive: true,
     force: true,
   });
+  if (process.env.CANOPY_SMOKE_TYPOGRAPHY_ONLY === '1') {
+    await auditTypography();
+    expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
+    await close();
+    await rm(userData, { recursive: true, force: true });
+    process.exit(0);
+  }
   if (process.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY === '1') {
     await launch();
     await auditAccessibility(

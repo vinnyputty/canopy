@@ -43,7 +43,12 @@ export function CreateChildDialog({
   assigneeQueryRef.current = assigneeQuery;
 
   useEffect(() => {
+    const previous = document.activeElement;
     dialogRef.current?.focus();
+    return () => {
+      if (previous instanceof HTMLElement && previous.isConnected)
+        previous.focus();
+    };
   }, []);
 
   useEffect(() => {
@@ -193,15 +198,16 @@ export function CreateChildDialog({
     >
       <section
         ref={dialogRef}
-        className="dialog compact"
+        className="dialog compact create-child-dialog"
         role="dialog"
         aria-modal="true"
         aria-label={`Create child issue of ${parent.key}`}
         tabIndex={-1}
         onKeyDown={(event) => {
-          if (event.key === 'Escape' && !saving) {
+          if (event.key === 'Escape') {
             event.preventDefault();
-            onClose();
+            event.stopPropagation();
+            if (!saving) onClose();
           }
           if (event.key !== 'Tab') return;
           const focusable = [
@@ -211,7 +217,10 @@ export function CreateChildDialog({
           ];
           const first = focusable[0];
           const last = focusable.at(-1);
-          if (event.shiftKey && document.activeElement === first) {
+          if (document.activeElement === event.currentTarget) {
+            event.preventDefault();
+            (event.shiftKey ? last : first)?.focus();
+          } else if (event.shiftKey && document.activeElement === first) {
             event.preventDefault();
             last?.focus();
           } else if (!event.shiftKey && document.activeElement === last) {
@@ -240,7 +249,9 @@ export function CreateChildDialog({
             {options ? ` · ${options.project.name}` : ''}
           </p>
           {loading ? (
-            <p className="dialog-note">Loading Jira creation options…</p>
+            <p className="dialog-note" role="status">
+              Loading Jira creation options…
+            </p>
           ) : (
             <>
               {options?.types.length ? (
@@ -277,6 +288,9 @@ export function CreateChildDialog({
                       required
                     />
                   </label>
+                  {!fields && !error && (
+                    <p role="status">Loading fields for this issue type…</p>
+                  )}
                   {fields?.description && (
                     <label>
                       <span>
@@ -312,6 +326,9 @@ export function CreateChildDialog({
                         >
                           Clear assignee
                         </button>
+                      )}
+                      {!assignee && peopleLoading && (
+                        <small role="status">Loading people…</small>
                       )}
                       {!assignee && assignees.length > 0 && (
                         <div className="create-child-people">
@@ -387,6 +404,17 @@ export function CreateChildDialog({
               Retry Jira options
             </button>
           )}
+          <p className="dialog-note" role="status">
+            {saving
+              ? 'Creating in Jira. Keep this dialog open until the result is confirmed.'
+              : createdUnknown
+                ? 'Check the parent in Jira before creating another child; this issue may already exist.'
+                : fields?.unsupported
+                  ? 'Continue in Jira to complete the required fields.'
+                  : fields && options?.types.length
+                    ? 'Required fields must be complete before creating a child.'
+                    : ''}
+          </p>
           <div className="dialog-footer">
             <button type="button" onClick={onOpenJira}>
               Open parent in Jira

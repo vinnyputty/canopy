@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash as hash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 
@@ -12,6 +14,43 @@ const body = source.slice(source.indexOf('const cwd ='));
 const cacheName = 'PSModuleAnalysisCachePath';
 const cache = '/controlled cache/fixture-analysis-file';
 const secret = 'UNRELATED_FIXTURE_SECRET';
+const revision = 'review-fixture-revision';
+const workspace = '/fixture source';
+const evidenceFiles = new Map<string, Buffer>([
+  [
+    join(workspace, '.cache/typography/measurements.json'),
+    Buffer.from('{"font":"system"}\n'),
+  ],
+  [
+    join(workspace, '.cache/typography/nested/screen.png'),
+    Buffer.from([0, 255, 42]),
+  ],
+  [
+    join(workspace, '.cache/accessibility/rendered-contrast.json'),
+    Buffer.from('{"ratio":7}\n'),
+  ],
+  [join(workspace, '.cache/tree.png'), Buffer.from([1, 2, 3, 4])],
+  [join(workspace, '.cache/preview.png'), Buffer.from([5, 6, 7])],
+]);
+const evidenceDirectories = new Map<
+  string,
+  Array<{ name: string; directory?: boolean }>
+>([
+  [
+    join(workspace, '.cache/typography'),
+    [{ name: 'measurements.json' }, { name: 'nested', directory: true }],
+  ],
+  [join(workspace, '.cache/typography/nested'), [{ name: 'screen.png' }]],
+  [
+    join(workspace, '.cache/accessibility'),
+    [{ name: 'rendered-contrast.json' }],
+  ],
+]);
+
+type RunOptions = {
+  failSmokeAt?: number;
+  evidenceFailure?: 'listing' | 'missing' | 'read' | 'write';
+};
 
 type Call = {
   command: string;
@@ -22,40 +61,100 @@ type Call = {
 async function run(
   platform: string,
   parent: Record<string, string | undefined>,
+  options: RunOptions = {},
 ) {
   const calls: Call[] = [];
-  await runInNewContext(`(async () => { ${body} })()`, {
-    process: {
-      platform,
-      arch: 'fixture',
-      argv: ['node', 'ci', '--ignore_all_rc_files'],
-      env: parent,
-      cwd: () => '/fixture source',
-      exit: () => {
-        throw new Error('unexpected exit');
+  const written = new Map<string, string>();
+  let smokeCount = 0;
+  let error: unknown;
+  try {
+    await runInNewContext(`(async () => { ${body} })()`, {
+      process: {
+        platform,
+        arch: 'fixture',
+        argv: ['node', 'ci', '--ignore_all_rc_files'],
+        env: { GITHUB_SHA: revision, ...parent },
+        cwd: () => '/fixture source',
+        exit: (status: number) => {
+          throw new Error(`process.exit(${status})`);
+        },
       },
-    },
-    console: {
-      error: () => {
-        throw new Error('unexpected log');
+      console: {
+        error: () => {
+          if (!options.failSmokeAt) throw new Error('unexpected log');
+        },
       },
-    },
-    runCimModuleControls: () => {},
-    runCimContextControls: async () => {},
-    spawnSync: (
-      command: string,
-      args: string[],
-      options: { env: Record<string, string>; cwd: string },
-    ) => {
-      calls.push({
-        command,
-        args: Array.from(args),
-        env: { ...options.env },
-        cwd: options.cwd,
-      });
-      return { status: 0 };
-    },
-  });
+      runCimModuleControls: () => {},
+      runCimContextControls: async () => {},
+      spawnSync: (
+        command: string,
+        args: string[],
+        spawnOptions: { env: Record<string, string>; cwd: string },
+      ) => {
+        calls.push({
+          command,
+          args: Array.from(args),
+          env: { ...spawnOptions.env },
+          cwd: spawnOptions.cwd,
+        });
+        if (args.includes('//:smoke')) smokeCount += 1;
+        return {
+          status:
+            options.failSmokeAt === smokeCount && args.includes('//:smoke')
+              ? 1
+              : 0,
+        };
+      },
+      createHash: (algorithm: string) => hash(algorithm),
+      mkdir: async () => {},
+      readdir: async (directory: string) => {
+        if (
+          options.evidenceFailure === 'listing' &&
+          directory === join(workspace, '.cache/accessibility')
+        ) {
+          throw new Error('fixture evidence listing failure');
+        }
+        const entries = evidenceDirectories.get(directory);
+        if (!entries) throw new Error(`ENOENT: ${directory}`);
+        return entries.map(({ name, directory: isDirectory }) => ({
+          name,
+          isDirectory: () => Boolean(isDirectory),
+          isFile: () => !isDirectory,
+        }));
+      },
+      readFile: async (file: string) => {
+        if (
+          options.evidenceFailure === 'missing' &&
+          file === join(workspace, '.cache/preview.png')
+        ) {
+          throw new Error(`ENOENT: ${file}`);
+        }
+        if (
+          options.evidenceFailure === 'read' &&
+          file === join(workspace, '.cache/tree.png')
+        ) {
+          throw new Error('fixture evidence read failure');
+        }
+        const contents = evidenceFiles.get(file);
+        if (!contents) throw new Error(`ENOENT: ${file}`);
+        return contents;
+      },
+      writeFile: async (file: string, contents: string) => {
+        if (
+          options.evidenceFailure === 'write' &&
+          file === join(workspace, '.cache/ui-review-evidence.json')
+        ) {
+          throw new Error('fixture manifest write failure');
+        }
+        written.set(file, contents);
+      },
+      join,
+      relative,
+      Buffer,
+    });
+  } catch (caught) {
+    error = caught;
+  }
   const testCall = calls.find((call) => call.args.includes('test'));
   assert.ok(testCall);
   assert.ok(
@@ -75,7 +174,7 @@ async function run(
   assert.ok(!JSON.stringify(calls.map((call) => call.args)).includes(cache));
   assert.equal(testCall.env.JS_BINARY__NODE_BINARY, undefined);
   assert.equal(testCall.env.RUNFILES_DIR, undefined);
-  return { calls, testCall };
+  return { calls, testCall, written, error };
 }
 
 for (const key of [
@@ -153,21 +252,37 @@ for (const [platform, display] of [
   ['linux', undefined],
   ['linux', ':fixture'],
 ] as const) {
-  test(`actual CI isolates focused accessibility after full smoke on ${platform} with ${display ?? 'no display'}`, async () => {
+  test(`actual CI orders typography and accessibility evidence after full smoke on ${platform} with ${display ?? 'no display'}`, async () => {
     const parent = {
       USER_SECRET: secret,
       DISPLAY: display,
       CANOPY_SMOKE_ACCESSIBILITY_ONLY: '1',
+      CANOPY_SMOKE_TYPOGRAPHY_ONLY: '1',
+      CANOPY_SMOKE_SIDEBAR_ONLY: '1',
+      CANOPY_SMOKE_TEST_DIAGNOSTICS: '1',
       JS_BINARY__NODE_BINARY: 'fixture-parent-node',
       RUNFILES_DIR: 'fixture-parent-runfiles',
     };
-    const { calls } = await run(platform, parent);
+    const { calls, written } = await run(platform, parent);
     const smokeCalls = calls.filter((call) => call.args.includes('//:smoke'));
-    assert.equal(smokeCalls.length, 2);
+    assert.equal(smokeCalls.length, 3);
     assert.equal(smokeCalls[0].env.CANOPY_SMOKE_ACCESSIBILITY_ONLY, undefined);
+    assert.equal(smokeCalls[0].env.CANOPY_SMOKE_TYPOGRAPHY_ONLY, undefined);
+    assert.equal(smokeCalls[0].env.CANOPY_SMOKE_SIDEBAR_ONLY, undefined);
+    assert.equal(smokeCalls[0].env.CANOPY_SMOKE_TEST_DIAGNOSTICS, undefined);
     assert.equal(smokeCalls[1].env.CANOPY_SMOKE_ACCESSIBILITY_ONLY, '1');
+    assert.equal(smokeCalls[1].env.CANOPY_SMOKE_TYPOGRAPHY_ONLY, undefined);
+    assert.equal(smokeCalls[2].env.CANOPY_SMOKE_ACCESSIBILITY_ONLY, undefined);
+    assert.equal(smokeCalls[2].env.CANOPY_SMOKE_TYPOGRAPHY_ONLY, '1');
+    assert.equal(smokeCalls[2].env.CANOPY_SMOKE_SIDEBAR_ONLY, undefined);
+    assert.equal(smokeCalls[2].env.CANOPY_SMOKE_TEST_DIAGNOSTICS, undefined);
     assert.equal(
       calls.filter((call) => call.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY === '1')
+        .length,
+      1,
+    );
+    assert.equal(
+      calls.filter((call) => call.env.CANOPY_SMOKE_TYPOGRAPHY_ONLY === '1')
         .length,
       1,
     );
@@ -177,6 +292,7 @@ for (const [platform, display] of [
         .map((call) => call.args.slice(call.args.indexOf('run') + 1)),
       [
         ['//:branding_smoke'],
+        ['//:smoke'],
         ['//:smoke'],
         ['//:smoke'],
         ['//:demo_check'],
@@ -200,7 +316,68 @@ for (const [platform, display] of [
         platform === 'linux' && !display ? 'xvfb-run' : 'bazel',
       );
     }
+    const manifest = written.get(
+      join(workspace, '.cache/ui-review-evidence.json'),
+    );
+    assert.ok(manifest);
+    const recorded = JSON.parse(manifest) as {
+      sourceRevision: string;
+      platform: string;
+      evidence: Array<{ file: string; sha256: string; bytes: number }>;
+    };
+    assert.equal(recorded.sourceRevision, revision);
+    assert.equal(recorded.platform, `${platform}-fixture`);
+    assert.deepEqual(
+      recorded.evidence,
+      [...evidenceFiles]
+        .map(([file, contents]) => ({
+          file: relative(workspace, file).replaceAll('\\', '/'),
+          sha256: hash('sha256').update(contents).digest('hex'),
+          bytes: contents.length,
+        }))
+        .sort((left, right) => left.file.localeCompare(right.file)),
+    );
     assert.equal(parent.CANOPY_SMOKE_ACCESSIBILITY_ONLY, '1');
+    assert.equal(parent.CANOPY_SMOKE_TYPOGRAPHY_ONLY, '1');
+  });
+}
+
+for (const [platform, display] of [
+  ['darwin', undefined],
+  ['win32', undefined],
+  ['linux', undefined],
+  ['linux', ':fixture'],
+] as const) {
+  for (const failSmokeAt of [1, 2, 3]) {
+    test(`actual CI stops after smoke ${failSmokeAt} failure on ${platform} with ${display ?? 'no display'}`, async () => {
+      const { calls, error } = await run(
+        platform,
+        { DISPLAY: display, USER_SECRET: secret },
+        { failSmokeAt },
+      );
+      assert.match(String(error), /process\.exit\(1\)/);
+      const smokeCalls = calls.filter((call) => call.args.includes('//:smoke'));
+      assert.equal(smokeCalls.length, failSmokeAt);
+      assert.ok(!calls.some((call) => call.args.includes('//:demo_check')));
+      assert.ok(!calls.some((call) => call.args.includes('//:package')));
+    });
+  }
+}
+
+for (const evidenceFailure of [
+  'listing',
+  'missing',
+  'read',
+  'write',
+] as const) {
+  test(`actual CI stops before packaging after evidence ${evidenceFailure} failure`, async () => {
+    const { calls, error } = await run(
+      'darwin',
+      { USER_SECRET: secret },
+      { evidenceFailure },
+    );
+    assert.match(String(error), /fixture evidence|ENOENT|fixture manifest/);
+    assert.ok(!calls.some((call) => call.args.includes('//:package')));
   });
 }
 

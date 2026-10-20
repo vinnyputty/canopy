@@ -353,3 +353,26 @@ it('disconnecting clears Undo and only that connection’s parked roots', () => 
   );
   assert.equal(forgetSidebarConnections(result.session, []), result.session);
 });
+
+it('inbox suppresses tree and saved-view selection while retaining every destination', () => {
+  for (const activeSavedViewId of [null, initial().savedViews![0].id]) {
+    const workspace = { ...initial(), activeSavedViewId };
+    const html = renderToStaticMarkup(
+      React.createElement(SidebarWork, {
+        workspace,
+        inactive: true,
+        session: emptySidebarSession(),
+        connections: [],
+        onOrganize() {},
+        onOpen() {},
+        onSelectTab() {},
+        onSelectView() {},
+        onCreateView() {},
+        onOpenPicker() {},
+      }),
+    );
+    assert.doesNotMatch(html, /aria-current="page"/);
+    assert.match(html, /Open A-1/);
+    assert.match(html, /Saved view:/);
+  }
+});

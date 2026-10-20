@@ -401,7 +401,10 @@ test('actual relationship UI exposes identity, direction, incomplete and outside
   );
   assert.match(html, /GitHub · Work account/);
   assert.match(html, /Incoming/);
-  assert.match(html, /Blockers · partial/);
+  assert.match(
+    html,
+    /Blockers <span class="relationship-state">partial<\/span>/,
+  );
   assert.match(html, /Cross-repository/);
   assert.match(html, /Outside this connection/);
   assert.doesNotMatch(html, /Show private\/repo#1 in tree/);

@@ -1,12 +1,17 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { runCimModuleControls } from './windows-cim-control.mjs';
 import { runCimContextControls } from './windows-cim-input-control.mjs';
 
 const cwd = process.env.BUILD_WORKSPACE_DIRECTORY || process.cwd();
 const startupOptions = process.argv.slice(2);
 const env = { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' };
-// CI always runs the full smoke before the isolated accessibility audit.
-delete env.CANOPY_SMOKE_ACCESSIBILITY_ONLY;
+// CI smoke runs must not inherit a focused mode or fault-injection switch.
+for (const key of Object.keys(env)) {
+  if (key.startsWith('CANOPY_SMOKE_')) delete env[key];
+}
 // Nested Bazel launchers must resolve their own runfiles and Node toolchain.
 for (const key of Object.keys(env)) {
   if (key.startsWith('JS_BINARY__') || key.startsWith('RUNFILES')) {
@@ -44,6 +49,58 @@ function run(command, args, commandEnv = env) {
 function bazel(...args) {
   run('bazel', [...startupOptions, ...args]);
 }
+function smoke(commandEnv = env) {
+  if (process.platform === 'linux' && !env.DISPLAY) {
+    run(
+      'xvfb-run',
+      ['-a', 'bazel', ...startupOptions, 'run', '//:smoke'],
+      commandEnv,
+    );
+  } else {
+    run('bazel', [...startupOptions, 'run', '//:smoke'], commandEnv);
+  }
+}
+async function collectEvidence(directory, files = []) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const file = join(directory, entry.name);
+    if (entry.isDirectory()) await collectEvidence(file, files);
+    else if (entry.isFile()) {
+      const contents = await readFile(file);
+      files.push({
+        file: relative(cwd, file).replaceAll('\\', '/'),
+        sha256: createHash('sha256').update(contents).digest('hex'),
+        bytes: contents.length,
+      });
+    }
+  }
+  return files;
+}
+async function writeEvidenceManifest() {
+  const evidence = [];
+  for (const directory of [
+    join(cwd, '.cache', 'typography'),
+    join(cwd, '.cache', 'accessibility'),
+  ]) {
+    await collectEvidence(directory, evidence);
+  }
+  for (const file of ['tree.png', 'preview.png']) {
+    const fullPath = join(cwd, '.cache', file);
+    const contents = await readFile(fullPath);
+    evidence.push({
+      file: `.cache/${file}`,
+      sha256: createHash('sha256').update(contents).digest('hex'),
+      bytes: contents.length,
+    });
+  }
+  evidence.sort((left, right) => left.file.localeCompare(right.file));
+  const revision =
+    process.env.GITHUB_SHA || process.env.BUILD_SCM_REVISION || 'unknown';
+  await mkdir(join(cwd, '.cache'), { recursive: true });
+  await writeFile(
+    join(cwd, '.cache', 'ui-review-evidence.json'),
+    `${JSON.stringify({ sourceRevision: revision, platform: `${process.platform}-${process.arch}`, evidence }, null, 2)}\n`,
+  );
+}
 if (process.platform === 'win32') {
   runCimModuleControls();
   await runCimContextControls();
@@ -69,10 +126,14 @@ if (process.platform === 'linux' && !env.DISPLAY) {
     'run',
     '//:branding_smoke',
   ]);
-  run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke']);
-  run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:smoke'], {
+  smoke();
+  smoke({
     ...env,
     CANOPY_SMOKE_ACCESSIBILITY_ONLY: '1',
+  });
+  smoke({
+    ...env,
+    CANOPY_SMOKE_TYPOGRAPHY_ONLY: '1',
   });
   run('xvfb-run', ['-a', 'bazel', ...startupOptions, 'run', '//:demo_check']);
   run('xvfb-run', [
@@ -86,12 +147,17 @@ if (process.platform === 'linux' && !env.DISPLAY) {
   ]);
 } else {
   bazel('run', '//:branding_smoke');
-  bazel('run', '//:smoke');
-  run('bazel', [...startupOptions, 'run', '//:smoke'], {
+  smoke();
+  smoke({
     ...env,
     CANOPY_SMOKE_ACCESSIBILITY_ONLY: '1',
+  });
+  smoke({
+    ...env,
+    CANOPY_SMOKE_TYPOGRAPHY_ONLY: '1',
   });
   bazel('run', '//:demo_check');
   bazel('run', '//:instance_check', '--', '--state-only');
 }
+await writeEvidenceManifest();
 bazel('run', '//:package');

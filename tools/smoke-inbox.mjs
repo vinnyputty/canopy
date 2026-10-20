@@ -212,6 +212,10 @@ export async function auditInbox(app, page) {
       .getByRole('button', { name: 'Triage inbox', exact: true })
       .click();
     const inbox = page.getByRole('region', { name: 'Triage inbox' });
+    await expect(inbox.locator('.inbox-overview')).toContainText(
+      'Coverage incomplete',
+    );
+    await inbox.locator('.inbox-source-details > summary').click();
     const expectOwner = async (id, connection, key) => {
       await expect
         .poll(() =>
@@ -263,7 +267,7 @@ export async function auditInbox(app, page) {
         }),
       })
       .filter({
-        has: page.getByText('github · Work · work · roots: org/repo#1', {
+        has: page.getByText('GitHub · Work · work · roots: org/repo#1', {
           exact: true,
         }),
       });
@@ -276,7 +280,7 @@ export async function auditInbox(app, page) {
         }),
       })
       .filter({
-        has: page.getByText('github · Other · other · roots: org/repo#1', {
+        has: page.getByText('GitHub · Other · other · roots: org/repo#1', {
           exact: true,
         }),
       });
@@ -340,7 +344,7 @@ export async function auditInbox(app, page) {
         has: page.getByRole('button', { name: 'A-1 Sample A-1', exact: true }),
       })
       .filter({
-        has: page.getByText('jira · Jira · jira · roots: A-1', {
+        has: page.getByText('Jira · Jira · jira · roots: A-1', {
           exact: true,
         }),
       });
@@ -462,6 +466,10 @@ export async function auditInbox(app, page) {
         exact: true,
       }),
     ).toBeVisible();
+    await expect(inbox.locator('.inbox-overview')).toContainText(
+      'Coverage incomplete',
+    );
+    await inbox.locator('.inbox-source-details > summary').click();
     await expect(inbox.getByText(/Sample partial hierarchy/)).toBeVisible();
     expect(await app.evaluate(() => globalThis.inboxAudit.searches)).toBe(0);
     expect(

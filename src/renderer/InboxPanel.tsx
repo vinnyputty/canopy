@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type {
   Connection,
   Issue,
@@ -61,6 +67,16 @@ export function InboxPanel(props: Props) {
   );
   const { inspection, graphs, busy } = props;
   const [showSnoozed, setShowSnoozed] = useState(false);
+  const [reasonFilter, setReasonFilter] = useState('');
+  const filterControl = useRef<HTMLSelectElement>(null);
+  const actionControl = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (actionControl.current && !actionControl.current.isConnected) {
+      if (document.activeElement === document.body)
+        filterControl.current?.focus();
+    }
+    actionControl.current = null;
+  });
   const initialInspection = useRef(false);
   useEffect(() => {
     inspection.reset(candidates, props.seedGraphs);
@@ -103,7 +119,8 @@ export function InboxPanel(props: Props) {
     issueKey: string,
     action: TriageAction,
     duration = 0,
-  ) =>
+  ) => {
+    actionControl.current = document.activeElement as HTMLElement;
     props.onChange((workspace) => ({
       ...workspace,
       triage: changeTriage(
@@ -115,6 +132,37 @@ export function InboxPanel(props: Props) {
         duration,
       ),
     }));
+  };
+  const visibleItems = items.filter(
+    (item) =>
+      (showSnoozed || !item.snoozedUntil) &&
+      (!reasonFilter ||
+        item.reasons.some((reason) => reason.startsWith(reasonFilter))),
+  );
+  const loadingSources = props.sources.filter((source) =>
+    props.loading.has(source.id),
+  ).length;
+  const incomplete =
+    props.sources.length < props.totalRoots ||
+    uninspected > 0 ||
+    props.sources.some(
+      (source) =>
+        !props.snapshots[source.id] ||
+        props.errors[source.id] ||
+        props.identityErrors[source.connectionId] ||
+        !props.users[source.connectionId] ||
+        props.snapshots[source.id]?.warnings?.length,
+    ) ||
+    Object.values(graphs).some(
+      (entry) =>
+        entry.error ||
+        !entry.graph?.groups.some(
+          (group) =>
+            group.kind === 'blockers' &&
+            group.state === 'visible' &&
+            group.items.every((item) => item.statusCategory !== undefined),
+        ),
+    );
   const statuses = (connection: Connection) =>
     [
       ...new Set([
@@ -149,60 +197,143 @@ export function InboxPanel(props: Props) {
           Refresh / Retry roots and accounts
         </button>
       </header>
-      <p>
-        Coverage: {props.sources.length} of {props.totalRoots} known roots
-        selected;{' '}
-        {props.sources.filter((source) => props.snapshots[source.id]).length}{' '}
-        confirmed snapshots. {candidates.length} returned issues; {uninspected}{' '}
-        unfinished issues await blocker inspection. Manual tree refreshes and
-        confirmed data changes invalidate affected inspections; unchanged
-        background fetches preserve them. Inspect again for current blocker
-        coverage. Provider visibility and tree limits apply. This inbox cannot
-        establish global absence of work.
-      </p>
-      {props.connections
-        .filter(
-          (connection) =>
-            !props.sources.some(
-              (source) => source.connectionId === connection.id,
-            ),
-        )
-        .map((connection) => (
-          <p key={connection.id}>
-            {connection.name} · {connection.id}: no selected known root. Load
-            more roots or open a root/configure a repository to include this
-            connection.
-          </p>
-        ))}
-      {props.sources.length < props.totalRoots && (
-        <button onClick={props.onMoreRoots}>Load 10 more roots</button>
-      )}
-      <button
-        disabled={busy || !uninspected}
-        onClick={() => void inspection.load(candidates)}
-      >
-        Inspect next 20 issues ({uninspected} remaining)
-      </button>{' '}
-      <button
-        disabled={busy}
-        onClick={() => void inspection.load(candidates, true)}
-      >
-        Retry partial / failed blockers
-      </button>{' '}
-      {busy && (
-        <button
-          onClick={() => {
-            inspection.cancel();
-          }}
-        >
-          Cancel blocker inspection
-        </button>
-      )}
-      {busy && (
-        <p role="status">
-          Inspecting blockers… successful results remain available.
+      <div className="inbox-overview" role="status">
+        <strong>{visibleItems.length} items needing attention</strong>
+        <span>
+          {loadingSources
+            ? `Refreshing ${loadingSources} roots…`
+            : incomplete
+              ? 'Coverage incomplete · review sources below'
+              : 'Loaded roots checked'}{' '}
+          · {props.sources.length} of {props.totalRoots} roots selected
+        </span>
+      </div>
+      <details className="inbox-source-details">
+        <summary>Sources and coverage</summary>
+        <p>
+          Coverage: {props.sources.length} of {props.totalRoots} known roots
+          selected;{' '}
+          {props.sources.filter((source) => props.snapshots[source.id]).length}{' '}
+          confirmed snapshots. {candidates.length} returned issues;{' '}
+          {uninspected} unfinished issues await blocker inspection. Manual tree
+          refreshes and confirmed data changes invalidate affected inspections;
+          unchanged background fetches preserve them. Inspect again for current
+          blocker coverage. Provider visibility and tree limits apply. This
+          inbox cannot establish global absence of work.
         </p>
-      )}
+        {props.connections
+          .filter(
+            (connection) =>
+              !props.sources.some(
+                (source) => source.connectionId === connection.id,
+              ),
+          )
+          .map((connection) => (
+            <p key={connection.id}>
+              {connection.name} · {connection.id}: no selected known root. Load
+              more roots or open a root/configure a repository to include this
+              connection.
+            </p>
+          ))}
+        {props.sources.length < props.totalRoots && (
+          <button onClick={props.onMoreRoots}>Load 10 more roots</button>
+        )}
+        <ul className="inbox-coverage">
+          {props.sources.map((source) => (
+            <li key={source.id}>
+              <strong>
+                {props.connections.find(
+                  (connection) => connection.id === source.connectionId,
+                )?.name ?? source.connectionId}{' '}
+                · {source.connectionId} · {source.rootKey}
+              </strong>
+              {props.loading.has(source.id)
+                ? ' — Refreshing'
+                : !props.snapshots[source.id]
+                  ? ' — Not confirmed'
+                  : ' — Last confirmed fetch ' +
+                    new Date(
+                      props.snapshots[source.id].fetchedAt,
+                    ).toLocaleString()}
+              {props.errors[source.id] && (
+                <span role="alert">
+                  {' '}
+                  — Root unavailable: {props.errors[source.id]}{' '}
+                  {props.snapshots[source.id]
+                    ? '(successful snapshot retained)'
+                    : '(no confirmed snapshot)'}
+                </span>
+              )}
+              {!props.users[source.connectionId] &&
+                !props.identityErrors[source.connectionId] && (
+                  <span> — Assigned work unknown: account lookup pending</span>
+                )}
+              {props.identityErrors[source.connectionId] && (
+                <span role="alert">
+                  {' '}
+                  — Assigned work unknown:{' '}
+                  {props.identityErrors[source.connectionId]}
+                </span>
+              )}
+              {(props.snapshots[source.id]?.warnings ?? []).map(
+                (warning, index) => (
+                  <p key={index}>Partial tree: {warning}</p>
+                ),
+              )}
+            </li>
+          ))}
+        </ul>
+        {Object.entries(graphs).flatMap(([id, entry]) => {
+          const [connectionId, key] = JSON.parse(id);
+          const group = entry.graph?.groups.find(
+            (group) => group.kind === 'blockers',
+          );
+          const unknownStatus = group?.items.some(
+            (item) => item.statusCategory === undefined,
+          );
+          return entry.error || group?.state !== 'visible' || unknownStatus
+            ? [
+                <p key={id} role="status">
+                  {connectionId} · {key}:{' '}
+                  {entry.error ??
+                    group?.reason ??
+                    (unknownStatus
+                      ? 'Blocker target status unknown'
+                      : 'Blocker coverage incomplete')}
+                  . Retry blockers to inspect again.
+                </p>,
+              ]
+            : [];
+        })}
+      </details>
+      <div className="inbox-inspection-actions">
+        <button
+          disabled={busy || !uninspected}
+          onClick={() => void inspection.load(candidates)}
+        >
+          Inspect next 20 issues ({uninspected} remaining)
+        </button>{' '}
+        <button
+          disabled={busy}
+          onClick={() => void inspection.load(candidates, true)}
+        >
+          Retry partial / failed blockers
+        </button>{' '}
+        {busy && (
+          <button
+            onClick={() => {
+              inspection.cancel();
+            }}
+          >
+            Cancel blocker inspection
+          </button>
+        )}
+        {busy && (
+          <p role="status">
+            Inspecting blockers… successful results remain available.
+          </p>
+        )}
+      </div>
       <details className="saved-view-settings">
         <summary>Review statuses and local history</summary>
         <p>
@@ -283,85 +414,46 @@ export function InboxPanel(props: Props) {
       {props.errors.workspace && (
         <p role="alert">Workspace save failed: {props.errors.workspace}</p>
       )}
-      <ul className="inbox-coverage">
-        {props.sources.map((source) => (
-          <li key={source.id}>
-            <strong>
-              {props.connections.find(
-                (connection) => connection.id === source.connectionId,
-              )?.name ?? source.connectionId}{' '}
-              · {source.connectionId} · {source.rootKey}
-            </strong>
-            {props.loading.has(source.id)
-              ? ' — Refreshing'
-              : !props.snapshots[source.id]
-                ? ' — Not confirmed'
-                : ' — Last confirmed fetch ' +
-                  new Date(
-                    props.snapshots[source.id].fetchedAt,
-                  ).toLocaleString()}
-            {props.errors[source.id] && (
-              <span role="alert">
-                {' '}
-                — Root unavailable: {props.errors[source.id]}{' '}
-                {props.snapshots[source.id]
-                  ? '(successful snapshot retained)'
-                  : '(no confirmed snapshot)'}
-              </span>
-            )}
-            {!props.users[source.connectionId] &&
-              !props.identityErrors[source.connectionId] && (
-                <span> — Assigned work unknown: account lookup pending</span>
-              )}
-            {props.identityErrors[source.connectionId] && (
-              <span role="alert">
-                {' '}
-                — Assigned work unknown:{' '}
-                {props.identityErrors[source.connectionId]}
-              </span>
-            )}
-            {(props.snapshots[source.id]?.warnings ?? []).map(
-              (warning, index) => (
-                <p key={index}>Partial tree: {warning}</p>
-              ),
-            )}
-          </li>
-        ))}
-      </ul>
-      {Object.entries(graphs).flatMap(([id, entry]) => {
-        const [connectionId, key] = JSON.parse(id);
-        const group = entry.graph?.groups.find(
-          (group) => group.kind === 'blockers',
-        );
-        const unknownStatus = group?.items.some(
-          (item) => item.statusCategory === undefined,
-        );
-        return entry.error || group?.state !== 'visible' || unknownStatus
-          ? [
-              <p key={id} role="status">
-                {connectionId} · {key}:{' '}
-                {entry.error ??
-                  group?.reason ??
-                  (unknownStatus
-                    ? 'Blocker target status unknown'
-                    : 'Blocker coverage incomplete')}
-                . Retry blockers to inspect again.
-              </p>,
-            ]
-          : [];
-      })}
-      <label>
-        <input
-          type="checkbox"
-          checked={showSnoozed}
-          onChange={(event) => setShowSnoozed(event.target.checked)}
-        />
-        Show snoozed items ({items.filter((item) => item.snoozedUntil).length})
-      </label>
+      <div className="inbox-filters">
+        <label>
+          Show
+          <select
+            ref={filterControl}
+            value={reasonFilter}
+            onChange={(event) => setReasonFilter(event.target.value)}
+          >
+            <option value="">All attention items</option>
+            <option value="Unread changes">Unread changes</option>
+            <option value="Assigned to you">Assigned to you</option>
+            <option value="Blocked by">Blockers</option>
+            <option value="Review:">Review work</option>
+            <option value="Pinned locally">Pinned</option>
+          </select>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={showSnoozed}
+            onChange={(event) => setShowSnoozed(event.target.checked)}
+          />
+          Show snoozed items ({items.filter((item) => item.snoozedUntil).length}
+          )
+        </label>
+      </div>
       <div className="inbox-items">
-        {items
-          .filter((item) => showSnoozed || !item.snoozedUntil)
-          .map((item) => (
+        {visibleItems.map((item) => {
+          const connection = props.connections.find(
+            (connection) => connection.id === item.source.connectionId,
+          );
+          const provider =
+            connection?.provider === 'github'
+              ? 'GitHub'
+              : connection?.provider === 'jira'
+                ? 'Jira'
+                : connection?.provider === 'demo'
+                  ? 'Demo'
+                  : 'Unknown provider';
+          return (
             <article
               className="inbox-item"
               key={triageIdentity(item.source.connectionId, item.issue.key)}
@@ -370,26 +462,20 @@ export function InboxPanel(props: Props) {
                 {item.issue.key} {item.issue.summary}
               </button>
               <p>
-                {item.reasons.join(' · ')}
+                {item.reasons.map((reason) => (
+                  <span className="inbox-reason" key={reason}>
+                    {reason}
+                  </span>
+                ))}
                 {item.blockerUnknown &&
                   ' · Blocker coverage unknown / incomplete'}
               </p>
-              <p>
-                {
-                  props.connections.find(
-                    (connection) => connection.id === item.source.connectionId,
-                  )?.provider
-                }{' '}
-                ·{' '}
-                {
-                  props.connections.find(
-                    (connection) => connection.id === item.source.connectionId,
-                  )?.name
-                }{' '}
-                · {item.source.connectionId} · roots:{' '}
+              <p className="inbox-source">
+                {provider} · {connection?.name ?? item.source.connectionId} ·{' '}
+                {item.source.connectionId} · roots:{' '}
                 {item.roots.map((root) => root.rootKey).join(', ')}
               </p>
-              <p>
+              <p className="inbox-timestamp">
                 Last confirmed update:{' '}
                 {item.issue.updated &&
                 Number.isFinite(Date.parse(item.issue.updated))
@@ -397,68 +483,92 @@ export function InboxPanel(props: Props) {
                   : 'Unavailable'}{' '}
                 · confirmed fetch {new Date(item.fetchedAt).toLocaleString()}
               </p>
-              <button
-                onClick={() => {
-                  for (const root of item.roots) props.onSeen(item.issue, root);
-                  action(item.source.connectionId, item.issue.key, 'seen');
-                }}
-              >
-                Mark seen
-              </button>{' '}
-              <button
-                onClick={() =>
-                  action(
-                    item.source.connectionId,
-                    item.issue.key,
-                    item.pinned ? 'unpin' : 'pin',
-                  )
-                }
-              >
-                {item.pinned ? 'Unpin' : 'Pin'}
-              </button>{' '}
-              {item.snoozedUntil ? (
-                <>
-                  <span>
-                    Snoozed until{' '}
-                    {new Date(item.snoozedUntil).toLocaleString()}{' '}
-                  </span>
-                  <button
-                    onClick={() =>
-                      action(item.source.connectionId, item.issue.key, 'wake')
-                    }
-                  >
-                    Wake now
-                  </button>
-                </>
-              ) : (
-                <select
-                  aria-label={`Snooze ${item.issue.key}`}
-                  value=""
-                  onChange={(event) =>
+              <div className="inbox-actions">
+                <button
+                  onClick={() => {
+                    for (const root of item.roots)
+                      props.onSeen(item.issue, root);
+                    action(item.source.connectionId, item.issue.key, 'seen');
+                  }}
+                >
+                  Mark seen
+                </button>{' '}
+                <button
+                  onClick={() =>
                     action(
                       item.source.connectionId,
                       item.issue.key,
-                      'snooze',
-                      Number(event.target.value),
+                      item.pinned ? 'unpin' : 'pin',
                     )
                   }
                 >
-                  <option value="" disabled>
-                    Snooze…
-                  </option>
-                  <option value={60 * 60 * 1000}>1 hour</option>
-                  <option value={24 * 60 * 60 * 1000}>24 hours</option>
-                  <option value={7 * 24 * 60 * 60 * 1000}>7 days</option>
-                </select>
-              )}
+                  {item.pinned ? 'Unpin' : 'Pin'}
+                </button>{' '}
+                {item.snoozedUntil ? (
+                  <>
+                    <span>
+                      Snoozed until{' '}
+                      {new Date(item.snoozedUntil).toLocaleString()}{' '}
+                    </span>
+                    <button
+                      onClick={() =>
+                        action(item.source.connectionId, item.issue.key, 'wake')
+                      }
+                    >
+                      Wake now
+                    </button>
+                  </>
+                ) : (
+                  <select
+                    aria-label={`Snooze ${item.issue.key}`}
+                    value=""
+                    onChange={(event) =>
+                      action(
+                        item.source.connectionId,
+                        item.issue.key,
+                        'snooze',
+                        Number(event.target.value),
+                      )
+                    }
+                  >
+                    <option value="" disabled>
+                      Snooze…
+                    </option>
+                    <option value={60 * 60 * 1000}>1 hour</option>
+                    <option value={24 * 60 * 60 * 1000}>24 hours</option>
+                    <option value={7 * 24 * 60 * 60 * 1000}>7 days</option>
+                  </select>
+                )}
+              </div>
             </article>
-          ))}
+          );
+        })}
       </div>
-      {!items.some((item) => showSnoozed || !item.snoozedUntil) && (
-        <p>
-          No matching items in confirmed loaded data. Unloaded roots,
-          uninspected blockers and failures may still contain work.
-        </p>
+      {!visibleItems.length && (
+        <div className="inbox-empty" role="status">
+          <strong>
+            {!props.sources.length
+              ? 'Choose roots for your inbox'
+              : loadingSources
+                ? 'Loading your inbox…'
+                : reasonFilter || items.length
+                  ? 'No items match these filters'
+                  : incomplete
+                    ? 'No attention items in available data'
+                    : 'You’re caught up in loaded roots'}
+          </strong>
+          <p>
+            {!props.sources.length
+              ? 'Open a root or configure a repository to include its issues here.'
+              : loadingSources
+                ? 'Confirmed items appear as roots finish loading.'
+                : reasonFilter || items.length
+                  ? 'Choose All attention items or show snoozed items to broaden the list.'
+                  : incomplete
+                    ? 'Review Sources and coverage, then retry unavailable roots or inspect remaining blockers.'
+                    : 'Refresh to check for new changes. Only known, selected roots are included.'}
+          </p>
+        </div>
       )}
     </section>
   );

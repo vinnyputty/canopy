@@ -103,6 +103,18 @@ export function IssuePreview({
   const [labels, setLabels] = useState<Choice[]>([]);
   const [editingLabels, setEditingLabels] = useState(false);
   const [savingLabels, setSavingLabels] = useState(false);
+  const [labelsLoading, setLabelsLoading] = useState(false);
+  const [labelsError, setLabelsError] = useState('');
+  const [labelsAttempt, setLabelsAttempt] = useState(0);
+  const [labelsSaved, setLabelsSaved] = useState(false);
+  const labelsTrigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    setEditingLabels(false);
+    setLabels([]);
+    setLabelsError('');
+    setLabelsSaved(false);
+    setSavingLabels(false);
+  }, [connectionId, issueKey, attempt]);
   const [developmentFor, setDevelopmentFor] = useState<string | null>(null);
   const developmentIdentity = `${connectionId}:${issueKey}`;
   const developmentOpen = developmentFor === developmentIdentity;
@@ -111,10 +123,6 @@ export function IssuePreview({
   const [developmentLinkError, setDevelopmentLinkError] = useState('');
   const [developmentAttempt, setDevelopmentAttempt] = useState(0);
   const identity = useRef('');
-  const currentIssue = useRef('');
-  useLayoutEffect(() => {
-    currentIssue.current = `${connectionId}:${issueKey}`;
-  }, [connectionId, issueKey]);
   const [dragWidth, setDragWidth] = useState<number>();
   const pane = useRef<HTMLElement>(null);
   const drag = useRef<{ x: number; width: number; next: number } | undefined>(
@@ -201,23 +209,32 @@ export function IssuePreview({
   useEffect(() => {
     if (provider !== 'github' || !editingLabels) return;
     let live = true;
+    setLabelsLoading(true);
+    setLabelsError('');
     window.canopy.labels(connectionId, issueKey).then(
       (values) => {
-        if (live) setLabels(values);
+        if (live) {
+          setLabels(values);
+          setLabelsLoading(false);
+        }
       },
       (reason: unknown) => {
-        if (live) setError(String(reason));
+        if (live) {
+          setLabelsError(String(reason));
+          setLabelsLoading(false);
+        }
       },
     );
     return () => {
       live = false;
     };
-  }, [provider, editingLabels, connectionId, issueKey]);
+  }, [provider, editingLabels, connectionId, issueKey, labelsAttempt]);
   const toggleLabel = async (name: string) => {
     if (!data || savingLabels) return;
-    const requestIdentity = currentIssue.current;
+    const requestGeneration = previewGeneration.current;
     setSavingLabels(true);
-    setError('');
+    setLabelsError('');
+    setLabelsSaved(false);
     const current = data.issue.labels?.map((item) => item.name) ?? [];
     const next = current.includes(name)
       ? current.filter((item) => item !== name)
@@ -233,17 +250,21 @@ export function IssuePreview({
       const issue = await window.canopy.update(connectionId, issueKey, {
         labels: next,
       });
-      if (currentIssue.current === requestIdentity) {
+      if (previewGeneration.current === requestGeneration) {
         setData({ ...data, issue: { ...issue, links: data.issue.links } });
         onChanged(issue);
+        setLabelsSaved(true);
       }
     } catch (reason) {
-      if (currentIssue.current === requestIdentity) {
+      if (previewGeneration.current === requestGeneration) {
         setData(data);
-        setError(String(reason));
+        setLabelsError(
+          `Labels were not saved. Previous labels restored; try the change again or open GitHub. ${String(reason)}`,
+        );
       }
     } finally {
-      setSavingLabels(false);
+      if (previewGeneration.current === requestGeneration)
+        setSavingLabels(false);
     }
   };
   const clamp = (next: number) => Math.max(300, Math.min(720, next));
@@ -338,7 +359,17 @@ export function IssuePreview({
         }}
       />
       <header>
-        <strong>{issueKey}</strong>
+        <div className="preview-identity">
+          <strong>{issueKey}</strong>
+          <span>
+            {provider === 'github'
+              ? 'GitHub'
+              : provider === 'jira'
+                ? 'Jira'
+                : 'Demo'}{' '}
+            · {connectionName}
+          </span>
+        </div>
         <button
           className="icon-button"
           aria-label="Close issue preview"
@@ -359,89 +390,27 @@ export function IssuePreview({
         ) : (
           <>
             <h2>{data.issue.summary}</h2>
-            <section
-              className="preview-changes"
-              aria-label="Changes since last seen"
-            >
-              <h3>Since last seen</h3>
-              {!observedIssue || !baseline ? (
-                <p>No last-seen baseline for this issue in this root.</p>
-              ) : unseen.fields.length === 0 && unseen.comments === 0 ? (
-                <p>No confirmed unread changes in the refreshed tree.</p>
-              ) : (
-                <>
-                  {unseen.fields.map((change) => (
-                    <p key={change.name}>
-                      <strong>{change.name}:</strong>{' '}
-                      {displayValue(change.before)} →{' '}
-                      {displayValue(change.after)}
-                    </p>
-                  ))}
-                  {unseen.comments > 0 && (
-                    <p>
-                      {unseen.comments} more comment
-                      {unseen.comments === 1 ? '' : 's'} than at the last view.{' '}
-                      {confirmedComments.length < unseen.comments
-                        ? 'Some recent comment links are unavailable.'
-                        : ''}
-                    </p>
-                  )}
-                  {confirmedComments.map((comment) => (
-                    <button
-                      key={comment.id}
-                      className="text-button"
-                      onClick={() => onOpenComment(comment.id)}
-                    >
-                      New comment by {comment.author} ·{' '}
-                      {new Date(comment.created).toLocaleString()}
-                    </button>
-                  ))}
-                  <button
-                    className="tool-button"
-                    onClick={() =>
-                      onMarkSeen({
-                        ...data.issue,
-                        commentCount: Math.max(
-                          data.issue.commentCount ?? 0,
-                          data.totalComments,
-                        ),
-                      })
-                    }
-                  >
-                    Mark issue seen
-                  </button>
-                </>
+            <div className="preview-actions">
+              {provider !== 'demo' && (
+                <button
+                  className="tool-button"
+                  onClick={() => onOpenExternal(issueKey)}
+                >
+                  Open in {provider === 'github' ? 'GitHub' : 'Jira'}
+                </button>
               )}
-              <p className="preview-hint">
-                Development updates and provider history are unavailable in this
-                view.
-              </p>
-              {observedIssue?.unavailableFields?.length ? (
-                <p className="preview-hint">
-                  This tree did not supply:{' '}
-                  {observedIssue.unavailableFields.join(', ')}.
-                </p>
-              ) : null}
-            </section>
-            {provider !== 'demo' && (
               <button
                 className="tool-button"
-                onClick={() => onOpenExternal(issueKey)}
+                onClick={() => onCopyKeySummary(data.issue)}
               >
-                Open in {provider === 'github' ? 'GitHub' : 'Jira'}
+                Copy key and summary
               </button>
-            )}
-            <button
-              className="tool-button"
-              onClick={() => onCopyKeySummary(data.issue)}
-            >
-              Copy key and summary
-            </button>
-            <button className="tool-button" onClick={() => onWorkBrief(data)}>
-              Copy work brief
-            </button>
+              <button className="tool-button" onClick={() => onWorkBrief(data)}>
+                Copy work brief
+              </button>
+            </div>
             <section>
-              <h3>Metadata</h3>
+              <h3>Properties</h3>
               <dl className="preview-metadata">
                 {(
                   [
@@ -486,84 +455,6 @@ export function IssuePreview({
                 ))}
               </dl>
             </section>
-            <section>
-              <h3>Development</h3>
-              <button
-                className="tool-button"
-                aria-expanded={developmentOpen}
-                onClick={() =>
-                  setDevelopmentFor(
-                    developmentOpen ? null : developmentIdentity,
-                  )
-                }
-              >
-                {developmentOpen ? 'Hide development' : 'Show development'}
-              </button>
-              {developmentOpen &&
-                (developmentError ? (
-                  <div role="alert">
-                    {developmentError}{' '}
-                    <button
-                      className="tool-button"
-                      onClick={() =>
-                        setDevelopmentAttempt((value) => value + 1)
-                      }
-                    >
-                      Retry development
-                    </button>
-                  </div>
-                ) : !development ? (
-                  <p role="status">Loading development links…</p>
-                ) : development.state === 'unavailable' ? (
-                  <p>{development.reason}</p>
-                ) : (
-                  <div>
-                    <p className="preview-hint">
-                      {development.reason ||
-                        'Associations shown from the GitHub issue timeline.'}
-                    </p>
-                    {developmentLinkError && (
-                      <p role="alert">{developmentLinkError}</p>
-                    )}
-                    <h4>Branches</h4>
-                    {development.branches.state === 'unavailable' ? (
-                      <p>{development.branches.reason}</p>
-                    ) : development.branches.links.length ? (
-                      development.branches.links.map(developmentLink)
-                    ) : (
-                      <p>No branch remote links found.</p>
-                    )}
-                    <h4>Pull requests</h4>
-                    {development.pullRequests.length === 0 && (
-                      <p>
-                        {development.source === 'jira-remote-links'
-                          ? 'No pull request remote links found.'
-                          : 'No associated pull requests found.'}
-                      </p>
-                    )}
-                    {development.pullRequests.map(developmentLink)}
-                    <h4>Commits</h4>
-                    {development.commits.length === 0 && (
-                      <p>
-                        {development.source === 'jira-remote-links'
-                          ? 'No commit remote links found.'
-                          : 'No associated commits found.'}
-                      </p>
-                    )}
-                    {development.commits.map(developmentLink)}
-                    {development.source === 'jira-remote-links' && (
-                      <>
-                        <h4>Other remote links</h4>
-                        {development.otherLinks?.length ? (
-                          development.otherLinks.map(developmentLink)
-                        ) : (
-                          <p>No other remote links found.</p>
-                        )}
-                      </>
-                    )}
-                  </div>
-                ))}
-            </section>
             {provider === 'github' && (
               <section>
                 <h3>Labels</h3>
@@ -573,12 +464,56 @@ export function IssuePreview({
                 </p>
                 <button
                   className="tool-button"
+                  ref={labelsTrigger}
+                  aria-expanded={editingLabels}
                   onClick={() => setEditingLabels((value) => !value)}
                 >
                   Edit labels
                 </button>
+                <div className="preview-field-feedback" aria-live="polite">
+                  {savingLabels
+                    ? 'Saving labels…'
+                    : labelsSaved
+                      ? 'Labels saved.'
+                      : ''}
+                </div>
+                {labelsError && (
+                  <div className="preview-field-error" role="alert">
+                    <p>{labelsError}</p>
+                    <button
+                      className="tool-button"
+                      disabled={savingLabels || labelsLoading}
+                      onClick={() => {
+                        setEditingLabels(true);
+                        setLabelsAttempt((value) => value + 1);
+                      }}
+                    >
+                      Retry labels
+                    </button>
+                    <button
+                      className="tool-button"
+                      onClick={() => onOpenExternal(issueKey)}
+                    >
+                      Open in GitHub
+                    </button>
+                  </div>
+                )}
                 {editingLabels && (
-                  <div className="github-labels">
+                  <div
+                    className="github-labels"
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setEditingLabels(false);
+                        labelsTrigger.current?.focus();
+                      }
+                    }}
+                  >
+                    {labelsLoading && <p role="status">Loading labels…</p>}
+                    {!labelsLoading && !labelsError && labels.length === 0 && (
+                      <p>No labels available in this repository.</p>
+                    )}
                     {labels.map((label) => (
                       <label key={label.id}>
                         <input
@@ -588,7 +523,7 @@ export function IssuePreview({
                               (item) => item.name === label.name,
                             ),
                           )}
-                          disabled={savingLabels}
+                          disabled={savingLabels || labelsLoading}
                           onChange={() => void toggleLabel(label.name)}
                         />
                         {label.name}
@@ -691,6 +626,148 @@ export function IssuePreview({
                   )}
                 </>
               )}
+            </section>
+            <section>
+              <h3>Development</h3>
+              <button
+                className="tool-button"
+                aria-expanded={developmentOpen}
+                onClick={() =>
+                  setDevelopmentFor(
+                    developmentOpen ? null : developmentIdentity,
+                  )
+                }
+              >
+                {developmentOpen ? 'Hide development' : 'Show development'}
+              </button>
+              {developmentOpen &&
+                (developmentError ? (
+                  <div role="alert">
+                    {developmentError}{' '}
+                    <button
+                      className="tool-button"
+                      onClick={() =>
+                        setDevelopmentAttempt((value) => value + 1)
+                      }
+                    >
+                      Retry development
+                    </button>
+                  </div>
+                ) : !development ? (
+                  <p role="status">Loading development links…</p>
+                ) : development.state === 'unavailable' ? (
+                  <p>{development.reason}</p>
+                ) : (
+                  <div>
+                    <p className="preview-hint">
+                      {development.reason ||
+                        'Associations shown from the GitHub issue timeline.'}
+                    </p>
+                    {developmentLinkError && (
+                      <p role="alert">{developmentLinkError}</p>
+                    )}
+                    <h4>Branches</h4>
+                    {development.branches.state === 'unavailable' ? (
+                      <p>{development.branches.reason}</p>
+                    ) : development.branches.links.length ? (
+                      development.branches.links.map(developmentLink)
+                    ) : (
+                      <p>No branch remote links found.</p>
+                    )}
+                    <h4>Pull requests</h4>
+                    {development.pullRequests.length === 0 && (
+                      <p>
+                        {development.source === 'jira-remote-links'
+                          ? 'No pull request remote links found.'
+                          : 'No associated pull requests found.'}
+                      </p>
+                    )}
+                    {development.pullRequests.map(developmentLink)}
+                    <h4>Commits</h4>
+                    {development.commits.length === 0 && (
+                      <p>
+                        {development.source === 'jira-remote-links'
+                          ? 'No commit remote links found.'
+                          : 'No associated commits found.'}
+                      </p>
+                    )}
+                    {development.commits.map(developmentLink)}
+                    {development.source === 'jira-remote-links' && (
+                      <>
+                        <h4>Other remote links</h4>
+                        {development.otherLinks?.length ? (
+                          development.otherLinks.map(developmentLink)
+                        ) : (
+                          <p>No other remote links found.</p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ))}
+            </section>
+            <section
+              className="preview-changes"
+              aria-label="Changes since last seen"
+            >
+              <h3>Since last seen</h3>
+              {!observedIssue || !baseline ? (
+                <p>No last-seen baseline for this issue in this root.</p>
+              ) : unseen.fields.length === 0 && unseen.comments === 0 ? (
+                <p>No confirmed unread changes in the refreshed tree.</p>
+              ) : (
+                <>
+                  {unseen.fields.map((change) => (
+                    <p key={change.name}>
+                      <strong>{change.name}:</strong>{' '}
+                      {displayValue(change.before)} →{' '}
+                      {displayValue(change.after)}
+                    </p>
+                  ))}
+                  {unseen.comments > 0 && (
+                    <p>
+                      {unseen.comments} more comment
+                      {unseen.comments === 1 ? '' : 's'} than at the last view.{' '}
+                      {confirmedComments.length < unseen.comments
+                        ? 'Some recent comment links are unavailable.'
+                        : ''}
+                    </p>
+                  )}
+                  {confirmedComments.map((comment) => (
+                    <button
+                      key={comment.id}
+                      className="text-button"
+                      onClick={() => onOpenComment(comment.id)}
+                    >
+                      New comment by {comment.author} ·{' '}
+                      {new Date(comment.created).toLocaleString()}
+                    </button>
+                  ))}
+                  <button
+                    className="tool-button"
+                    onClick={() =>
+                      onMarkSeen({
+                        ...data.issue,
+                        commentCount: Math.max(
+                          data.issue.commentCount ?? 0,
+                          data.totalComments,
+                        ),
+                      })
+                    }
+                  >
+                    Mark issue seen
+                  </button>
+                </>
+              )}
+              <p className="preview-hint">
+                Development updates and provider history are unavailable in this
+                view.
+              </p>
+              {observedIssue?.unavailableFields?.length ? (
+                <p className="preview-hint">
+                  This tree did not supply:{' '}
+                  {observedIssue.unavailableFields.join(', ')}.
+                </p>
+              ) : null}
             </section>
             <section>
               <h3>Issue relationships</h3>

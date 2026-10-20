@@ -298,6 +298,16 @@ export function BulkTriage({
           </button>
         )}
       </header>
+      <p className="bulk-context">
+        {connection.provider === 'github'
+          ? 'GitHub'
+          : connection.provider === 'jira'
+            ? 'Jira'
+            : connection.provider === 'demo'
+              ? 'Demo'
+              : 'Unknown provider'}{' '}
+        · {connection.name} · Changes are checked for each issue before saving.
+      </p>
       {issues.length > 1 && (
         <>
           <div className="bulk-controls">
@@ -415,9 +425,17 @@ export function BulkTriage({
           {preview && (
             <div className="bulk-preview">
               <strong>Review before applying</strong>
+              <p>
+                {preview.filter((value) => value.patch).length} eligible ·{' '}
+                {preview.filter((value) => !value.patch).length} unavailable.
+                Only eligible issues will change.
+              </p>
               <ul>
                 {preview.map(({ issue, patch, reason }) => (
-                  <li key={issue.key}>
+                  <li
+                    key={issue.key}
+                    className={patch ? 'bulk-eligible' : 'bulk-unavailable'}
+                  >
                     <b>{issue.key}</b> {issue.summary} —{' '}
                     {patch
                       ? `${action === 'assignee' ? 'Assign' : action === 'priority' ? 'Priority' : 'Transition'}: ${available?.name ?? 'Unassigned'}`
@@ -443,21 +461,48 @@ export function BulkTriage({
       )}
       {operation && (
         <div className="bulk-results" aria-live="polite">
-          <strong>Results</strong>
+          <strong>Results{working ? ' · Working…' : ''}</strong>
+          <p>
+            {
+              operation.results.filter((result) => result.state === 'saved')
+                .length
+            }{' '}
+            saved ·{' '}
+            {
+              operation.results.filter(
+                (result) =>
+                  result.state === 'failed' || result.state === 'undo-failed',
+              ).length
+            }{' '}
+            need attention ·{' '}
+            {
+              operation.results.filter((result) => result.state === 'undone')
+                .length
+            }{' '}
+            undone
+          </p>
           <ul>
             {operation.results.map(({ issue, state, reason, token }) => (
-              <li key={issue.key}>
-                <b>{issue.key}</b> —{' '}
-                {state === 'saved'
-                  ? 'Saved'
-                  : state === 'undone'
-                    ? 'Undone'
-                    : state === 'pending'
-                      ? 'Pending…'
-                      : state === 'undoing'
-                        ? 'Undoing…'
-                        : reason}
-                <span>
+              <li
+                key={issue.key}
+                className={`bulk-result bulk-result-${state}`}
+              >
+                <div className="bulk-result-issue">
+                  <b>{issue.key}</b>
+                  <span>{issue.summary}</span>
+                </div>
+                <div className="bulk-result-state">
+                  {state === 'saved'
+                    ? 'Saved'
+                    : state === 'undone'
+                      ? 'Undone'
+                      : state === 'pending'
+                        ? 'Pending…'
+                        : state === 'undoing'
+                          ? 'Undoing…'
+                          : (reason ?? 'Change failed. Retry this issue.')}
+                </div>
+                <span className="bulk-result-actions">
                   {state === 'failed' && (
                     <button
                       disabled={working}

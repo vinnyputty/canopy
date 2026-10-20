@@ -79,6 +79,40 @@ export function SavedViewsPanel(props: Props) {
           <RefreshCw size={15} /> Refresh
         </button>
       </header>
+      <div className="saved-view-summary" role="status">
+        <strong>
+          {results.length} {results.length === 1 ? 'issue' : 'issues'}
+        </strong>
+        <span>
+          {sources.length} selected roots
+          {props.loading.size > 0 ? ' · Refreshing…' : ''}
+          {failedSources
+            ? ` · ${failedSources} roots need attention · results may be incomplete`
+            : ''}
+        </span>
+        <div
+          className="saved-view-filter-summary"
+          role="group"
+          aria-label="Active filters"
+        >
+          <span>
+            {view.filters.assignee === 'me'
+              ? 'Assigned to me'
+              : view.filters.assignee === 'unassigned'
+                ? 'Unassigned'
+                : 'Anyone'}
+          </span>
+          <span>
+            {view.filters.statuses.length
+              ? view.filters.statuses.join(', ')
+              : 'Any status'}
+          </span>
+          {view.filters.priority && (
+            <span>Priority: {view.filters.priority}</span>
+          )}
+          {view.filters.hideDone && <span>Done hidden</span>}
+        </div>
+      </div>
       <details className="saved-view-settings">
         <summary>Edit view</summary>
         <div className="saved-view-form">
@@ -104,6 +138,16 @@ export function SavedViewsPanel(props: Props) {
               );
               return (
                 <div key={connection.id} className="saved-source-group">
+                  <strong>
+                    {connection.provider === 'github'
+                      ? 'GitHub'
+                      : connection.provider === 'jira'
+                        ? 'Jira'
+                        : connection.provider === 'demo'
+                          ? 'Demo'
+                          : 'Unknown provider'}{' '}
+                    · {connection.name}
+                  </strong>
                   <label>
                     <input
                       type="checkbox"
@@ -355,11 +399,19 @@ export function SavedViewsPanel(props: Props) {
                   onClick={() => props.onSelect(identity)}
                   onDoubleClick={() => props.onOpen(result)}
                 >
-                  <strong>{result.issue.key}</strong>
-                  <span>{result.issue.summary}</span>
+                  <strong className="saved-view-key">{result.issue.key}</strong>
+                  <span className="saved-view-title">
+                    {result.issue.summary}
+                  </span>
                   <small>
-                    {connection?.provider ?? 'Unknown provider'} ·{' '}
-                    {connection?.name ?? result.source.connectionId} ·{' '}
+                    {connection?.provider === 'github'
+                      ? 'GitHub'
+                      : connection?.provider === 'jira'
+                        ? 'Jira'
+                        : connection?.provider === 'demo'
+                          ? 'Demo'
+                          : 'Unknown provider'}{' '}
+                    · {connection?.name ?? result.source.connectionId} ·{' '}
                     {result.source.rootKey} · {result.issue.status.name}
                   </small>
                 </button>
@@ -382,7 +434,7 @@ export function SavedViewsPanel(props: Props) {
                 ? 'Couldn’t load issues from any selected root. Review the errors above and retry.'
                 : failedSources > 0
                   ? 'No matching issues from the available roots. Some roots could not be loaded.'
-                  : 'No matching issues.'}
+                  : 'No matching issues. Adjust the filters or sources in Edit view, or refresh to check for changes.'}
           </p>
         )}
       </div>

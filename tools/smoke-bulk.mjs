@@ -64,7 +64,9 @@ export async function auditBulk(app, page, modifier) {
     globalThis.canopySmoke.hold('bulk-failure', 'update', 'CAN-106'),
   );
   await bulk.getByRole('button', { name: 'Apply to 2 issues' }).click();
-  await expect(bulk.getByText('Results', { exact: true })).toBeVisible();
+  await expect(bulk.locator('.bulk-results > strong')).toHaveText(
+    'Results · Working…',
+  );
   await expect
     .poll(() =>
       app.evaluate(() => globalThis.canopySmoke.started('bulk-failure')),
@@ -80,9 +82,43 @@ export async function auditBulk(app, page, modifier) {
   await expect(
     results.locator('li').filter({ hasText: 'CAN-101' }),
   ).toContainText('Saved');
+  const windowState = await app.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    const state = {
+      bounds: window.getBounds(),
+      minimum: window.getMinimumSize(),
+    };
+    window.setMinimumSize(800, 480);
+    window.setSize(1040, 560);
+    return state;
+  });
+  await expect
+    .poll(() =>
+      page.locator('.tree-scroll').evaluate((tree) => {
+        const header = tree.querySelector('.column-head');
+        const row = tree.querySelector('.issue-row');
+        const bounds = tree.getBoundingClientRect();
+        const parentBounds = tree
+          .closest('.tree-with-preview')
+          .getBoundingClientRect();
+        return (
+          bounds.top >= parentBounds.top &&
+          bounds.bottom <= Math.min(parentBounds.bottom, window.innerHeight) &&
+          tree.clientHeight >=
+            header.getBoundingClientRect().height +
+              row.getBoundingClientRect().height
+        );
+      }),
+    )
+    .toBe(true);
   await row('CAN-110')
     .getByRole('button', { name: 'Keep the details in sync' })
     .click();
+  await app.evaluate(({ BrowserWindow }, state) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    window.setBounds(state.bounds);
+    window.setMinimumSize(...state.minimum);
+  }, windowState);
   await expect(bulk).toContainText('Bulk triage results');
   await expect(results.locator('li')).toHaveCount(2);
   await page.getByRole('button', { name: 'Open issue' }).first().click();
