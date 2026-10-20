@@ -2855,10 +2855,6 @@ kbd {
 .github-labels label:hover {
   background: var(--hover);
 }
-.preview-changes {
-  padding: 0 0 12px;
-  border-bottom: 1px solid var(--border);
-}
 .preview-changes p {
   margin: 8px 0;
 }
