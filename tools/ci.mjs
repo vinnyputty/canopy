@@ -95,10 +95,11 @@ async function writeEvidenceManifest() {
   evidence.sort((left, right) => left.file.localeCompare(right.file));
   const revision =
     process.env.GITHUB_SHA || process.env.BUILD_SCM_REVISION || 'unknown';
+  const headRevision = process.env.CANOPY_PR_HEAD_SHA || revision;
   await mkdir(join(cwd, '.cache'), { recursive: true });
   await writeFile(
     join(cwd, '.cache', 'ui-review-evidence.json'),
-    `${JSON.stringify({ sourceRevision: revision, platform: `${process.platform}-${process.arch}`, evidence }, null, 2)}\n`,
+    `${JSON.stringify({ sourceRevision: revision, headRevision, platform: `${process.platform}-${process.arch}`, evidence }, null, 2)}\n`,
   );
 }
 if (process.platform === 'win32') {

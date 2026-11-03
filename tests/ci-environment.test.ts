@@ -322,10 +322,12 @@ for (const [platform, display] of [
     assert.ok(manifest);
     const recorded = JSON.parse(manifest) as {
       sourceRevision: string;
+      headRevision: string;
       platform: string;
       evidence: Array<{ file: string; sha256: string; bytes: number }>;
     };
     assert.equal(recorded.sourceRevision, revision);
+    assert.equal(recorded.headRevision, revision);
     assert.equal(recorded.platform, `${platform}-fixture`);
     assert.deepEqual(
       recorded.evidence,
@@ -408,3 +410,43 @@ test('an unrelated undefined-name environment key cannot become a cache override
   assert.ok(!testCall.args.some((arg) => arg.startsWith('--test_env')));
   assert.equal(testCall.env[cacheName], undefined);
 });
+
+for (const [label, metadata, sourceRevision, headRevision] of [
+  [
+    'PR merge and head',
+    {
+      GITHUB_SHA: 'merge-sha',
+      CANOPY_PR_HEAD_SHA: 'head-sha',
+      BUILD_SCM_REVISION: 'build-sha',
+    },
+    'merge-sha',
+    'head-sha',
+  ],
+  ['branch build', { GITHUB_SHA: 'branch-sha' }, 'branch-sha', 'branch-sha'],
+  [
+    'empty PR metadata',
+    { GITHUB_SHA: 'branch-sha', CANOPY_PR_HEAD_SHA: '' },
+    'branch-sha',
+    'branch-sha',
+  ],
+  [
+    'build metadata fallback',
+    { GITHUB_SHA: '', BUILD_SCM_REVISION: 'build-sha' },
+    'build-sha',
+    'build-sha',
+  ],
+  ['missing metadata', { GITHUB_SHA: undefined }, 'unknown', 'unknown'],
+] as const) {
+  test(`CI evidence identifies tested source and PR head: ${label}`, async () => {
+    const { written, error } = await run('darwin', {
+      USER_SECRET: secret,
+      ...metadata,
+    });
+    assert.equal(error, undefined);
+    const manifest = JSON.parse(
+      written.get(join(workspace, '.cache/ui-review-evidence.json'))!,
+    );
+    assert.equal(manifest.sourceRevision, sourceRevision);
+    assert.equal(manifest.headRevision, headRevision);
+  });
+}

@@ -22,6 +22,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
       - run: bazel run //:ci
+        env:
+          CANOPY_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       - name: Upload UI review evidence
         uses: actions/upload-artifact@v7.0.1
         with:

@@ -28,7 +28,7 @@ The typography pass records screenshots and font/layout measurements in `.cache/
 
 The headless Linux runner installs Noto CJK fonts to exercise multilingual system fallback. This does not replace validation with the fonts installed on a native desktop.
 
-Each successful macOS, Windows, and Linux CI job uploads a separate `ui-review-<platform>` artifact, retained for 14 days. It contains only `.cache/typography/`, `.cache/accessibility/`, `.cache/tree.png`, `.cache/preview.png`, and `.cache/ui-review-evidence.json`. The manifest identifies the source revision and runner platform and records the hashes and sizes of included evidence files. Smoke failure diagnostics remain in the separate failure artifact; release packages remain in the existing package artifact.
+Each successful macOS, Windows, and Linux CI job uploads a separate `ui-review-<platform>` artifact, retained for 14 days. It contains only `.cache/typography/`, `.cache/accessibility/`, `.cache/tree.png`, `.cache/preview.png`, and `.cache/ui-review-evidence.json`. The manifest records the tested checkout in `sourceRevision`, the PR head in `headRevision`, and the runner platform, hashes, and sizes of included evidence files. GitHub PR builds test a synthetic merge commit, so these revisions can differ. Outside PR builds, both fields use the available build revision or `unknown` when metadata is absent. Smoke failure diagnostics remain in the separate failure artifact; release packages remain in the existing package artifact.
 
 ## Remaining platform checks
 
