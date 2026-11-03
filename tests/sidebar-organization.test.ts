@@ -48,6 +48,27 @@ const initial = (): Workspace => ({
   theme: 'system',
   sidebarCollapsed: false,
 });
+
+it('names the demo provider in sidebar context and accessible root labels', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(SidebarWork, {
+      workspace: initial(),
+      session: emptySidebarSession(),
+      connections: [
+        { id: 'one', name: 'Canopy demo', provider: 'demo', url: '' },
+      ],
+      onOrganize() {},
+      onOpen() {},
+      onSelectTab() {},
+      onSelectView() {},
+      onCreateView() {},
+      onOpenPicker() {},
+    }),
+  );
+  assert.match(html, /Demo · Canopy demo/);
+  assert.doesNotMatch(html, /Jira · Canopy demo/);
+  assert.match(html, /aria-label="Open A-1 · Demo · Canopy demo: Summary A-1"/);
+});
 it('orders favorites by connection and root, persists order, and preserves all live view state through Undo', () => {
   const before = initial();
   let result = organizeSidebar(before, emptySidebarSession(), {

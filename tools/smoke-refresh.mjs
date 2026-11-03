@@ -224,7 +224,7 @@ export async function auditRefresh(app, page, resizeWindow) {
   );
   await expect(summary(key)).toHaveText(baseline);
   await expect(timestamp).toHaveAttribute('title', updatedBefore);
-  await expect(status).toHaveText('Connection error');
+  await expect(status).toHaveText('Load failed');
   await hold('refresh-retry', 'tree', key);
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await started('refresh-retry');
@@ -475,7 +475,7 @@ export async function auditRefresh(app, page, resizeWindow) {
   await expect(page.getByRole('alert')).toContainText(
     'Duplicate refresh failure',
   );
-  await expect(status).toHaveText('Connection error');
+  await expect(status).toHaveText('Load failed');
   await page.getByRole('tab').nth(0).click();
   await page.waitForTimeout(1100);
   await hold('duplicate-manual', 'tree', 'CAN-100');

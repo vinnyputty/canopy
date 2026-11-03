@@ -266,6 +266,7 @@ button {
   border: 0;
 }
 button:disabled,
+button[aria-disabled='true'],
 input:disabled,
 select:disabled,
 textarea:disabled {

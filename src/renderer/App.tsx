@@ -27,6 +27,7 @@ import {
 } from './connection-setup';
 import { SetupHelp, TokenPermissions } from './SetupHelp';
 import { openIssueError } from './open-issue-error';
+import { providerLabel } from './provider-label';
 import { supportLinks, type SupportLink } from '../shared/support';
 import { withScrollPositions } from './scroll-position';
 import { WorkspaceBackupPanel } from './WorkspaceBackupPanel';
@@ -717,6 +718,11 @@ export function App() {
     storeConnections(value);
   };
   const searchRef = useRef<HTMLInputElement>(null);
+  const refreshButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingTabFocus = useRef<{
+    tabId: string;
+    origin: Element | null;
+  } | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewOverride, setPreviewOverride] =
     useState<PreviewOverride | null>(null);
@@ -745,6 +751,7 @@ export function App() {
       ? document.querySelector<HTMLElement>(`[data-tree-key="${key}"]`)
       : null;
     row?.focus({ preventScroll: true });
+    return Boolean(row);
   }, []);
   const closeRowMenu = useCallback(
     (restore = true) => {
@@ -813,6 +820,11 @@ export function App() {
   const [undoState, setUndoState] = useState<{ label?: string; busy: boolean }>(
     { busy: false },
   );
+  const [undoFocusRequest, setUndoFocusRequest] = useState<{
+    trigger: HTMLButtonElement;
+    tabId: string;
+    key: string;
+  } | null>(null);
   const [mutations] = useState(
     () =>
       new Mutations(
@@ -892,6 +904,11 @@ export function App() {
     mutations.pending(connectionId);
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
+  const tabSummary = (tab: TabState) =>
+    tab.summary ??
+    (errors[tab.id] && !loading.has(tab.id) && !refreshing.has(tab.id)
+      ? 'Couldn’t load issue tree'
+      : 'Loading…');
   const [inboxOpen, setInboxOpen] = useState(false);
   const [inboxRootLimit, setInboxRootLimit] = useState(10);
   const inboxView = useMemo<SavedIssueView>(
@@ -911,11 +928,20 @@ export function App() {
         (item) => item.id === workspace.activeSavedViewId,
       );
   const tabOrder = workspace.tabs.map((tab) => tab.id).join('\0');
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const request = pendingTabFocus.current;
+    pendingTabFocus.current = null;
     if (activeSavedView) return;
     const tab = document.querySelector<HTMLElement>('.top-tab.active');
     const strip = tab?.parentElement;
     if (!tab || !strip) return;
+    if (
+      request &&
+      request.tabId === activeTab?.id &&
+      (document.activeElement === request.origin ||
+        document.activeElement === document.body)
+    )
+      tab.focus({ preventScroll: true });
     const left = tab.offsetLeft;
     if (left < strip.scrollLeft) strip.scrollLeft = left;
     else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth)
@@ -2280,11 +2306,15 @@ export function App() {
       const index = current.tabs.findIndex(
         (tab) => tab.id === current.activeTabId,
       );
-      navigate(
+      const tab =
         current.tabs[
           (index + direction + current.tabs.length) % current.tabs.length
-        ],
-      );
+        ];
+      pendingTabFocus.current = {
+        tabId: tab.id,
+        origin: document.activeElement,
+      };
+      navigate(tab);
     },
     [navigate],
   );
@@ -2296,6 +2326,45 @@ export function App() {
     },
     [navigate],
   );
+
+  const undoFromButton = async (trigger: HTMLButtonElement) => {
+    const tab = activeTab;
+    if (!tab || undoState.busy) return;
+    const ownedFocus = document.activeElement === trigger;
+    try {
+      await mutations.undo();
+    } finally {
+      if (ownedFocus)
+        setUndoFocusRequest({
+          trigger,
+          tabId: tab.id,
+          key: tab.selectedKey ?? tab.rootKey,
+        });
+    }
+  };
+  const restoreUndoFocus = () => {
+    const request = undoFocusRequest;
+    if (!request) return;
+    setUndoFocusRequest(null);
+    if (
+      request.trigger.isConnected ||
+      document.activeElement !== document.body ||
+      dialog ||
+      childParent ||
+      workBrief ||
+      workspaceRef.current.activeTabId !== request.tabId ||
+      workspaceRef.current.activeSavedViewId
+    )
+      return;
+    if (!restoreTreeFocus(request.key))
+      refreshButtonRef.current?.focus({ preventScroll: true });
+  };
+  useLayoutEffect(restoreUndoFocus, [
+    undoFocusRequest,
+    dialog,
+    childParent,
+    workBrief,
+  ]);
 
   useEffect(() => {
     if (!tabMenu) return;
@@ -2640,12 +2709,10 @@ export function App() {
       } else if (command === 'reopenTab') {
         event.preventDefault();
         reopenClosedTab();
-      } else if (command === 'nextTab') {
+      } else if (command === 'nextTab' || command === 'previousTab') {
         event.preventDefault();
-        selectRelativeTab(1);
-      } else if (command === 'previousTab') {
-        event.preventDefault();
-        selectRelativeTab(-1);
+        if (!dialog && !childParent)
+          selectRelativeTab(command === 'nextTab' ? 1 : -1);
       } else if (command === 'toggleSidebar') {
         event.preventDefault();
         setWorkspace((current) => ({
@@ -4100,7 +4167,8 @@ export function App() {
                 key={tab.id}
                 role="tab"
                 data-tab-id={tab.id}
-                title={`${tab.rootKey}: ${tab.summary ?? ''} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable site'}`}
+                title={`${tab.rootKey}: ${tabSummary(tab)} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable connection'}`}
+                aria-label={`${tab.rootKey}: ${tabSummary(tab)} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable connection'}`}
                 draggable
                 onDragStart={(event) => {
                   draggedTab.current = tab.id;
@@ -4187,6 +4255,20 @@ export function App() {
                     event.preventDefault();
                     selectTab(tab.id);
                   }
+                  if (event.key === 'Home' || event.key === 'End') {
+                    event.preventDefault();
+                    const tabs = [
+                      ...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>(
+                        '[role="tab"]',
+                      ),
+                    ];
+                    const target =
+                      tabs[event.key === 'Home' ? 0 : tabs.length - 1];
+                    if (target) {
+                      selectTab(target.dataset.tabId!);
+                      target.focus();
+                    }
+                  }
                   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
                     event.preventDefault();
                     const direction = event.key === 'ArrowLeft' ? -1 : 1;
@@ -4212,7 +4294,7 @@ export function App() {
                         ?.name ?? 'Unavailable connection'}
                     </span>
                   </span>
-                  <small>{tab.summary ?? 'Loading…'}</small>
+                  <small>{tabSummary(tab)}</small>
                 </span>
                 {refreshing.has(tab.id) && (
                   <Loader2 className="spin" size={12} />
@@ -4514,15 +4596,21 @@ export function App() {
                   aria-label="Sync and commands"
                 >
                   <button
+                    ref={refreshButtonRef}
                     className="tool-button"
                     aria-label="Refresh"
-                    disabled={
+                    aria-disabled={
                       refreshing.has(activeTab.id) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                     }
-                    onClick={() =>
-                      void refreshTab(activeTab, true, true, true, true)
-                    }
+                    onClick={() => {
+                      if (
+                        refreshing.has(activeTab.id) ||
+                        (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                      )
+                        return;
+                      void refreshTab(activeTab, true, true, true, true);
+                    }}
                     title="Refresh"
                   >
                     <RefreshCw
@@ -4585,11 +4673,22 @@ export function App() {
                   }
                   onKeyDown={(event) => {
                     if (event.key === 'Escape') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      const search = event.currentTarget;
                       setQueries((current) => ({
                         ...current,
                         [activeTab.id]: '',
                       }));
-                      event.currentTarget.blur();
+                      requestAnimationFrame(() => {
+                        if (
+                          workspaceRef.current.activeTabId === activeTab.id &&
+                          document.activeElement === search
+                        )
+                          restoreTreeFocus(
+                            activeTab.selectedKey ?? activeTab.rootKey,
+                          );
+                      });
                     }
                   }}
                 />
@@ -4866,9 +4965,10 @@ export function App() {
                 )}
                 {errors[activeTab.id] && (
                   <button
-                    onClick={() =>
-                      void refreshTab(activeTab, true, true, true, true)
-                    }
+                    onClick={() => {
+                      refreshButtonRef.current?.focus({ preventScroll: true });
+                      void refreshTab(activeTab, true, true, true, true);
+                    }}
                     disabled={
                       (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
@@ -4900,12 +5000,14 @@ export function App() {
               <div className="undo-banner" role="status">
                 <span>Change saved</span>
                 <button
-                  disabled={undoState.busy}
-                  onClick={() => void mutations.undo()}
+                  aria-disabled={undoState.busy}
+                  onClick={(event) => void undoFromButton(event.currentTarget)}
                 >
                   {undoState.label}
                 </button>
-                <small>⌘Z / Ctrl+Z</small>
+                <small>
+                  {/mac/i.test(navigator.platform) ? '⌘Z' : 'Ctrl+Z'}
+                </small>
               </div>
             )}
             {snapshot &&
@@ -5605,7 +5707,7 @@ export function App() {
                         : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                           ? 'Rate limited'
                           : connectionErrors.has(activeTab.id)
-                            ? 'Connection error'
+                            ? 'Load failed'
                             : snapshot
                               ? 'Connected'
                               : 'Connecting'}
@@ -6231,7 +6333,7 @@ function Connections({
           <span>
             <b>{connection.name}</b>
             <small>
-              {connection.provider === 'github' ? 'GitHub' : 'Jira'} ·{' '}
+              {providerLabel(connection.provider)} ·{' '}
               {connection.provider === 'github'
                 ? connection.repositories?.join(', ')
                 : (connection.accountName ?? connection.url)}
@@ -6781,7 +6883,12 @@ function TreeRow(
             .closest<HTMLElement>('.field-cell')
             ?.focus();
         }
-        if (event.key === 'Tab') {
+        if (
+          event.key === 'Tab' &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey
+        ) {
           event.preventDefault();
           event.stopPropagation();
           const field = props.editor.field;
@@ -6956,7 +7063,10 @@ function SummaryEditor({
           tree?.getAttribute('data-tab-id') === tabId &&
           document.activeElement === document.body
         )
-          container.querySelector<HTMLButtonElement>('button.summary')?.focus();
+          (
+            container.querySelector<HTMLButtonElement>('button.summary') ??
+            container.closest<HTMLElement>('[data-tree-key]')
+          )?.focus({ preventScroll: true });
       });
     };
   }, []);
@@ -8038,12 +8148,16 @@ function OpenIssueDialog({
             placeholder={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, uppercase project prefix, Jira URL, or summary'
+                : selectedConnection?.provider === 'demo'
+                  ? 'Sample issue key or title'
+                  : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
             aria-label={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, uppercase project prefix, Jira URL, or summary'
+                : selectedConnection?.provider === 'demo'
+                  ? 'Sample issue key or title'
+                  : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
           />
           {busy && <Loader2 className="spin" size={14} />}
@@ -8092,7 +8206,7 @@ function OpenIssueDialog({
           <p className="dialog-note" role="status">
             {options.length
               ? 'Loading more matches…'
-              : `Searching ${selectedConnection?.provider === 'github' ? 'GitHub' : 'Jira'}…`}
+              : `Searching ${providerLabel(selectedConnection?.provider)}…`}
           </p>
         )}
         {!busy &&

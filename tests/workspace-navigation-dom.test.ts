@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import React, { act } from 'react';
 import ts from 'typescript';
 import { reorderTab } from '../src/renderer/workspace';
+import { execute } from './source-probe';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 const source = readFileSync(
@@ -54,16 +55,23 @@ assert.ok(ts.isBinaryExpression(treeScope));
 const tabOrder = find(
   (n) => ts.isVariableDeclaration(n) && n.name.getText(ast) === 'tabOrder',
 );
+const tabSummary = find(
+  (n) => ts.isVariableDeclaration(n) && n.name.getText(ast) === 'tabSummary',
+);
+const relativeTab = find(
+  (n) =>
+    ts.isVariableDeclaration(n) && n.name.getText(ast) === 'selectRelativeTab',
+) as ts.VariableDeclaration;
 const effect = find(
   (n) =>
     ts.isCallExpression(n) &&
-    n.expression.getText(ast) === 'useEffect' &&
+    n.expression.getText(ast) === 'useLayoutEffect' &&
     n.arguments[0]?.getText(ast).includes("'.top-tab.active'") === true,
 );
 
 // Mount the production JSX and effect, retaining App's callbacks and display guards.
 const fixtureCode = ts.transpileModule(
-  `function Fixture() { const ${tabOrder.getText(ast)}; ${effect.getText(ast)}; return <>{${tabs.getText(ast)}}{${treeScope.left.getText(ast)} && (${filterExpression.expression!.getText(ast)})}</>; }`,
+  `function Fixture() { const ${tabOrder.getText(ast)}; const ${tabSummary.getText(ast)}; const ${relativeTab.getText(ast)}; ${effect.getText(ast)}; return <>{${tabs.getText(ast)}}{${treeScope.left.getText(ast)} && (${filterExpression.expression!.getText(ast)})}</>; }`,
   {
     compilerOptions: {
       jsx: ts.JsxEmit.React,
@@ -91,6 +99,17 @@ test('tabs reveal the active connection without vertical scrolling; views and in
   const icon = () => null;
   const scope: any = {
     useEffect: React.useEffect,
+    useLayoutEffect: React.useLayoutEffect,
+    useCallback: (run: unknown) => run,
+    pendingTabFocus: { current: null },
+    workspaceRef: {
+      get current() {
+        return scope.workspace;
+      },
+    },
+    navigate(tab: { id: string }) {
+      scope.selectTab(tab.id);
+    },
     workspace: {
       tabs: ['one', 'two', 'three'].map((id) => ({
         id,
@@ -110,6 +129,8 @@ test('tabs reveal the active connection without vertical scrolling; views and in
     })),
     activeSavedView: null,
     refreshing: new Set(),
+    loading: new Set(),
+    errors: {},
     draggedTab: { current: null },
     queries: { one: 'first', two: 'second', three: 'third' },
     filtering: true,
@@ -134,12 +155,6 @@ test('tabs reveal the active connection without vertical scrolling; views and in
     selectTab(id: string) {
       scope.setWorkspace((w: any) => ({ ...w, activeTabId: id }));
       scope.activeSavedView = null;
-    },
-    selectRelativeTab(direction: number) {
-      const index = scope.workspace.tabs.findIndex(
-        (t: any) => t.id === scope.workspace.activeTabId,
-      );
-      scope.selectTab(scope.workspace.tabs[(index + direction + 3) % 3].id);
     },
     setQueries(update: any) {
       scope.queries = update(scope.queries);
@@ -218,6 +233,123 @@ test('tabs reveal the active connection without vertical scrolling; views and in
       dom.window.document.activeElement?.getAttribute('data-tab-id'),
       'one',
     );
+    for (const [key, id] of [
+      ['End', 'three'],
+      ['Home', 'one'],
+    ] as const) {
+      await act(async () =>
+        dom.window.document.activeElement!.dispatchEvent(
+          new dom.window.KeyboardEvent('keydown', { key, bubbles: true }),
+        ),
+      );
+      await render();
+      assert.equal(scope.workspace.activeTabId, id);
+      assert.equal(
+        dom.window.document.activeElement?.getAttribute('data-tab-id'),
+        id,
+      );
+    }
+    const first = strip.querySelector<HTMLElement>('[data-tab-id="one"]')!;
+    assert.equal(
+      first.getAttribute('aria-label'),
+      'A-1: Refreshed title · Team one',
+    );
+    assert.doesNotMatch(first.getAttribute('aria-label')!, /Close/);
+    scope.errors.one = 'Refresh failed';
+    await render();
+    assert.equal(first.querySelector('small')!.textContent, 'Refreshed title');
+    scope.workspace.tabs[0].summary = undefined;
+    scope.errors.one = 'Issue not found';
+    await render();
+    assert.equal(
+      first.querySelector('small')!.textContent,
+      'Couldn’t load issue tree',
+    );
+    scope.loading.add('one');
+    await render();
+    assert.equal(first.querySelector('small')!.textContent, 'Loading…');
+    scope.loading.clear();
+    scope.refreshing.add('one');
+    await render();
+    assert.equal(first.querySelector('small')!.textContent, 'Loading…');
+    scope.refreshing.clear();
+    scope.errors = {};
+    await render();
+    assert.equal(first.querySelector('small')!.textContent, 'Loading…');
+    scope.workspace.tabs[0].summary = 'Refreshed title';
+    await render();
+    const accounts = scope.connections;
+    scope.connections = accounts.filter(
+      (account: { id: string }) => account.id !== 'one',
+    );
+    await render();
+    assert.equal(
+      first.querySelector('.tab-connection')!.textContent,
+      'Unavailable connection',
+    );
+    assert.equal(first.title, 'A-1: Refreshed title · Unavailable connection');
+    assert.equal(first.getAttribute('aria-label'), first.title);
+    scope.connections = accounts;
+    await render();
+    const shortcut = execute(relativeTab.initializer!.getText(ast), scope) as (
+      direction: -1 | 1,
+    ) => void;
+    const draft = dom.window.document.createElement('input');
+    host.append(draft);
+    draft.focus();
+    let blurCount = 0;
+    draft.addEventListener('blur', () => {
+      blurCount++;
+    });
+    shortcut(1);
+    assert.equal(
+      dom.window.document.activeElement === draft,
+      true,
+      'tab shortcut must not blur an editor before the destination renders',
+    );
+    assert.equal(blurCount, 0);
+    draft.remove();
+    await render();
+    assert.equal(
+      dom.window.document.activeElement?.getAttribute('data-tab-id'),
+      'two',
+    );
+    const chosen = dom.window.document.createElement('button');
+    host.append(chosen);
+    shortcut(-1);
+    chosen.focus();
+    await render();
+    assert.equal(
+      dom.window.document.activeElement === chosen,
+      true,
+      'a new control owns focus before commit',
+    );
+    chosen.blur();
+    scope.pendingTabFocus.current = {
+      tabId: 'three',
+      origin: dom.window.document.body,
+    };
+    scope.selectTab('two');
+    await render();
+    assert.equal(
+      dom.window.document.activeElement === dom.window.document.body,
+      true,
+    );
+    assert.equal(scope.pendingTabFocus.current, null);
+    scope.pendingTabFocus.current = {
+      tabId: 'two',
+      origin: dom.window.document.body,
+    };
+    scope.activeSavedView = { id: 'saved' };
+    await render();
+    assert.equal(
+      dom.window.document.activeElement === dom.window.document.body,
+      true,
+    );
+    assert.equal(scope.pendingTabFocus.current, null);
+    scope.selectTab('one');
+    chosen.remove();
+    await render();
     scope.selectTab('two');
     strip.scrollLeft = 190;
     await render();

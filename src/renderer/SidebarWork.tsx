@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import type { Connection, RootReference, Workspace } from '../shared/types';
 import { sameRoot } from './workspace';
+import { providerLabel } from './provider-label';
 import {
   captureSidebar,
   restoreSidebar,
@@ -76,7 +77,7 @@ export function SidebarWork({
       (item) => item.id === root.connectionId,
     );
     return connection
-      ? `${connection.provider === 'github' ? 'GitHub' : 'Jira'} · ${connection.name}`
+      ? `${providerLabel(connection.provider)} · ${connection.name}`
       : 'Unavailable connection';
   };
   const heading = (name: string, count: number, action?: React.ReactNode) => (

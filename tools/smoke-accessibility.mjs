@@ -119,15 +119,45 @@ export async function auditAccessibility(app, page, evidence) {
   ).toBeVisible();
   await page.getByRole('tab', { name: /CAN-100/ }).click();
 
+  {
+    const row = page.locator('[data-tree-key="CAN-100"]');
+    await row.focus();
+    await page.keyboard.press('Control+Tab');
+    const next = page.getByRole('tab', { name: /CAN-200/ });
+    await expect(next).toHaveAttribute('aria-selected', 'true');
+    await expect(next).toBeFocused();
+    await page.keyboard.press('Control+Shift+Tab');
+    const previous = page.getByRole('tab', { name: /CAN-100/ });
+    await expect(previous).toHaveAttribute('aria-selected', 'true');
+    await expect(previous).toBeFocused();
+  }
+
   const summary = page
     .locator('[data-tree-key="CAN-100"] > .issue-row')
     .getByTitle('Double-click to edit');
+  const tabSummaryBeforeEdit = await summary.textContent();
+  await summary.press('Enter');
+  await page
+    .getByLabel('Summary for CAN-100', { exact: true })
+    .fill('Outgoing tab draft');
+  await page.keyboard.press('Control+Tab');
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeFocused();
+  await page.keyboard.press('Control+Shift+Tab');
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeFocused();
+  await expect(summary).toHaveText(tabSummaryBeforeEdit);
+  await expect(
+    page.getByLabel('Summary for CAN-100', { exact: true }),
+  ).toHaveCount(0);
   await summary.press('Enter');
   await expect(
     page.getByLabel('Summary for CAN-100', { exact: true }),
   ).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(summary).toBeFocused();
+  const find = page.getByLabel('Find in tree', { exact: true });
+  await find.fill('CAN-101');
+  await find.press('Escape');
+  await expect(page.locator('[data-tree-key="CAN-100"]')).toBeFocused();
   await summary.press('Enter');
   const searchDestination = page.getByLabel('Find in tree', { exact: true });
   await searchDestination.click();
@@ -139,6 +169,17 @@ export async function auditAccessibility(app, page, evidence) {
 
   // A dialog action focuses the real search field before dismissing the dialog.
   await commands.click();
+  const paletteInput = page
+    .getByRole('dialog', { name: 'Command palette' })
+    .getByRole('combobox', { name: 'Search workspace' });
+  for (const shortcut of ['Control+Tab', 'Control+Shift+Tab']) {
+    await page.keyboard.press(shortcut);
+    await expect(paletteInput).toBeFocused();
+    await expect(page.getByRole('tab', { name: /CAN-100/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+  }
   await page
     .getByRole('dialog', { name: 'Command palette' })
     .getByRole('option', { name: /Find in tree/ })
@@ -431,8 +472,14 @@ export async function auditAccessibility(app, page, evidence) {
   );
   await checkLive('before', before);
   await fixture('hold', 'a11y-refresh', 'tree', 'CAN-100');
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  await refresh.focus();
+  await refresh.press('Enter');
   await expect.poll(() => fixture('started', 'a11y-refresh')).toBe(true);
+  await expect(refresh).toBeFocused();
+  await expect(refresh).toHaveAttribute('aria-disabled', 'true');
+  await refresh.press('Enter');
+  await expect(refresh).toBeFocused();
   await expect(live).toHaveText('Checking CAN-100 for changes');
   await checkLive('failure-pending', before);
   await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -465,7 +512,7 @@ export async function auditAccessibility(app, page, evidence) {
   expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);
   await expect(
     page.getByRole('status', { name: 'Connection status' }),
-  ).toHaveText('Connection error');
+  ).toHaveText('Load failed');
   await checkLive('failure-settled-retained', before);
   await capture('refresh-error');
 
@@ -475,8 +522,13 @@ export async function auditAccessibility(app, page, evidence) {
     .poll(() => page.evaluate(() => Date.now()))
     .toBeGreaterThan(before.fetchedAt + 1000);
   await fixture('hold', 'a11y-retry', 'tree', 'CAN-100');
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  const retry = page.getByRole('button', { name: 'Retry', exact: true });
+  await retry.focus();
+  await retry.press('Enter');
   await expect.poll(() => fixture('started', 'a11y-retry')).toBe(true);
+  await expect(
+    page.getByRole('button', { name: 'Refresh', exact: true }),
+  ).toBeFocused();
   await expect(live).toHaveText('Checking CAN-100 for changes');
   await expect(timestamp).toHaveAttribute('title', previousTitle);
   expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);

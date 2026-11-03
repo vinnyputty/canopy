@@ -226,6 +226,27 @@ try {
   await expect(
     page.getByText('Playback stopped. Explore the sample workspace freely.'),
   ).toBeVisible();
+  const demoRow = page.locator('[data-tree-key="CAN-100"]');
+  await demoRow.press('F2');
+  await page.getByLabel('Summary for CAN-100', { exact: true }).press('Escape');
+  await expect(demoRow).toBeFocused();
+  await demoRow.press('F2');
+  await page
+    .getByLabel('Summary for CAN-100', { exact: true })
+    .fill('Demo focus check');
+  await page.getByLabel('Summary for CAN-100', { exact: true }).press('Enter');
+  await expect(demoRow).toBeFocused();
+  const demoUndo = page.getByRole('button', {
+    name: 'Undo edit to CAN-100',
+    exact: true,
+  });
+  await expect(demoUndo).toBeEnabled();
+  await demoUndo.focus();
+  await demoUndo.press('Enter');
+  await expect(demoRow).toBeFocused();
+  await expect(demoRow.locator('.summary')).toHaveText(
+    'A calmer place to get things done',
+  );
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page
     .getByRole('dialog', { name: 'Settings', exact: true })
