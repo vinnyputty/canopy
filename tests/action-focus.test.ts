@@ -421,3 +421,46 @@ for (const command of ['nextTab', 'previousTab'] as const)
         f.close();
       }
     });
+
+for (const existing of [false, true]) {
+  for (const focus of [undefined, false, true]) {
+    test(`opening a tree queues post-commit focus only when requested: existing=${existing}, focus=${focus}`, () => {
+      const f = fixture();
+      try {
+        const input = f.document.querySelector<HTMLInputElement>('#other')!;
+        input.focus();
+        const tab = {
+          id: 'destination',
+          connectionId: 'work',
+          rootKey: 'CAN-200',
+        };
+        const navigated: (typeof tab)[] = [];
+        const dialogs: unknown[] = [];
+        const run = execute(callback(app, 'openTab'), {
+          ...f.scope,
+          connections: [{ id: 'work', provider: 'jira' }],
+          workspaceRef: { current: { tabs: existing ? [tab] : [] } },
+          rootView: () => ({ hideDone: false }),
+          navigate: (value: typeof tab) => navigated.push(value),
+          setDialog: (value: unknown) => dialogs.push(value),
+        });
+        run('work', 'can-200', focus);
+        assert.equal(navigated.length, 1);
+        assert.equal(navigated[0].rootKey, 'CAN-200');
+        if (existing) assert.equal(navigated[0], tab);
+        assert.equal(
+          f.document.activeElement === input,
+          true,
+          'opening waits for commit before moving focus',
+        );
+        if (focus) {
+          assert.equal(f.scope.pendingTabFocus.current?.tabId, navigated[0].id);
+          assert.equal(f.scope.pendingTabFocus.current?.origin === input, true);
+        } else assert.equal(f.scope.pendingTabFocus.current, null);
+        assert.deepEqual(dialogs, [null]);
+      } finally {
+        f.close();
+      }
+    });
+  }
+}

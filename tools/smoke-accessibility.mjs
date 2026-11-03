@@ -81,8 +81,15 @@ export async function auditAccessibility(app, page, evidence) {
   await open.click();
   const picker = page.getByRole('dialog', { name: 'Open issue tree' });
   await picker.getByRole('combobox').fill('CAN-100');
-  await picker.getByRole('button', { name: 'Open tree', exact: true }).click();
+  await picker.getByRole('combobox').press('Enter');
   await expect(page.getByRole('tree')).toBeVisible();
+  await afterRestoration();
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeFocused();
+  await open.click();
+  await picker.getByRole('combobox').fill('CAN-100');
+  await picker.getByRole('combobox').press('Enter');
+  await afterRestoration();
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeFocused();
 
   const commands = page.getByRole('button', { name: 'More commands' });
   await commands.focus();
@@ -107,7 +114,9 @@ export async function auditAccessibility(app, page, evidence) {
   await fixture('hold', 'a11y-initial', 'tree', 'CAN-200');
   await open.click();
   await picker.getByRole('combobox').fill('CAN-200');
-  await picker.getByRole('button', { name: 'Open tree', exact: true }).click();
+  await picker.getByRole('combobox').press('Enter');
+  await afterRestoration();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeFocused();
   await expect.poll(() => fixture('started', 'a11y-initial')).toBe(true);
   await expect(
     page.getByRole('status', { name: 'Loading issue tree' }),

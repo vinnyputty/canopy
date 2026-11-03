@@ -946,7 +946,7 @@ export function App() {
     if (left < strip.scrollLeft) strip.scrollLeft = left;
     else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth)
       strip.scrollLeft = left + tab.offsetWidth - strip.clientWidth;
-  }, [activeTab?.id, tabOrder, activeSavedView?.id]);
+  }, [activeTab?.id, tabOrder, activeSavedView?.id, dialog]);
   const availableRoots = useMemo(
     () => configuredRoots(workspace, connections),
     [
@@ -2116,7 +2116,7 @@ export function App() {
   );
 
   const openTab = useCallback(
-    (connectionId: string, rootKey: string) => {
+    (connectionId: string, rootKey: string, focus = false) => {
       const key =
         connections.find((item) => item.id === connectionId)?.provider ===
         'github'
@@ -2125,25 +2125,28 @@ export function App() {
       const existing = workspaceRef.current.tabs.find(
         (tab) => tab.connectionId === connectionId && tab.rootKey === key,
       );
-      navigate(
-        existing ?? {
-          id:
-            globalThis.crypto?.randomUUID?.() ??
-            `${Date.now()}-${Math.random()}`,
+      const tab = existing ?? {
+        id:
+          globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        connectionId,
+        rootKey: key,
+        expanded: [key],
+        hideDone: rootView(workspaceRef.current, {
           connectionId,
           rootKey: key,
-          expanded: [key],
-          hideDone: rootView(workspaceRef.current, {
-            connectionId,
-            rootKey: key,
-          }).hideDone,
-          filters: rootView(workspaceRef.current, {
-            connectionId,
-            rootKey: key,
-          }).filters,
-          scrollTop: 0,
-        },
-      );
+        }).hideDone,
+        filters: rootView(workspaceRef.current, {
+          connectionId,
+          rootKey: key,
+        }).filters,
+        scrollTop: 0,
+      };
+      if (focus)
+        pendingTabFocus.current = {
+          tabId: tab.id,
+          origin: document.activeElement,
+        };
+      navigate(tab);
       setDialog(null);
     },
     [navigate, connections],
@@ -6044,7 +6047,7 @@ export function App() {
           }}
           onOpen={(id, key) => {
             setSetupConnectionId(undefined);
-            openTab(id, key);
+            openTab(id, key, true);
           }}
         />
       )}
@@ -6117,11 +6120,11 @@ export function App() {
           sources={sourceTabs}
           scrollElement={scrollRef.current}
           activeRoot={activeTab ?? undefined}
-          onOpen={openTab}
+          onOpen={(id, key) => openTab(id, key, true)}
           onNavigate={(entry) => {
             const target = entry.target;
             if (target.type === 'Open root' || target.type === 'Recent root') {
-              openTab(target.root.connectionId, target.root.rootKey);
+              openTab(target.root.connectionId, target.root.rootKey, true);
             } else if (target.type === 'Saved view') {
               setInboxOpen(false);
               setSelectedViewIssue(null);

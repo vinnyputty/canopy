@@ -2,7 +2,7 @@
 
 The sidebar separates active tabs, pinned roots, saved views, recent roots, parked roots, and connections. Each root includes its provider and connection; tab headers also show connection names. Tabs scroll horizontally while Open issue and the window drag area stay available. Selected destinations have a persistent accent edge; keyboard focus has an outline.
 
-Use Left/Right or Home/End in the tab strip; Ctrl+Tab and Ctrl+Shift+Tab switch and focus tabs. Escape closes an inline editor and returns focus to the issue. Escape in Find clears the query and returns focus to the selected row. Retry focuses Refresh while checking, and Undo returns focus to the issue when its button disappears. These actions preserve focus if you move to another control or workspace view.
+Opening an issue from a dialog focuses its destination tab, including when that tab is already active or still loading. Use Left/Right or Home/End in the tab strip; Ctrl+Tab and Ctrl+Shift+Tab switch and focus tabs. Escape closes an inline editor and returns focus to the issue. Escape in Find clears the query and returns focus to the selected row. Retry focuses Refresh while checking, and Undo returns focus to the issue when its button disappears. These actions preserve focus if you move to another control or workspace view.
 
 Tabs show **Couldn’t load issue tree** after a failed initial load and keep a known title after a failed refresh. **Load failed** in the footer identifies a failed operation; the error banner gives the specific reason.
 

@@ -102,6 +102,7 @@ test('tabs reveal the active connection without vertical scrolling; views and in
     useLayoutEffect: React.useLayoutEffect,
     useCallback: (run: unknown) => run,
     pendingTabFocus: { current: null },
+    dialog: null,
     workspaceRef: {
       get current() {
         return scope.workspace;
@@ -294,6 +295,22 @@ test('tabs reveal the active connection without vertical scrolling; views and in
     const shortcut = execute(relativeTab.initializer!.getText(ast), scope) as (
       direction: -1 | 1,
     ) => void;
+    scope.dialog = 'open';
+    await render();
+    const picker = dom.window.document.createElement('input');
+    host.append(picker);
+    picker.focus();
+    scope.pendingTabFocus.current = { tabId: 'one', origin: picker };
+    picker.remove();
+    scope.dialog = null;
+    await render();
+    assert.equal(
+      dom.window.document.activeElement?.getAttribute('data-tab-id'),
+      'one',
+      'dialog submission focuses an already-active destination after commit',
+    );
+    assert.equal(scope.pendingTabFocus.current, null);
+
     const draft = dom.window.document.createElement('input');
     host.append(draft);
     draft.focus();
