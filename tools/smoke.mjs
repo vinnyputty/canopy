@@ -2391,14 +2391,19 @@ try {
   await expect(
     page.getByRole('navigation', { name: 'Issue ancestry' }),
   ).toContainText('CAN-113');
-  expect(
-    await page
-      .locator('.tree-branch')
-      .first()
-      .evaluate(
-        (element) => getComputedStyle(element, '::before').borderLeftWidth,
-      ),
-  ).toBe('1px');
+  const branchLine = await page
+    .locator('.tree-branch')
+    .first()
+    .evaluate((element) => {
+      const style = getComputedStyle(element, '::before');
+      return {
+        style: style.borderLeftStyle,
+        physicalWidth: parseFloat(style.borderLeftWidth) * devicePixelRatio,
+        expectedWidth: Math.max(1, Math.floor(devicePixelRatio)),
+      };
+    });
+  expect(branchLine.style).toBe('solid');
+  expect(branchLine.physicalWidth).toBeCloseTo(branchLine.expectedWidth, 4);
   await collapse.click();
   await actions.click();
   await page
