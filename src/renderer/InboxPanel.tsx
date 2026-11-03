@@ -18,6 +18,7 @@ import {
   type TriageAction,
 } from '../shared/triage';
 import type { ViewSource } from './saved-views';
+import { providerLabel } from './provider-label';
 import {
   inboxCandidates,
   inboxItems,
@@ -445,14 +446,6 @@ export function InboxPanel(props: Props) {
           const connection = props.connections.find(
             (connection) => connection.id === item.source.connectionId,
           );
-          const provider =
-            connection?.provider === 'github'
-              ? 'GitHub'
-              : connection?.provider === 'jira'
-                ? 'Jira'
-                : connection?.provider === 'demo'
-                  ? 'Demo'
-                  : 'Unknown provider';
           return (
             <article
               className="inbox-item"
@@ -471,7 +464,8 @@ export function InboxPanel(props: Props) {
                   ' · Blocker coverage unknown / incomplete'}
               </p>
               <p className="inbox-source">
-                {provider} · {connection?.name ?? item.source.connectionId} ·{' '}
+                {providerLabel(connection?.provider)} ·{' '}
+                {connection?.name ?? item.source.connectionId} ·{' '}
                 {item.source.connectionId} · roots:{' '}
                 {item.roots.map((root) => root.rootKey).join(', ')}
               </p>

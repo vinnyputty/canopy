@@ -18,7 +18,10 @@ export async function auditAccessibility(app, page, evidence) {
       const image = await BrowserWindow.getAllWindows()[0].capturePage();
       return image.toPNG().toString('base64');
     });
-    await writeFile(join(evidence, `${name}.png`), Buffer.from(png, 'base64'));
+    const image = Buffer.from(png, 'base64');
+    if (image.length === 0)
+      throw new Error(`Native capture for ${name} produced an empty PNG.`);
+    await writeFile(join(evidence, `${name}.png`), image);
     await writeFile(
       join(evidence, `${name}.aria.txt`),
       await page.locator('body').ariaSnapshot(),

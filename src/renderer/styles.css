@@ -3489,7 +3489,7 @@ kbd {
 }
 .issue-preview :focus-visible,
 .create-child-dialog :focus-visible {
-  outline: var(--focus-ring, 2px solid var(--accent));
+  outline: 2px solid var(--focus-ring, var(--accent));
   outline-offset: 2px;
 }
 .create-child-dialog {

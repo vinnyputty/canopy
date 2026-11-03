@@ -128,6 +128,15 @@ export async function auditChildCreation(appPath, executablePath, baseEnv) {
     });
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Close' }).focus();
+    await page.keyboard.press('Tab');
+    const focusedControl = dialog.locator(':focus-visible');
+    await expect(focusedControl).toHaveCount(1);
+    await expect(focusedControl).toHaveCSS('outline-style', 'solid');
+    expect(
+      await focusedControl.evaluate((control) =>
+        parseFloat(getComputedStyle(control).outlineWidth),
+      ),
+    ).toBeGreaterThan(0);
     await page.keyboard.press(
       process.platform === 'darwin' ? 'Meta+z' : 'Control+z',
     );

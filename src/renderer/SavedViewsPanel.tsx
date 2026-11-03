@@ -7,6 +7,7 @@ import type {
   SavedIssueView,
 } from '../shared/types';
 import type { ViewResult, ViewSource } from './saved-views';
+import { providerLabel } from './provider-label';
 
 type Props = {
   view: SavedIssueView;
@@ -139,14 +140,7 @@ export function SavedViewsPanel(props: Props) {
               return (
                 <div key={connection.id} className="saved-source-group">
                   <strong>
-                    {connection.provider === 'github'
-                      ? 'GitHub'
-                      : connection.provider === 'jira'
-                        ? 'Jira'
-                        : connection.provider === 'demo'
-                          ? 'Demo'
-                          : 'Unknown provider'}{' '}
-                    · {connection.name}
+                    {providerLabel(connection.provider)} · {connection.name}
                   </strong>
                   <label>
                     <input
@@ -404,14 +398,8 @@ export function SavedViewsPanel(props: Props) {
                     {result.issue.summary}
                   </span>
                   <small>
-                    {connection?.provider === 'github'
-                      ? 'GitHub'
-                      : connection?.provider === 'jira'
-                        ? 'Jira'
-                        : connection?.provider === 'demo'
-                          ? 'Demo'
-                          : 'Unknown provider'}{' '}
-                    · {connection?.name ?? result.source.connectionId} ·{' '}
+                    {providerLabel(connection?.provider)} ·{' '}
+                    {connection?.name ?? result.source.connectionId} ·{' '}
                     {result.source.rootKey} · {result.issue.status.name}
                   </small>
                 </button>

@@ -12,6 +12,7 @@ function harness(
   options: {
     paintError?: Error;
     captureError?: Error;
+    emptyCapture?: boolean;
     pngWriteError?: Error;
     ariaError?: Error;
     ariaWriteError?: Error;
@@ -31,7 +32,9 @@ function harness(
             {
               async capturePage() {
                 if (options.captureError) throw options.captureError;
-                return { toPNG: () => png };
+                return {
+                  toPNG: () => (options.emptyCapture ? Buffer.alloc(0) : png),
+                };
               },
             },
           ],
@@ -99,6 +102,13 @@ test('native capture rejection writes no evidence', async () => {
   const error = new Error('capture failed');
   const h = harness({ captureError: error });
   await assert.rejects(h.run(), error);
+  assert.deepEqual(h.writes, []);
+  assert.equal(h.ariaCalls(), 0);
+});
+
+test('empty native capture writes no evidence', async () => {
+  const h = harness({ emptyCapture: true });
+  await assert.rejects(h.run(), /empty PNG/);
   assert.deepEqual(h.writes, []);
   assert.equal(h.ariaCalls(), 0);
 });

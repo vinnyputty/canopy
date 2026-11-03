@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { CanopyAPI, Choice, Connection, Issue } from '../shared/types';
+import { providerLabel } from './provider-label';
 import {
   bulkChoices,
   executeBulkIssue,
@@ -299,14 +300,8 @@ export function BulkTriage({
         )}
       </header>
       <p className="bulk-context">
-        {connection.provider === 'github'
-          ? 'GitHub'
-          : connection.provider === 'jira'
-            ? 'Jira'
-            : connection.provider === 'demo'
-              ? 'Demo'
-              : 'Unknown provider'}{' '}
-        · {connection.name} · Changes are checked for each issue before saving.
+        {providerLabel(connection.provider)} · {connection.name} · Changes are
+        checked for each issue before saving.
       </p>
       {issues.length > 1 && (
         <>
