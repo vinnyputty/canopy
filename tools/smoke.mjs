@@ -2568,9 +2568,17 @@ try {
   await page.locator('.tree-scroll').evaluate((element) => {
     element.scrollTop = 100;
   });
+  await links
+    .getByRole('button', { name: 'Open tree' })
+    .scrollIntoViewIfNeeded();
   const linkedSourceScroll = await page
     .locator('.tree-scroll')
-    .evaluate((element) => element.scrollTop);
+    .evaluate(
+      (element) =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => resolve(element.scrollTop)),
+        ),
+    );
   expect(linkedSourceScroll).toBeGreaterThan(0);
   await links.getByRole('button', { name: 'Open tree' }).click();
   await expect(page.locator('.issue-preview')).toHaveAttribute(
