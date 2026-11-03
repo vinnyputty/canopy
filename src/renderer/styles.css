@@ -3532,7 +3532,7 @@ kbd {
   justify-content: space-between;
   gap: 6px;
   letter-spacing: normal;
-  font-size: 11px;
+  font-size: var(--font-size-caption);
 }
 .sidebar-work .side-tabs {
   margin-bottom: 18px;
@@ -3564,7 +3564,7 @@ kbd {
 .tab-connection {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 10px;
+  font-size: var(--font-size-caption);
   font-weight: 400;
   color: var(--muted);
 }
