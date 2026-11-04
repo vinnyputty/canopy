@@ -67,6 +67,19 @@ const index = () =>
     actions,
   );
 
+test('demo palette results use readable provider labels in roots and connections', () => {
+  const entries = paletteIndex(
+    workspace,
+    [{ ...connection('one'), provider: 'demo', name: 'Canopy demo' }],
+    { first: snapshot },
+    actions,
+  );
+  const root = entries.find((entry) => entry.target.type === 'Open root')!;
+  const account = entries.find((entry) => entry.target.type === 'Connection')!;
+  assert.equal(root.context, 'Canopy demo · Demo');
+  assert.match(account.context, /^Demo · /);
+});
+
 test('local search retains provider identity, root context and snapshot disclosures', () => {
   const entries = index();
   assert.equal(entries.filter((e) => e.target.type === 'Open root').length, 2);
@@ -84,7 +97,7 @@ test('local search retains provider identity, root context and snapshot disclosu
   );
   assert.equal(issues.length, 2);
   assert.notEqual(issues[0].id, issues[1].id);
-  assert.match(issues[0].context, /Site one · jira · in CAN-100/);
+  assert.match(issues[0].context, /Site one · Jira · in CAN-100/);
   assert.match(issues[0].context, /may be stale/);
   assert.match(issues[0].context, /Some linked issues could not be loaded/);
   assert.equal(

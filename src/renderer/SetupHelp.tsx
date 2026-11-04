@@ -7,11 +7,12 @@ export function TokenPermissions({
 }) {
   const [error, setError] = useState('');
   const open = async (url: string) => {
+    setError('');
     try {
       await window.canopy.openLink(url);
     } catch {
       setError(
-        'Could not open the browser. Open the provider’s token settings manually.',
+        `Could not open the browser. Copy this address into your browser: ${url}`,
       );
     }
   };
@@ -128,9 +129,9 @@ export function SetupHelp({
   return (
     <div className="setup-help">
       <p>
-        Connect a provider, verify access, then open your first root. Help opens
-        over your workspace; closing it keeps your connections, tabs, and
-        position.
+        Connect Jira Cloud with your site, email, and API token, or GitHub with
+        a fine-grained token and repository names. Then open an issue as a root
+        to explore its hierarchy. Closing help keeps your place.
       </p>
       <div className="connect-actions">
         <button className="primary" onClick={onConnect}>

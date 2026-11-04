@@ -44,6 +44,39 @@ async function closeDemo(session) {
   if (session.errors.length) throw session.errors[0];
 }
 
+async function expectUnobscuredFocus(control) {
+  await control.scrollIntoViewIfNeeded();
+  await control.focus();
+  await expect(control).toBeFocused();
+  expect(
+    await control.evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      return button.contains(
+        document.elementFromPoint(
+          rect.x + rect.width / 2,
+          rect.y + rect.height / 2,
+        ),
+      );
+    }),
+  ).toBe(true);
+}
+
+async function setZoomFactor(session, factor) {
+  const width = await session.app.evaluate(({ BrowserWindow }, zoom) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    window.webContents.setZoomFactor(zoom);
+    return window.getContentSize()[0];
+  }, factor);
+  await expect
+    .poll(() =>
+      session.page.evaluate(
+        ({ width, factor }) => Math.abs(window.innerWidth - width / factor),
+        { width, factor },
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+}
+
 const first = await openDemo();
 // Pause synchronously when a target state renders, before its presentation timer
 // can expire. The script is reinstalled after every Reset and replay reload.
@@ -226,6 +259,27 @@ try {
   await expect(
     page.getByText('Playback stopped. Explore the sample workspace freely.'),
   ).toBeVisible();
+  const demoRow = page.locator('[data-tree-key="CAN-100"]');
+  await demoRow.press('F2');
+  await page.getByLabel('Summary for CAN-100', { exact: true }).press('Escape');
+  await expect(demoRow).toBeFocused();
+  await demoRow.press('F2');
+  await page
+    .getByLabel('Summary for CAN-100', { exact: true })
+    .fill('Demo focus check');
+  await page.getByLabel('Summary for CAN-100', { exact: true }).press('Enter');
+  await expect(demoRow).toBeFocused();
+  const demoUndo = page.getByRole('button', {
+    name: 'Undo edit to CAN-100',
+    exact: true,
+  });
+  await expect(demoUndo).toBeEnabled();
+  await demoUndo.focus();
+  await demoUndo.press('Enter');
+  await expect(demoRow).toBeFocused();
+  await expect(demoRow.locator('.summary')).toHaveText(
+    'A calmer place to get things done',
+  );
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page
     .getByRole('dialog', { name: 'Settings', exact: true })
@@ -325,7 +379,9 @@ try {
   ).toHaveCount(0);
   await page.getByRole('button', { name: 'Reset and replay' }).click();
   await expect(
-    page.getByText('Tour complete. The sample tree is yours to explore.'),
+    page.getByText(
+      'Tour complete. Explore the sample, open Settings for reading and shortcuts, or Close demo to return to your workspace.',
+    ),
   ).toBeVisible({ timeout: 70000 });
   const final = await page.evaluate(async () => {
     const issues = (await window.canopy.tree('demo', 'CAN-100')).issues;
@@ -340,6 +396,63 @@ try {
     throw new Error(
       `Tour left unexpected sample data: ${JSON.stringify(final)}`,
     );
+  try {
+    for (const zoom of [1, 2, 2.0736]) {
+      await setZoomFactor(first, zoom);
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const main = document
+              .querySelector('.main')
+              .getBoundingClientRect();
+            const tour = document
+              .querySelector('.demo-tour')
+              .getBoundingClientRect();
+            return main.bottom <= tour.top && main.height > 0;
+          }),
+        )
+        .toBe(true);
+      const action = page.locator('.row-menu-trigger').last();
+      await expectUnobscuredFocus(action);
+      await page.locator('[data-tree-key="CAN-100"]').focus();
+      await page.keyboard.press('Space');
+      await expect(
+        page.getByRole('complementary', { name: 'Preview CAN-100' }),
+      ).toBeVisible();
+      expect(
+        await page.locator('.tree-scroll').evaluate((tree) => {
+          const row = tree.querySelector('.issue-row');
+          const header = tree.querySelector('.column-head');
+          return (
+            tree.clientHeight >=
+            row.getBoundingClientRect().height +
+              header.getBoundingClientRect().height
+          );
+        }),
+      ).toBe(true);
+      await expectUnobscuredFocus(
+        page.getByRole('button', { name: 'Actions for CAN-100', exact: true }),
+      );
+      await page.keyboard.press('Escape');
+      await expect(
+        page.getByRole('complementary', { name: 'Preview CAN-100' }),
+      ).toHaveCount(0);
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      const done = page
+        .getByRole('dialog', { name: 'Settings' })
+        .getByRole('button', { name: 'Done', exact: true });
+      await expectUnobscuredFocus(done);
+      await done.press('Enter');
+      await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCount(
+        0,
+      );
+      await expectUnobscuredFocus(
+        page.getByRole('button', { name: 'Reset and replay' }),
+      );
+    }
+  } finally {
+    await setZoomFactor(first, 1);
+  }
   await page.getByRole('button', { name: 'Previous demo step' }).click();
   await expect(page.getByText('Step 6 of 7')).toBeVisible();
   await expect
@@ -355,7 +468,9 @@ try {
   await page.getByRole('button', { name: 'Next demo step' }).click();
   await expect(page.getByText('Step 7 of 7')).toBeVisible();
   await expect(
-    page.getByText('Tour complete. The sample tree is yours to explore.'),
+    page.getByText(
+      'Tour complete. Explore the sample, open Settings for reading and shortcuts, or Close demo to return to your workspace.',
+    ),
   ).toBeVisible({ timeout: 20000 });
   await page.locator('[data-tree-key="CAN-110"]').focus();
   await page.keyboard.press('ArrowLeft');
@@ -401,6 +516,45 @@ try {
   await expect(
     page.getByText('Playback stopped because you took control.'),
   ).toBeVisible();
+  await page.evaluate(() =>
+    sessionStorage.setItem('canopy-check-hold', 'start'),
+  );
+  const replay = page.getByRole('button', { name: 'Reset and replay' });
+  await replay.focus();
+  await replay.press('Enter');
+  const resume = page.getByRole('button', { name: 'Resume demo', exact: true });
+  const pause = page.getByRole('button', { name: 'Pause demo', exact: true });
+  await expect(resume).toBeFocused();
+  await resume.press('Enter');
+  await expect(pause).toBeFocused();
+  await pause.press('Enter');
+  await expect(resume).toBeFocused();
+  try {
+    await setZoomFactor(first, 2.0736);
+    expect(
+      await page.locator('.demo-tour-copy').evaluate((copy) => {
+        const footer = copy.closest('.demo-tour');
+        const style = getComputedStyle(footer);
+        const available =
+          footer.clientWidth -
+          parseFloat(style.paddingLeft) -
+          parseFloat(style.paddingRight);
+        return (
+          copy.getBoundingClientRect().width >= Math.min(260, available) - 1
+        );
+      }),
+    ).toBe(true);
+    await expectUnobscuredFocus(resume);
+    await expectUnobscuredFocus(
+      page.getByRole('button', { name: 'Stop demo', exact: true }),
+    );
+    await expectUnobscuredFocus(replay);
+    await expectUnobscuredFocus(
+      page.getByRole('button', { name: 'Close demo', exact: true }),
+    );
+  } finally {
+    await setZoomFactor(first, 1);
+  }
   const exited = new Promise((resolve) => first.child.once('exit', resolve));
   await page.getByRole('button', { name: 'Close demo' }).click();
   await Promise.race([

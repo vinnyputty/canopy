@@ -11,7 +11,7 @@ import type {
 
 export const DEFAULT_READING: ReadingSettings = {
   textSize: 'medium',
-  spacing: 'compact',
+  spacing: 'comfortable',
 };
 export function validReading(value: unknown): value is ReadingSettings {
   return (
@@ -43,7 +43,10 @@ export function migrateReading(workspace: Workspace): Workspace {
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([, view]) => view),
   ];
-  const selected = candidates.find(validReading) ?? DEFAULT_READING;
+  const selected = candidates.find(validReading) ?? {
+    textSize: 'medium',
+    spacing: 'compact',
+  };
   return {
     ...workspace,
     reading: { textSize: selected.textSize, spacing: selected.spacing },

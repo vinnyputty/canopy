@@ -17,6 +17,38 @@ const source = sourceFile(
 const picker = declaration(source, 'OpenIssueDialog');
 const submitSource = callback(picker, 'submit');
 
+test('picker guidance names the selected provider without calling demo Jira', () => {
+  const input = findNode(
+    picker,
+    (node): node is ts.JsxSelfClosingElement =>
+      ts.isJsxSelfClosingElement(node) &&
+      node.tagName.getText() === 'input' &&
+      node.attributes.properties.some(
+        (attribute) =>
+          ts.isJsxAttribute(attribute) &&
+          attribute.name.getText() === 'role' &&
+          attribute.initializer?.getText() === '"combobox"',
+      ),
+  );
+  for (const [provider, expected] of [
+    ['github', 'GitHub URL, owner/repo, issue number, or title'],
+    ['jira', 'Issue key, uppercase project prefix, Jira URL, or summary'],
+    ['demo', 'Sample issue key or title'],
+  ])
+    for (const name of ['placeholder', 'aria-label']) {
+      const attribute = input.attributes.properties.find(
+        (node) => ts.isJsxAttribute(node) && node.name.getText() === name,
+      ) as ts.JsxAttribute;
+      const source = (
+        attribute.initializer as ts.JsxExpression
+      ).expression!.getText();
+      assert.equal(
+        execute(source, { selectedConnection: { provider } }),
+        expected,
+      );
+    }
+});
+
 for (const mode of [
   'no-match',
   'short-query',

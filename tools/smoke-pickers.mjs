@@ -356,12 +356,23 @@ export async function auditPickers(app, page) {
       window.dispatchEvent(new Event('resize'));
       const bounds = menu.getBoundingClientRect();
       const scroller = menu.closest('.tree-scroll').getBoundingClientRect();
+      const header = document
+        .querySelector('.column-head')
+        .getBoundingClientRect();
+      const overlapTop = Math.max(bounds.top, header.top);
+      const overlapBottom = Math.min(bounds.bottom, header.bottom);
+      const hit = document.elementFromPoint(
+        bounds.left + bounds.width / 2,
+        (overlapTop + overlapBottom) / 2,
+      );
       return {
         top: bounds.top,
         bottom: bounds.bottom,
         scrollerTop: scroller.top,
         scrollerBottom: scroller.bottom,
         scrollable: menu.scrollHeight > menu.clientHeight,
+        headerOverlap: overlapBottom - overlapTop,
+        aboveHeader: menu.contains(hit),
       };
     });
   expect(bottomMenuBounds.top).toBeGreaterThanOrEqual(
@@ -371,7 +382,19 @@ export async function auditPickers(app, page) {
     bottomMenuBounds.scrollerBottom + 1,
   );
   expect(bottomMenuBounds.scrollable).toBe(true);
+  expect(bottomMenuBounds.headerOverlap).toBeGreaterThan(0);
+  expect(bottomMenuBounds.aboveHeader).toBe(true);
   await page.locator('.status-popover').press('Escape');
+  expect(
+    await page.evaluate(() => {
+      const row = document.activeElement.closest('.issue-row');
+      const header = document.querySelector('.column-head');
+      return (
+        Number(getComputedStyle(row).zIndex) <
+        Number(getComputedStyle(header).zIndex)
+      );
+    }),
+  ).toBe(true);
   await page.evaluate(() => {
     const scroller = document.querySelector('.tree-scroll');
     scroller.style.removeProperty('max-height');

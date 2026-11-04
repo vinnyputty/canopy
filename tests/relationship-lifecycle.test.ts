@@ -2344,6 +2344,7 @@ function inboxPanelEffects(inspection: InboxInspection) {
       useMemo: (fn: () => unknown) => fn(),
       useState: (value: unknown) => [value, () => {}],
       useRef: (value: unknown) => (refs[refIndex++] ??= { current: value }),
+      useLayoutEffect: (fn: () => void) => fn(),
       useEffect: (fn: () => (() => void) | void, deps: unknown[]) => {
         const index = effectIndex++;
         const previous = effects[index];

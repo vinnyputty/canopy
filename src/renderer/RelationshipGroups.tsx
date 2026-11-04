@@ -24,8 +24,12 @@ export function RelationshipGroups({
       {graph.groups.map((group) => (
         <section key={group.kind} aria-label={relationshipTitles[group.kind]}>
           <h4>
-            {relationshipTitles[group.kind]} ·{' '}
-            {group.state === 'visible' ? 'Visible results' : group.state}
+            {relationshipTitles[group.kind]}{' '}
+            <span className="relationship-state">
+              {group.state === 'visible'
+                ? `${group.items.length} visible`
+                : group.state}
+            </span>
           </h4>
           {group.reason && (
             <p role={group.problem ? 'status' : undefined}>{group.reason}</p>
@@ -38,9 +42,10 @@ export function RelationshipGroups({
           )}
           {group.items.map((link, index) => (
             <article className="preview-link" key={`${link.key}-${index}`}>
-              <strong>
+              <p className="relationship-direction">
                 {graph.key} {link.relationship} {link.key}
-              </strong>
+              </p>
+              <strong className="relationship-summary">{link.summary}</strong>
               <p className="preview-hint">
                 {identity} ·{' '}
                 {link.direction === 'inward' ? 'Incoming' : 'Outgoing'}
@@ -52,14 +57,13 @@ export function RelationshipGroups({
                     ? 'Active'
                     : 'Status unknown'}
               </p>
-              <p>{link.summary}</p>
               {link.access === 'outside-connection' ? (
                 <p>
                   Outside this connection’s selected repositories. Add the
                   repository to inspect this issue.
                 </p>
               ) : (
-                <div>
+                <div className="relationship-actions">
                   {link.access === 'unknown' && (
                     <p>Target access and status have not been verified.</p>
                   )}

@@ -1,7 +1,9 @@
 import type { Workspace } from '../shared/types';
+import { DEFAULT_READING } from '../shared/views';
 import { DemoProvider } from './demo-provider';
 
 export const demoWorkspace: Workspace = {
+  reading: { ...DEFAULT_READING },
   tabs: [
     {
       id: 'demo-can-100',

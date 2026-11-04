@@ -88,6 +88,10 @@ function harness(
   const workspaceRef = { current: workspace };
   const navigationReveal = { current: undefined as unknown };
   const pendingScrollRestore = { current: undefined as unknown };
+  const pendingTabFocus = {
+    current: null as { tabId: string; origin: object } | null,
+  };
+  const focusOrigin = {};
   const setters = {
     setInboxOpen: (value: boolean) => {
       inboxOpen = value;
@@ -117,6 +121,8 @@ function harness(
     pendingScrollRestore,
   });
   const openTab = execute(callback(source, 'openTab'), {
+    pendingTabFocus,
+    document: { activeElement: focusOrigin },
     useCallback: (fn: unknown) => fn,
     ...setters,
     workspaceRef,
@@ -224,6 +230,8 @@ function harness(
       reveal,
       navigationReveal: navigationReveal.current,
       pendingScrollRestore: pendingScrollRestore.current,
+      pendingTabFocus: pendingTabFocus.current,
+      focusOrigin,
     }),
   };
 }
@@ -291,6 +299,8 @@ for (const type of ['Open root', 'Recent root']) {
     assert.equal(h.state().workspace.activeSavedViewId, null);
     assert.equal(h.state().workspace.activeTabId, h.tab.id);
     assert.equal(h.state().pendingScrollRestore, h.tab.id);
+    assert.equal(h.state().pendingTabFocus?.tabId, h.tab.id);
+    assert.equal(h.state().pendingTabFocus?.origin, h.state().focusOrigin);
     assert.equal(h.state().dialog, null);
   });
 }

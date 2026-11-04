@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import React from 'react';
+import ts from 'typescript';
+import { callback, execute, findNode, sourceFile } from './source-probe';
+import { starterViews } from '../src/renderer/saved-views';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { demoWorkspace } from '../src/main/demo';
 import type { RootView, Workspace } from '../src/shared/types';
 import {
   DEFAULT_READING,
@@ -108,7 +112,7 @@ it('falls back deterministically through open, closed and sorted connection defa
       ...base,
       reading: { textSize: 'huge', spacing: 'compact' } as never,
     }).reading,
-    DEFAULT_READING,
+    { textSize: 'medium', spacing: 'compact' },
   );
   assert.equal(validReading({ textSize: 'small', spacing: 'wide' }), false);
 });
@@ -141,7 +145,10 @@ it('recovers malformed persisted reading without coercion or losing workspace st
     assert.equal(validReading(reading), false);
     const saved = JSON.parse(JSON.stringify({ ...current, reading }));
     const recovered = recoverWorkspaceViews(saved);
-    assert.deepEqual(recovered, current);
+    assert.deepEqual(recovered, {
+      ...current,
+      reading: { textSize: 'medium', spacing: 'compact' },
+    });
     assert.deepEqual(saved.reading, reading);
     const withLegacy = {
       ...saved,
@@ -199,7 +206,7 @@ it('Settings exposes global reading, scoped reset and setup destinations; root V
     'Reading',
     'Text size',
     'Row spacing',
-    'Reset reading to Medium / Compact',
+    'Reset reading to Medium / Comfortable',
     'Appearance',
     'Keyboard shortcuts',
     'Connection setup',
@@ -217,4 +224,95 @@ it('Settings exposes global reading, scoped reset and setup destinations; root V
   assert.ok(!root.includes('Text size'));
   assert.ok(!root.includes('Row spacing'));
   assert.ok(root.includes('Reset this root to default'));
+});
+
+it('keeps migration density separate from fresh workspace and reset defaults', () => {
+  assert.deepEqual(migrateViews(demoWorkspace).reading, {
+    textSize: 'medium',
+    spacing: 'comfortable',
+  });
+  assert.deepEqual(DEFAULT_READING, {
+    textSize: 'medium',
+    spacing: 'comfortable',
+  });
+  for (const workspace of [base, { ...base, tabs: [], activeTabId: null }]) {
+    const saved = JSON.parse(JSON.stringify(workspace));
+    const migrated = migrateViews(saved);
+    assert.deepEqual(migrated.reading, {
+      textSize: 'medium',
+      spacing: 'compact',
+    });
+    assert.deepEqual(
+      migrateViews(JSON.parse(JSON.stringify(migrated))),
+      migrated,
+    );
+    assert.equal(saved.reading, undefined);
+  }
+  for (const spacing of ['compact', 'comfortable'] as const) {
+    for (const textSize of ['small', 'medium', 'large'] as const) {
+      const reading = { textSize, spacing };
+      const saved = { ...base, reading };
+      assert.deepEqual(migrateViews(saved).reading, reading);
+      assert.deepEqual(
+        migrateViews({
+          ...base,
+          tabs: [{ ...a, view: legacy(textSize, spacing) }],
+        }).reading,
+        reading,
+      );
+    }
+  }
+  assert.deepEqual(
+    migrateViews({ ...base, reading: { ...DEFAULT_READING } }).reading,
+    DEFAULT_READING,
+  );
+});
+
+it('hydrates fresh startup with Comfortable while saved workspaces retain their density', () => {
+  const renderer = sourceFile(
+    new URL('../src/renderer/App.tsx', import.meta.url),
+  );
+  const hydration = findNode(
+    renderer,
+    (node): node is ts.CallExpression =>
+      ts.isCallExpression(node) &&
+      node.expression.getText() === 'setWorkspace' &&
+      node.arguments[0]?.getText().includes('...EMPTY_WORKSPACE') === true &&
+      node.arguments[0]?.getText().includes('...saved') === true,
+  ).arguments[0].getText();
+  const context = {
+    PLATFORM_SHORTCUTS: {},
+    DEFAULT_READING,
+    migrateViews,
+    starterViews,
+    nextConnections: [],
+  };
+  const empty = execute(callback(renderer, 'EMPTY_WORKSPACE'), context);
+  const hydrate = (saved?: Workspace) =>
+    execute(hydration, {
+      ...context,
+      EMPTY_WORKSPACE: empty,
+      saved,
+      tabs: saved?.tabs ?? [],
+    }) as Workspace;
+  assert.deepEqual(hydrate().reading, {
+    textSize: 'medium',
+    spacing: 'comfortable',
+  });
+  assert.deepEqual(hydrate(base).reading, {
+    textSize: 'medium',
+    spacing: 'compact',
+  });
+  assert.deepEqual(hydrate({ ...base, tabs: [], activeTabId: null }).reading, {
+    textSize: 'medium',
+    spacing: 'compact',
+  });
+  for (const spacing of ['compact', 'comfortable'] as const) {
+    const saved = { ...base, reading: { textSize: 'large', spacing } as const };
+    assert.deepEqual(hydrate(saved).reading, saved.reading);
+    assert.deepEqual(
+      hydrate(JSON.parse(JSON.stringify(hydrate(saved)))).reading,
+      saved.reading,
+    );
+  }
 });

@@ -48,6 +48,27 @@ const initial = (): Workspace => ({
   theme: 'system',
   sidebarCollapsed: false,
 });
+
+it('names the demo provider in sidebar context and accessible root labels', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(SidebarWork, {
+      workspace: initial(),
+      session: emptySidebarSession(),
+      connections: [
+        { id: 'one', name: 'Canopy demo', provider: 'demo', url: '' },
+      ],
+      onOrganize() {},
+      onOpen() {},
+      onSelectTab() {},
+      onSelectView() {},
+      onCreateView() {},
+      onOpenPicker() {},
+    }),
+  );
+  assert.match(html, /Demo · Canopy demo/);
+  assert.doesNotMatch(html, /Jira · Canopy demo/);
+  assert.match(html, /aria-label="Open A-1 · Demo · Canopy demo: Summary A-1"/);
+});
 it('orders favorites by connection and root, persists order, and preserves all live view state through Undo', () => {
   const before = initial();
   let result = organizeSidebar(before, emptySidebarSession(), {
@@ -352,4 +373,27 @@ it('disconnecting clears Undo and only that connection’s parked roots', () => 
     result.workspace,
   );
   assert.equal(forgetSidebarConnections(result.session, []), result.session);
+});
+
+it('inbox suppresses tree and saved-view selection while retaining every destination', () => {
+  for (const activeSavedViewId of [null, initial().savedViews![0].id]) {
+    const workspace = { ...initial(), activeSavedViewId };
+    const html = renderToStaticMarkup(
+      React.createElement(SidebarWork, {
+        workspace,
+        inactive: true,
+        session: emptySidebarSession(),
+        connections: [],
+        onOrganize() {},
+        onOpen() {},
+        onSelectTab() {},
+        onSelectView() {},
+        onCreateView() {},
+        onOpenPicker() {},
+      }),
+    );
+    assert.doesNotMatch(html, /aria-current="page"/);
+    assert.match(html, /Open A-1/);
+    assert.match(html, /Saved view:/);
+  }
 });

@@ -339,6 +339,15 @@ export async function auditPreview(app, page, restart) {
   const open = async () => {
     await row.focus();
     await page.keyboard.press('Space');
+    const close = pane.getByRole('button', { name: 'Close issue preview' });
+    await close.focus();
+    await expect(close).toBeFocused();
+    await expect(close).toHaveCSS('outline-style', 'solid');
+    expect(
+      await close.evaluate((control) =>
+        parseFloat(getComputedStyle(control).outlineWidth),
+      ),
+    ).toBeGreaterThan(0);
   };
   const mode = (value) =>
     app.evaluate((_electron, value) => {

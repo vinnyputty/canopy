@@ -1,4 +1,5 @@
 import { ancestorPath, buildIssueTree } from './tree';
+import { providerLabel } from './provider-label';
 import type {
   Connection,
   RootReference,
@@ -32,7 +33,7 @@ export function paletteIndex(
   sources: TabState[] = [],
 ): PaletteEntry[] {
   const names = new Map(
-    connections.map((c) => [c.id, `${c.name} · ${c.provider}`]),
+    connections.map((c) => [c.id, `${c.name} · ${providerLabel(c.provider)}`]),
   );
   const entries: PaletteEntry[] = [];
   const add = (
@@ -92,7 +93,7 @@ export function paletteIndex(
     add(
       `connection:${connection.id}`,
       connection.name,
-      `${connection.provider} · ${connection.url}${connection.accountName ? ` · ${connection.accountName}` : ''}`,
+      `${providerLabel(connection.provider)} · ${connection.url}${connection.accountName ? ` · ${connection.accountName}` : ''}`,
       { type: 'Connection', connectionId: connection.id },
       4,
     );

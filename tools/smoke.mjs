@@ -354,6 +354,154 @@ async function auditSettingsKeyboard() {
     'Settings keyboard checks passed: initial focus, Tab/Shift+Tab containment, close restoration, and destination focus.',
   );
 }
+async function auditTypography() {
+  const evidence = join(workspace, '.cache', 'typography');
+  await mkdir(evidence, { recursive: true });
+  await launch(true);
+  await expectReading('Text size', 'medium');
+  await expectReading('Row spacing', 'comfortable');
+  await close();
+  const persisted = {
+    tabs: [
+      {
+        id: 'sample',
+        connectionId: 'demo',
+        rootKey: 'CAN-100',
+        expanded: ['CAN-100'],
+        hideDone: false,
+        scrollTop: 0,
+      },
+    ],
+    activeTabId: 'sample',
+    shortcuts: {},
+    theme: 'light',
+    sidebarCollapsed: false,
+  };
+  await writeFile(join(userData, 'workspace.json'), JSON.stringify(persisted));
+  await launch();
+  await expectReading('Row spacing', 'compact');
+  await expect(page.locator('.issue-row').first()).toHaveCSS(
+    'min-height',
+    '30px',
+  );
+  await app.evaluate(async () => {
+    await globalThis.canopySmoke.update('CAN-101', {
+      summary:
+        'Readable workspace — 日本語の課題 · العربية · Français · 한국어 · A long title with enough detail to exercise truncation and keep its actions reachable',
+    });
+  });
+  await page.reload();
+  await expect(page.locator('.issue-tree')).toBeVisible();
+  const measurements = [];
+  for (const textSize of ['small', 'medium', 'large']) {
+    for (const spacing of ['compact', 'comfortable']) {
+      await changeReading('Text size', textSize);
+      await changeReading('Row spacing', spacing);
+      await expect(page.locator('.issue-tree')).toHaveCSS(
+        'font-size',
+        `${{ small: 11, medium: 13, large: 15 }[textSize]}px`,
+      );
+      await expect(page.locator('.issue-row').first()).toHaveCSS(
+        'min-height',
+        spacing === 'compact' ? '30px' : '40px',
+      );
+      measurements.push(
+        await page.locator('.issue-tree').evaluate(
+          (tree, reading) => ({
+            ...reading,
+            fontFamily: getComputedStyle(tree).fontFamily,
+            fontSize: getComputedStyle(tree).fontSize,
+            rowHeight: getComputedStyle(tree.querySelector('.issue-row'))
+              .height,
+            text: tree.textContent,
+          }),
+          { textSize, spacing },
+        ),
+      );
+      await page.screenshot({
+        path: join(evidence, `${textSize}-${spacing}.png`),
+      });
+    }
+  }
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByLabel('Row spacing', { exact: true }).focus();
+  await page.screenshot({ path: join(evidence, 'settings-focus.png') });
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    const { root } = await session.send('DOM.getDocument');
+    const fonts = [];
+    for (const selector of [
+      '.dialog > header h2',
+      '.settings-content legend',
+      '.settings-content select',
+      '[data-tree-key="CAN-101"] .summary',
+    ]) {
+      const { nodeId } = await session.send('DOM.querySelector', {
+        nodeId: root.nodeId,
+        selector,
+      });
+      expect(nodeId, selector).toBeGreaterThan(0);
+      const rendered = await session.send('CSS.getPlatformFontsForNode', {
+        nodeId,
+      });
+      fonts.push({ selector, ...rendered });
+      expect(
+        rendered.fonts.some((font) => font.glyphCount > 0),
+        selector,
+      ).toBe(true);
+      expect(
+        rendered.fonts.some((font) => font.isCustomFont),
+        selector,
+      ).toBe(false);
+      if (process.platform === 'darwin')
+        expect(
+          rendered.fonts.some((font) => /SF|AppleSystem/.test(font.familyName)),
+          selector,
+        ).toBe(true);
+    }
+    const controls = await page
+      .getByLabel('Row spacing', { exact: true })
+      .evaluate((control) => ({
+        fontFamily: getComputedStyle(control).fontFamily,
+        fontSize: getComputedStyle(control).fontSize,
+        focusOutline: getComputedStyle(control).outline,
+      }));
+    expect(controls.fontFamily).toContain('system-ui');
+    expect(controls.focusOutline).toContain('solid');
+    await writeFile(
+      join(evidence, 'measurements.json'),
+      JSON.stringify(
+        {
+          platform: process.platform,
+          arch: process.arch,
+          measurements,
+          fonts,
+          controls,
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    await session.detach();
+  }
+  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  await waitForSavedWorkspace(
+    (saved) =>
+      saved.reading?.textSize === 'large' &&
+      saved.reading.spacing === 'comfortable',
+  );
+  await close();
+  await launch();
+  await expectReading('Text size', 'large');
+  await expectReading('Row spacing', 'comfortable');
+  console.log(
+    'Typography Electron checks passed: fresh startup, implicit legacy Compact, all six reading combinations, multilingual content, native platform fonts, focus, and relaunch persistence.',
+  );
+}
+
 async function auditReadingMigration() {
   const rootView = {
     columns: ['issue', 'priority', 'assignee', 'status'],
@@ -547,7 +695,7 @@ async function auditGlobalReading() {
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page
     .getByRole('button', {
-      name: 'Reset reading to Medium / Compact',
+      name: 'Reset reading to Medium / Comfortable',
       exact: true,
     })
     .click();
@@ -555,17 +703,17 @@ async function auditGlobalReading() {
   await expect(page.locator('.issue-tree')).toHaveCSS('font-size', '13px');
   await expect(page.locator('.issue-row').first()).toHaveCSS(
     'min-height',
-    '30px',
+    '40px',
   );
   await page
     .getByRole('button', { name: 'Saved view: New view', exact: true })
     .click();
   await expect(result).toHaveCSS('font-size', '13px');
-  await expect(result).toHaveCSS('padding-top', '4px');
+  await expect(result).toHaveCSS('padding-top', '9px');
   await waitForSavedWorkspace(
     (saved) =>
       saved.reading?.textSize === 'medium' &&
-      saved.reading.spacing === 'compact' &&
+      saved.reading.spacing === 'comfortable' &&
       saved.savedViews.some(
         (view) =>
           view.id === saved.activeSavedViewId &&
@@ -582,7 +730,7 @@ async function auditGlobalReading() {
       .first(),
   ).toHaveCSS('font-size', '13px');
   await expectReading('Text size', 'medium');
-  await expectReading('Row spacing', 'compact');
+  await expectReading('Row spacing', 'comfortable');
   await page.getByRole('tab', { name: /CAN-100/ }).click();
   await changeReading('Text size', 'large');
   await changeReading('Row spacing', 'comfortable');
@@ -1472,6 +1620,13 @@ try {
     recursive: true,
     force: true,
   });
+  if (process.env.CANOPY_SMOKE_TYPOGRAPHY_ONLY === '1') {
+    await auditTypography();
+    expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);
+    await close();
+    await rm(userData, { recursive: true, force: true });
+    process.exit(0);
+  }
   if (process.env.CANOPY_SMOKE_ACCESSIBILITY_ONLY === '1') {
     await launch();
     await auditAccessibility(
@@ -2236,14 +2391,19 @@ try {
   await expect(
     page.getByRole('navigation', { name: 'Issue ancestry' }),
   ).toContainText('CAN-113');
-  expect(
-    await page
-      .locator('.tree-branch')
-      .first()
-      .evaluate(
-        (element) => getComputedStyle(element, '::before').borderLeftWidth,
-      ),
-  ).toBe('1px');
+  const branchLine = await page
+    .locator('.tree-branch')
+    .first()
+    .evaluate((element) => {
+      const style = getComputedStyle(element, '::before');
+      return {
+        style: style.borderLeftStyle,
+        physicalWidth: parseFloat(style.borderLeftWidth) * devicePixelRatio,
+        expectedWidth: Math.max(1, Math.floor(devicePixelRatio)),
+      };
+    });
+  expect(branchLine.style).toBe('solid');
+  expect(branchLine.physicalWidth).toBeCloseTo(branchLine.expectedWidth, 4);
   await collapse.click();
   await actions.click();
   await page
@@ -2359,6 +2519,12 @@ try {
   await page.getByRole('button', { name: /Sam Rivera/ }).click();
   await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();
 
+  await expect(page.locator('.statusbar .sr-only[role="status"]')).toHaveText(
+    '',
+  );
+  await app.evaluate(() =>
+    globalThis.canopySmoke.hold('late-status-picker', 'update', 'CAN-111'),
+  );
   await issue('CAN-111').getByLabel('Edit status for CAN-111').click();
   await page
     .getByRole('menuitem', { name: 'In Progress', exact: true })
@@ -2369,6 +2535,11 @@ try {
       exact: true,
     }),
   ).toHaveText('In Progress');
+  await expect
+    .poll(() =>
+      app.evaluate(() => globalThis.canopySmoke.started('late-status-picker')),
+    )
+    .toBe(true);
 
   // Enter edits a focused summary; Escape cancels without saving on blur.
   await issue('CAN-111')
@@ -2382,6 +2553,26 @@ try {
     .press('Enter');
   await summaryInput.fill('Keyboard draft');
   await summaryInput.press('Tab');
+  await expect(page.getByLabel('Choose value')).toBeFocused();
+  await app.evaluate(() => {
+    globalThis.canopySmoke.hold(
+      'late-status-priorities',
+      'priorities',
+      'CAN-111',
+    );
+    globalThis.canopySmoke.release('late-status-picker');
+  });
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        globalThis.canopySmoke.started('late-status-priorities'),
+      ),
+    )
+    .toBe(true);
+  await expect(page.locator('.priority-editor .choice-loading')).toBeVisible();
+  await app.evaluate(() =>
+    globalThis.canopySmoke.release('late-status-priorities'),
+  );
   await expect(page.getByLabel('Choose value')).toBeFocused();
   await page.getByLabel('Choose value').press('Escape');
   await expect(issue('CAN-111').getByText('Keyboard draft')).toBeVisible();
@@ -2408,9 +2599,17 @@ try {
   await page.locator('.tree-scroll').evaluate((element) => {
     element.scrollTop = 100;
   });
+  await links
+    .getByRole('button', { name: 'Open tree' })
+    .scrollIntoViewIfNeeded();
   const linkedSourceScroll = await page
     .locator('.tree-scroll')
-    .evaluate((element) => element.scrollTop);
+    .evaluate(
+      (element) =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => resolve(element.scrollTop)),
+        ),
+    );
   expect(linkedSourceScroll).toBeGreaterThan(0);
   await links.getByRole('button', { name: 'Open tree' }).click();
   await expect(page.locator('.issue-preview')).toHaveAttribute(

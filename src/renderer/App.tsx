@@ -26,6 +26,8 @@ import {
   verifiedSetupConnection,
 } from './connection-setup';
 import { SetupHelp, TokenPermissions } from './SetupHelp';
+import { openIssueError } from './open-issue-error';
+import { providerLabel } from './provider-label';
 import { supportLinks, type SupportLink } from '../shared/support';
 import { withScrollPositions } from './scroll-position';
 import { WorkspaceBackupPanel } from './WorkspaceBackupPanel';
@@ -311,6 +313,7 @@ export function App() {
     caption: string;
   } | null>(null);
   const tourStarted = useRef(false);
+  const pendingTourFocus = useRef(false);
   const stopTourRef = useRef<(() => void) | null>(null);
   const seekTourRef = useRef<((step: number, paused?: boolean) => void) | null>(
     null,
@@ -716,6 +719,11 @@ export function App() {
     storeConnections(value);
   };
   const searchRef = useRef<HTMLInputElement>(null);
+  const refreshButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingTabFocus = useRef<{
+    tabId: string;
+    origin: Element | null;
+  } | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewOverride, setPreviewOverride] =
     useState<PreviewOverride | null>(null);
@@ -744,6 +752,7 @@ export function App() {
       ? document.querySelector<HTMLElement>(`[data-tree-key="${key}"]`)
       : null;
     row?.focus({ preventScroll: true });
+    return Boolean(row);
   }, []);
   const closeRowMenu = useCallback(
     (restore = true) => {
@@ -812,6 +821,11 @@ export function App() {
   const [undoState, setUndoState] = useState<{ label?: string; busy: boolean }>(
     { busy: false },
   );
+  const [undoFocusRequest, setUndoFocusRequest] = useState<{
+    trigger: HTMLButtonElement;
+    tabId: string;
+    key: string;
+  } | null>(null);
   const [mutations] = useState(
     () =>
       new Mutations(
@@ -891,6 +905,11 @@ export function App() {
     mutations.pending(connectionId);
   const activeTab =
     workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
+  const tabSummary = (tab: TabState) =>
+    tab.summary ??
+    (errors[tab.id] && !loading.has(tab.id) && !refreshing.has(tab.id)
+      ? 'Couldn’t load issue tree'
+      : 'Loading…');
   const [inboxOpen, setInboxOpen] = useState(false);
   const [inboxRootLimit, setInboxRootLimit] = useState(10);
   const inboxView = useMemo<SavedIssueView>(
@@ -909,6 +928,26 @@ export function App() {
     : workspace.savedViews?.find(
         (item) => item.id === workspace.activeSavedViewId,
       );
+  const tabOrder = workspace.tabs.map((tab) => tab.id).join('\0');
+  useLayoutEffect(() => {
+    const request = pendingTabFocus.current;
+    pendingTabFocus.current = null;
+    if (activeSavedView) return;
+    const tab = document.querySelector<HTMLElement>('.top-tab.active');
+    const strip = tab?.parentElement;
+    if (!tab || !strip) return;
+    if (
+      request &&
+      request.tabId === activeTab?.id &&
+      (document.activeElement === request.origin ||
+        document.activeElement === document.body)
+    )
+      tab.focus({ preventScroll: true });
+    const left = tab.offsetLeft;
+    if (left < strip.scrollLeft) strip.scrollLeft = left;
+    else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth)
+      strip.scrollLeft = left + tab.offsetWidth - strip.clientWidth;
+  }, [activeTab?.id, tabOrder, activeSavedView?.id, dialog]);
   const availableRoots = useMemo(
     () => configuredRoots(workspace, connections),
     [
@@ -1455,6 +1494,7 @@ export function App() {
                 }
               : {
                   ...EMPTY_WORKSPACE,
+                  reading: { ...DEFAULT_READING },
                   savedViews: starterViews().map((view) => ({
                     ...view,
                     connectionIds: nextConnections.map(
@@ -1662,6 +1702,14 @@ export function App() {
         tab.rootKey,
         mutations.confirmedSnapshot(tab.id) ?? snapshotsRef.current[tab.id],
       );
+      if (
+        workspaceRef.current.activeTabId === tab.id &&
+        !workspaceRef.current.activeSavedViewId &&
+        document.activeElement
+          ?.closest('[data-tree-recovery]')
+          ?.getAttribute('data-tree-recovery') === tab.id
+      )
+        refreshButtonRef.current?.focus({ preventScroll: true });
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
       try {
@@ -2077,7 +2125,7 @@ export function App() {
   );
 
   const openTab = useCallback(
-    (connectionId: string, rootKey: string) => {
+    (connectionId: string, rootKey: string, focus = false) => {
       const key =
         connections.find((item) => item.id === connectionId)?.provider ===
         'github'
@@ -2086,25 +2134,28 @@ export function App() {
       const existing = workspaceRef.current.tabs.find(
         (tab) => tab.connectionId === connectionId && tab.rootKey === key,
       );
-      navigate(
-        existing ?? {
-          id:
-            globalThis.crypto?.randomUUID?.() ??
-            `${Date.now()}-${Math.random()}`,
+      const tab = existing ?? {
+        id:
+          globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+        connectionId,
+        rootKey: key,
+        expanded: [key],
+        hideDone: rootView(workspaceRef.current, {
           connectionId,
           rootKey: key,
-          expanded: [key],
-          hideDone: rootView(workspaceRef.current, {
-            connectionId,
-            rootKey: key,
-          }).hideDone,
-          filters: rootView(workspaceRef.current, {
-            connectionId,
-            rootKey: key,
-          }).filters,
-          scrollTop: 0,
-        },
-      );
+        }).hideDone,
+        filters: rootView(workspaceRef.current, {
+          connectionId,
+          rootKey: key,
+        }).filters,
+        scrollTop: 0,
+      };
+      if (focus)
+        pendingTabFocus.current = {
+          tabId: tab.id,
+          origin: document.activeElement,
+        };
+      navigate(tab);
       setDialog(null);
     },
     [navigate, connections],
@@ -2267,11 +2318,15 @@ export function App() {
       const index = current.tabs.findIndex(
         (tab) => tab.id === current.activeTabId,
       );
-      navigate(
+      const tab =
         current.tabs[
           (index + direction + current.tabs.length) % current.tabs.length
-        ],
-      );
+        ];
+      pendingTabFocus.current = {
+        tabId: tab.id,
+        origin: document.activeElement,
+      };
+      navigate(tab);
     },
     [navigate],
   );
@@ -2283,6 +2338,45 @@ export function App() {
     },
     [navigate],
   );
+
+  const undoFromButton = async (trigger: HTMLButtonElement) => {
+    const tab = activeTab;
+    if (!tab || undoState.busy) return;
+    const ownedFocus = document.activeElement === trigger;
+    try {
+      await mutations.undo();
+    } finally {
+      if (ownedFocus)
+        setUndoFocusRequest({
+          trigger,
+          tabId: tab.id,
+          key: tab.selectedKey ?? tab.rootKey,
+        });
+    }
+  };
+  const restoreUndoFocus = () => {
+    const request = undoFocusRequest;
+    if (!request) return;
+    setUndoFocusRequest(null);
+    if (
+      request.trigger.isConnected ||
+      document.activeElement !== document.body ||
+      dialog ||
+      childParent ||
+      workBrief ||
+      workspaceRef.current.activeTabId !== request.tabId ||
+      workspaceRef.current.activeSavedViewId
+    )
+      return;
+    if (!restoreTreeFocus(request.key))
+      refreshButtonRef.current?.focus({ preventScroll: true });
+  };
+  useLayoutEffect(restoreUndoFocus, [
+    undoFocusRequest,
+    dialog,
+    childParent,
+    workBrief,
+  ]);
 
   useEffect(() => {
     if (!tabMenu) return;
@@ -2380,7 +2474,7 @@ export function App() {
           return;
         setErrors((current) => ({
           ...current,
-          app: `Couldn’t open ${key}: ${error instanceof Error ? error.message : String(error)}`,
+          app: `Couldn’t open ${key}: ${openIssueError(error)}`,
         }));
       }
     },
@@ -2399,7 +2493,7 @@ export function App() {
       } catch (error) {
         setErrors((current) => ({
           ...current,
-          app: `Couldn’t open ${key}: ${error instanceof Error ? error.message : String(error)}`,
+          app: `Couldn’t open ${key}: ${openIssueError(error)}`,
         }));
       }
     },
@@ -2627,12 +2721,10 @@ export function App() {
       } else if (command === 'reopenTab') {
         event.preventDefault();
         reopenClosedTab();
-      } else if (command === 'nextTab') {
+      } else if (command === 'nextTab' || command === 'previousTab') {
         event.preventDefault();
-        selectRelativeTab(1);
-      } else if (command === 'previousTab') {
-        event.preventDefault();
-        selectRelativeTab(-1);
+        if (!dialog && !childParent)
+          selectRelativeTab(command === 'nextTab' ? 1 : -1);
       } else if (command === 'toggleSidebar') {
         event.preventDefault();
         setWorkspace((current) => ({
@@ -2716,6 +2808,43 @@ export function App() {
       pickers,
     ],
   );
+
+  useEffect(() => {
+    if (
+      !editor ||
+      editor.field === 'summary' ||
+      editor.tabId !== activeTab?.id ||
+      editor.connectionId !== activeTab.connectionId
+    )
+      return;
+    const current = options[`${editor.connectionId}:${editor.key}`];
+    const choices =
+      editor.field === 'priority'
+        ? current?.priorities
+        : editor.field === 'assignee'
+          ? current?.assignees
+          : current?.transitions;
+    if (current?.[editor.field] || choices !== undefined) return;
+    void pickers.open(
+      editor.connectionId,
+      editor.key,
+      editor.field,
+      activeTab.rootKey,
+      activeConnection?.provider === 'jira' &&
+        view.assumeMatchingStatusTransitions,
+      snapshot?.issues.find((issue) => issue.key === editor.key),
+    );
+  }, [
+    editor,
+    options,
+    activeTab?.id,
+    activeTab?.connectionId,
+    activeTab?.rootKey,
+    activeConnection?.provider,
+    view.assumeMatchingStatusTransitions,
+    snapshot,
+    pickers,
+  ]);
 
   useEffect(() => {
     if (!editor || editor.field === 'summary') return;
@@ -3125,6 +3254,20 @@ export function App() {
 
   useEffect(() => {
     if (
+      !pendingTourFocus.current ||
+      (tour?.phase !== 'playing' && tour?.phase !== 'paused')
+    )
+      return;
+    const frame = window.requestAnimationFrame(() => {
+      pendingTourFocus.current = false;
+      if (document.activeElement === document.body)
+        document.querySelector<HTMLElement>('[data-tour-playback]')?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [tour?.phase, tour?.step]);
+
+  useEffect(() => {
+    if (
       !demoMode ||
       !ready ||
       !snapshots['demo-can-100'] ||
@@ -3132,6 +3275,8 @@ export function App() {
     )
       return;
     tourStarted.current = true;
+    pendingTourFocus.current =
+      sessionStorage.getItem('canopy-demo-step') !== null;
     const requestedStep = Number(
       sessionStorage.getItem('canopy-demo-step') ?? 0,
     );
@@ -3377,7 +3522,7 @@ export function App() {
       try {
         show(
           0,
-          'This is a local sample workspace. We’ll follow one issue tree, then leave it ready for you.',
+          'Explore a local sample with no account needed. Pause anytime to try an action; Resume continues the tour.',
           6000,
         );
         highlight(
@@ -3586,7 +3731,8 @@ export function App() {
         setTour({
           phase: 'complete',
           step: 7,
-          caption: 'Tour complete. The sample tree is yours to explore.',
+          caption:
+            'Tour complete. Explore the sample, open Settings for reading and shortcuts, or Close demo to return to your workspace.',
         });
       } catch (error) {
         if (signal.aborted) return;
@@ -3603,6 +3749,7 @@ export function App() {
     void run();
     return () => {
       controller.abort();
+      pendingTourFocus.current = false;
       stopTourRef.current = null;
       seekTourRef.current = null;
       toggleTourPauseRef.current = null;
@@ -3829,6 +3976,9 @@ export function App() {
         </header>
         <div className="preview-content">
           <p role="status">Select an issue to preview.</p>
+          <p>
+            Choose a row in the tree to read its description and comments here.
+          </p>
         </div>
       </aside>
     )
@@ -3890,6 +4040,7 @@ export function App() {
           <SidebarWork
             workspace={workspace}
             connections={connections}
+            inactive={inboxOpen}
             session={sidebarSession}
             onOrganize={organize}
             onOpen={(root) => void openTab(root.connectionId, root.rootKey)}
@@ -4062,7 +4213,7 @@ export function App() {
           owner={refreshOwner}
           scope={refreshAnnouncements.scope}
         />
-        <div className="tabstrip" role="tablist" aria-label="Open issue trees">
+        <div className="tabstrip">
           <button
             className="icon-button sidebar-reveal"
             aria-label="Show sidebar"
@@ -4072,125 +4223,168 @@ export function App() {
           >
             <Menu size={17} />
           </button>
-          {workspace.tabs.map((tab) => (
-            <div
-              key={tab.id}
-              role="tab"
-              data-tab-id={tab.id}
-              title={`${tab.rootKey}: ${tab.summary ?? ''} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable site'}`}
-              draggable
-              onDragStart={(event) => {
-                draggedTab.current = tab.id;
-                event.dataTransfer.setData('application/x-canopy-tab', tab.id);
-                event.dataTransfer.effectAllowed = 'move';
-              }}
-              onDragEnd={() => {
-                draggedTab.current = null;
-              }}
-              onDragOver={(event) => {
-                if (draggedTab.current) {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = 'move';
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                const source = draggedTab.current;
-                if (source)
-                  setWorkspace((current) =>
-                    reorderTab(current, source, tab.id),
+          <div
+            className="tabstrip-scroll"
+            role="tablist"
+            aria-label="Open issue trees"
+          >
+            {workspace.tabs.map((tab) => (
+              <div
+                key={tab.id}
+                role="tab"
+                data-tab-id={tab.id}
+                title={`${tab.rootKey}: ${tabSummary(tab)} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable connection'}`}
+                aria-label={`${tab.rootKey}: ${tabSummary(tab)} · ${connections.find((item) => item.id === tab.connectionId)?.name ?? 'Unavailable connection'}`}
+                draggable
+                onDragStart={(event) => {
+                  draggedTab.current = tab.id;
+                  event.dataTransfer.setData(
+                    'application/x-canopy-tab',
+                    tab.id,
                   );
-                draggedTab.current = null;
-              }}
-              onAuxClick={(event) => {
-                if (event.button === 1) {
+                  event.dataTransfer.effectAllowed = 'move';
+                }}
+                onDragEnd={() => {
+                  draggedTab.current = null;
+                }}
+                onDragOver={(event) => {
+                  if (draggedTab.current) {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                  }
+                }}
+                onDrop={(event) => {
                   event.preventDefault();
-                  closeTab(tab.id);
-                }
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setTabMenu({
-                  id: tab.id,
-                  x: Math.min(event.clientX, window.innerWidth - 220),
-                  y: Math.min(event.clientY, window.innerHeight - 245),
-                });
-              }}
-              aria-selected={tab.id === activeTab?.id}
-              tabIndex={tab.id === activeTab?.id ? 0 : -1}
-              className={cx('top-tab', tab.id === activeTab?.id && 'active')}
-              onClick={() => selectTab(tab.id)}
-              onKeyDown={(event) => {
-                if (event.target !== event.currentTarget) return;
-                if (
-                  event.key === 'ContextMenu' ||
-                  (event.shiftKey && event.key === 'F10')
-                ) {
+                  const source = draggedTab.current;
+                  if (source)
+                    setWorkspace((current) =>
+                      reorderTab(current, source, tab.id),
+                    );
+                  draggedTab.current = null;
+                }}
+                onAuxClick={(event) => {
+                  if (event.button === 1) {
+                    event.preventDefault();
+                    closeTab(tab.id);
+                  }
+                }}
+                onContextMenu={(event) => {
                   event.preventDefault();
-                  const rect = event.currentTarget.getBoundingClientRect();
                   setTabMenu({
                     id: tab.id,
-                    x: Math.min(rect.left, window.innerWidth - 220),
-                    y: rect.bottom,
+                    x: Math.min(event.clientX, window.innerWidth - 220),
+                    y: Math.min(event.clientY, window.innerHeight - 245),
                   });
-                  return;
-                }
-                if (
-                  event.altKey &&
-                  event.shiftKey &&
-                  ['ArrowLeft', 'ArrowRight'].includes(event.key)
-                ) {
-                  event.preventDefault();
-                  const index = workspace.tabs.findIndex(
-                    (item) => item.id === tab.id,
-                  );
-                  const target =
-                    workspace.tabs[
-                      index + (event.key === 'ArrowLeft' ? -1 : 1)
-                    ];
-                  if (target)
-                    setWorkspace((current) =>
-                      reorderTab(current, tab.id, target.id),
+                }}
+                aria-selected={!activeSavedView && tab.id === activeTab?.id}
+                tabIndex={tab.id === activeTab?.id ? 0 : -1}
+                className={cx(
+                  'top-tab',
+                  !activeSavedView && tab.id === activeTab?.id && 'active',
+                )}
+                onClick={() => selectTab(tab.id)}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
+                  if (
+                    event.key === 'ContextMenu' ||
+                    (event.shiftKey && event.key === 'F10')
+                  ) {
+                    event.preventDefault();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setTabMenu({
+                      id: tab.id,
+                      x: Math.min(rect.left, window.innerWidth - 220),
+                      y: rect.bottom,
+                    });
+                    return;
+                  }
+                  if (
+                    event.altKey &&
+                    event.shiftKey &&
+                    ['ArrowLeft', 'ArrowRight'].includes(event.key)
+                  ) {
+                    event.preventDefault();
+                    const index = workspace.tabs.findIndex(
+                      (item) => item.id === tab.id,
                     );
-                  return;
-                }
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  selectTab(tab.id);
-                }
-                if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-                  event.preventDefault();
-                  const direction = event.key === 'ArrowLeft' ? -1 : 1;
-                  selectRelativeTab(direction);
-                  const tabs = [
-                    ...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>(
-                      '[role="tab"]',
-                    ),
-                  ];
-                  const index = tabs.indexOf(event.currentTarget);
-                  tabs[
-                    (index + direction + tabs.length) % tabs.length
-                  ]?.focus();
-                }
-              }}
-            >
-              <CircleDot size={14} />
-              <span className="tab-label">
-                <b>{tab.rootKey}</b>
-                <small>{tab.summary ?? 'Loading…'}</small>
-              </span>
-              {refreshing.has(tab.id) && <Loader2 className="spin" size={12} />}
-              <button
-                aria-label={`Close ${tab.rootKey}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  closeTab(tab.id);
+                    const target =
+                      workspace.tabs[
+                        index + (event.key === 'ArrowLeft' ? -1 : 1)
+                      ];
+                    if (target)
+                      setWorkspace((current) =>
+                        reorderTab(current, tab.id, target.id),
+                      );
+                    return;
+                  }
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    selectTab(tab.id);
+                  }
+                  if (event.key === 'Home' || event.key === 'End') {
+                    event.preventDefault();
+                    const tabs = [
+                      ...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>(
+                        '[role="tab"]',
+                      ),
+                    ];
+                    const target =
+                      tabs[event.key === 'Home' ? 0 : tabs.length - 1];
+                    if (target) {
+                      selectTab(target.dataset.tabId!);
+                      target.focus();
+                    }
+                  }
+                  if (
+                    (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+                    !event.altKey &&
+                    !event.ctrlKey &&
+                    !event.metaKey &&
+                    !event.shiftKey
+                  ) {
+                    event.preventDefault();
+                    const direction = event.key === 'ArrowLeft' ? -1 : 1;
+                    const tabs = [
+                      ...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>(
+                        '[role="tab"]',
+                      ),
+                    ];
+                    const index = tabs.indexOf(event.currentTarget);
+                    const target =
+                      tabs[(index + direction + tabs.length) % tabs.length];
+                    if (target) {
+                      selectTab(target.dataset.tabId!);
+                      target.focus();
+                    }
+                  }
                 }}
               >
-                <X size={13} />
-              </button>
-            </div>
-          ))}
+                <CircleDot size={14} />
+                <span className="tab-label">
+                  <span className="tab-identity">
+                    <b>{tab.rootKey}</b>
+                    <span className="tab-connection">
+                      {connections.find((item) => item.id === tab.connectionId)
+                        ?.name ?? 'Unavailable connection'}
+                    </span>
+                  </span>
+                  <small>{tabSummary(tab)}</small>
+                </span>
+                {refreshing.has(tab.id) && (
+                  <Loader2 className="spin" size={12} />
+                )}
+                <button
+                  aria-label={`Close ${tab.rootKey}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    closeTab(tab.id);
+                  }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
           <button
             className="new-tab"
             aria-label="Open issue"
@@ -4352,156 +4546,189 @@ export function App() {
         )}
         {activeTab && !activeSavedView && (
           <>
-            <header className="toolbar">
-              <button
-                className="icon-button"
-                aria-label="Back"
-                title="Back (Alt+←)"
-                disabled={!history.back.length}
-                onClick={() => navigateHistory('back')}
+            <header className="toolbar workspace-toolbar">
+              <div
+                className="toolbar-location"
+                role="group"
+                aria-label="Tree navigation"
               >
-                <ArrowLeft size={16} />
-              </button>
-              <button
-                className="icon-button"
-                aria-label="Forward"
-                title="Forward (Alt+→)"
-                disabled={!history.forward.length}
-                onClick={() => navigateHistory('forward')}
-              >
-                <ArrowRight size={16} />
-              </button>
-              <div className="crumb">
-                <span>
-                  {
-                    connections.find(
-                      (item) => item.id === activeTab.connectionId,
-                    )?.name
-                  }
-                </span>
-                <ChevronRight size={14} />
-                <strong>{activeTab.rootKey}</strong>
+                <button
+                  className="icon-button"
+                  aria-label="Back"
+                  title="Back (Alt+←)"
+                  disabled={!history.back.length}
+                  onClick={() => navigateHistory('back')}
+                >
+                  <ArrowLeft size={16} />
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label="Forward"
+                  title="Forward (Alt+→)"
+                  disabled={!history.forward.length}
+                  onClick={() => navigateHistory('forward')}
+                >
+                  <ArrowRight size={16} />
+                </button>
+                <div className="crumb">
+                  <span>
+                    {
+                      connections.find(
+                        (item) => item.id === activeTab.connectionId,
+                      )?.name
+                    }
+                  </span>
+                  <ChevronRight size={14} />
+                  <strong>{activeTab.rootKey}</strong>
+                </div>
               </div>
               <div className="toolbar-actions">
-                <button
-                  className={cx('tool-button', nextTaskOpen && 'active')}
-                  aria-pressed={nextTaskOpen}
-                  onClick={() =>
-                    setNextTaskViews((current) => ({
-                      ...current,
-                      [activeTab.id]: !current[activeTab.id],
-                    }))
-                  }
+                <div
+                  className="toolbar-group"
+                  role="group"
+                  aria-label="View options"
                 >
-                  Next tasks
-                </button>
-                <ViewSettings
-                  view={view}
-                  provider={activeConnection?.provider}
-                  update={updateView}
-                  useDefault={() =>
-                    setWorkspace((current) =>
-                      defaultRootView(current, activeTab),
-                    )
-                  }
-                  reset={() => {
-                    setEditor(null);
-                    setDragKey(null);
-                    setWorkspace((current) =>
-                      resetRootView(current, activeTab),
-                    );
-                  }}
-                />
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={activeTab.hideDone}
-                    onChange={(event) =>
-                      updateTab(activeTab.id, {
-                        hideDone: event.target.checked,
-                      })
+                  <button
+                    className={cx('tool-button', nextTaskOpen && 'active')}
+                    aria-pressed={nextTaskOpen}
+                    onClick={() =>
+                      setNextTaskViews((current) => ({
+                        ...current,
+                        [activeTab.id]: !current[activeTab.id],
+                      }))
                     }
+                  >
+                    Next tasks
+                  </button>
+                  <ViewSettings
+                    view={view}
+                    provider={activeConnection?.provider}
+                    update={updateView}
+                    useDefault={() =>
+                      setWorkspace((current) =>
+                        defaultRootView(current, activeTab),
+                      )
+                    }
+                    reset={() => {
+                      setEditor(null);
+                      setDragKey(null);
+                      setWorkspace((current) =>
+                        resetRootView(current, activeTab),
+                      );
+                    }}
                   />
-                  <span>
-                    {activeConnection?.provider === 'github'
-                      ? 'Hide closed'
-                      : 'Hide done'}
-                  </span>
-                </label>
-                <span className="separator" />
-                <button
-                  className="tool-button"
-                  disabled={filtering}
-                  onClick={(event) =>
-                    expandAll(false, event.altKey || event.detail > 1)
-                  }
-                  onDoubleClick={() => expandAll(false, true)}
-                  title="Collapse all; double-click or Alt-click to include linked issues"
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={activeTab.hideDone}
+                      onChange={(event) =>
+                        updateTab(activeTab.id, {
+                          hideDone: event.target.checked,
+                        })
+                      }
+                    />
+                    <span>
+                      {activeConnection?.provider === 'github'
+                        ? 'Hide closed'
+                        : 'Hide done'}
+                    </span>
+                  </label>
+                </div>
+                <div
+                  className="toolbar-group"
+                  role="group"
+                  aria-label="Tree expansion"
                 >
-                  <ChevronsDownUp size={15} />
-                  <span>Collapse</span>
-                </button>
-                <button
-                  className="tool-button"
-                  disabled={filtering}
-                  onClick={(event) =>
-                    expandAll(true, event.altKey || event.detail > 1)
-                  }
-                  onDoubleClick={() => expandAll(true, true)}
-                  title="Expand all; double-click or Alt-click to include linked issues"
-                >
-                  <ChevronsUpDown size={15} />
-                  <span>Expand</span>
-                </button>
-                <button
-                  className="icon-button"
-                  disabled={
-                    refreshing.has(activeTab.id) ||
-                    (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
-                  }
-                  onClick={() =>
-                    void refreshTab(activeTab, true, true, true, true)
-                  }
-                  title="Refresh"
-                >
-                  <RefreshCw
-                    className={cx(refreshing.has(activeTab.id) && 'spin')}
-                    size={16}
-                  />
-                </button>
-                {unreadCount > 0 && confirmedSnapshot && (
                   <button
                     className="tool-button"
-                    onClick={() => {
-                      const rootKey = seenRootKey(
-                        activeTab.connectionId,
-                        activeTab.rootKey,
-                      );
-                      setWorkspace((current) => ({
-                        ...current,
-                        seenRoots: boundRoots(
-                          {
-                            ...current.seenRoots,
-                            [rootKey]: markRootSeen(
-                              confirmedSnapshot,
-                              current.seenRoots?.[rootKey],
-                            ),
-                          },
-                          current.seenRoots ?? {},
-                        ),
-                      }));
-                    }}
+                    disabled={filtering}
+                    onClick={(event) =>
+                      expandAll(false, event.altKey || event.detail > 1)
+                    }
+                    onDoubleClick={() => expandAll(false, true)}
+                    title="Collapse all; double-click or Alt-click to include linked issues"
                   >
-                    Mark root seen ({unreadCount})
+                    <ChevronsDownUp size={15} />
+                    <span>Collapse</span>
                   </button>
-                )}
-                <button
-                  className="icon-button"
-                  onClick={() => setDialog('commands')}
-                  title="More commands"
+                  <button
+                    className="tool-button"
+                    disabled={filtering}
+                    onClick={(event) =>
+                      expandAll(true, event.altKey || event.detail > 1)
+                    }
+                    onDoubleClick={() => expandAll(true, true)}
+                    title="Expand all; double-click or Alt-click to include linked issues"
+                  >
+                    <ChevronsUpDown size={15} />
+                    <span>Expand</span>
+                  </button>
+                </div>
+                <div
+                  className="toolbar-group"
+                  role="group"
+                  aria-label="Sync and commands"
                 >
-                  <MoreHorizontal size={17} />
-                </button>
+                  <button
+                    ref={refreshButtonRef}
+                    className="tool-button"
+                    aria-label="Refresh"
+                    aria-disabled={
+                      refreshing.has(activeTab.id) ||
+                      (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                    }
+                    onClick={() => {
+                      if (
+                        refreshing.has(activeTab.id) ||
+                        (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
+                      )
+                        return;
+                      void refreshTab(activeTab, true, true, true, true);
+                    }}
+                    title="Refresh"
+                  >
+                    <RefreshCw
+                      className={cx(refreshing.has(activeTab.id) && 'spin')}
+                      size={16}
+                    />
+                    <span>Refresh</span>
+                  </button>
+                  {unreadCount > 0 && confirmedSnapshot && (
+                    <button
+                      className="tool-button"
+                      onClick={() => {
+                        const rootKey = seenRootKey(
+                          activeTab.connectionId,
+                          activeTab.rootKey,
+                        );
+                        setWorkspace((current) => ({
+                          ...current,
+                          seenRoots: boundRoots(
+                            {
+                              ...current.seenRoots,
+                              [rootKey]: markRootSeen(
+                                confirmedSnapshot,
+                                current.seenRoots?.[rootKey],
+                              ),
+                            },
+                            current.seenRoots ?? {},
+                          ),
+                        }));
+                      }}
+                    >
+                      Mark root seen ({unreadCount})
+                    </button>
+                  )}
+                  <button
+                    className="tool-button"
+                    onClick={() => setDialog('commands')}
+                    title="Command palette"
+                    aria-label="More commands"
+                  >
+                    <MoreHorizontal size={17} />
+                    <span>Commands</span>
+                  </button>
+                </div>
               </div>
             </header>
             <div className="tree-navigation">
@@ -4520,11 +4747,22 @@ export function App() {
                   }
                   onKeyDown={(event) => {
                     if (event.key === 'Escape') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      const search = event.currentTarget;
                       setQueries((current) => ({
                         ...current,
                         [activeTab.id]: '',
                       }));
-                      event.currentTarget.blur();
+                      requestAnimationFrame(() => {
+                        if (
+                          workspaceRef.current.activeTabId === activeTab.id &&
+                          document.activeElement === search
+                        )
+                          restoreTreeFocus(
+                            activeTab.selectedKey ?? activeTab.rootKey,
+                          );
+                      });
                     }
                   }}
                 />
@@ -4721,15 +4959,35 @@ export function App() {
                 </button>
               </div>
             )}
-            {filtering && (
-              <div className="identity-hint">
-                Matching paths are expanded automatically. Clear search and
-                filters to restore your expansion.
+            {(filtering || activeTab.hideDone) && (
+              <div className="tree-filter-state">
+                <span>
+                  {filtering
+                    ? 'Search or filters active · Matching paths expanded'
+                    : activeConnection?.provider === 'github'
+                      ? 'Closed issues hidden'
+                      : 'Done issues hidden'}
+                </span>
+                <button
+                  className="tool-button"
+                  onClick={() => {
+                    setQueries((current) => ({
+                      ...current,
+                      [activeTab.id]: '',
+                    }));
+                    updateTab(activeTab.id, { filters: {}, hideDone: false });
+                    searchRef.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  Reset filters
+                </button>
               </div>
             )}
             {
               <nav className="tree-breadcrumb" aria-label="Issue ancestry">
+                <span className="breadcrumb-label">Location</span>
                 <button
+                  aria-current={!activeTab.focusKey ? 'location' : undefined}
                   onClick={() => {
                     updateTab(activeTab.id, { focusKey: undefined });
                     scrollRef.current?.scrollTo({ top: 0 });
@@ -4766,7 +5024,13 @@ export function App() {
               errors.edit ||
               errors.app ||
               (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow) && (
-              <div className="error-banner" role="alert">
+              <div
+                className="error-banner"
+                role="alert"
+                data-tree-recovery={
+                  errors[activeTab.id] ? activeTab.id : undefined
+                }
+              >
                 <AlertCircle size={15} />
                 <span>
                   {(cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
@@ -4781,9 +5045,10 @@ export function App() {
                 )}
                 {errors[activeTab.id] && (
                   <button
-                    onClick={() =>
-                      void refreshTab(activeTab, true, true, true, true)
-                    }
+                    onClick={() => {
+                      refreshButtonRef.current?.focus({ preventScroll: true });
+                      void refreshTab(activeTab, true, true, true, true);
+                    }}
                     disabled={
                       (!online && !demoMode) ||
                       (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow ||
@@ -4815,12 +5080,14 @@ export function App() {
               <div className="undo-banner" role="status">
                 <span>Change saved</span>
                 <button
-                  disabled={undoState.busy}
-                  onClick={() => void mutations.undo()}
+                  aria-disabled={undoState.busy}
+                  onClick={(event) => void undoFromButton(event.currentTarget)}
                 >
                   {undoState.label}
                 </button>
-                <small>⌘Z / Ctrl+Z</small>
+                <small>
+                  {/mac/i.test(navigator.platform) ? '⌘Z' : 'Ctrl+Z'}
+                </small>
               </div>
             )}
             {snapshot &&
@@ -4838,7 +5105,11 @@ export function App() {
             {((!snapshot &&
               (loading.has(activeTab.id) || refreshing.has(activeTab.id))) ||
               snapshot?.incomplete) && (
-              <div className="error-banner" role="status">
+              <div
+                className="error-banner"
+                role="status"
+                data-tree-recovery={activeTab.id}
+              >
                 <span>
                   {snapshot?.incomplete
                     ? `Incomplete results: ${snapshot.incomplete.reason}`
@@ -5270,6 +5541,14 @@ export function App() {
                         void refreshTab(activeTab, false, true, true, true)
                       }
                     />
+                  ) : !online && !demoMode && !snapshot ? (
+                    <EmptyState
+                      icon={AlertCircle}
+                      title="You’re offline"
+                      detail="Connect to the internet, then use Refresh to load this tree. Your saved roots and settings stay here."
+                      action="Setup help"
+                      onAction={() => setDialog('setup')}
+                    />
                   ) : errors[activeTab.id] && !snapshot ? (
                     <EmptyState
                       icon={AlertCircle}
@@ -5421,14 +5700,18 @@ export function App() {
                     <EmptyState
                       icon={Search}
                       title="No matching issues"
-                      detail="Try another search or clear the filters."
+                      detail="Try another search or clear the filters for this root. Other roots keep their filters."
                       action="Clear search and filters"
                       onAction={() => {
                         setQueries((current) => ({
                           ...current,
                           [activeTab.id]: '',
                         }));
-                        updateTab(activeTab.id, { filters: {} });
+                        updateTab(activeTab.id, {
+                          filters: {},
+                          hideDone: false,
+                        });
+                        searchRef.current?.focus({ preventScroll: true });
                       }}
                     />
                   ) : tree && activeTab.hideDone ? (
@@ -5508,7 +5791,7 @@ export function App() {
                         : (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
                           ? 'Rate limited'
                           : connectionErrors.has(activeTab.id)
-                            ? 'Connection error'
+                            ? 'Load failed'
                             : snapshot
                               ? 'Connected'
                               : 'Connecting'}
@@ -5551,6 +5834,9 @@ export function App() {
             onOpen={() => setDialog('open')}
             onConnect={() => setDialog('connect')}
             onDemo={launchDemo}
+            onHelp={() => setDialog('setup')}
+            onShortcuts={() => setDialog('shortcuts')}
+            loading={!ready}
             demoMode={demoMode}
             hasConnections={connections.length > 0}
             error={errors.app ?? errors.workspace}
@@ -5613,6 +5899,7 @@ export function App() {
             <>
               <button
                 className="secondary"
+                data-tour-playback
                 onClick={() => toggleTourPauseRef.current?.()}
               >
                 {tour.phase === 'paused' ? 'Resume demo' : 'Pause demo'}
@@ -5842,7 +6129,7 @@ export function App() {
           }}
           onOpen={(id, key) => {
             setSetupConnectionId(undefined);
-            openTab(id, key);
+            openTab(id, key, true);
           }}
         />
       )}
@@ -5915,11 +6202,11 @@ export function App() {
           sources={sourceTabs}
           scrollElement={scrollRef.current}
           activeRoot={activeTab ?? undefined}
-          onOpen={openTab}
+          onOpen={(id, key) => openTab(id, key, true)}
           onNavigate={(entry) => {
             const target = entry.target;
             if (target.type === 'Open root' || target.type === 'Recent root') {
-              openTab(target.root.connectionId, target.root.rootKey);
+              openTab(target.root.connectionId, target.root.rootKey, true);
             } else if (target.type === 'Saved view') {
               setInboxOpen(false);
               setSelectedViewIssue(null);
@@ -6113,7 +6400,7 @@ function Connections({
   return (
     <section className="connections">
       <div className="side-heading">
-        <span>CONNECTIONS</span>
+        <h2>Connections</h2>
         {!demoMode && (
           <button
             className="icon-button"
@@ -6131,6 +6418,7 @@ function Connections({
           <span>
             <b>{connection.name}</b>
             <small>
+              {providerLabel(connection.provider)} ·{' '}
               {connection.provider === 'github'
                 ? connection.repositories?.join(', ')
                 : (connection.accountName ?? connection.url)}
@@ -6389,7 +6677,7 @@ function TreeRow(
         className="issue-cell"
         style={{ '--depth': depth } as React.CSSProperties}
       >
-        {rankable && (
+        {rankable ? (
           <button
             className="grab"
             draggable={props.rankingEnabled}
@@ -6416,25 +6704,31 @@ function TreeRow(
           >
             <GripVertical size={14} />
           </button>
+        ) : (
+          <span className="grab-placeholder" aria-hidden="true" />
         )}
-        <button
-          className={cx('disclosure', !hasChildren && 'placeholder')}
-          aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
-          tabIndex={hasChildren ? 0 : -1}
-          disabled={props.expansionLocked}
-          title={
-            props.expansionLocked
-              ? 'Matching paths expand automatically'
-              : undefined
-          }
-          onClick={() =>
-            hasChildren && !props.expansionLocked && onToggle(issue.key)
-          }
-        >
-          {hasChildren &&
-            (open ? <ChevronDown size={15} /> : <ChevronRight size={15} />)}
-        </button>
+        {hasChildren ? (
+          <button
+            className="disclosure"
+            aria-label={open ? `Collapse ${issue.key}` : `Expand ${issue.key}`}
+            aria-expanded={open}
+            disabled={props.expansionLocked}
+            title={
+              props.expansionLocked
+                ? 'Matching paths expand automatically'
+                : undefined
+            }
+            onClick={() =>
+              hasChildren && !props.expansionLocked && onToggle(issue.key)
+            }
+          >
+            {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          </button>
+        ) : (
+          <span className="disclosure placeholder" aria-hidden="true" />
+        )}
         <span
+          title={issue.type}
           className={cx(
             'type-icon',
             `type-${issue.type.toLowerCase().replace(/\s/g, '-')}`,
@@ -6515,6 +6809,7 @@ function TreeRow(
             className={cx('link-count', linksOpen && 'active')}
             onClick={() => props.onToggleLinks(issue.key)}
             aria-expanded={linksOpen}
+            aria-label={`${linksOpen ? 'Hide' : 'Show'} ${issue.links.length} linked issue${issue.links.length === 1 ? '' : 's'} for ${issue.key}`}
             title={`${issue.links.length} linked issue${issue.links.length === 1 ? '' : 's'}`}
           >
             <Link2 size={12} />
@@ -6673,7 +6968,12 @@ function TreeRow(
             .closest<HTMLElement>('.field-cell')
             ?.focus();
         }
-        if (event.key === 'Tab') {
+        if (
+          event.key === 'Tab' &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey
+        ) {
           event.preventDefault();
           event.stopPropagation();
           const field = props.editor.field;
@@ -6688,6 +6988,10 @@ function TreeRow(
           (props.selectedKeys.size > 0
             ? props.selectedKeys.has(issue.key)
             : selectedKey === issue.key) && 'selected',
+          props.selectedKeys.size > 1 &&
+            props.selectedKeys.has(issue.key) &&
+            'multi-selected',
+          props.editor?.key === issue.key && 'editing',
           props.revealedKey === issue.key && 'revealed',
           props.rankingEnabled &&
             dragKey &&
@@ -6844,7 +7148,10 @@ function SummaryEditor({
           tree?.getAttribute('data-tab-id') === tabId &&
           document.activeElement === document.body
         )
-          container.querySelector<HTMLButtonElement>('button.summary')?.focus();
+          (
+            container.querySelector<HTMLButtonElement>('button.summary') ??
+            container.closest<HTMLElement>('[data-tree-key]')
+          )?.focus({ preventScroll: true });
       });
     };
   }, []);
@@ -7502,9 +7809,10 @@ function ConnectDialog({
             connections; your workspace stays in place.
           </p>
         )}
-        <div className="connect-provider">
+        <div className="connect-provider" role="group" aria-label="Provider">
           <button
             disabled={Boolean(busy)}
+            aria-pressed={provider === 'jira'}
             className={provider === 'jira' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('jira');
@@ -7515,6 +7823,7 @@ function ConnectDialog({
           </button>
           <button
             disabled={Boolean(busy)}
+            aria-pressed={provider === 'github'}
             className={provider === 'github' ? 'primary' : 'secondary'}
             onClick={() => {
               setProvider('github');
@@ -7543,7 +7852,8 @@ function ConnectDialog({
               />
               <small>
                 Enter the repositories selected for this connection, separated
-                by commas or spaces. Canopy verifies issue access before saving.
+                by commas or spaces. Use one owner per connection. Canopy
+                verifies issue access before saving.
               </small>
             </label>
             <label>
@@ -7923,12 +8233,16 @@ function OpenIssueDialog({
             placeholder={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, uppercase project prefix, Jira URL, or summary'
+                : selectedConnection?.provider === 'demo'
+                  ? 'Sample issue key or title'
+                  : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
             aria-label={
               selectedConnection?.provider === 'github'
                 ? 'GitHub URL, owner/repo, issue number, or title'
-                : 'Issue key, uppercase project prefix, Jira URL, or summary'
+                : selectedConnection?.provider === 'demo'
+                  ? 'Sample issue key or title'
+                  : 'Issue key, uppercase project prefix, Jira URL, or summary'
             }
           />
           {busy && <Loader2 className="spin" size={14} />}
@@ -7977,7 +8291,7 @@ function OpenIssueDialog({
           <p className="dialog-note" role="status">
             {options.length
               ? 'Loading more matches…'
-              : `Searching ${selectedConnection?.provider === 'github' ? 'GitHub' : 'Jira'}…`}
+              : `Searching ${providerLabel(selectedConnection?.provider)}…`}
           </p>
         )}
         {!busy &&
@@ -8411,7 +8725,7 @@ function AppearanceDialog({
       <div className="appearance-dialog">
         <p>
           Choose a palette and appearance. Changes preview throughout the window
-          until you save.
+          until you save. Cancel restores your saved appearance.
         </p>
         <fieldset className="appearance-modes">
           <legend>Appearance</legend>
@@ -8946,7 +9260,9 @@ function Dialog({
 function TreeSkeleton() {
   return (
     <div className="skeleton" role="status" aria-label="Loading issue tree">
-      <span className="sr-only">Loading issue tree</span>
+      <p className="loading-tree-copy">
+        Loading issue tree… You can cancel the load above.
+      </p>
       {[0, 1, 2, 3, 4, 5].map((item) => (
         <div
           key={item}
@@ -8992,6 +9308,9 @@ function Welcome({
   onOpen,
   onConnect,
   onDemo,
+  onHelp,
+  onShortcuts,
+  loading,
   demoMode,
   hasConnections,
   error,
@@ -8999,34 +9318,35 @@ function Welcome({
   onOpen: () => void;
   onConnect: () => void;
   onDemo: () => void;
+  onHelp: () => void;
+  onShortcuts: () => void;
+  loading: boolean;
   demoMode: boolean;
   hasConnections: boolean;
   error?: string;
 }) {
-  return (
-    <div className="welcome">
-      <div className="welcome-art">
-        <div className="branch branch-one">
-          <i />
-          <i />
-          <i />
-        </div>
-        <div className="branch branch-two">
-          <i />
-          <i />
+  if (loading)
+    return (
+      <div className="welcome" role="status">
+        <div className="welcome-copy">
+          <h1>Opening your workspace…</h1>
+          <p>Loading saved connections and roots.</p>
         </div>
       </div>
+    );
+  return (
+    <div className="welcome">
       <div className="welcome-copy">
-        <div className="eyebrow">ISSUES, IN CONTEXT</div>
         <h1>See the whole tree.</h1>
         <p>
-          Explore epics, stories, tasks, and subtasks together. Make quick
-          changes without losing your place.
+          {hasConnections || demoMode
+            ? 'Choose an issue or repository to explore its hierarchy. Your saved roots are in the sidebar.'
+            : 'Keep related issues together. Explore a hierarchy, update work, and keep your place across Jira and GitHub.'}
         </p>
         {error && (
-          <div className="welcome-error">
+          <div className="welcome-error" role="alert">
             <AlertCircle size={15} />
-            {error}
+            <span>{error} Open Setup help for connection recovery steps.</span>
           </div>
         )}
         <div className="welcome-actions">
@@ -9055,9 +9375,41 @@ function Welcome({
             </button>
           )}
         </div>
+        {!hasConnections && !demoMode && (
+          <div className="welcome-guide">
+            <h2>Start with your work, or explore a sample</h2>
+            <dl>
+              <div>
+                <dt>Jira Cloud</dt>
+                <dd>Your site URL, Atlassian email, and API token.</dd>
+              </div>
+              <div>
+                <dt>GitHub</dt>
+                <dd>
+                  A fine-grained token and the repositories you want to open.
+                </dd>
+              </div>
+              <div>
+                <dt>Try demo</dt>
+                <dd>
+                  A separate sample workspace with a guided tour. No account
+                  needed.
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+        <div className="welcome-help">
+          <button className="secondary" onClick={onHelp}>
+            Setup help
+          </button>
+          <button className="secondary" onClick={onShortcuts}>
+            Keyboard shortcuts
+          </button>
+        </div>
         <span className="welcome-hint">
-          Tip: Press <kbd>{shortcutDisplay(PLATFORM_SHORTCUTS.quickOpen)}</kbd>{' '}
-          to open an issue from anywhere.
+          Open an issue anytime with{' '}
+          <kbd>{shortcutDisplay(PLATFORM_SHORTCUTS.quickOpen)}</kbd>.
         </span>
       </div>
     </div>

@@ -12,7 +12,16 @@ export async function auditAccessibility(app, page, evidence) {
   await page.clock.install();
   await page.reload();
   const capture = async (name) => {
-    await page.screenshot({ path: join(evidence, `${name}.png`) });
+    // Playwright synchronizes painting; native capture preserves zoomed bounds.
+    await page.screenshot();
+    const png = await app.evaluate(async ({ BrowserWindow }) => {
+      const image = await BrowserWindow.getAllWindows()[0].capturePage();
+      return image.toPNG().toString('base64');
+    });
+    const image = Buffer.from(png, 'base64');
+    if (image.length === 0)
+      throw new Error(`Native capture for ${name} produced an empty PNG.`);
+    await writeFile(join(evidence, `${name}.png`), image);
     await writeFile(
       join(evidence, `${name}.aria.txt`),
       await page.locator('body').ariaSnapshot(),
@@ -72,8 +81,15 @@ export async function auditAccessibility(app, page, evidence) {
   await open.click();
   const picker = page.getByRole('dialog', { name: 'Open issue tree' });
   await picker.getByRole('combobox').fill('CAN-100');
-  await picker.getByRole('button', { name: 'Open tree', exact: true }).click();
+  await picker.getByRole('combobox').press('Enter');
   await expect(page.getByRole('tree')).toBeVisible();
+  await afterRestoration();
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeFocused();
+  await open.click();
+  await picker.getByRole('combobox').fill('CAN-100');
+  await picker.getByRole('combobox').press('Enter');
+  await afterRestoration();
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeFocused();
 
   const commands = page.getByRole('button', { name: 'More commands' });
   await commands.focus();
@@ -98,7 +114,9 @@ export async function auditAccessibility(app, page, evidence) {
   await fixture('hold', 'a11y-initial', 'tree', 'CAN-200');
   await open.click();
   await picker.getByRole('combobox').fill('CAN-200');
-  await picker.getByRole('button', { name: 'Open tree', exact: true }).click();
+  await picker.getByRole('combobox').press('Enter');
+  await afterRestoration();
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeFocused();
   await expect.poll(() => fixture('started', 'a11y-initial')).toBe(true);
   await expect(
     page.getByRole('status', { name: 'Loading issue tree' }),
@@ -110,15 +128,45 @@ export async function auditAccessibility(app, page, evidence) {
   ).toBeVisible();
   await page.getByRole('tab', { name: /CAN-100/ }).click();
 
+  {
+    const row = page.locator('[data-tree-key="CAN-100"]');
+    await row.focus();
+    await page.keyboard.press('Control+Tab');
+    const next = page.getByRole('tab', { name: /CAN-200/ });
+    await expect(next).toHaveAttribute('aria-selected', 'true');
+    await expect(next).toBeFocused();
+    await page.keyboard.press('Control+Shift+Tab');
+    const previous = page.getByRole('tab', { name: /CAN-100/ });
+    await expect(previous).toHaveAttribute('aria-selected', 'true');
+    await expect(previous).toBeFocused();
+  }
+
   const summary = page
     .locator('[data-tree-key="CAN-100"] > .issue-row')
     .getByTitle('Double-click to edit');
+  const tabSummaryBeforeEdit = await summary.textContent();
+  await summary.press('Enter');
+  await page
+    .getByLabel('Summary for CAN-100', { exact: true })
+    .fill('Outgoing tab draft');
+  await page.keyboard.press('Control+Tab');
+  await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeFocused();
+  await page.keyboard.press('Control+Shift+Tab');
+  await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeFocused();
+  await expect(summary).toHaveText(tabSummaryBeforeEdit);
+  await expect(
+    page.getByLabel('Summary for CAN-100', { exact: true }),
+  ).toHaveCount(0);
   await summary.press('Enter');
   await expect(
     page.getByLabel('Summary for CAN-100', { exact: true }),
   ).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(summary).toBeFocused();
+  const find = page.getByLabel('Find in tree', { exact: true });
+  await find.fill('CAN-101');
+  await find.press('Escape');
+  await expect(page.locator('[data-tree-key="CAN-100"]')).toBeFocused();
   await summary.press('Enter');
   const searchDestination = page.getByLabel('Find in tree', { exact: true });
   await searchDestination.click();
@@ -130,6 +178,17 @@ export async function auditAccessibility(app, page, evidence) {
 
   // A dialog action focuses the real search field before dismissing the dialog.
   await commands.click();
+  const paletteInput = page
+    .getByRole('dialog', { name: 'Command palette' })
+    .getByRole('combobox', { name: 'Search workspace' });
+  for (const shortcut of ['Control+Tab', 'Control+Shift+Tab']) {
+    await page.keyboard.press(shortcut);
+    await expect(paletteInput).toBeFocused();
+    await expect(page.getByRole('tab', { name: /CAN-100/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+  }
   await page
     .getByRole('dialog', { name: 'Command palette' })
     .getByRole('option', { name: /Find in tree/ })
@@ -422,8 +481,14 @@ export async function auditAccessibility(app, page, evidence) {
   );
   await checkLive('before', before);
   await fixture('hold', 'a11y-refresh', 'tree', 'CAN-100');
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  await refresh.focus();
+  await refresh.press('Enter');
   await expect.poll(() => fixture('started', 'a11y-refresh')).toBe(true);
+  await expect(refresh).toBeFocused();
+  await expect(refresh).toHaveAttribute('aria-disabled', 'true');
+  await refresh.press('Enter');
+  await expect(refresh).toBeFocused();
   await expect(live).toHaveText('Checking CAN-100 for changes');
   await checkLive('failure-pending', before);
   await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -456,7 +521,7 @@ export async function auditAccessibility(app, page, evidence) {
   expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);
   await expect(
     page.getByRole('status', { name: 'Connection status' }),
-  ).toHaveText('Connection error');
+  ).toHaveText('Load failed');
   await checkLive('failure-settled-retained', before);
   await capture('refresh-error');
 
@@ -466,8 +531,13 @@ export async function auditAccessibility(app, page, evidence) {
     .poll(() => page.evaluate(() => Date.now()))
     .toBeGreaterThan(before.fetchedAt + 1000);
   await fixture('hold', 'a11y-retry', 'tree', 'CAN-100');
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  const retry = page.getByRole('button', { name: 'Retry', exact: true });
+  await retry.focus();
+  await retry.press('Enter');
   await expect.poll(() => fixture('started', 'a11y-retry')).toBe(true);
+  await expect(
+    page.getByRole('button', { name: 'Refresh', exact: true }),
+  ).toBeFocused();
   await expect(live).toHaveText('Checking CAN-100 for changes');
   await expect(timestamp).toHaveAttribute('title', previousTitle);
   expect((await latestTree('CAN-100')).fetchedAt).toBe(before.fetchedAt);
@@ -609,6 +679,38 @@ export async function auditAccessibility(app, page, evidence) {
     'automatic-forced-recovery-completed',
     await latestTree('CAN-100'),
   );
+
+  await automatic('a11y-recovery-focus-seed');
+  await fixture(
+    'release',
+    'a11y-recovery-focus-seed',
+    'Recovery focus failure',
+  );
+  await expect(retry).toBeEnabled();
+  await expect(page.locator('.spin:visible')).toHaveCount(0);
+  await fixture('hold', 'a11y-recovery-focus-return', 'tree', 'CAN-100');
+  await retry.focus();
+  await page.clock.runFor(1100);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect
+    .poll(() => fixture('started', 'a11y-recovery-focus-return'))
+    .toBe(true);
+  await expect(refresh).toBeFocused();
+  await expect(retry).toBeDisabled();
+  await fixture(
+    'release',
+    'a11y-recovery-focus-return',
+    'Recovery focus failure',
+  );
+  await expect(retry).toBeEnabled();
+  await expect(refresh).toBeFocused();
+  await retry.focus();
+  await automatic('a11y-recovery-focus-success');
+  await expect(refresh).toBeFocused();
+  await fixture('release', 'a11y-recovery-focus-success');
+  await expect(retry).toHaveCount(0);
+  await expect(refresh).toBeFocused();
+  await capture('background-retry-focus');
 
   // A command Refresh during a held poll must retain user intent until the
   // deferred read starts; automatic completion cannot steal that feedback.
@@ -949,16 +1051,67 @@ export async function auditAccessibility(app, page, evidence) {
     await capture('zoom200-settings-done');
     await done.press('Enter');
     await expect(settings).toBeFocused();
+    const overflow = await page
+      .locator('.toolbar button')
+      .evaluateAll((elements) =>
+        elements.flatMap((element) => {
+          const bounds = element.getBoundingClientRect();
+          return element.checkVisibility() &&
+            bounds.width &&
+            bounds.right > innerWidth
+            ? [
+                {
+                  name:
+                    element.getAttribute('aria-label') || element.textContent,
+                  right: bounds.right,
+                  viewport: innerWidth,
+                },
+              ]
+            : [];
+        }),
+      );
+    expect(overflow).toEqual([]);
+    await capture('zoom200-toolbar');
+    const main = page.locator('main.main');
+    await main.hover();
+    await page.mouse.wheel(0, 2000);
+    await expect
+      .poll(() => main.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    await expect
+      .poll(() =>
+        page.locator('.tree-scroll').evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return bounds.top >= 0 && bounds.bottom <= innerHeight;
+        }),
+      )
+      .toBe(true);
+    await capture('zoom200-tree');
+    await main.evaluate((element) => element.scrollTo({ top: 0 }));
+    await expect
+      .poll(() => main.evaluate((element) => element.scrollTop))
+      .toBe(0);
+    await page.locator('.view-settings > summary').click();
+    const viewPanel = page.locator('.view-panel');
+    await expect(viewPanel).toBeVisible();
     expect(
-      await page
-        .locator('.toolbar button')
+      await viewPanel.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.left >= 0 && bounds.right <= innerWidth;
+      }),
+    ).toBe(true);
+    expect(
+      await viewPanel
+        .locator('button')
         .evaluateAll((elements) =>
-          elements
-            .filter((e) => e.getBoundingClientRect().width)
-            .every((e) => e.getBoundingClientRect().right <= innerWidth),
+          elements.every(
+            (element) => element.getBoundingClientRect().right <= innerWidth,
+          ),
         ),
     ).toBe(true);
-    await capture('zoom200-toolbar');
+    await capture('zoom200-view-menu');
+    await page.locator('.view-settings > summary').press('Escape');
+    await expect(viewPanel).toBeHidden();
   } finally {
     await app.evaluate(({ BrowserWindow }, bounds) => {
       const window = BrowserWindow.getAllWindows()[0];
