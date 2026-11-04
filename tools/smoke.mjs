@@ -2519,6 +2519,12 @@ try {
   await page.getByRole('button', { name: /Sam Rivera/ }).click();
   await expect(issue('CAN-111').getByText('Sam Rivera')).toBeVisible();
 
+  await expect(page.locator('.statusbar .sr-only[role="status"]')).toHaveText(
+    '',
+  );
+  await app.evaluate(() =>
+    globalThis.canopySmoke.hold('late-status-picker', 'update', 'CAN-111'),
+  );
   await issue('CAN-111').getByLabel('Edit status for CAN-111').click();
   await page
     .getByRole('menuitem', { name: 'In Progress', exact: true })
@@ -2529,6 +2535,11 @@ try {
       exact: true,
     }),
   ).toHaveText('In Progress');
+  await expect
+    .poll(() =>
+      app.evaluate(() => globalThis.canopySmoke.started('late-status-picker')),
+    )
+    .toBe(true);
 
   // Enter edits a focused summary; Escape cancels without saving on blur.
   await issue('CAN-111')
@@ -2542,6 +2553,26 @@ try {
     .press('Enter');
   await summaryInput.fill('Keyboard draft');
   await summaryInput.press('Tab');
+  await expect(page.getByLabel('Choose value')).toBeFocused();
+  await app.evaluate(() => {
+    globalThis.canopySmoke.hold(
+      'late-status-priorities',
+      'priorities',
+      'CAN-111',
+    );
+    globalThis.canopySmoke.release('late-status-picker');
+  });
+  await expect
+    .poll(() =>
+      app.evaluate(() =>
+        globalThis.canopySmoke.started('late-status-priorities'),
+      ),
+    )
+    .toBe(true);
+  await expect(page.locator('.priority-editor .choice-loading')).toBeVisible();
+  await app.evaluate(() =>
+    globalThis.canopySmoke.release('late-status-priorities'),
+  );
   await expect(page.getByLabel('Choose value')).toBeFocused();
   await page.getByLabel('Choose value').press('Escape');
   await expect(issue('CAN-111').getByText('Keyboard draft')).toBeVisible();

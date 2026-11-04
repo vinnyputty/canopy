@@ -2810,6 +2810,43 @@ export function App() {
   );
 
   useEffect(() => {
+    if (
+      !editor ||
+      editor.field === 'summary' ||
+      editor.tabId !== activeTab?.id ||
+      editor.connectionId !== activeTab.connectionId
+    )
+      return;
+    const current = options[`${editor.connectionId}:${editor.key}`];
+    const choices =
+      editor.field === 'priority'
+        ? current?.priorities
+        : editor.field === 'assignee'
+          ? current?.assignees
+          : current?.transitions;
+    if (current?.[editor.field] || choices !== undefined) return;
+    void pickers.open(
+      editor.connectionId,
+      editor.key,
+      editor.field,
+      activeTab.rootKey,
+      activeConnection?.provider === 'jira' &&
+        view.assumeMatchingStatusTransitions,
+      snapshot?.issues.find((issue) => issue.key === editor.key),
+    );
+  }, [
+    editor,
+    options,
+    activeTab?.id,
+    activeTab?.connectionId,
+    activeTab?.rootKey,
+    activeConnection?.provider,
+    view.assumeMatchingStatusTransitions,
+    snapshot,
+    pickers,
+  ]);
+
+  useEffect(() => {
     if (!editor || editor.field === 'summary') return;
     const dismiss = (event: PointerEvent) => {
       const activeCell = document.querySelector('.field-cell.editing');
@@ -4298,19 +4335,27 @@ export function App() {
                       target.focus();
                     }
                   }
-                  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                  if (
+                    (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+                    !event.altKey &&
+                    !event.ctrlKey &&
+                    !event.metaKey &&
+                    !event.shiftKey
+                  ) {
                     event.preventDefault();
                     const direction = event.key === 'ArrowLeft' ? -1 : 1;
-                    selectRelativeTab(direction);
                     const tabs = [
                       ...event.currentTarget.parentElement!.querySelectorAll<HTMLElement>(
                         '[role="tab"]',
                       ),
                     ];
                     const index = tabs.indexOf(event.currentTarget);
-                    tabs[
-                      (index + direction + tabs.length) % tabs.length
-                    ]?.focus();
+                    const target =
+                      tabs[(index + direction + tabs.length) % tabs.length];
+                    if (target) {
+                      selectTab(target.dataset.tabId!);
+                      target.focus();
+                    }
                   }
                 }}
               >

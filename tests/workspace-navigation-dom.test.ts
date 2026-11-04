@@ -234,6 +234,44 @@ test('tabs reveal the active connection without vertical scrolling; views and in
       dom.window.document.activeElement?.getAttribute('data-tab-id'),
       'one',
     );
+    for (const modifier of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey']) {
+      for (const key of ['ArrowLeft', 'ArrowRight']) {
+        const focused = dom.window.document.activeElement!;
+        const event = new dom.window.KeyboardEvent('keydown', {
+          key,
+          [modifier]: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        await act(async () => focused.dispatchEvent(event));
+        assert.equal(event.defaultPrevented, false, `${modifier}+${key}`);
+        assert.equal(scope.workspace.activeTabId, 'one');
+        assert.equal(dom.window.document.activeElement, focused);
+      }
+    }
+    for (const [focusedId, key, targetId] of [
+      ['three', 'ArrowLeft', 'two'],
+      ['one', 'ArrowLeft', 'three'],
+      ['one', 'ArrowRight', 'two'],
+    ]) {
+      const focused = host.querySelector<HTMLElement>(
+        `[data-tab-id="${focusedId}"]`,
+      )!;
+      focused.focus();
+      await act(async () =>
+        focused.dispatchEvent(
+          new dom.window.KeyboardEvent('keydown', { key, bubbles: true }),
+        ),
+      );
+      await render();
+      assert.equal(scope.workspace.activeTabId, targetId);
+      assert.equal(
+        dom.window.document.activeElement?.getAttribute('data-tab-id'),
+        targetId,
+      );
+    }
+    await click(host.querySelector<HTMLElement>('[data-tab-id="one"]')!);
+    await render();
     for (const [key, id] of [
       ['End', 'three'],
       ['Home', 'one'],

@@ -61,6 +61,22 @@ async function expectUnobscuredFocus(control) {
   ).toBe(true);
 }
 
+async function setZoomFactor(session, factor) {
+  const width = await session.app.evaluate(({ BrowserWindow }, zoom) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    window.webContents.setZoomFactor(zoom);
+    return window.getContentSize()[0];
+  }, factor);
+  await expect
+    .poll(() =>
+      session.page.evaluate(
+        ({ width, factor }) => Math.abs(window.innerWidth - width / factor),
+        { width, factor },
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+}
+
 const first = await openDemo();
 // Pause synchronously when a target state renders, before its presentation timer
 // can expire. The script is reinstalled after every Reset and replay reload.
@@ -382,9 +398,7 @@ try {
     );
   try {
     for (const zoom of [1, 2, 2.0736]) {
-      await first.app.evaluate(({ BrowserWindow }, factor) => {
-        BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(factor);
-      }, zoom);
+      await setZoomFactor(first, zoom);
       await expect
         .poll(() =>
           page.evaluate(() => {
@@ -437,9 +451,7 @@ try {
       );
     }
   } finally {
-    await first.app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(1);
-    });
+    await setZoomFactor(first, 1);
   }
   await page.getByRole('button', { name: 'Previous demo step' }).click();
   await expect(page.getByText('Step 6 of 7')).toBeVisible();
@@ -518,9 +530,7 @@ try {
   await pause.press('Enter');
   await expect(resume).toBeFocused();
   try {
-    await first.app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(2.0736);
-    });
+    await setZoomFactor(first, 2.0736);
     expect(
       await page.locator('.demo-tour-copy').evaluate((copy) => {
         const footer = copy.closest('.demo-tour');
@@ -543,9 +553,7 @@ try {
       page.getByRole('button', { name: 'Close demo', exact: true }),
     );
   } finally {
-    await first.app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(1);
-    });
+    await setZoomFactor(first, 1);
   }
   const exited = new Promise((resolve) => first.child.once('exit', resolve));
   await page.getByRole('button', { name: 'Close demo' }).click();
