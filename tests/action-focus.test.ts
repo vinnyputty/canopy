@@ -464,3 +464,188 @@ for (const existing of [false, true]) {
     });
   }
 }
+
+const errorRecoveryBanner = findNode(
+  app,
+  (node): node is ts.JsxOpeningElement =>
+    ts.isJsxOpeningElement(node) &&
+    node.attributes.properties.some(
+      (attribute) =>
+        ts.isJsxAttribute(attribute) &&
+        attribute.name.getText() === 'role' &&
+        attribute.initializer?.getText() === '"alert"',
+    ) &&
+    node.attributes.properties.some(
+      (attribute) =>
+        ts.isJsxAttribute(attribute) &&
+        attribute.name.getText() === 'data-tree-recovery',
+    ),
+);
+const errorRecoveryAttribute = errorRecoveryBanner.attributes.properties.find(
+  (node) =>
+    ts.isJsxAttribute(node) && node.name.getText() === 'data-tree-recovery',
+) as ts.JsxAttribute;
+const errorRecoveryOwner = (errors: Record<string, string>) =>
+  execute(
+    (
+      errorRecoveryAttribute.initializer as ts.JsxExpression
+    ).expression!.getText(),
+    { errors, activeTab: { id: 'source' } },
+  );
+
+for (const unrelated of ['workspace', 'edit', 'app', 'other'])
+  test(`the rendered error-banner attribute only identifies tree recovery with ${unrelated} errors`, () => {
+    assert.equal(errorRecoveryOwner({ [unrelated]: 'Failure' }), undefined);
+    assert.equal(
+      errorRecoveryOwner({ [unrelated]: 'Failure', source: 'Tree failure' }),
+      'source',
+    );
+  });
+
+for (const outcome of ['success', 'failure'] as const)
+  for (const origin of [
+    'Retry',
+    'Retry load',
+    'Cancel load',
+    'Dismiss error',
+    'other control',
+    'other tab',
+    'saved view',
+    'other recovery',
+    'workspace error',
+    'edit error',
+    'app error',
+    'no fallback',
+  ] as const)
+    test(`background refresh preserves ${origin} focus through ${outcome}`, async () => {
+      const f = fixture();
+      const banner = f.document.createElement('div');
+      const persistentError = [
+        'workspace error',
+        'edit error',
+        'app error',
+      ].includes(origin);
+      const recoveryOwner = errorRecoveryOwner(
+        persistentError
+          ? { [origin.split(' ')[0]]: 'Failure' }
+          : { source: 'Tree failure' },
+      );
+      if (recoveryOwner !== undefined)
+        banner.dataset.treeRecovery =
+          origin === 'other recovery' ? 'other' : recoveryOwner;
+      const trigger = f.document.createElement('button');
+      trigger.textContent = origin;
+      banner.append(trigger);
+      f.document.body.append(banner);
+      if (origin === 'other control')
+        f.document.querySelector<HTMLInputElement>('#other')!.focus();
+      else trigger.focus();
+      if (origin === 'other tab')
+        f.scope.workspaceRef.current.activeTabId = 'other';
+      if (origin === 'saved view')
+        f.scope.workspaceRef.current.activeSavedViewId = 'view';
+      if (origin === 'no fallback') f.scope.refreshButtonRef.current = null;
+      const before = f.document.activeElement;
+      const tab = f.scope.activeTab!;
+      let resolve!: (value: unknown) => void;
+      let reject!: (reason: unknown) => void;
+      const promise = new Promise((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      let busy = false;
+      const focusAtBusy: Element[] = [];
+      const scope = {
+        ...f.scope,
+        tabsRef: { current: [tab] },
+        manualRelationshipRefreshes: { current: new Set() },
+        forcedRefreshes: { current: new Set() },
+        cancelledTrees: { current: new Set() },
+        deferredRefreshes: { current: new Set() },
+        runningExplicitRefreshes: { current: new Map() },
+        refreshSequences: { current: {} },
+        snapshotsRef: { current: {} },
+        cooldowns: { current: {} },
+        refreshBlocked: { current: () => false },
+        refreshSchedule: { current: { begin: () => true, finish() {} } },
+        rootRefreshes: {
+          current: {
+            load: () => ({ promise, started: true, generation: 1 }),
+            isCurrent: () => true,
+            replaceSnapshot() {},
+          },
+        },
+        mutations: {
+          isEvicted: () => false,
+          beginRefresh: () => 1,
+          endRefresh() {},
+          confirmedSnapshot: () => undefined,
+          receive() {},
+        },
+        refreshAnnouncements: {
+          request() {},
+          begin() {},
+          complete() {},
+          fail() {},
+          end() {},
+        },
+        invalidateRelationships() {},
+        refreshRootKey: () => 'root',
+        navigator: { onLine: true },
+        demoMode: false,
+        connectionsRef: { current: [] },
+        window: { canopy: { syncStatus: async () => null } },
+        treeRefreshError: () => 'Request failed',
+        setConnectionErrors() {},
+        setErrors() {
+          if (outcome === 'success' && !persistentError) banner.remove();
+        },
+        setWorkspace() {},
+        setRefreshing() {
+          busy = !busy;
+          if (busy) {
+            focusAtBusy.push(f.document.activeElement!);
+            if (!persistentError) trigger.disabled = true;
+          }
+        },
+      };
+      const refresh = execute(callback(app, 'refreshTab'), scope) as (
+        tab: unknown,
+        quiet: boolean,
+      ) => Promise<void>;
+      try {
+        const pending = refresh(tab, true);
+        const shouldTransfer = ![
+          'other control',
+          'other tab',
+          'saved view',
+          'other recovery',
+          'workspace error',
+          'edit error',
+          'app error',
+          'no fallback',
+        ].includes(origin);
+        assert.equal(
+          focusAtBusy[0],
+          shouldTransfer ? f.scope.refreshButtonRef.current : before,
+        );
+        if (outcome === 'success') resolve({ issues: [], warnings: [] });
+        else reject(new Error('Request failed'));
+        await pending;
+        assert.equal(busy, false);
+        if (shouldTransfer)
+          assert.equal(
+            f.document.activeElement,
+            f.scope.refreshButtonRef.current,
+          );
+        else if (origin === 'other control' || persistentError)
+          assert.equal(f.document.activeElement, before);
+        else
+          assert.notEqual(
+            f.document.activeElement,
+            f.scope.refreshButtonRef.current,
+          );
+      } finally {
+        f.close();
+      }
+    });

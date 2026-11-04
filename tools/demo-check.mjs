@@ -44,6 +44,23 @@ async function closeDemo(session) {
   if (session.errors.length) throw session.errors[0];
 }
 
+async function expectUnobscuredFocus(control) {
+  await control.scrollIntoViewIfNeeded();
+  await control.focus();
+  await expect(control).toBeFocused();
+  expect(
+    await control.evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      return button.contains(
+        document.elementFromPoint(
+          rect.x + rect.width / 2,
+          rect.y + rect.height / 2,
+        ),
+      );
+    }),
+  ).toBe(true);
+}
+
 const first = await openDemo();
 // Pause synchronously when a target state renders, before its presentation timer
 // can expire. The script is reinstalled after every Reset and replay reload.
@@ -363,6 +380,44 @@ try {
     throw new Error(
       `Tour left unexpected sample data: ${JSON.stringify(final)}`,
     );
+  try {
+    for (const zoom of [1, 2, 2.0736]) {
+      await first.app.evaluate(({ BrowserWindow }, factor) => {
+        BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(factor);
+      }, zoom);
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const main = document
+              .querySelector('.main')
+              .getBoundingClientRect();
+            const tour = document
+              .querySelector('.demo-tour')
+              .getBoundingClientRect();
+            return main.bottom <= tour.top && main.height > 0;
+          }),
+        )
+        .toBe(true);
+      const action = page.locator('.row-menu-trigger').last();
+      await expectUnobscuredFocus(action);
+      await page.getByRole('button', { name: 'Settings', exact: true }).click();
+      const done = page
+        .getByRole('dialog', { name: 'Settings' })
+        .getByRole('button', { name: 'Done', exact: true });
+      await expectUnobscuredFocus(done);
+      await done.press('Enter');
+      await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCount(
+        0,
+      );
+      await expectUnobscuredFocus(
+        page.getByRole('button', { name: 'Reset and replay' }),
+      );
+    }
+  } finally {
+    await first.app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(1);
+    });
+  }
   await page.getByRole('button', { name: 'Previous demo step' }).click();
   await expect(page.getByText('Step 6 of 7')).toBeVisible();
   await expect

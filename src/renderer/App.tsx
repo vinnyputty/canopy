@@ -1701,6 +1701,14 @@ export function App() {
         tab.rootKey,
         mutations.confirmedSnapshot(tab.id) ?? snapshotsRef.current[tab.id],
       );
+      if (
+        workspaceRef.current.activeTabId === tab.id &&
+        !workspaceRef.current.activeSavedViewId &&
+        document.activeElement
+          ?.closest('[data-tree-recovery]')
+          ?.getAttribute('data-tree-recovery') === tab.id
+      )
+        refreshButtonRef.current?.focus({ preventScroll: true });
       const setter = quiet ? setRefreshing : setLoading;
       setter((current) => new Set(current).add(tab.id));
       try {
@@ -4953,7 +4961,13 @@ export function App() {
               errors.edit ||
               errors.app ||
               (cooldownTimes[activeTab.connectionId] ?? 0) > syncNow) && (
-              <div className="error-banner" role="alert">
+              <div
+                className="error-banner"
+                role="alert"
+                data-tree-recovery={
+                  errors[activeTab.id] ? activeTab.id : undefined
+                }
+              >
                 <AlertCircle size={15} />
                 <span>
                   {(cooldownTimes[activeTab.connectionId] ?? 0) > syncNow
@@ -5028,7 +5042,11 @@ export function App() {
             {((!snapshot &&
               (loading.has(activeTab.id) || refreshing.has(activeTab.id))) ||
               snapshot?.incomplete) && (
-              <div className="error-banner" role="status">
+              <div
+                className="error-banner"
+                role="status"
+                data-tree-recovery={activeTab.id}
+              >
                 <span>
                   {snapshot?.incomplete
                     ? `Incomplete results: ${snapshot.incomplete.reason}`

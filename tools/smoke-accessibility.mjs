@@ -680,6 +680,38 @@ export async function auditAccessibility(app, page, evidence) {
     await latestTree('CAN-100'),
   );
 
+  await automatic('a11y-recovery-focus-seed');
+  await fixture(
+    'release',
+    'a11y-recovery-focus-seed',
+    'Recovery focus failure',
+  );
+  await expect(retry).toBeEnabled();
+  await expect(page.locator('.spin:visible')).toHaveCount(0);
+  await fixture('hold', 'a11y-recovery-focus-return', 'tree', 'CAN-100');
+  await retry.focus();
+  await page.clock.runFor(1100);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect
+    .poll(() => fixture('started', 'a11y-recovery-focus-return'))
+    .toBe(true);
+  await expect(refresh).toBeFocused();
+  await expect(retry).toBeDisabled();
+  await fixture(
+    'release',
+    'a11y-recovery-focus-return',
+    'Recovery focus failure',
+  );
+  await expect(retry).toBeEnabled();
+  await expect(refresh).toBeFocused();
+  await retry.focus();
+  await automatic('a11y-recovery-focus-success');
+  await expect(refresh).toBeFocused();
+  await fixture('release', 'a11y-recovery-focus-success');
+  await expect(retry).toHaveCount(0);
+  await expect(refresh).toBeFocused();
+  await capture('background-retry-focus');
+
   // A command Refresh during a held poll must retain user intent until the
   // deferred read starts; automatic completion cannot steal that feedback.
   await automatic('a11y-overlap-poll');

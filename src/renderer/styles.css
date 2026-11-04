@@ -316,15 +316,18 @@ summary:focus-visible,
 .app.sidebar-is-collapsed {
   grid-template-columns: 0 minmax(0, 1fr);
 }
+.app:has(> .demo-tour) {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
 .demo-tour {
-  position: fixed;
-  z-index: 30;
-  left: max(16px, calc(var(--sidebar-width, 220px) + 16px));
-  right: 16px;
-  bottom: 16px;
+  grid-column: 1 / -1;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  max-height: 30vh;
+  overflow: auto;
+  margin: 8px;
   padding: 12px 14px;
   border: 1px solid var(--selected-border);
   border-radius: 10px;
@@ -379,19 +382,13 @@ summary:focus-visible,
   box-shadow: 0 0 0 7px rgba(76, 130, 195, 0.3);
   scroll-margin-bottom: 100px;
 }
-@media (max-width: 900px) {
-  .demo-tour {
-    left: 12px;
-    right: 12px;
-    flex-wrap: wrap;
-  }
-}
 .app.sidebar-is-collapsed .sidebar {
   transform: translateX(calc(-1 * var(--sidebar-width, 220px)));
 }
 .sidebar {
   position: relative;
   z-index: 3;
+  min-height: 0;
   min-width: var(--sidebar-width, 220px);
   display: flex;
   flex-direction: column;
