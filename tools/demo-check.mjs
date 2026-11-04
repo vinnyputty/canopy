@@ -400,6 +400,29 @@ try {
         .toBe(true);
       const action = page.locator('.row-menu-trigger').last();
       await expectUnobscuredFocus(action);
+      await page.locator('[data-tree-key="CAN-100"]').focus();
+      await page.keyboard.press('Space');
+      await expect(
+        page.getByRole('complementary', { name: 'Preview CAN-100' }),
+      ).toBeVisible();
+      expect(
+        await page.locator('.tree-scroll').evaluate((tree) => {
+          const row = tree.querySelector('.issue-row');
+          const header = tree.querySelector('.column-head');
+          return (
+            tree.clientHeight >=
+            row.getBoundingClientRect().height +
+              header.getBoundingClientRect().height
+          );
+        }),
+      ).toBe(true);
+      await expectUnobscuredFocus(
+        page.getByRole('button', { name: 'Actions for CAN-100', exact: true }),
+      );
+      await page.keyboard.press('Escape');
+      await expect(
+        page.getByRole('complementary', { name: 'Preview CAN-100' }),
+      ).toHaveCount(0);
       await page.getByRole('button', { name: 'Settings', exact: true }).click();
       const done = page
         .getByRole('dialog', { name: 'Settings' })
@@ -481,6 +504,49 @@ try {
   await expect(
     page.getByText('Playback stopped because you took control.'),
   ).toBeVisible();
+  await page.evaluate(() =>
+    sessionStorage.setItem('canopy-check-hold', 'start'),
+  );
+  const replay = page.getByRole('button', { name: 'Reset and replay' });
+  await replay.focus();
+  await replay.press('Enter');
+  const resume = page.getByRole('button', { name: 'Resume demo', exact: true });
+  const pause = page.getByRole('button', { name: 'Pause demo', exact: true });
+  await expect(resume).toBeFocused();
+  await resume.press('Enter');
+  await expect(pause).toBeFocused();
+  await pause.press('Enter');
+  await expect(resume).toBeFocused();
+  try {
+    await first.app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(2.0736);
+    });
+    expect(
+      await page.locator('.demo-tour-copy').evaluate((copy) => {
+        const footer = copy.closest('.demo-tour');
+        const style = getComputedStyle(footer);
+        const available =
+          footer.clientWidth -
+          parseFloat(style.paddingLeft) -
+          parseFloat(style.paddingRight);
+        return (
+          copy.getBoundingClientRect().width >= Math.min(260, available) - 1
+        );
+      }),
+    ).toBe(true);
+    await expectUnobscuredFocus(resume);
+    await expectUnobscuredFocus(
+      page.getByRole('button', { name: 'Stop demo', exact: true }),
+    );
+    await expectUnobscuredFocus(replay);
+    await expectUnobscuredFocus(
+      page.getByRole('button', { name: 'Close demo', exact: true }),
+    );
+  } finally {
+    await first.app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(1);
+    });
+  }
   const exited = new Promise((resolve) => first.child.once('exit', resolve));
   await page.getByRole('button', { name: 'Close demo' }).click();
   await Promise.race([

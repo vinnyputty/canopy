@@ -313,6 +313,7 @@ export function App() {
     caption: string;
   } | null>(null);
   const tourStarted = useRef(false);
+  const pendingTourFocus = useRef(false);
   const stopTourRef = useRef<(() => void) | null>(null);
   const seekTourRef = useRef<((step: number, paused?: boolean) => void) | null>(
     null,
@@ -3216,6 +3217,20 @@ export function App() {
 
   useEffect(() => {
     if (
+      !pendingTourFocus.current ||
+      (tour?.phase !== 'playing' && tour?.phase !== 'paused')
+    )
+      return;
+    const frame = window.requestAnimationFrame(() => {
+      pendingTourFocus.current = false;
+      if (document.activeElement === document.body)
+        document.querySelector<HTMLElement>('[data-tour-playback]')?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [tour?.phase, tour?.step]);
+
+  useEffect(() => {
+    if (
       !demoMode ||
       !ready ||
       !snapshots['demo-can-100'] ||
@@ -3223,6 +3238,8 @@ export function App() {
     )
       return;
     tourStarted.current = true;
+    pendingTourFocus.current =
+      sessionStorage.getItem('canopy-demo-step') !== null;
     const requestedStep = Number(
       sessionStorage.getItem('canopy-demo-step') ?? 0,
     );
@@ -3695,6 +3712,7 @@ export function App() {
     void run();
     return () => {
       controller.abort();
+      pendingTourFocus.current = false;
       stopTourRef.current = null;
       seekTourRef.current = null;
       toggleTourPauseRef.current = null;
@@ -5836,6 +5854,7 @@ export function App() {
             <>
               <button
                 className="secondary"
+                data-tour-playback
                 onClick={() => toggleTourPauseRef.current?.()}
               >
                 {tour.phase === 'paused' ? 'Resume demo' : 'Pause demo'}

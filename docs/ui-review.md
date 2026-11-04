@@ -6,13 +6,13 @@ Use the guided demo and disposable sample data for this review. It requires no p
 
 Build and run the app, then follow these paths with both pointer and keyboard:
 
-1. Start the guided demo; inspect its welcome state, provider setup guidance, and empty/loading/error states.
+1. Start the guided demo; inspect its welcome state, provider setup guidance, and empty/loading/error states. Activate Reset and replay with the keyboard, then pause and step the tour without losing focus.
 2. Open a sample tree, move between roots and tabs, expand a deep branch, search for an issue, and return to the tree.
 3. Edit an issue inline; save, cancel, and inspect failure recovery and focus return. With Retry focused after a load failure, return to the window during a refresh and confirm focus stays on a usable control through success and repeated failure.
 4. Open an issue preview, inspect its details and actions, then close it and confirm focus and tree position.
 5. Use triage and bulk actions, then create/select a saved view and refresh its results.
 6. Open Settings; change palette, light/dark/system mode, reading size and spacing, and verify persistence after restart.
-7. Repeat key paths in a narrow window, at 200% zoom, with long issue text, and with reduced-motion emulation. Check visible focus, names, tab order, status text, non-color state cues, contrast, and whether every action remains reachable. Keep the demo controls open and confirm they leave focused tree rows and Settings unobscured.
+7. Repeat key paths in a narrow window, at 200% zoom, with long issue text, and with reduced-motion emulation. Check visible focus, names, tab order, status text, non-color state cues, contrast, and whether every action remains reachable. Keep the demo controls and issue preview open and confirm focused tree rows, preview actions, and Settings remain visible and reachable.
 
 Run the existing sample Electron review commands after obtaining exclusive desktop access:
 
