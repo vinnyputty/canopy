@@ -84,6 +84,8 @@ let focusWindow = () => {
   focusRequested = true;
 };
 const html = join(__dirname, 'renderer/index.html');
+class WorkspaceLoadFailure extends Error {}
+
 function text(value: unknown, limit = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit)
     throw new Error('Invalid input.');
@@ -1009,15 +1011,20 @@ async function start(
             (async () => {
               await rendererLoaded;
               signal.throwIfAborted();
-              await created.webContents.executeJavaScript(
+              const result = await created.webContents.executeJavaScript(
                 `window.canopy.flushWorkspace(${closeAttempt})`,
               );
+              if (result && typeof result.initializationError === 'string')
+                throw new WorkspaceLoadFailure(result.initializationError);
               return false;
             })(),
           ]);
           if (!lost) return false;
         } catch (error) {
-          if (!rendererUnavailable && !created.webContents.isCrashed())
+          if (
+            error instanceof WorkspaceLoadFailure ||
+            (!rendererUnavailable && !created.webContents.isCrashed())
+          )
             throw error;
         } finally {
           unsubscribe();
@@ -1070,6 +1077,7 @@ async function start(
           );
         if (
           error !== timedOut &&
+          !(error instanceof WorkspaceLoadFailure) &&
           !rendererUnavailable &&
           !created.webContents.isCrashed()
         )
@@ -1077,13 +1085,17 @@ async function start(
         const { response } = await dialog.showMessageBox(created, {
           type: 'warning',
           message:
-            error === timedOut
-              ? 'The workspace save has not finished.'
-              : 'The workspace could not be saved.',
+            error instanceof WorkspaceLoadFailure
+              ? 'The workspace could not load.'
+              : error === timedOut
+                ? 'The workspace save has not finished.'
+                : 'The workspace could not be saved.',
           detail:
-            error === timedOut
-              ? 'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.'
-              : `${error instanceof Error ? error.message : String(error)}\n\nThe renderer is unavailable. Keep Canopy open to repair storage and retry closing; only workspace changes already received can be retried. Closing anyway abandons those changes.`,
+            error instanceof WorkspaceLoadFailure
+              ? `${error.message}\n\nYour saved workspace will be left unchanged. Changes made since loading failed have not been saved and will be lost if you close anyway. Keep Canopy open to repair the problem or use Reload workspace.`
+              : error === timedOut
+                ? 'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.'
+                : `${error instanceof Error ? error.message : String(error)}\n\nThe renderer is unavailable. Keep Canopy open to repair storage and retry closing; only workspace changes already received can be retried. Closing anyway abandons those changes.`,
           buttons: ['Keep open', 'Close anyway'],
           defaultId: 0,
           cancelId: 0,

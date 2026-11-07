@@ -1,3 +1,4 @@
+import { workspaceError } from '../src/renderer/workspace-error';
 import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -147,6 +148,7 @@ async function model(options: Record<string, unknown> = {}) {
     clearTimeout: () => {},
   };
   const context = {
+    workspaceError,
     window,
     useCallback: (fn: unknown) => fn,
     demoResetting: { current: false },

@@ -1,3 +1,4 @@
+import { workspaceError } from '../src/renderer/workspace-error';
 import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -108,6 +109,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     },
   };
   const context = {
+    workspaceError,
     window,
     withScrollPositions,
     scrollPositions: { current: new Map<string, number>() },

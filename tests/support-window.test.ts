@@ -1,3 +1,5 @@
+import { recoverWorkspaceViews } from '../src/shared/views';
+import type { Workspace } from '../src/shared/types';
 import { rendererFixture } from './fixtures/workspace-close';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -60,6 +62,14 @@ async function fixture() {
     crashed: false,
     consent: 0,
     prompts: 0,
+    warnings: [] as {
+      message: string;
+      detail: string;
+      buttons: string[];
+      defaultId: number;
+      cancelId: number;
+    }[],
+    readWorkspace: async (): Promise<Workspace | null> => null,
     quits: 0,
     expireClose: () => {},
     saved: null as WindowState | null,
@@ -175,6 +185,7 @@ async function fixture() {
   }
   class Storage {
     async read(name: string) {
+      if (name === 'workspace') return controls.readWorkspace();
       assert.equal(name, 'window');
       reads++;
       await readGate.wait;
@@ -233,7 +244,11 @@ async function fixture() {
           },
           shell: {},
           dialog: {
-            showMessageBox: async () => {
+            showMessageBox: async (
+              _window: unknown,
+              options: (typeof controls.warnings)[number],
+            ) => {
+              controls.warnings.push(options);
               controls.prompts++;
               await controls.warning();
               return { response: controls.consent };
@@ -242,6 +257,7 @@ async function fixture() {
               errors.push(message),
           },
         };
+      if (name === '../shared/views') return { recoverWorkspaceViews };
       if (name === '../shared/workspace-validation')
         return { validateWorkspace };
       if (name === '../shared/support') return { supportLinks, supportUrl };
@@ -1079,5 +1095,221 @@ it('deadline cancellation releases the renderer before waiting for the native wa
   window.close();
   await setImmediate();
   assert.equal(window.destroyed, true);
+  dom.window.close();
+});
+
+for (const route of ['close', 'quit'])
+  it(`persistent initial read failure supports Keep open, cancel and explicit ${route} without a workspace write`, async () => {
+    const { JSDOM } = require('jsdom'),
+      dom = new JSDOM('<body><button>Edit</button></body>');
+    dom.window.document.body.inert = false;
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    let reads = 0;
+    f.controls.readWorkspace = async () => {
+      reads++;
+      throw Error(
+        "Error invoking remote method 'canopy:loadWorkspace': Error: Saved workspace is unreadable.",
+      );
+    };
+    const renderer = rendererFixture(dom.window.document, async (value) => {
+      await f.invoke(window, 'saveWorkspace', value);
+    });
+    f.controls.flush = (script) => renderer.executeScript(script);
+    f.controls.release = (attempt) => {
+      renderer.release(attempt);
+    };
+    const request = () => (route === 'quit' ? f.app.quit() : window.close());
+    let cleanup = await renderer.initialize(
+      async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+    );
+    const focus = dom.window.document.querySelector('button');
+    focus.focus();
+    for (const action of ['Keep open', 'Escape']) {
+      await assert.rejects(
+        renderer.save(renderer.workspaceRef.current),
+        /not loaded/,
+      );
+      await assert.rejects(renderer.api.flushWorkspace(), /workspace.*load/i);
+      request();
+      await setImmediate();
+      assert.equal(window.destroyed, false);
+      assert.equal(renderer.controller.paused, false);
+      assert.equal(dom.window.document.body.inert, false);
+      assert.equal(dom.window.document.activeElement, focus);
+      assert.equal(f.controls.prompts, action === 'Keep open' ? 1 : 2);
+      assert.match(
+        renderer.errors().workspace,
+        /Couldn’t save workspace: Workspace has not loaded/,
+      );
+      const prompt = f.controls.warnings.at(-1)!;
+      assert.equal(prompt.message, 'The workspace could not load.');
+      assert.deepEqual(Array.from(prompt.buttons), [
+        'Keep open',
+        'Close anyway',
+      ]);
+      assert.equal(prompt.defaultId, 0);
+      assert.equal(prompt.cancelId, 0);
+      assert.match(prompt.detail, /saved workspace will be left unchanged/);
+      assert.match(
+        prompt.detail,
+        /Changes made since loading failed have not been saved and will be lost if you close anyway/,
+      );
+      assert.doesNotMatch(
+        prompt.detail,
+        /renderer is unavailable|Error invoking remote method/i,
+      );
+      await renderer.api.reloadWorkspace();
+      assert.equal(renderer.calls.at(-1), 'canopy:reloadWorkspace');
+      cleanup();
+      cleanup = await renderer.initialize(
+        async () =>
+          (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+      );
+      assert.equal(renderer.context.workspaceLoaded.current, false, action);
+    }
+    assert.equal(reads, 3);
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+    f.controls.consent = 1;
+    request();
+    await setImmediate();
+    assert.equal(window.destroyed, true);
+    assert.equal(f.controls.prompts, 3);
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+    if (route === 'quit') assert.ok(f.controls.quits >= 2);
+    else assert.equal(f.controls.quits, 0);
+    if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
+      await import('node:fs/promises').then((fs) =>
+        fs.writeFile(
+          process.env.CANOPY_CLOSE_EVIDENCE_DIR +
+            `/initial-load-${route}-prompts.json`,
+          JSON.stringify(f.controls.warnings, null, 2) + '\n',
+        ),
+      );
+    cleanup();
+    dom.window.close();
+  });
+
+it('a kept-open initial-load failure can repair storage, reload and close normally without abandonment', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  f.controls.readWorkspace = async () => {
+    throw Error('Initial read failed');
+  };
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  let cleanup = await renderer.initialize(
+    async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+  );
+  window.close();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(window.destroyed, false);
+  const saved: Workspace = {
+    tabs: [],
+    activeTabId: null,
+    theme: 'light',
+    reading: { textSize: 'small', spacing: 'compact' },
+    shortcuts: {},
+    sidebarCollapsed: false,
+  };
+  f.controls.readWorkspace = async () => structuredClone(saved);
+  cleanup();
+  cleanup = await renderer.initialize(
+    async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+  );
+  assert.equal(renderer.context.workspaceLoaded.current, true);
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(
+    f.writes.filter((write) => write.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  cleanup();
+  dom.window.close();
+});
+
+it('a loaded save error with initialization-like text retains ordinary refusal policy', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  f.controls.write = async (name) => {
+    if (name === 'workspace')
+      throw Error('Workspace could not load: permission denied');
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 0);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  assert.match(renderer.errors().workspace, /permission denied/);
+  assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
+  dom.window.close();
+});
+
+it('a reported initialization failure retains its consent requirement if renderer availability changes', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  f.controls.readWorkspace = async () => {
+    throw Error('Initial read failed');
+  };
+  const renderer = rendererFixture(dom.window.document);
+  await renderer.initialize(
+    async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+  );
+  f.controls.flush = async (script) => {
+    const result = await renderer.executeScript(script);
+    f.controls.crashed = true;
+    return result;
+  };
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(f.controls.warnings[0].message, 'The workspace could not load.');
+  assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
   dom.window.close();
 });

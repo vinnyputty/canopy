@@ -269,6 +269,10 @@ export type HandoffState = {
   canceledId?: string;
 };
 
+export interface WorkspaceFlushFailure {
+  initializationError: string;
+}
+
 export interface CanopyAPI {
   handoffReady(clientId: string): Promise<HandoffState>;
   handoffAck(
@@ -429,10 +433,10 @@ export interface CanopyAPI {
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace, closeAttempt?: number): Promise<void>;
   onWorkspaceFlush(
-    handler: (closeAttempt?: number) => Promise<void>,
+    handler: (closeAttempt?: number) => Promise<void | WorkspaceFlushFailure>,
     release?: (closeAttempt: number) => void,
   ): () => void;
-  flushWorkspace(closeAttempt?: number): Promise<void>;
+  flushWorkspace(closeAttempt?: number): Promise<void | WorkspaceFlushFailure>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;
   openIssue(connectionId: string, key: string): Promise<void>;
   openLink(url: string): Promise<void>;

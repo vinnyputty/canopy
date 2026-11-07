@@ -518,7 +518,38 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
         const audit = globalThis.selfConnectionAudit;
         return audit ? { workspace: audit.submittedWorkspace } : null;
       });
-      if (submission) expect(submission.workspace).toEqual(workspace);
+      if (submission) {
+        expect(submission.workspace).toBeDefined();
+        const actual = JSON.parse(JSON.stringify(submission.workspace));
+        const expected = JSON.parse(JSON.stringify(workspace));
+        const scroll = await page.evaluate((savedTop) => {
+          const element = document.querySelector('.tree-scroll');
+          if (!element)
+            throw new Error('Restored tree has no scroll viewport.');
+          const observed = element.scrollTop;
+          // Probe the native clamp without repairing a lost, still-valid offset.
+          try {
+            element.scrollTop = savedTop;
+            return { observed, clamped: element.scrollTop };
+          } finally {
+            element.scrollTop = observed;
+          }
+        }, active.scrollTop ?? 0);
+        expect(scroll.observed).toBe(scroll.clamped);
+        expected.tabs.find((tab) => tab.id === active.id).scrollTop =
+          scroll.clamped;
+        // Refresh advances root recency; every unread baseline stays exact.
+        for (const [key, root] of Object.entries(expected.seenRoots ?? {})) {
+          const reloaded = actual.seenRoots?.[key];
+          expect(reloaded).toBeDefined();
+          expect(
+            Number.isFinite(reloaded.touchedAt) &&
+              reloaded.touchedAt >= root.touchedAt,
+          ).toBe(true);
+          reloaded.touchedAt = root.touchedAt;
+        }
+        expect(actual).toEqual(expected);
+      }
       expect(await page.evaluate(() => window.canopy.loadWorkspace())).toEqual(
         workspace,
       );

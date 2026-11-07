@@ -1,3 +1,4 @@
+import { workspaceError } from './workspace-error';
 import { flushSync } from 'react-dom';
 import { WorkspaceClose } from './workspace-close';
 import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
@@ -1521,7 +1522,7 @@ export function App() {
       .catch((error) => {
         if (!live) return;
         workspaceLoaded.current = false;
-        const message = error instanceof Error ? error.message : String(error);
+        const message = workspaceError(error);
         setWorkspaceLoadError(message);
         setErrors((value) => ({ ...value, app: message }));
       })
@@ -1589,7 +1590,7 @@ export function App() {
       void saveWorkspace(workspace).catch((error) => {
         setErrors((value) => ({
           ...value,
-          workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
+          workspace: `Couldn’t save workspace: ${workspaceError(error)}`,
         }));
       });
     }, 180);
@@ -1613,6 +1614,16 @@ export function App() {
             clearTimeout(scrollSaveTimer.current);
             await workspaceClose.current.drain();
             workspaceClose.current.assertOwner(closeAttempt);
+          }
+          if (!workspaceLoaded.current) {
+            setErrors((value) => ({
+              ...value,
+              workspace:
+                'Couldn’t save workspace: Workspace has not loaded; the existing workspace was preserved.',
+            }));
+            return {
+              initializationError: `Workspace could not load: ${workspaceLoadError ?? 'Initialization did not finish.'}`,
+            };
           }
           // A change made while an earlier write is in flight must also persist.
           let saved: Workspace;
@@ -1644,7 +1655,7 @@ export function App() {
           )
             setErrors((value) => ({
               ...value,
-              workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
+              workspace: `Couldn’t save workspace: ${workspaceError(error)}`,
             }));
           throw error;
         }
@@ -4299,6 +4310,9 @@ export function App() {
       </aside>
 
       <main className="main">
+        {workspaceLoadError !== null && (
+          <WorkspaceLoadRecovery error={workspaceLoadError} />
+        )}
         <RefreshStatus
           message={refreshAnnouncement}
           owner={refreshOwner}
@@ -6362,9 +6376,6 @@ export function App() {
           setDialog('settings');
         }}
       />
-      {workspaceLoadError !== null && (
-        <WorkspaceLoadRecovery error={workspaceLoadError} />
-      )}
       {dialog === 'settings' && (
         <Dialog title="Settings" onClose={() => setDialog(null)} initialFocus>
           <Settings
@@ -9300,33 +9311,42 @@ export function WorkspaceLoadRecovery({ error }: { error: string }) {
           initialFocus
           onClose={() => setOpen(false)}
         >
-          <p>{error}</p>
-          <p>
-            Changes made since workspace loading failed have not been saved.
-            Reloading will discard those changes. Your saved workspace will be
-            kept.
-          </p>
-          {reloadError && <p role="alert">{reloadError}</p>}
-          <div className="dialog-footer">
-            <button onClick={() => setOpen(false)}>Keep open</button>
-            <button
-              disabled={reloading}
-              onClick={async () => {
-                setReloading(true);
-                setReloadError('');
-                try {
-                  await window.canopy.reloadWorkspace();
-                } catch (reason) {
-                  setReloadError(
-                    `Couldn’t reload workspace: ${reason instanceof Error ? reason.message : String(reason)}`,
-                  );
-                } finally {
-                  setReloading(false);
-                }
-              }}
-            >
-              Reload workspace
-            </button>
+          <div className="workspace-recovery-dialog">
+            <p className="dialog-error">{workspaceError(error)}</p>
+            <p className="dialog-note">
+              Changes made since workspace loading failed have not been saved.
+              Reloading will discard those changes. Your saved workspace will be
+              kept.
+            </p>
+            {reloadError && (
+              <p role="alert" className="dialog-error">
+                {reloadError}
+              </p>
+            )}
+            <div className="dialog-footer">
+              <button className="secondary" onClick={() => setOpen(false)}>
+                Keep open
+              </button>
+              <button
+                className="primary"
+                disabled={reloading}
+                onClick={async () => {
+                  setReloading(true);
+                  setReloadError('');
+                  try {
+                    await window.canopy.reloadWorkspace();
+                  } catch (reason) {
+                    setReloadError(
+                      `Couldn’t reload workspace: ${workspaceError(reason)}`,
+                    );
+                  } finally {
+                    setReloading(false);
+                  }
+                }}
+              >
+                Reload workspace
+              </button>
+            </div>
           </div>
         </Dialog>
       )}
@@ -9518,7 +9538,7 @@ function Welcome({
         {error && (
           <div className="welcome-error" role="alert">
             <AlertCircle size={15} />
-            <span>{error} Open Setup help for connection recovery steps.</span>
+            <span>{error}</span>
           </div>
         )}
         <div className="welcome-actions">

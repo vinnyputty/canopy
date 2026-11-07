@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CanopyAPI } from '../shared/types';
-let flushHandler: ((attempt?: number) => Promise<void>) | undefined;
+import type { CanopyAPI, WorkspaceFlushFailure } from '../shared/types';
+let flushHandler:
+  ((attempt?: number) => Promise<void | WorkspaceFlushFailure>) | undefined;
 let releaseHandler: ((attempt: number) => void) | undefined;
 let closeAttempt: number | undefined;
 let releasedThrough = 0;
@@ -76,7 +77,10 @@ const api: CanopyAPI = {
       closeAttempt = attempt;
     }
     if (!flushHandler) throw new Error('Workspace is not ready to save.');
-    await flushHandler(attempt);
+    const result = await flushHandler(attempt);
+    if (result && attempt === undefined)
+      throw new Error(result.initializationError);
+    return result;
   },
   diagnostics: () => ipcRenderer.invoke('canopy:diagnostics'),
   exportDiagnostics: (reviewed) =>

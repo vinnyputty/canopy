@@ -110,6 +110,8 @@ test('held import and reload reject old-renderer saves and preserve actual impor
         result = node.arguments[1];
       if (ts.isPropertyAssignment(node) && node.name.getText(mainAst) === name)
         result = node.initializer;
+      if (ts.isClassDeclaration(node) && node.name?.text === name)
+        result = node;
       ts.forEachChild(node, visit);
     }
     visit(mainAst);
@@ -124,6 +126,7 @@ import {EventEmitter} from 'node:events';
 import {withScrollPositions} from ${importPath(root + '/src/renderer/scroll-position')};
 import {Storage} from ${importPath(root + '/src/main/storage')};
 import {WorkspaceClose} from ${importPath(root + '/src/renderer/workspace-close')};
+import {workspaceError} from ${importPath(root + '/src/renderer/workspace-error')};
 import {WorkspaceTransfer} from ${importPath(root + '/src/main/workspace-transfer')};
 import {createBackup} from ${importPath(root + '/src/shared/workspace-backup')};
 import {recoverWorkspaceViews} from ${importPath(root + '/src/shared/views')};
@@ -137,6 +140,8 @@ const bytes=()=>fs.readFile(${JSON.stringify(join(directory, 'workspace.json'))}
 const persisted=value=>JSON.parse(JSON.stringify(value));
 const workspaceRef={current:baseline},pendingWorkspaceSave={current:Promise.resolve()},workspaceSaveTimer={current:null},workspaceTransferBusy={current:false},workspaceTransferCommitted={current:false},workspaceLoaded={current:true},appearanceSaving={current:false},demoResetting={current:false};
 const workspaceClose={current:new WorkspaceClose()};
+const workspaceLoadError='Fixture initial read failed';
+${mainCallback('WorkspaceLoadFailure')}
 const scrollPositions={current:new Map()};
 let reportedErrors={};const setErrors=update=>reportedErrors=update(reportedErrors);
 let active=false,dialog='backup',reload;
@@ -151,9 +156,9 @@ const text=value=>{assert.equal(typeof value,'string');return value;};
 const applyWorkspaceImport=${mainCallback('applyWorkspaceImport')},rollbackWorkspaceImport=${mainCallback('rollbackWorkspaceImport')};
 const saveWorkspace=${save.arguments[0].getText(ast)},onApply=${attribute(panel.attributes, 'onApply')},flush=${attribute(panel.attributes, 'flush')},onSave=${attribute(appearance.attributes, 'onSave')},close=${attribute(backupDialog.attributes, 'onClose')},onKey=${onKey.initializer!.getText(ast)};
 const workspaceCloseFlush=${closeFlush.arguments[0].getText(ast)};
-async function attemptMainQuit({unavailable=false,onPending=async()=>{},consent=0}={}) {
+async function attemptMainQuit({unavailable=false,onPending=async()=>{},consent=0,initialFailure=false}={}) {
   let closeSequence=0,closing=false,closingWindow,closeApproved=false,quitting=true,handoffCanceled=false,closed=false,quitCalls=0,prevented=false;
-  let expireClose,prompts=0;
+  let expireClose,prompts=0;const warnings=[];
   const setTimeout=(callback,ms)=>{const timer=globalThis.setTimeout(callback,ms);if(ms===15000)expireClose=()=>{clearTimeout(timer);callback();};return timer;};
   let complete;const done=new Promise(resolve=>complete=resolve),errors=[];
   const console={error:(...args)=>{errors.push(args);complete();}};
@@ -161,7 +166,7 @@ async function attemptMainQuit({unavailable=false,onPending=async()=>{},consent=
   created.isDestroyed=()=>closed;created.destroy=()=>{closed=true;created.emit('closed');complete();};
   const rendererUnavailable=unavailable,rendererLoaded=Promise.resolve();
   const windowStateSaver={flush:async()=>{},resume(){}},handoffs={pause(){},resume(){}},saveBounds=()=>{};
-  const dialog={showMessageBox:async()=>{if(!unavailable)throw Error('Healthy renderer must not require abandonment consent');prompts++;return {response:consent};}};
+  const dialog={showMessageBox:async(_window,options)=>{warnings.push(options);if(!unavailable&&!initialFailure)throw Error('Healthy renderer must not require abandonment consent');prompts++;return {response:consent};}};
   const app={quit:()=>{quitCalls++;created.close();}};
   const flushRenderer=${mainCallback('flushRenderer')};
   const flushBeforeClose=${mainCallback('flushBeforeClose')};
@@ -172,18 +177,18 @@ async function attemptMainQuit({unavailable=false,onPending=async()=>{},consent=
   let timeout;
   try {await Promise.race([done,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('Main close did not settle')),5000);})]);}
   finally {clearTimeout(timeout);}
-  return {closed,quitCalls,prevented,errors,prompts};
+  return {closed,quitCalls,prevented,errors,prompts,warnings};
 }
 const backup=createBackup({...baseline,theme:'light',tabs:[],activeTabId:null,savedViews:[],activeSavedViewId:null},backupConnections);
 const mapping=Object.fromEntries(backupConnections.map(c=>[c.id,c.id]));
 await storage.write('workspace',baseline);
 workspaceLoaded.current=false;workspaceRef.current={...baseline,theme:'system'};
-await assert.rejects(workspaceCloseFlush(),/workspace.*load/i);
+assert.match((await workspaceCloseFlush()).initializationError,/workspace.*load/i);
 assert.match(reportedErrors.workspace,/Couldn’t save workspace: Workspace has not loaded/);
 assert.equal(await bytes(),JSON.stringify(baseline));
 await assert.rejects(onSave('system','default'),/workspace.*load/i);
 assert.equal(await bytes(),JSON.stringify(baseline));
-const unloadedClose=await attemptMainQuit();assert.equal(unloadedClose.closed,false);assert.equal(unloadedClose.quitCalls,0);assert.match(String(unloadedClose.errors[0]?.[1]),/workspace.*load/i);assert.equal(await bytes(),JSON.stringify(baseline));
+const unloadedClose=await attemptMainQuit({initialFailure:true});assert.equal(unloadedClose.closed,false);assert.equal(unloadedClose.quitCalls,0);assert.match(String(unloadedClose.errors[0]?.[1]),/workspace.*load/i);assert.equal(await bytes(),JSON.stringify(baseline));
 workspaceLoaded.current=true;workspaceRef.current=baseline;const loadedRetry=await attemptMainQuit();assert.equal(loadedRetry.closed,true);assert.deepEqual(loadedRetry.errors,[]);
 
 await fs.writeFile(${JSON.stringify(join(directory, 'credentials.json'))},'FAKE SAMPLE SENTINEL');
@@ -295,6 +300,21 @@ assert.equal(failedClose.closed,false);assert.equal(failedClose.prompts,1);asser
 assert.equal((await fs.readdir(${JSON.stringify(directory)})).some(name=>name.endsWith('.tmp')),false);
 const failedTransferRetry=await attemptMainQuit({unavailable:true});assert.equal(failedTransferRetry.closed,true);assert.equal(failedTransferRetry.prompts,0);
 console.log('PASS unavailable renderer warns on failed transfer, preserves original bytes, cleans staging, and retries close');
+const unreadableBytes='{unreadable saved workspace fixture';
+await fs.writeFile(${JSON.stringify(join(directory, 'workspace.json'))},unreadableBytes);
+workspaceLoaded.current=false;
+for(const choice of [0,0,1]){
+  await assert.rejects(storage.read('workspace'),/Could not read saved workspace/);
+  await assert.rejects(saveWorkspace(baseline),/not loaded/);
+  const result=await attemptMainQuit({initialFailure:true,consent:choice});
+  assert.equal(result.closed,choice===1);assert.equal(result.prompts,1);assert.equal(result.quitCalls,choice===1?1:0);
+  assert.equal(await bytes(),unreadableBytes);
+  assert.equal(result.warnings[0].defaultId,0);assert.equal(result.warnings[0].cancelId,0);
+  assert.match(result.warnings[0].detail,/saved workspace will be left unchanged/);
+  assert.doesNotMatch(result.warnings[0].detail,/renderer is unavailable/i);
+}
+console.log('PASS repeated unreadable file keeps exact bytes through Keep open, cancel and explicit Close anyway');
+
 
 
 `;

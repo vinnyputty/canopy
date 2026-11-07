@@ -1,3 +1,5 @@
+import { workspaceError } from '../src/renderer/workspace-error';
+import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import ts from 'typescript';
@@ -16,7 +18,7 @@ import { setImmediate as tick } from 'node:timers/promises';
 import React, { act } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
-import { WorkspaceLoadRecovery } from '../src/renderer/App';
+import { App, WorkspaceLoadRecovery } from '../src/renderer/App';
 import { gate, rendererFixture } from './fixtures/workspace-close';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
@@ -241,7 +243,10 @@ async function recoveryFixture() {
       canopy: {
         reloadWorkspace: async () => {
           reloads++;
-          if (fail) throw Error('Storage remains unavailable');
+          if (fail)
+            throw Error(
+              "Error invoking remote method 'canopy:reloadWorkspace': Error: Storage remains unavailable",
+            );
         },
       },
     }),
@@ -659,3 +664,150 @@ test('unsubscribed flush registration stops release notifications as well as sav
   assert.equal(h.writes.length, 0);
   d.window.close();
 });
+
+test('production App recovery occupies the main content column and uses existing dialog styles with clean storage reasons', async () => {
+  const f = await recoveryFixture();
+  let flush!: (attempt?: number) => Promise<unknown>;
+  let readFails = true;
+  const raw =
+    "Error invoking remote method 'canopy:loadWorkspace': Error: Could not read saved workspace.";
+  const api = new Proxy(
+    {
+      connections: async () => [],
+      loadWorkspace: async () => {
+        if (readFails) throw Error(raw);
+        return null;
+      },
+      saveWorkspace: async () => {
+        throw Error(
+          "Error invoking remote method 'canopy:saveWorkspace': Error: Could not write saved workspace.",
+        );
+      },
+      demoMode: async () => false,
+      demoTimeScale: async () => 1,
+      onWorkspaceFlush: (handler: typeof flush) => {
+        flush = handler;
+        return () => {};
+      },
+    },
+    {
+      get: (target, key) =>
+        key in target
+          ? (target as any)[key]
+          : String(key).startsWith('on')
+            ? () => () => {}
+            : async () => undefined,
+    },
+  );
+  Object.assign(f.d.window, { canopy: api });
+  const style = f.d.window.document.createElement('style');
+  style.textContent = readFileSync('src/renderer/styles.css', 'utf8');
+  f.d.window.document.head.append(style);
+  try {
+    await act(async () => f.root.render(React.createElement(App)));
+    const banner = () =>
+      [...f.d.window.document.querySelectorAll('.error-banner')].find(
+        (node: any) =>
+          node.textContent.includes('Your saved workspace has been kept.'),
+      )! as Element;
+    assert.equal(
+      banner().parentElement!.tagName,
+      'MAIN',
+      'recovery must not be auto-placed into the sidebar grid column',
+    );
+    const dialog = f.d.window.document.querySelector('[role=dialog]')!;
+    const content = dialog.querySelector('.workspace-recovery-dialog')!;
+    assert.ok(content);
+    assert.equal(f.d.window.getComputedStyle(content).paddingTop, '15px');
+    assert.match(dialog.textContent!, /Could not read saved workspace/);
+    assert.doesNotMatch(dialog.textContent!, /Error invoking remote method/);
+    const keep = [...dialog.querySelectorAll('button')].find(
+      (node: any) => node.textContent === 'Keep open',
+    )! as HTMLButtonElement;
+    const reload = [...dialog.querySelectorAll('button')].find(
+      (node: any) => node.textContent === 'Reload workspace',
+    )!;
+    assert.ok(keep.classList.contains('secondary'));
+    assert.ok(reload.classList.contains('primary'));
+    if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
+      await writeFile(
+        join(
+          process.env.CANOPY_CLOSE_EVIDENCE_DIR,
+          'rendered-recovery-dialog.html',
+        ),
+        f.d.window.document.querySelector('#host')!.innerHTML,
+      );
+    await act(async () => keep.click());
+    const hide = f.d.window.document.querySelector(
+      '[aria-label="Hide sidebar"]',
+    ) as HTMLButtonElement;
+    await act(async () => hide.click());
+    assert.ok(f.d.window.document.querySelector('.app.sidebar-is-collapsed'));
+    assert.equal(
+      banner().closest('main')!.parentElement!.classList.contains('app'),
+      true,
+    );
+    await act(async () => {
+      await flush();
+    });
+    const welcome = f.d.window.document.querySelector('.welcome-error')!;
+    assert.match(welcome.textContent!, /Workspace has not loaded/);
+    assert.doesNotMatch(
+      welcome.textContent!,
+      /connection recovery|Error invoking remote method/,
+    );
+    assert.ok(
+      f.d.window.document.querySelector('.welcome-help'),
+      'the explicit help actions remain available',
+    );
+    readFails = false;
+    await act(async () =>
+      f.root.render(React.createElement(App, { key: 'reloaded' })),
+    );
+    assert.equal(
+      f.d.window.document.querySelector('[role=dialog]'),
+      null,
+      'successful loading removes initialization recovery',
+    );
+    await act(async () => {
+      await assert.rejects(flush(), /Could not write saved workspace/);
+    });
+    const savedError = f.d.window.document.querySelector('.welcome-error')!;
+    assert.match(
+      savedError.textContent!,
+      /Couldn’t save workspace: Could not write saved workspace/,
+    );
+    assert.doesNotMatch(
+      savedError.textContent!,
+      /Error invoking remote method|connection recovery/,
+    );
+
+    if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
+      await writeFile(
+        join(
+          process.env.CANOPY_CLOSE_EVIDENCE_DIR,
+          'rendered-recovery-layout.html',
+        ),
+        f.d.window.document.querySelector('#host')!.innerHTML,
+      );
+  } finally {
+    await f.close();
+  }
+});
+
+for (const method of ['loadWorkspace', 'saveWorkspace', 'reloadWorkspace'])
+  test(`workspace reason formatting removes only the confirmed ${method} envelope`, () => {
+    const prefix = `Error invoking remote method 'canopy:${method}': Error: `;
+    for (const value of [
+      prefix + 'Saved file is unreadable.',
+      Error(prefix + 'Saved file is unreadable.'),
+    ])
+      assert.equal(workspaceError(value), 'Saved file is unreadable.');
+    for (const value of [
+      prefix,
+      'Provider context: ' + prefix + 'reason',
+      `Error invoking remote method 'canopy:${method}': TypeError: reason`,
+      "Error invoking remote method 'canopy:author': Error: reason",
+    ])
+      assert.equal(workspaceError(value), value);
+  });

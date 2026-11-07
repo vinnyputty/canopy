@@ -1,3 +1,4 @@
+import { workspaceError } from '../src/renderer/workspace-error';
 import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -75,6 +76,7 @@ async function fixture(source = setter) {
   let update!: React.Dispatch<React.SetStateAction<Workspace>>;
   let save!: (value: Workspace) => Promise<void>;
   const context = {
+    workspaceError,
     useCallback: React.useCallback,
     withScrollPositions,
     scrollPositions,

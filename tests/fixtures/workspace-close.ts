@@ -1,3 +1,8 @@
+import { workspaceError } from '../../src/renderer/workspace-error';
+import { DEFAULT_READING } from '../../src/shared/views';
+import { defaultShortcuts } from '../../src/renderer/tree';
+import { migrateViews } from '../../src/renderer/table-view';
+import { starterViews } from '../../src/renderer/saved-views';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
@@ -75,6 +80,7 @@ export function rendererFixture(
       typeof update === 'function' ? update(workspaceRef.current) : update;
   };
   const context = {
+    workspaceError,
     workspaceClose,
     workspaceRef,
     storeWorkspace,
@@ -82,6 +88,7 @@ export function rendererFixture(
     flushSync: (work: () => void) => work(),
     useCallback: (fn: unknown) => fn,
     workspaceLoaded: { current: true },
+    workspaceLoadError: null as string | null,
     workspaceTransferBusy: { current: false },
     workspaceTransferCommitted: { current: false },
     pendingWorkspaceSave: { current: Promise.resolve() },
@@ -148,6 +155,58 @@ export function rendererFixture(
     setWorkspace,
     save,
     saveAppearance,
+    initialize: async (read: () => Promise<Workspace | null>) => {
+      const effect = findNode(
+        source,
+        (node): node is ts.CallExpression =>
+          ts.isCallExpression(node) &&
+          node.expression.getText() === 'useEffect' &&
+          node.getText().includes('window.canopy.demoTimeScale()'),
+      );
+      const empty = findNode(
+        source,
+        (node): node is ts.VariableDeclaration =>
+          ts.isVariableDeclaration(node) &&
+          node.name.getText() === 'EMPTY_WORKSPACE',
+      );
+      const PLATFORM_SHORTCUTS = defaultShortcuts();
+      let done!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        done = resolve;
+      });
+      const cleanup = execute(effect.arguments[0].getText(), {
+        ...context,
+        document,
+        demoTimeScale: { current: 1 },
+        setWorkspace,
+        setReady: () => done(),
+        setWorkspaceLoadError: (message: string | null) => {
+          context.workspaceLoadError = message;
+        },
+        setDemoMode() {},
+        setConnections() {},
+        setHandoffHydrated() {},
+        PLATFORM_SHORTCUTS,
+        EMPTY_WORKSPACE: execute(`()=>(${empty.initializer!.getText()})`, {
+          PLATFORM_SHORTCUTS,
+        })(),
+        DEFAULT_READING,
+        starterViews,
+        migrateViews,
+        window: {
+          canopy: {
+            ...api,
+            connections: async () => [],
+            loadWorkspace: read,
+            demoMode: async () => false,
+            demoTimeScale: async () => 1,
+          },
+        },
+      })();
+      await ready;
+      register();
+      return cleanup as () => void;
+    },
     release: (attempt: number) =>
       ipc.emit('canopy:workspaceCloseReleased', {}, attempt),
     errors: () => errors,

@@ -1,3 +1,12 @@
+import { workspaceError } from '../src/renderer/workspace-error';
+import type { Workspace, TreeSnapshot } from '../src/shared/types';
+import { DemoProvider } from '../src/main/demo-provider';
+import { demoWorkspace } from '../src/main/demo';
+import { DEFAULT_READING } from '../src/shared/views';
+import { defaultShortcuts } from '../src/renderer/tree';
+import { migrateViews } from '../src/renderer/table-view';
+import { starterViews } from '../src/renderer/saved-views';
+import { boundRoots, seedOrExtend, seenRootKey } from '../src/renderer/seen';
 import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -270,9 +279,13 @@ const trust = findNode(
     node.getText().includes('Untrusted application window.'),
 ).getText();
 
-function restoreModel(options: Record<string, unknown> = {}) {
-  const saved = {
+function restoreModel(
+  options: Record<string, unknown> = {},
+  captured?: Workspace,
+) {
+  const saved: Workspace & { privatePayload: string } = {
     ...workspace(['CAN-100', 'CAN-106']),
+    activeTabId: null,
     theme: 'system',
     shortcuts: {},
     sidebarCollapsed: false,
@@ -284,6 +297,7 @@ function restoreModel(options: Record<string, unknown> = {}) {
       hideDone: false,
       scrollTop: 0,
     })),
+    ...captured,
   };
   saved.activeTabId = options.missingActive
     ? 'missing-active-tab'
@@ -340,7 +354,26 @@ function restoreModel(options: Record<string, unknown> = {}) {
     },
   };
   let reloads = 0,
-    rendered = structuredClone(fixture);
+    rendered: Workspace & { privatePayload: string } = structuredClone(fixture);
+  let offset = 0;
+  const viewport = {
+    get scrollTop() {
+      return offset;
+    },
+    set scrollTop(value: number) {
+      offset = Math.max(
+        0,
+        Math.min(Number(options.viewportMax ?? 1000), value),
+      );
+    },
+  };
+  const document = {
+    querySelector: (selector: string) => {
+      assert.equal(selector, '.tree-scroll');
+      return options.missingViewport ? null : viewport;
+    },
+  };
+  let refreshedAt: number | undefined;
   const window = {
     canopy: {
       saveWorkspace: (value: unknown) =>
@@ -355,7 +388,7 @@ function restoreModel(options: Record<string, unknown> = {}) {
   };
   const page = {
     evaluate: (callback: (...args: any[]) => unknown, value: unknown) =>
-      execute(`(${callback})`, { window })(value),
+      execute(`(${callback})`, { window, document })(value),
     reload: async () => {
       reloads++;
       // A pending renderer save must still write the captured snapshot here.
@@ -368,11 +401,78 @@ function restoreModel(options: Record<string, unknown> = {}) {
         saved,
         'Save guard must own persistence through reload',
       );
+      if (options.productionReload) {
+        rendered = (await hydrateWorkspace(rendered)) as typeof saved;
+        const active = rendered.tabs.find(
+          (tab) => tab.id === rendered.activeTabId,
+        )!;
+        const confirmed = await new DemoProvider().tree(active.rootKey);
+        confirmed.fetchedAt = 1794020324655;
+        refreshedAt = confirmed.fetchedAt;
+        const refresh = findNode(
+          rendererAst,
+          (node): node is ts.CallExpression =>
+            ts.isCallExpression(node) &&
+            node.expression.getText() === 'setWorkspace' &&
+            node.arguments[0]
+              ?.getText()
+              .includes('[seenKey]: seedOrExtend(') === true,
+        );
+        rendered = execute(refresh.arguments[0].getText(), {
+          tab: active,
+          confirmed,
+          boundRoots,
+          seedOrExtend,
+          seenRootKey,
+        })(rendered);
+        execute(callbackOf(rendererAst, 'restoreScroll'), {
+          workspaceClose: { current: new WorkspaceClose() },
+          scrollRef: { current: viewport },
+          scrollPositions: { current: new Map() },
+          setWorkspace: (
+            update: (current: typeof rendered) => typeof rendered,
+          ) => {
+            rendered = update(rendered);
+          },
+        })(active);
+      } else
+        viewport.scrollTop =
+          rendered.tabs.find((tab) => tab.id === rendered.activeTabId)
+            ?.scrollTop ?? 0;
+      if (options.wrongViewportScroll) viewport.scrollTop = 0;
+      if (options.lostValidScroll) {
+        viewport.scrollTop = 0;
+        rendered.tabs.find(
+          (tab) => tab.id === rendered.activeTabId,
+        )!.scrollTop = 0;
+      }
+      if (options.wrongInactiveScroll)
+        rendered.tabs.find(
+          (tab) => tab.id !== rendered.activeTabId,
+        )!.scrollTop = 0;
+      if (options.wrongSelectedKey) rendered.tabs[0].selectedKey = 'CAN-101';
+      if (options.wrongSavedView)
+        rendered.savedViews![0].name = 'Corrupted saved view';
+      if (options.wrongActiveSavedView)
+        rendered.activeSavedViewId = 'assigned-to-me';
+      if (options.wrongSeenBaseline)
+        Object.values(rendered.seenRoots!)[0].issues['CAN-100'].seenAt++;
+      if (options.wrongTouchedAt)
+        Object.values(rendered.seenRoots!)[0].touchedAt = 1;
+      if (options.invalidTouchedAt)
+        Object.values(rendered.seenRoots!)[0].touchedAt = Number.NaN;
+      if (options.wrongSubmittedScroll)
+        rendered.tabs.find(
+          (tab) => tab.id === rendered.activeTabId,
+        )!.scrollTop = 0;
       if (options.wrongOrder) rendered.tabs.reverse();
       if (options.wrongId) rendered.tabs[0].id = 'foreign-tab';
       if (options.wrongRoot) rendered.tabs[0].rootKey = 'CAN-200';
       if (options.wrongCount) rendered.tabs.pop();
-      if (options.wrongSelection) rendered.activeTabId = rendered.tabs[0].id;
+      if (options.wrongSelection)
+        rendered.activeTabId =
+          rendered.tabs.find((tab) => tab.id !== saved.activeTabId)?.id ??
+          'foreign-active';
       if (options.wrongReading)
         Object.assign(rendered, { reading: { textSize: 'large' } });
       if (options.wrongRootViews)
@@ -407,6 +507,7 @@ function restoreModel(options: Record<string, unknown> = {}) {
         expected,
       ),
     toBeDefined: () => assert.notEqual(value, undefined),
+    toBe: (expected: unknown) => assert.equal(value, expected),
     toBeVisible: async () => {
       const active = rendered.tabs.find((t) => t.id === rendered.activeTabId);
       assert.equal(value.role, 'tree');
@@ -458,6 +559,9 @@ function restoreModel(options: Record<string, unknown> = {}) {
     get reloads() {
       return reloads;
     },
+    rendered: () => rendered,
+    offset: () => offset,
+    refreshedAt: () => refreshedAt,
   };
 }
 
@@ -592,8 +696,16 @@ function lifecycle(
     ...workspace(['CAN-100', 'CAN-106']),
     activeTabId: 'can-106',
     tabs: [
-      { ...tab('CAN-100'), view: { filters: { assignee: 'alex' } } },
-      { ...tab('CAN-106'), view: { hideDone: true, scrollTop: 124 } },
+      {
+        ...tab('CAN-100'),
+        scrollTop: 0,
+        view: { filters: { assignee: 'alex' } },
+      },
+      {
+        ...tab('CAN-106'),
+        scrollTop: 0,
+        view: { hideDone: true, scrollTop: 124 },
+      },
     ],
     rootViews: { second: { hideDone: true, scrollTop: 124 } },
   };
@@ -642,6 +754,7 @@ function lifecycle(
     workspaceSaveTimer: { current: 42 as number | null },
   };
   const context = {
+    workspaceError,
     ...refs,
     demoResetting: { current: false },
     pendingWorkspaceSave: { current: Promise.resolve() },
@@ -670,6 +783,7 @@ function lifecycle(
       },
     },
     document: {
+      querySelector: () => ({ scrollTop: 0 }),
       querySelectorAll: () =>
         rendered.tabs.map((item) => ({
           querySelector: () => ({ textContent: item.rootKey }),
@@ -728,6 +842,7 @@ function lifecycle(
     {
       expect: (locator: { role: string; name?: string; index?: number }) => ({
         toBeDefined: () => assert.notEqual(locator, undefined),
+        toBe: (value: unknown) => assert.equal(locator, value),
         toHaveText: async (roots: string[]) =>
           assert.deepEqual(
             rendered.tabs.map((item) => item.rootKey),
@@ -1035,3 +1150,182 @@ test('restoration also completes when fixture installation never created handler
   assert.deepEqual(h.handlers, h.originals);
   assert.equal(h.auditPresent(), false);
 });
+
+function callbackOf(ast: ts.SourceFile, name: string) {
+  const node = findNode(
+    ast,
+    (node): node is ts.VariableDeclaration =>
+      ts.isVariableDeclaration(node) && node.name.getText() === name,
+  );
+  return (node.initializer as ts.CallExpression).arguments[0].getText();
+}
+async function hydrateWorkspace(saved: Workspace): Promise<Workspace> {
+  let hydrated = saved,
+    error: unknown,
+    done!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    done = resolve;
+  });
+  const initialization = findNode(
+    rendererAst,
+    (node): node is ts.CallExpression =>
+      ts.isCallExpression(node) &&
+      node.expression.getText() === 'useEffect' &&
+      node.getText().includes('window.canopy.demoTimeScale()'),
+  );
+  const empty = findNode(
+    rendererAst,
+    (node): node is ts.VariableDeclaration =>
+      ts.isVariableDeclaration(node) &&
+      node.name.getText() === 'EMPTY_WORKSPACE',
+  );
+  const PLATFORM_SHORTCUTS = defaultShortcuts();
+  const EMPTY_WORKSPACE = execute(`()=>(${empty.initializer!.getText()})`, {
+    PLATFORM_SHORTCUTS,
+  })();
+  const cleanup = execute(initialization.arguments[0].getText(), {
+    workspaceLoaded: { current: false },
+    workspaceError,
+    demoTimeScale: { current: 1 },
+    document: { title: '' },
+    setWorkspace: (value: Workspace) => {
+      hydrated = value;
+    },
+    setWorkspaceLoadError: (value: unknown) => {
+      error = value;
+    },
+    setErrors() {},
+    setReady: () => done(),
+    setDemoMode() {},
+    setConnections() {},
+    setHandoffHydrated() {},
+    EMPTY_WORKSPACE,
+    PLATFORM_SHORTCUTS,
+    DEFAULT_READING,
+    starterViews,
+    migrateViews,
+    window: {
+      canopy: {
+        connections: async () => [{ id: 'demo' }],
+        loadWorkspace: async () => saved,
+        demoMode: async () => false,
+        demoTimeScale: async () => 1,
+      },
+    },
+  })();
+  await ready;
+  cleanup();
+  if (error) throw Error(String(error));
+  return hydrated;
+}
+async function capturedReloadWorkspace() {
+  const provider = new DemoProvider();
+  const baseline = await provider.tree('CAN-100');
+  baseline.fetchedAt = 1794020317961;
+  const captured = await hydrateWorkspace({
+    ...structuredClone(demoWorkspace),
+    tabs: [
+      {
+        ...demoWorkspace.tabs[0],
+        id: 'captured-0',
+        selectedKey: 'CAN-110',
+        expanded: ['CAN-100'],
+        hideDone: true,
+        scrollTop: 34,
+      },
+      {
+        ...demoWorkspace.tabs[0],
+        id: 'captured-1',
+        rootKey: 'CAN-106',
+        scrollTop: 34,
+      },
+    ],
+    activeTabId: 'captured-0',
+    seenRoots: { 'demo:CAN-100': seedOrExtend(undefined, baseline) },
+  });
+  return JSON.parse(JSON.stringify(captured)) as Workspace;
+}
+
+test('reload restoration accepts production hydration, refresh metadata and an actual viewport clamp without changing its captured file', async () => {
+  const captured = await capturedReloadWorkspace();
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, viewportMax: 0 },
+    captured,
+  );
+  await model.run();
+  assert.equal(model.offset(), 0);
+  assert.equal(model.rendered().tabs[0].scrollTop, 0);
+  assert.equal(model.rendered().tabs[1].scrollTop, 34);
+  assert.equal(
+    model.rendered().seenRoots!['demo:CAN-100'].touchedAt,
+    1794020324655,
+  );
+  assert.ok(Object.hasOwn(model.rendered(), 'pinnedRoots'));
+  assert.ok(
+    Object.hasOwn(
+      model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'],
+      'commentCount',
+    ),
+  );
+  assert.deepEqual(model.store.load(), model.saved);
+  assert.equal(model.store.load().tabs[0].scrollTop, 34);
+});
+
+test('reload restoration keeps a valid scroll offset exactly', async () => {
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, viewportMax: 100 },
+    await capturedReloadWorkspace(),
+  );
+  await model.run();
+  assert.equal(model.offset(), 34);
+  assert.equal(model.rendered().tabs[0].scrollTop, 34);
+});
+for (const option of [
+  'wrongReading',
+  'wrongRootViews',
+  'wrongOrder',
+  'wrongId',
+  'wrongRoot',
+  'wrongSelection',
+  'wrongSavedView',
+  'wrongActiveSavedView',
+  'wrongSelectedKey',
+  'wrongSeenBaseline',
+  'wrongTouchedAt',
+  'invalidTouchedAt',
+  'wrongInactiveScroll',
+  'wrongSubmittedScroll',
+  'lostValidScroll',
+  'wrongViewportScroll',
+  'missingSubmission',
+  'missingViewport',
+])
+  test(`production reload restoration rejects ${option} and preserves fixture ownership`, async () => {
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        viewportMax: 100,
+        [option]: true,
+      },
+      await capturedReloadWorkspace(),
+    );
+    await assert.rejects(
+      model.run(),
+      option === 'missingViewport'
+        ? /has no scroll viewport/
+        : { code: 'ERR_ASSERTION' },
+    );
+    if (option === 'lostValidScroll' || option === 'wrongViewportScroll')
+      assert.equal(
+        model.offset(),
+        0,
+        'the assertion must restore rather than repair the observed viewport',
+      );
+    assert.equal(
+      model.handlers.get('canopy:saveWorkspace'),
+      model.originalSave,
+    );
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+    assert.deepEqual(model.store.load(), model.saved);
+  });
