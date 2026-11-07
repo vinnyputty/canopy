@@ -116,3 +116,11 @@ Move-Item -LiteralPath (Join-Path $profileDir 'workspace.close-check-backup.json
 ```
 
 Reopen and verify the latest change persisted. Close the fixture before deleting its disposable profile, and clear `CANOPY_USER_DATA` from a PowerShell session when finished.
+
+## Editing pause and failed-load recovery
+
+With the disposable fixture, hold a workspace or bounds write and request close or quit. Verify keyboard shortcuts, tab actions, settings, context menus, and direct mutation calls cannot change the paused workspace. Edits accepted before the pause, including a settings save already in progress, must survive reopening. If the save fails or reaches the existing 15-second warning, choose **Keep open** and verify editing, scroll interaction, keyboard handling, and prior focus resume. Repair the failure and retry. Release an abandoned held write after the retry starts; it must not pause input again, replace the retry's snapshot, or approve the old close.
+
+Hold backup Apply and Undo separately, make the renderer unavailable, and keep bounds persistence idle. Close must wait for the transfer or warn at the existing deadline. Check **Keep open**, successful settlement and retry, transfer failure, and explicit **Close anyway** independently.
+
+For initialization failure, preserve a backup of the disposable saved workspace and obstruct reading it before launch. Verify **Workspace could not load** offers **Reload workspace** and **Keep open**, and that the dialog discloses discarding changes made since loading failed. Keep open and Escape must preserve the document and avoid reload. Make temporary settings changes; closing must report that the workspace has not loaded and preserve the saved file. Choosing Reload workspace in the disclosed dialog is the explicit discard action. A failed retry must keep the error and original file; repair the read failure, explicitly reload again, and verify normal loaded-state saving. Compare saved bytes through the failure cases. Restore the disposable profile after verification.

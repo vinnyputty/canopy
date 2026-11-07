@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -49,6 +50,7 @@ for (const failure of [false, true]) {
       demoResetting,
       workspaceLoaded: { current: true },
       workspaceTransferBusy: { current: false },
+      workspaceClose: { current: new WorkspaceClose() },
       scrollPositions: { current: new Map() },
       withScrollPositions,
       workspaceSaveTimer,
@@ -156,6 +158,7 @@ for (const saveFails of [false, true]) {
         demoResetting: { current: false },
         workspaceLoaded: { current: true },
         workspaceTransferBusy: { current: false },
+        workspaceClose: { current: new WorkspaceClose() },
         scrollPositions: { current: new Map() },
         withScrollPositions,
         workspaceSaveTimer: { current: null as number | null },

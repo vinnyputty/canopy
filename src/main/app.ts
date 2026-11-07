@@ -298,6 +298,11 @@ async function start(
   };
   let demoLaunch: symbol | null = null;
   let savingWorkspace: Promise<void> = Promise.resolve();
+  const pendingWorkspaceTransfers = new Set<Promise<Workspace>>();
+  const trackWorkspaceTransfer = (operation: Promise<Workspace>) => {
+    pendingWorkspaceTransfers.add(operation);
+    return operation.finally(() => pendingWorkspaceTransfers.delete(operation));
+  };
   let receivedWorkspace: Workspace | undefined;
   let retryUnavailableWorkspace = false;
   let reviewedDiagnostics: string | undefined;
@@ -822,9 +827,10 @@ async function start(
       mapping: Record<string, string>,
       mode: ImportMode,
     ) => transfer.preview(backup, mapping, mode),
-    applyWorkspaceImport: (token: string) => transfer.apply(text(token)),
+    applyWorkspaceImport: (token: string) =>
+      trackWorkspaceTransfer(transfer.apply(text(token))),
     canUndoWorkspaceImport: () => transfer.canUndo(),
-    rollbackWorkspaceImport: () => transfer.rollback(),
+    rollbackWorkspaceImport: () => trackWorkspaceTransfer(transfer.rollback()),
     reloadWorkspace: () => window?.webContents.reload(),
     loadWorkspace: async () => {
       if (demoMode) return structuredClone(demoWorkspaceState);
@@ -953,6 +959,7 @@ async function start(
       (state) => storage.write('window', state),
       (error) => console.error('Could not save window state:', error),
     );
+    let closeSequence = 0;
     let closeApproved = false;
     let closing = false;
     let rendererLoaded: Promise<void>;
@@ -970,7 +977,7 @@ async function start(
       rendererUnavailable =
         created.webContents.getURL() !== pathToFileURL(html).href;
     });
-    const flushRenderer = async (signal: AbortSignal) => {
+    const flushRenderer = async (signal: AbortSignal, closeAttempt: number) => {
       if (!rendererUnavailable && !created.webContents.isCrashed()) {
         let unavailable: () => void;
         const failedLoad = (
@@ -1001,8 +1008,9 @@ async function start(
             lostRenderer,
             (async () => {
               await rendererLoaded;
+              signal.throwIfAborted();
               await created.webContents.executeJavaScript(
-                'window.canopy.flushWorkspace()',
+                `window.canopy.flushWorkspace(${closeAttempt})`,
               );
               return false;
             })(),
@@ -1027,6 +1035,8 @@ async function start(
         retryUnavailableWorkspace = true;
         throw error;
       }
+      while (pendingWorkspaceTransfers.size)
+        await Promise.all(pendingWorkspaceTransfers);
       return true;
     };
     const flushBeforeClose = async () => {
@@ -1035,11 +1045,12 @@ async function start(
       );
       let deadline: ReturnType<typeof setTimeout> | undefined;
       const attempt = new AbortController();
+      const closeAttempt = ++closeSequence;
       try {
         const [, forceClose] = await Promise.race([
           Promise.all([
             windowStateSaver.flush(),
-            flushRenderer(attempt.signal),
+            flushRenderer(attempt.signal, closeAttempt),
           ]).then(async (result) => {
             attempt.signal.throwIfAborted();
             await windowStateSaver.flush();
@@ -1052,6 +1063,11 @@ async function start(
         return forceClose;
       } catch (error) {
         attempt.abort();
+        if (!created.isDestroyed())
+          created.webContents.send(
+            'canopy:workspaceCloseReleased',
+            closeAttempt,
+          );
         if (
           error !== timedOut &&
           !rendererUnavailable &&

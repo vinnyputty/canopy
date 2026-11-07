@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
@@ -114,6 +115,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     workspaceSaveTimer,
     demoResetting,
     workspaceLoaded,
+    workspaceClose: { current: new WorkspaceClose() },
     workspaceTransferBusy: { current: false },
     workspaceRef,
     setErrors: (

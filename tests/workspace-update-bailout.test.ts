@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
@@ -82,6 +83,7 @@ async function fixture(source = setter) {
     pendingWorkspaceSave,
     workspaceLoaded: { current: true },
     workspaceTransferBusy: { current: false },
+    workspaceClose: { current: new WorkspaceClose() },
     demoResetting: { current: false },
     setErrors: () => {},
     window: {

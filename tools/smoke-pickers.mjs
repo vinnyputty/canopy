@@ -477,7 +477,10 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
           ipcMain.handle(
             channel,
             channel === 'canopy:saveWorkspace'
-              ? (event) => handler(event, saved)
+              ? (event, submitted) => {
+                  audit.submittedWorkspace = structuredClone(submitted);
+                  return handler(event, saved);
+                }
               : handler,
           );
         }
@@ -506,7 +509,16 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
       await expect(
         page.getByRole('tree', { name: `${active.rootKey} issue tree` }),
       ).toBeVisible();
+      await app.evaluate(() => {
+        if (globalThis.selfConnectionAudit)
+          delete globalThis.selfConnectionAudit.submittedWorkspace;
+      });
       await page.evaluate(() => window.canopy.flushWorkspace());
+      const submission = await app.evaluate(() => {
+        const audit = globalThis.selfConnectionAudit;
+        return audit ? { workspace: audit.submittedWorkspace } : null;
+      });
+      if (submission) expect(submission.workspace).toEqual(workspace);
       expect(await page.evaluate(() => window.canopy.loadWorkspace())).toEqual(
         workspace,
       );

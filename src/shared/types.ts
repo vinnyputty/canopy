@@ -427,9 +427,12 @@ export interface CanopyAPI {
   canUndoWorkspaceImport(): Promise<boolean>;
   reloadWorkspace(): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
-  saveWorkspace(workspace: Workspace): Promise<void>;
-  onWorkspaceFlush(handler: () => Promise<void>): void;
-  flushWorkspace(): Promise<void>;
+  saveWorkspace(workspace: Workspace, closeAttempt?: number): Promise<void>;
+  onWorkspaceFlush(
+    handler: (closeAttempt?: number) => Promise<void>,
+    release?: (closeAttempt: number) => void,
+  ): () => void;
+  flushWorkspace(closeAttempt?: number): Promise<void>;
   copyIssueLink(connectionId: string, key: string): Promise<void>;
   openIssue(connectionId: string, key: string): Promise<void>;
   openLink(url: string): Promise<void>;

@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -8,7 +9,8 @@ import { validateWorkspace } from '../src/shared/workspace-validation';
 import { execute, findNode, sourceFile } from './source-probe';
 
 const source = readFileSync(
-  new URL('../tools/smoke-pickers.mjs', import.meta.url),
+  process.env.CANOPY_SELF_CONNECTION_SOURCE ??
+    new URL('../tools/smoke-pickers.mjs', import.meta.url),
   'utf8',
 );
 const prefix = 'Self-connection workspace capture: ';
@@ -337,14 +339,17 @@ function restoreModel(options: Record<string, unknown> = {}) {
       handlers.set(key, handler);
     },
   };
-  let evaluations = 0,
-    reloads = 0,
+  let reloads = 0,
     rendered = structuredClone(fixture);
   const window = {
     canopy: {
       saveWorkspace: (value: unknown) =>
         handlers.get('canopy:saveWorkspace')!(event, value),
-      flushWorkspace: async () => {},
+      flushWorkspace: async () => {
+        if (options.missingSubmission && reloads) return;
+        await window.canopy.saveWorkspace(rendered);
+        if (options.corruptPersistence && reloads) store.save(fixture);
+      },
       loadWorkspace: () => handlers.get('canopy:loadWorkspace')!(event),
     },
   };
@@ -354,7 +359,8 @@ function restoreModel(options: Record<string, unknown> = {}) {
     reload: async () => {
       reloads++;
       // A pending renderer save must still write the captured snapshot here.
-      await window.canopy.saveWorkspace(fixture);
+      if (!options.missingSubmission)
+        await window.canopy.saveWorkspace(fixture);
       if ('reloadFailure' in options) throw options.reloadFailure;
       rendered = await window.canopy.loadWorkspace();
       assert.deepEqual(
@@ -367,7 +373,10 @@ function restoreModel(options: Record<string, unknown> = {}) {
       if (options.wrongRoot) rendered.tabs[0].rootKey = 'CAN-200';
       if (options.wrongCount) rendered.tabs.pop();
       if (options.wrongSelection) rendered.activeTabId = rendered.tabs[0].id;
-      if (options.corruptPersistence) store.save(fixture);
+      if (options.wrongReading)
+        Object.assign(rendered, { reading: { textSize: 'large' } });
+      if (options.wrongRootViews)
+        Object.assign(rendered, { rootViews: { foreign: { hideDone: true } } });
     },
     getByRole: (role: string, args?: { name: string }) => ({
       role,
@@ -410,10 +419,14 @@ function restoreModel(options: Record<string, unknown> = {}) {
   });
   const app = {
     evaluate: (callback: (...args: any[]) => unknown, value: unknown) => {
-      evaluations++;
-      if (evaluations === 3 && 'cleanupFailure' in options)
+      if (
+        callback
+          .toString()
+          .includes('delete globalThis.selfConnectionAudit;') &&
+        'cleanupFailure' in options
+      )
         throw options.cleanupFailure;
-      return execute(`(${callback})`, { globalThis: owner })(
+      return execute(`(${callback})`, { globalThis: owner, structuredClone })(
         { ipcMain },
         value,
       );
@@ -483,6 +496,9 @@ for (const option of [
   'bothSelected',
   'wrongTree',
   'corruptPersistence',
+  'wrongReading',
+  'wrongRootViews',
+  'missingSubmission',
 ])
   test(`restoration refuses ${option} and releases save ownership`, async () => {
     const m = restoreModel({ [option]: true });
@@ -535,14 +551,19 @@ const renderer = readFileSync(
   new URL('../src/renderer/App.tsx', import.meta.url),
   'utf8',
 );
-const saveStart = renderer.indexOf(
-  '    (value: Workspace, transferFlush = false) => {',
+const rendererAst = ts.createSourceFile(
+  'App.tsx',
+  renderer,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TSX,
 );
-const saveEnd = renderer.indexOf('\n    [],', saveStart);
-const flushStart =
-  renderer.indexOf('window.canopy.onWorkspaceFlush(') +
-  'window.canopy.onWorkspaceFlush('.length;
-const flushEnd = renderer.indexOf('\n    });', flushStart) + '\n    }'.length;
+const rendererFlush = findNode(
+  rendererAst,
+  (node): node is ts.CallExpression =>
+    ts.isCallExpression(node) &&
+    node.expression.getText() === 'window.canopy.onWorkspaceFlush',
+);
 
 function deferred() {
   let resolve!: () => void;
@@ -616,6 +637,7 @@ function lifecycle(
     workspaceLoaded: { current: true },
     workspaceRef: { current: rendered },
     workspaceTransferBusy: { current: false },
+    workspaceClose: { current: new WorkspaceClose() },
     workspaceTransferCommitted: { current: false },
     workspaceSaveTimer: { current: 42 as number | null },
   };
@@ -658,20 +680,19 @@ function lifecycle(
     console: { log: () => {} },
   };
   // Run the renderer's actual queue and flush callbacks against the IPC fixture.
-  const save = runInNewContext(
-    renderer
-      .slice(saveStart, saveEnd)
-      .trim()
-      .replace(/,$/, '')
-      .replace('(value: Workspace,', '(value,'),
-    context,
+  const saveNode = findNode(
+    rendererAst,
+    (node): node is ts.VariableDeclaration =>
+      ts.isVariableDeclaration(node) && node.name.getText() === 'saveWorkspace',
   );
-  const flush = runInNewContext(
-    renderer
-      .slice(flushStart, flushEnd)
-      .replace('let saved: Workspace;', 'let saved;'),
-    { ...context, saveWorkspace: save },
-  );
+  const save = execute(saveNode.initializer!.getText(), {
+    ...context,
+    useCallback: (fn: unknown) => fn,
+  });
+  const flush = execute(rendererFlush.arguments[0].getText(), {
+    ...context,
+    saveWorkspace: save,
+  });
   const main = {
     canopySmoke: {
       tree: () => ({
@@ -786,7 +807,7 @@ function lifecycle(
     getByRole: locator,
     locator: () => ({}),
   };
-  const mainContext = createContext({ ...main, ipcMain });
+  const mainContext = createContext({ ...main, ipcMain, structuredClone });
   const app = {
     evaluate: (callback: (...args: any[]) => unknown, value?: unknown) => {
       mainContext.value = value;

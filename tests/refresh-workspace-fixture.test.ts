@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -150,6 +151,8 @@ async function model(options: Record<string, unknown> = {}) {
     useCallback: (fn: unknown) => fn,
     demoResetting: { current: false },
     workspaceTransferBusy: { current: false },
+    workspaceClose: { current: new WorkspaceClose() },
+    workspaceLoaded: { current: true },
     pendingWorkspaceSave: pending,
     scrollPositions: { current: new Map() },
     withScrollPositions,
@@ -160,7 +163,6 @@ async function model(options: Record<string, unknown> = {}) {
     saveWorkspace,
     workspace: old,
     ready: true,
-    workspaceLoaded: { current: true },
     workspaceSaveTimer: { current: null },
     setErrors: () => {
       if (!options.missingHandler && !('saveFailure' in options))

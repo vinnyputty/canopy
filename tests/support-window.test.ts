@@ -1,3 +1,4 @@
+import { rendererFixture } from './fixtures/workspace-close';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -51,7 +52,10 @@ async function fixture() {
   const closeErrors: unknown[][] = [];
   const writes: { name: string; value: any }[] = [];
   const controls = {
-    flush: async () => {},
+    flush: async (_script: string) => {},
+    release: (_attempt: number) => {},
+    onClosed: () => {},
+    warning: async () => {},
     write: async (_name: string) => {},
     crashed: false,
     consent: 0,
@@ -87,12 +91,14 @@ async function fixture() {
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: '' },
       isCrashed: () => controls.crashed,
-      executeJavaScript: () => controls.flush(),
+      executeJavaScript: (script: string) => controls.flush(script),
       getURL: () => this.webContents.mainFrame.url,
       session: { setPermissionRequestHandler() {} },
       setWindowOpenHandler() {},
       send: (channel: string, state: unknown) => {
         this.messages.push(channel);
+        if (channel === 'canopy:workspaceCloseReleased')
+          controls.release(state as number);
         if (channel === 'canopy:handoff') this.handoffStates.push(state);
       },
     });
@@ -114,6 +120,7 @@ async function fixture() {
       await loadGate.wait;
     }
     destroy() {
+      controls.onClosed();
       this.destroyed = true;
       this.webContents.emit('destroyed');
       this.emit('closed');
@@ -159,6 +166,7 @@ async function fixture() {
         },
       });
       if (!prevented) {
+        controls.onClosed();
         this.destroyed = true;
         this.webContents.emit('destroyed');
         this.emit('closed');
@@ -227,6 +235,7 @@ async function fixture() {
           dialog: {
             showMessageBox: async () => {
               controls.prompts++;
+              await controls.warning();
               return { response: controls.consent };
             },
             showErrorBox: (_title: string, message: string) =>
@@ -871,4 +880,204 @@ it('an abandoned renderer completion cannot drain bounds or approve a newer clos
   );
   assert.equal(window.destroyed, true);
   assert.equal(f.controls.prompts, 1);
+});
+
+it('the final bounds gap preserves pre-pause edits and rejects later mutations until close', async () => {
+  const { JSDOM } = require('jsdom');
+  const dom = new JSDOM('<!doctype html><body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0],
+    bounds = gate();
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  f.controls.onClosed = () => {
+    assert.equal(renderer.controller.paused, true);
+  };
+  f.controls.write = async (name) => {
+    if (name === 'window') await bounds.wait;
+  };
+  renderer.setWorkspace((current: any) => ({ ...current, theme: 'light' }));
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(renderer.controller.paused, true);
+  assert.equal(dom.window.document.body.inert, true);
+  renderer.setWorkspace((current: any) => ({ ...current, theme: 'dark' }));
+  await assert.rejects(
+    renderer.api.saveWorkspace({
+      ...renderer.workspaceRef.current,
+      theme: 'dark',
+    }),
+    /closing/,
+  );
+  assert.equal(renderer.workspaceRef.current.theme, 'light');
+  bounds.release();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(
+    f.writes.filter((write) => write.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  assert.equal(f.controls.prompts, 0);
+  dom.window.close();
+});
+
+it('Keep open restores input and stale snapshot completion cannot pause or approve a retry', async () => {
+  const { JSDOM } = require('jsdom');
+  const dom = new JSDOM('<!doctype html><body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0],
+    saving = gate();
+  let first = true;
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    if (first) {
+      first = false;
+      await saving.wait;
+    }
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(renderer.controller.paused, true);
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  renderer.setWorkspace((current: any) => ({ ...current, theme: 'light' }));
+  window.close();
+  await setImmediate();
+  assert.equal(renderer.controller.owner, 2);
+  saving.release();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(
+    f.writes.filter((write) => write.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  assert.deepEqual(renderer.errors(), {});
+  dom.window.close();
+});
+
+it('a save error releases editing and permits a repaired retry', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  const releases: number[] = [];
+  f.controls.release = (attempt) => {
+    releases.push(attempt);
+    renderer.release(attempt);
+  };
+  f.controls.write = async (name) => {
+    if (name === 'workspace') throw Error('disk failure');
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  assert.match(renderer.errors().workspace, /disk failure/);
+  assert.equal(f.controls.prompts, 0);
+  assert.deepEqual(releases, [1]);
+  renderer.setWorkspace((value: any) => ({ ...value, theme: 'light' }));
+  f.controls.write = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(
+    f.writes.filter((w) => w.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  dom.window.close();
+});
+
+it('a close canceled during initial loading cannot start a pause after late load completion', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  await setImmediate();
+  let flushes = 0;
+  f.controls.flush = async () => {
+    flushes++;
+  };
+  const window = f.windows[0];
+  window.close();
+  await setImmediate();
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(flushes, 0);
+  f.releaseLoad();
+  await setImmediate();
+  assert.equal(flushes, 0);
+  window.close();
+  await setImmediate();
+  assert.equal(flushes, 1);
+  assert.equal(window.destroyed, true);
+});
+
+it('deadline cancellation releases the renderer before waiting for the native warning choice', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0],
+    saving = gate(),
+    warning = gate();
+  const renderer = rendererFixture(dom.window.document, async () => {
+    await saving.wait;
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  f.controls.warning = () => warning.wait;
+  window.close();
+  await setImmediate();
+  assert.equal(renderer.controller.paused, true);
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  saving.release();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.deepEqual(renderer.errors(), {});
+  warning.release();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  dom.window.close();
 });

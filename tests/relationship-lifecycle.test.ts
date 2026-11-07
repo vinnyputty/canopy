@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { InboxPanel } from '../src/renderer/InboxPanel';
@@ -1363,6 +1364,7 @@ for (const [checkpoint, name] of [
       .map((n) => `const ${n.getText(source)};`)
       .join('\n');
     const context: any = {
+      workspaceClose: { current: new WorkspaceClose() },
       relationshipDestination,
       organizeSidebar,
       ancestorPath,

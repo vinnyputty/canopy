@@ -1,3 +1,5 @@
+import { flushSync } from 'react-dom';
+import { WorkspaceClose } from './workspace-close';
 import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
 import { recoverTriage } from '../shared/triage';
 import { InboxPanel } from './InboxPanel';
@@ -267,12 +269,17 @@ function refreshRootKey(tab: Pick<TabState, 'connectionId' | 'rootKey'>) {
 export function App() {
   const updates = useUpdates();
   const [workspace, storeWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
+  const workspaceClose = useRef(new WorkspaceClose());
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(
+    null,
+  );
   const scrollPositions = useRef(new Map<string, number>());
   const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
   const setWorkspace = useCallback(
     (update: React.SetStateAction<Workspace>) => {
+      if (workspaceClose.current.paused) return;
       storeWorkspace((current) => {
         if (typeof update !== 'function') return update;
         const overlaid = withScrollPositions(current, scrollPositions.current);
@@ -435,16 +442,18 @@ export function App() {
   const workspaceLoaded = useRef(false);
   const connectionsRef = useRef(connections);
   const draggedTab = useRef<string | null>(null);
-  workspaceRef.current = withScrollPositions(
-    workspace,
-    scrollPositions.current,
-  );
+  if (!workspaceClose.current.paused)
+    workspaceRef.current = withScrollPositions(
+      workspace,
+      scrollPositions.current,
+    );
   connectionsRef.current = connections;
   historyRef.current = history;
   const [sidebarSession, setSidebarSession] = useState(emptySidebarSession);
   const sidebarSessionRef = useRef(sidebarSession);
   sidebarSessionRef.current = sidebarSession;
   const organize = (action: OrganizationAction) => {
+    if (workspaceClose.current.paused) return;
     const next = organizeSidebar(
       workspaceRef.current,
       sidebarSessionRef.current,
@@ -1444,6 +1453,7 @@ export function App() {
 
   useEffect(() => {
     let live = true;
+    workspaceLoaded.current = false;
     Promise.all([
       window.canopy.connections(),
       window.canopy.loadWorkspace(),
@@ -1453,7 +1463,6 @@ export function App() {
       .then(([nextConnections, saved, isDemo, timeScale]) => {
         if (!live) return;
         demoTimeScale.current = timeScale;
-        workspaceLoaded.current = true;
         setDemoMode(isDemo);
         document.title = isDemo ? 'Canopy — Demo' : 'Canopy';
         setConnections(nextConnections);
@@ -1505,14 +1514,17 @@ export function App() {
                 },
           ),
         );
+        workspaceLoaded.current = true;
+        setWorkspaceLoadError(null);
         setHandoffHydrated(true);
       })
-      .catch((error) =>
-        setErrors((value) => ({
-          ...value,
-          app: error instanceof Error ? error.message : String(error),
-        })),
-      )
+      .catch((error) => {
+        if (!live) return;
+        workspaceLoaded.current = false;
+        const message = error instanceof Error ? error.message : String(error);
+        setWorkspaceLoadError(message);
+        setErrors((value) => ({ ...value, app: message }));
+      })
       .finally(() => live && setReady(true));
     return () => {
       live = false;
@@ -1527,15 +1539,24 @@ export function App() {
   }, [workspace.theme, workspace.palette, appearancePreview]);
 
   const saveWorkspace = useCallback(
-    (value: Workspace, transferFlush = false) => {
+    (value: Workspace, transferFlush = false, closeAttempt?: number) => {
       if (demoResetting.current) return Promise.resolve();
       const allowed = () => {
+        if (!workspaceLoaded.current)
+          throw new Error(
+            'Workspace has not loaded; the existing workspace was preserved.',
+          );
         if (workspaceTransferBusy.current && !transferFlush)
           throw new Error(
             'Workspace transfer is in progress; wait for reload.',
           );
       };
       try {
+        if (
+          workspaceClose.current.paused &&
+          closeAttempt !== workspaceClose.current.owner
+        )
+          workspaceClose.current.assertWritable();
         allowed();
       } catch (error) {
         return Promise.reject(error);
@@ -1544,9 +1565,12 @@ export function App() {
         .catch(() => {})
         .then(() => {
           allowed();
+          if (closeAttempt !== undefined)
+            workspaceClose.current.assertOwner(closeAttempt);
           if (!demoResetting.current)
             return window.canopy.saveWorkspace(
               withScrollPositions(value, scrollPositions.current),
+              closeAttempt ?? workspaceClose.current.owner,
             );
         });
       pendingWorkspaceSave.current = save;
@@ -1556,10 +1580,12 @@ export function App() {
   );
 
   useEffect(() => {
-    if (!ready || !workspaceLoaded.current) return;
+    if (!ready || !workspaceLoaded.current || workspaceClose.current.paused)
+      return;
     const timer = window.setTimeout(() => {
       workspaceSaveTimer.current = null;
-      if (workspaceTransferBusy.current) return;
+      if (workspaceTransferBusy.current || workspaceClose.current.paused)
+        return;
       void saveWorkspace(workspace).catch((error) => {
         setErrors((value) => ({
           ...value,
@@ -1577,36 +1603,59 @@ export function App() {
 
   useLayoutEffect(() => {
     if (!ready) return;
-    window.canopy.onWorkspaceFlush(async () => {
-      if (!workspaceLoaded.current) return;
-      try {
-        // A change made while an earlier write is in flight must also persist.
-        let saved: Workspace;
-        do {
-          if (workspaceTransferBusy.current) {
-            if (workspaceTransferCommitted.current) return;
-            throw new Error(
-              'Workspace transfer is in progress; wait for reload.',
-            );
+    const unsubscribe = window.canopy.onWorkspaceFlush(
+      async (closeAttempt) => {
+        try {
+          if (closeAttempt !== undefined) {
+            workspaceClose.current.pause(closeAttempt, document, () => {
+              flushSync(() => storeWorkspace((current) => ({ ...current })));
+            });
+            clearTimeout(scrollSaveTimer.current);
+            await workspaceClose.current.drain();
+            workspaceClose.current.assertOwner(closeAttempt);
           }
-          if (workspaceSaveTimer.current !== null) {
-            window.clearTimeout(workspaceSaveTimer.current);
-            workspaceSaveTimer.current = null;
-          }
-          saved = workspaceRef.current;
-          await saveWorkspace(saved);
-        } while (
-          workspaceTransferBusy.current ||
-          workspaceRef.current !== saved
-        );
-      } catch (error) {
-        setErrors((value) => ({
-          ...value,
-          workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
-        }));
-        throw error;
-      }
-    });
+          // A change made while an earlier write is in flight must also persist.
+          let saved: Workspace;
+          do {
+            if (workspaceTransferBusy.current) {
+              if (workspaceTransferCommitted.current) return;
+              throw new Error(
+                'Workspace transfer is in progress; wait for reload.',
+              );
+            }
+            if (workspaceSaveTimer.current !== null) {
+              window.clearTimeout(workspaceSaveTimer.current);
+              workspaceSaveTimer.current = null;
+            }
+            if (closeAttempt !== undefined)
+              workspaceClose.current.assertOwner(closeAttempt);
+            saved = workspaceRef.current;
+            await saveWorkspace(saved, false, closeAttempt);
+            if (closeAttempt !== undefined)
+              workspaceClose.current.assertOwner(closeAttempt);
+          } while (
+            workspaceTransferBusy.current ||
+            workspaceRef.current !== saved
+          );
+        } catch (error) {
+          if (
+            closeAttempt === undefined ||
+            workspaceClose.current.owner === closeAttempt
+          )
+            setErrors((value) => ({
+              ...value,
+              workspace: `Couldn’t save workspace: ${error instanceof Error ? error.message : String(error)}`,
+            }));
+          throw error;
+        }
+      },
+      (closeAttempt) => workspaceClose.current.release(closeAttempt),
+    );
+    return () => {
+      unsubscribe();
+      if (workspaceClose.current.owner !== undefined)
+        workspaceClose.current.release(workspaceClose.current.owner);
+    };
   }, [ready, saveWorkspace]);
 
   const cancelledTrees = useRef(new Set<string>());
@@ -2076,6 +2125,7 @@ export function App() {
   }, [editor, saving, online, allRefreshTabs, refreshTab]);
 
   const restoreScroll = useCallback((tab: TabState) => {
+    if (workspaceClose.current.paused) return;
     const element = scrollRef.current;
     if (!element) return;
     const savedTop = scrollPositions.current.get(tab.id) ?? tab.scrollTop;
@@ -2118,6 +2168,7 @@ export function App() {
   }, [activeTab, Boolean(snapshot), restoreScroll]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
+    if (workspaceClose.current.paused) return;
     if (patch.scrollTop !== undefined) scrollPositions.current.delete(tabId);
     setWorkspace((current) => {
       const tab = current.tabs.find((tab) => tab.id === tabId);
@@ -2138,6 +2189,7 @@ export function App() {
   }, []);
 
   const navigate = useCallback((tab: TabState, restoring = false) => {
+    if (workspaceClose.current.paused) return;
     setInboxOpen(false);
     const current = workspaceRef.current;
     const from = current.tabs.find((item) => item.id === current.activeTabId);
@@ -2704,6 +2756,10 @@ export function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (workspaceClose.current.paused) {
+        event.preventDefault();
+        return;
+      }
       if (event.defaultPrevented) return;
       if (workspaceTransferBusy.current) {
         event.preventDefault();
@@ -5548,6 +5604,7 @@ export function App() {
                   style={tableStyle(view) as React.CSSProperties}
                   ref={scrollRef}
                   onScroll={(event) => {
+                    if (workspaceClose.current.paused) return;
                     // Placeholder/layout scrolling must not replace a saved position
                     // before the restored tree has been rendered and positioned.
                     if (
@@ -5565,6 +5622,7 @@ export function App() {
                     );
                     clearTimeout(scrollSaveTimer.current);
                     scrollSaveTimer.current = setTimeout(() => {
+                      if (workspaceClose.current.paused) return;
                       void saveWorkspace(workspaceRef.current).catch(
                         (error: unknown) => {
                           setErrors((current) => ({
@@ -6304,6 +6362,9 @@ export function App() {
           setDialog('settings');
         }}
       />
+      {workspaceLoadError !== null && (
+        <WorkspaceLoadRecovery error={workspaceLoadError} />
+      )}
       {dialog === 'settings' && (
         <Dialog title="Settings" onClose={() => setDialog(null)} initialFocus>
           <Settings
@@ -6347,6 +6408,7 @@ export function App() {
               await saveWorkspace(workspaceRef.current);
             }}
             onApply={async (operation) => {
+              workspaceClose.current.assertWritable();
               if (workspaceTransferBusy.current)
                 throw new Error(
                   'Workspace transfer is in progress; wait for reload.',
@@ -6388,35 +6450,38 @@ export function App() {
             setAppearancePreview(null);
             setDialog(null);
           }}
-          onSave={async (theme, palette) => {
-            appearanceSaving.current = true;
-            try {
-              if (workspaceSaveTimer.current !== null) {
-                window.clearTimeout(workspaceSaveTimer.current);
-                workspaceSaveTimer.current = null;
-                void saveWorkspace(workspaceRef.current).catch(() => {});
+          onSave={(theme, palette) =>
+            workspaceClose.current.track(async () => {
+              appearanceSaving.current = true;
+              try {
+                if (workspaceSaveTimer.current !== null) {
+                  window.clearTimeout(workspaceSaveTimer.current);
+                  workspaceSaveTimer.current = null;
+                  void saveWorkspace(workspaceRef.current).catch(() => {});
+                }
+                await saveWorkspace({
+                  ...workspaceRef.current,
+                  theme,
+                  palette,
+                });
+                // Closing can flush before React commits this update. Preserve
+                // other workspace changes made while the appearance write waited.
+                workspaceRef.current = {
+                  ...workspaceRef.current,
+                  theme,
+                  palette,
+                };
+                // This save was accepted before pausing; the close snapshot awaits it.
+                storeWorkspace((current) => ({ ...current, theme, palette }));
+                setAppearancePreview(null);
+                setDialog((current) =>
+                  current === 'appearance' ? null : current,
+                );
+              } finally {
+                appearanceSaving.current = false;
               }
-              await saveWorkspace({
-                ...workspaceRef.current,
-                theme,
-                palette,
-              });
-              // Closing can flush before React commits this update. Preserve
-              // other workspace changes made while the appearance write waited.
-              workspaceRef.current = {
-                ...workspaceRef.current,
-                theme,
-                palette,
-              };
-              setWorkspace((current) => ({ ...current, theme, palette }));
-              setAppearancePreview(null);
-              setDialog((current) =>
-                current === 'appearance' ? null : current,
-              );
-            } finally {
-              appearanceSaving.current = false;
-            }
-          }}
+            })
+          }
           onShortcuts={() => {
             setAppearancePreview(null);
             setDialog('shortcuts');
@@ -9214,6 +9279,58 @@ function WorkBriefDialog({
         </div>
       </div>
     </Dialog>
+  );
+}
+
+export function WorkspaceLoadRecovery({ error }: { error: string }) {
+  const [open, setOpen] = useState(true);
+  const [reloading, setReloading] = useState(false);
+  const [reloadError, setReloadError] = useState('');
+  return (
+    <>
+      <div role="alert" className="error-banner">
+        <span>
+          The workspace could not load. Your saved workspace has been kept.
+        </span>
+        <button onClick={() => setOpen(true)}>Reload workspace</button>
+      </div>
+      {open && (
+        <Dialog
+          title="Workspace could not load"
+          initialFocus
+          onClose={() => setOpen(false)}
+        >
+          <p>{error}</p>
+          <p>
+            Changes made since workspace loading failed have not been saved.
+            Reloading will discard those changes. Your saved workspace will be
+            kept.
+          </p>
+          {reloadError && <p role="alert">{reloadError}</p>}
+          <div className="dialog-footer">
+            <button onClick={() => setOpen(false)}>Keep open</button>
+            <button
+              disabled={reloading}
+              onClick={async () => {
+                setReloading(true);
+                setReloadError('');
+                try {
+                  await window.canopy.reloadWorkspace();
+                } catch (reason) {
+                  setReloadError(
+                    `Couldn’t reload workspace: ${reason instanceof Error ? reason.message : String(reason)}`,
+                  );
+                } finally {
+                  setReloading(false);
+                }
+              }}
+            >
+              Reload workspace
+            </button>
+          </div>
+        </Dialog>
+      )}
+    </>
   );
 }
 
