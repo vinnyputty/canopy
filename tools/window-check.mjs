@@ -352,6 +352,10 @@ try {
   await expect(page.getByLabel('Text size', { exact: true })).toHaveValue(
     'small',
   );
+  await page.getByLabel('Row spacing', { exact: true }).selectOption('compact');
+  await expect(page.getByLabel('Row spacing', { exact: true })).toHaveValue(
+    'compact',
+  );
   await page.getByRole('button', { name: 'Done', exact: true }).click();
   await page.evaluate(() => window.canopy.flushWorkspace());
   const expectedWorkspace = JSON.parse(
