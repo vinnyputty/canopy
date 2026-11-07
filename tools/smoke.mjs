@@ -4,6 +4,8 @@ import { auditAuthoring } from './smoke-authoring.mjs';
 import { _electron as electron, expect } from '@playwright/test';
 import { auditAccessibility } from './smoke-accessibility.mjs';
 import { auditSidebar } from './smoke-sidebar.mjs';
+import { auditCloseLifecycle } from './smoke-close-lifecycle.mjs';
+import { auditWorkspaceClose } from './smoke-close.mjs';
 import { auditRefresh } from './smoke-refresh.mjs';
 import { auditSearch } from './smoke-search.mjs';
 import { auditPalette } from './smoke-palette.mjs';
@@ -3749,6 +3751,7 @@ try {
     'aria-selected',
     'true',
   );
+  await page.evaluate(() => window.canopy.flushWorkspace());
   await waitForSavedWorkspace((saved) =>
     saved.tabs.some(
       (tab) => tab.id === saved.activeTabId && tab.rootKey === 'CAN-200',
@@ -3849,6 +3852,19 @@ try {
   await auditSidebarSample();
 
   await auditChildCreation(appPath, executablePath, env);
+  await auditWorkspaceClose({
+    launch,
+    close,
+    current: () => ({ app, page }),
+    userData,
+  });
+
+  await auditCloseLifecycle({
+    launch,
+    close,
+    current: () => ({ app, page }),
+    userData,
+  });
   await auditAuthoring(appPath, executablePath, env, authoringLifecycle);
 
   expect(pageErrors, pageErrors.map(String).join('\n')).toEqual([]);

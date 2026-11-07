@@ -84,6 +84,8 @@ let focusWindow = () => {
   focusRequested = true;
 };
 const html = join(__dirname, 'renderer/index.html');
+class WorkspaceLoadFailure extends Error {}
+
 function text(value: unknown, limit = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit)
     throw new Error('Invalid input.');
@@ -297,6 +299,14 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let savingWorkspace: Promise<void> = Promise.resolve();
+  const pendingWorkspaceTransfers = new Set<Promise<Workspace>>();
+  const trackWorkspaceTransfer = (operation: Promise<Workspace>) => {
+    pendingWorkspaceTransfers.add(operation);
+    return operation.finally(() => pendingWorkspaceTransfers.delete(operation));
+  };
+  let receivedWorkspace: Workspace | undefined;
+  let retryUnavailableWorkspace = false;
   let reviewedDiagnostics: string | undefined;
   let creatingWindow: Promise<void> | null = null;
   let supportPending = false;
@@ -819,9 +829,10 @@ async function start(
       mapping: Record<string, string>,
       mode: ImportMode,
     ) => transfer.preview(backup, mapping, mode),
-    applyWorkspaceImport: (token: string) => transfer.apply(text(token)),
+    applyWorkspaceImport: (token: string) =>
+      trackWorkspaceTransfer(transfer.apply(text(token))),
     canUndoWorkspaceImport: () => transfer.canUndo(),
-    rollbackWorkspaceImport: () => transfer.rollback(),
+    rollbackWorkspaceImport: () => trackWorkspaceTransfer(transfer.rollback()),
     reloadWorkspace: () => window?.webContents.reload(),
     loadWorkspace: async () => {
       if (demoMode) return structuredClone(demoWorkspaceState);
@@ -834,7 +845,10 @@ async function start(
         demoWorkspaceState = structuredClone(valid);
         return;
       }
-      return storage.write('workspace', valid);
+      receivedWorkspace = valid;
+      retryUnavailableWorkspace = false;
+      savingWorkspace = storage.write('workspace', valid);
+      return savingWorkspace;
     },
     copyIssueLink: (id: string, issue: string) =>
       demoMode && id === fixture?.connection.id
@@ -947,8 +961,152 @@ async function start(
       (state) => storage.write('window', state),
       (error) => console.error('Could not save window state:', error),
     );
+    let closeSequence = 0;
     let closeApproved = false;
     let closing = false;
+    let rendererLoaded: Promise<void>;
+    let rendererUnavailable = false;
+    created.webContents.on('render-process-gone', () => {
+      rendererUnavailable = true;
+    });
+    created.webContents.on(
+      'did-fail-load',
+      (_event, code, _description, _url, mainFrame) => {
+        if (mainFrame && code !== -3) rendererUnavailable = true;
+      },
+    );
+    created.webContents.on('did-finish-load', () => {
+      rendererUnavailable =
+        created.webContents.getURL() !== pathToFileURL(html).href;
+    });
+    const flushRenderer = async (signal: AbortSignal, closeAttempt: number) => {
+      if (!rendererUnavailable && !created.webContents.isCrashed()) {
+        let unavailable: () => void;
+        const failedLoad = (
+          _event: unknown,
+          code: number,
+          _description: string,
+          _url: string,
+          mainFrame: boolean,
+        ) => {
+          if (mainFrame && code !== -3) unavailable();
+        };
+        const lostRenderer = new Promise<true>((resolve) => {
+          unavailable = () => resolve(true);
+          created.webContents.once('render-process-gone', unavailable);
+          created.webContents.on('did-fail-load', failedLoad);
+        });
+        const unsubscribe = () => {
+          created.webContents.removeListener(
+            'render-process-gone',
+            unavailable!,
+          );
+          created.webContents.removeListener('did-fail-load', failedLoad);
+          signal.removeEventListener('abort', unsubscribe);
+        };
+        signal.addEventListener('abort', unsubscribe, { once: true });
+        try {
+          const lost = await Promise.race([
+            lostRenderer,
+            (async () => {
+              await rendererLoaded;
+              signal.throwIfAborted();
+              const result = await created.webContents.executeJavaScript(
+                `window.canopy.flushWorkspace(${closeAttempt})`,
+              );
+              if (result && typeof result.initializationError === 'string')
+                throw new WorkspaceLoadFailure(result.initializationError);
+              return false;
+            })(),
+          ]);
+          if (!lost) return false;
+        } catch (error) {
+          if (
+            error instanceof WorkspaceLoadFailure ||
+            (!rendererUnavailable && !created.webContents.isCrashed())
+          )
+            throw error;
+        } finally {
+          unsubscribe();
+        }
+      }
+      // Preserve writes already received when an unavailable renderer cannot
+      // supply newer state. The overall close deadline also bounds this drain.
+      if (retryUnavailableWorkspace && receivedWorkspace) {
+        retryUnavailableWorkspace = false;
+        savingWorkspace = storage.write('workspace', receivedWorkspace);
+      }
+      try {
+        await savingWorkspace;
+      } catch (error) {
+        retryUnavailableWorkspace = true;
+        throw error;
+      }
+      while (pendingWorkspaceTransfers.size)
+        await Promise.all(pendingWorkspaceTransfers);
+      return true;
+    };
+    const flushBeforeClose = async () => {
+      const timedOut = new Error(
+        'Workspace save did not finish before the close deadline.',
+      );
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const attempt = new AbortController();
+      const closeAttempt = ++closeSequence;
+      try {
+        const [, forceClose] = await Promise.race([
+          Promise.all([
+            windowStateSaver.flush(),
+            flushRenderer(attempt.signal, closeAttempt),
+          ]).then(async (result) => {
+            attempt.signal.throwIfAborted();
+            await windowStateSaver.flush();
+            return result;
+          }),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(timedOut), 15_000);
+          }),
+        ]);
+        return forceClose;
+      } catch (error) {
+        attempt.abort();
+        if (!created.isDestroyed())
+          created.webContents.send(
+            'canopy:workspaceCloseReleased',
+            closeAttempt,
+          );
+        if (
+          error !== timedOut &&
+          !(error instanceof WorkspaceLoadFailure) &&
+          !rendererUnavailable &&
+          !created.webContents.isCrashed()
+        )
+          throw error;
+        const { response } = await dialog.showMessageBox(created, {
+          type: 'warning',
+          message:
+            error instanceof WorkspaceLoadFailure
+              ? 'The workspace could not load.'
+              : error === timedOut
+                ? 'The workspace save has not finished.'
+                : 'The workspace could not be saved.',
+          detail:
+            error instanceof WorkspaceLoadFailure
+              ? `${error.message}\n\nYour saved workspace will be left unchanged. Changes made since loading failed have not been saved and will be lost if you close anyway. Keep Canopy open to repair the problem or use Reload workspace.`
+              : error === timedOut
+                ? 'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.'
+                : `${error instanceof Error ? error.message : String(error)}\n\nThe renderer is unavailable. Keep Canopy open to repair storage and retry closing; only workspace changes already received can be retried. Closing anyway abandons those changes.`,
+          buttons: ['Keep open', 'Close anyway'],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        if (response !== 1) throw error;
+        return true;
+      } finally {
+        attempt.abort();
+        clearTimeout(deadline);
+      }
+    };
     const saveBounds = () => {
       if (
         demoMode ||
@@ -983,11 +1141,30 @@ async function start(
       };
       created.once('closed', finishClosing);
       saveBounds();
-      void windowStateSaver.flush().finally(() => {
-        closeApproved = true;
-        if (quitting) app.quit();
-        else if (!created.isDestroyed()) created.close();
-      });
+      void flushBeforeClose()
+        .then((forceClose) => {
+          closeApproved = true;
+          if (forceClose) created.destroy();
+          if (quitting) app.quit();
+          else if (!created.isDestroyed()) created.close();
+        })
+        .catch((error) => {
+          closing = false;
+          quitting = false;
+          windowStateSaver.resume();
+          handoffCanceled = false;
+          handoffs.resume();
+          created.removeListener('closed', finishClosing);
+          finishClosing();
+          console.error('Could not save workspace before closing:', error);
+        });
+    });
+    created.on('query-session-end', (event) => {
+      // Windows marks forced termination as critical; that request cannot
+      // promise time to persist and must not start another blocking close.
+      if (closeApproved || event.reasons.includes('critical')) return;
+      event.preventDefault();
+      app.quit();
     });
     if (saved?.maximized) {
       // X11 must receive maximized state before mapping to retain normal bounds.
@@ -1022,8 +1199,12 @@ async function start(
         handoffs.resume(true);
       }
     });
+    rendererLoaded = created.loadFile(html).catch((error) => {
+      rendererUnavailable = true;
+      throw error;
+    });
     try {
-      await created.loadFile(html);
+      await rendererLoaded;
       initialLoad = false;
     } catch (error) {
       if (window === created) {

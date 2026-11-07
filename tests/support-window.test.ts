@@ -1,3 +1,6 @@
+import { recoverWorkspaceViews } from '../src/shared/views';
+import type { Workspace } from '../src/shared/types';
+import { rendererFixture } from './fixtures/workspace-close';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
@@ -51,8 +54,24 @@ async function fixture() {
   const closeErrors: unknown[][] = [];
   const writes: { name: string; value: any }[] = [];
   const controls = {
+    flush: async (_script: string) => {},
+    release: (_attempt: number) => {},
+    onClosed: () => {},
+    warning: async () => {},
     write: async (_name: string) => {},
+    crashed: false,
+    consent: 0,
+    prompts: 0,
+    warnings: [] as {
+      message: string;
+      detail: string;
+      buttons: string[];
+      defaultId: number;
+      cancelId: number;
+    }[],
+    readWorkspace: async (): Promise<Workspace | null> => null,
     quits: 0,
+    expireClose: () => {},
     saved: null as WindowState | null,
   };
   const app = Object.assign(new EventEmitter(), {
@@ -81,11 +100,15 @@ async function fixture() {
     handoffStates: any[] = [];
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: '' },
+      isCrashed: () => controls.crashed,
+      executeJavaScript: (script: string) => controls.flush(script),
       getURL: () => this.webContents.mainFrame.url,
       session: { setPermissionRequestHandler() {} },
       setWindowOpenHandler() {},
       send: (channel: string, state: unknown) => {
         this.messages.push(channel);
+        if (channel === 'canopy:workspaceCloseReleased')
+          controls.release(state as number);
         if (channel === 'canopy:handoff') this.handoffStates.push(state);
       },
     });
@@ -107,6 +130,7 @@ async function fixture() {
       await loadGate.wait;
     }
     destroy() {
+      controls.onClosed();
       this.destroyed = true;
       this.webContents.emit('destroyed');
       this.emit('closed');
@@ -152,6 +176,7 @@ async function fixture() {
         },
       });
       if (!prevented) {
+        controls.onClosed();
         this.destroyed = true;
         this.webContents.emit('destroyed');
         this.emit('closed');
@@ -160,6 +185,7 @@ async function fixture() {
   }
   class Storage {
     async read(name: string) {
+      if (name === 'workspace') return controls.readWorkspace();
       assert.equal(name, 'window');
       reads++;
       await readGate.wait;
@@ -183,7 +209,15 @@ async function fixture() {
     structuredClone,
     URL,
     AbortController,
-    setTimeout,
+    setTimeout: (callback: () => void, ms: number) => {
+      const timer = setTimeout(callback, ms);
+      if (ms === 15_000)
+        controls.expireClose = () => {
+          clearTimeout(timer);
+          callback();
+        };
+      return timer;
+    },
     clearTimeout,
     require(name: string) {
       if (name.startsWith('node:')) return require(name);
@@ -210,10 +244,20 @@ async function fixture() {
           },
           shell: {},
           dialog: {
+            showMessageBox: async (
+              _window: unknown,
+              options: (typeof controls.warnings)[number],
+            ) => {
+              controls.warnings.push(options);
+              controls.prompts++;
+              await controls.warning();
+              return { response: controls.consent };
+            },
             showErrorBox: (_title: string, message: string) =>
               errors.push(message),
           },
         };
+      if (name === '../shared/views') return { recoverWorkspaceViews };
       if (name === '../shared/workspace-validation')
         return { validateWorkspace };
       if (name === '../shared/support') return { supportLinks, supportUrl };
@@ -423,6 +467,181 @@ it('disposes a failed About window and retries activation with the queued reques
   assert.deepEqual(f.errors, ['Renderer load failed']);
 });
 
+it('waits for renderer and final bounds writes before duplicate-launch recreation', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const old = f.windows[0];
+  const renderer = gate();
+  f.controls.flush = () => renderer.wait;
+  const focuses = old.focused;
+  old.close();
+  f.app.emit('activate');
+  await setImmediate();
+  assert.equal(old.focused, focuses);
+  assert.equal(old.destroyed, false);
+  assert.equal(f.windows.length, 1);
+  const bounds = gate();
+  f.controls.write = async (name) => {
+    if (name === 'window') await bounds.wait;
+  };
+  old.bounds = { x: 30, y: 40, width: 1200, height: 800 };
+  old.emit('move');
+  renderer.release();
+  await setImmediate();
+  assert.equal(old.destroyed, false);
+  assert.equal(f.windows.length, 1);
+  bounds.release();
+  await setImmediate();
+  assert.equal(old.destroyed, true);
+  assert.equal(f.windows.length, 2);
+  assert.ok(f.windows[1].focused > 0);
+  assert.deepEqual(f.writes.at(-1)?.value.bounds, old.bounds);
+  assert.deepEqual(f.closeErrors, []);
+});
+
+it('a refused save releases queued focus and its close listener, then permits retry', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const initialListeners = window.listenerCount('closed');
+  const renderer = gate();
+  f.controls.flush = () => renderer.wait;
+  window.close();
+  f.app.emit('activate');
+  const focuses = window.focused;
+  renderer.reject(new Error('workspace save rejected'));
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.windows.length, 1);
+  assert.ok(window.focused > focuses);
+  assert.equal(window.listenerCount('closed'), initialListeners);
+  assert.equal(f.controls.prompts, 0);
+  assert.equal(f.closeErrors.length, 1);
+  f.controls.flush = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+});
+
+it('unavailable renderer save failures require consent and can retry received workspace', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const workspace = {
+    tabs: [],
+    theme: 'system',
+    shortcuts: {},
+    sidebarCollapsed: false,
+  };
+  f.controls.write = async (name) => {
+    if (name === 'workspace') throw new Error('disk failure');
+  };
+  await assert.rejects(
+    Promise.resolve(f.invoke(window, 'saveWorkspace', workspace)),
+    /disk failure/,
+  );
+  f.controls.crashed = true;
+  window.close();
+  f.app.emit('activate');
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 1);
+  f.controls.write = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.deepEqual(
+    f.writes.filter((write) => write.name === 'workspace').at(-1)?.value,
+    workspace,
+  );
+});
+
+it('unavailable renderer closes after explicit consent to abandon failed writes', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const workspace = {
+    tabs: [],
+    theme: 'system',
+    shortcuts: {},
+    sidebarCollapsed: false,
+  };
+  f.controls.write = async (name) => {
+    if (name === 'workspace') throw new Error('disk failure');
+  };
+  await assert.rejects(
+    Promise.resolve(f.invoke(window, 'saveWorkspace', workspace)),
+    /disk failure/,
+  );
+  f.controls.crashed = true;
+  f.controls.consent = 1;
+  window.close();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(window.destroyed, true);
+});
+
+it('close deadline refusal removes temporary renderer listeners and ignores late completion', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const renderer = gate();
+  f.controls.flush = () => renderer.wait;
+  const listeners = window.webContents.listenerCount('render-process-gone');
+  window.close();
+  await setImmediate();
+  assert.equal(
+    window.webContents.listenerCount('render-process-gone'),
+    listeners + 1,
+  );
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(
+    window.webContents.listenerCount('render-process-gone'),
+    listeners,
+  );
+  renderer.release();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  f.controls.flush = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+});
+
+it('quit waits for workspace and final bounds before approving the native close', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const renderer = gate();
+  f.controls.flush = () => renderer.wait;
+  const window = f.windows[0];
+  f.app.quit();
+  f.app.emit('activate');
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.quits, 1);
+  renderer.release();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.quits, 2);
+  assert.equal(f.windows.length, 1);
+  assert.deepEqual(f.writes.at(-1)?.value.bounds, window.bounds);
+});
+
 it('saved maximized windows receive maximize before show and retain normal bounds', async () => {
   const f = await fixture();
   f.controls.saved = {
@@ -450,4 +669,647 @@ it('saved maximized windows receive maximize before show and retain normal bound
   await setImmediate();
   assert.deepEqual(f.writes.at(-1)?.value, f.controls.saved);
   assert.equal(window.destroyed, true);
+});
+
+for (const mode of ['close', 'quit'])
+  it(`a refused ${mode} restores handoff delivery to the surviving renderer session`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    const first = f.invoke(
+      window,
+      'handoffReady',
+      '11111111-1111-4111-8111-111111111111',
+    ) as { session: string };
+    const send = (view: string) =>
+      f.app.emit('second-instance', {}, [], '/ignored', {
+        canopyMode: 'main',
+        canopyArguments: [
+          '--canopy-open',
+          `canopy://handoff/view?view=${view}`,
+        ],
+      });
+    send('old');
+    const old = window.handoffStates.at(-1).delivery;
+    const renderer = gate();
+    f.controls.flush = () => renderer.wait;
+    if (mode === 'quit') f.app.quit();
+    else window.close();
+    send('during-close');
+    await setImmediate();
+    assert.equal(window.handoffStates.at(-1).canceledId, old.id);
+    assert.equal(
+      f.invoke(window, 'handoffAck', first.session, old.id, 'opened'),
+      false,
+    );
+    assert.throws(
+      () =>
+        f.invoke(
+          window,
+          'handoffReady',
+          '11111111-1111-4111-8111-111111111111',
+        ),
+      /closing/,
+    );
+    renderer.reject(new Error('save refused quit'));
+    await setImmediate();
+    assert.equal(window.destroyed, false);
+    assert.equal(f.windows.length, 1);
+    const resumed = window.handoffStates.at(-1);
+    assert.equal(resumed.session, first.session);
+    assert.deepEqual(resumed.delivery.intent, {
+      kind: 'view',
+      view: 'during-close',
+    });
+    assert.equal(
+      f.invoke(
+        window,
+        'handoffAck',
+        resumed.session,
+        resumed.delivery.id,
+        'opened',
+      ),
+      true,
+    );
+    send('after-refusal');
+    assert.deepEqual(window.handoffStates.at(-1).delivery.intent, {
+      kind: 'view',
+      view: 'after-refusal',
+    });
+    f.app.emit('will-quit');
+    assert.throws(
+      () =>
+        f.invoke(
+          window,
+          'handoffReady',
+          '11111111-1111-4111-8111-111111111111',
+        ),
+      /closing/,
+    );
+  });
+
+it('a refused close restores bounds debouncing for the surviving window', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  f.controls.flush = async () => {
+    throw new Error('save refused');
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  const writes = f.writes.length;
+  for (let x = 1; x <= 50; x++) {
+    window.bounds.x = x;
+    window.emit('move');
+  }
+  await setImmediate();
+  assert.equal(f.writes.length, writes);
+  context.mock.timers.tick(199);
+  await setImmediate();
+  assert.equal(f.writes.length, writes);
+  context.mock.timers.tick(1);
+  await setImmediate();
+  assert.equal(f.writes.length, writes + 1);
+  assert.equal(f.writes.at(-1)?.value.bounds.x, 50);
+  f.controls.flush = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+});
+
+it('a timed-out close cannot drain bounds after Keep open restores debouncing', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const renderer = gate();
+  f.controls.flush = () => renderer.wait;
+  context.after(async () => {
+    renderer.release();
+    f.controls.flush = async () => {};
+    window.close();
+    await setImmediate();
+  });
+  window.close();
+  await setImmediate();
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(window.destroyed, false);
+  const writes = f.writes.length;
+  window.bounds.x = 73;
+  window.emit('move');
+  renderer.release();
+  await setImmediate();
+  assert.equal(
+    f.writes.length,
+    writes,
+    'abandoned close must leave the pending bounds debounce intact',
+  );
+  context.mock.timers.tick(199);
+  await setImmediate();
+  assert.equal(f.writes.length, writes);
+  context.mock.timers.tick(1);
+  await setImmediate();
+  assert.equal(f.writes.length, writes + 1);
+  assert.equal(f.writes.at(-1)?.value.bounds.x, 73);
+  window.bounds.x = 74;
+  window.emit('move');
+  await setImmediate();
+  assert.equal(
+    f.writes.length,
+    writes + 1,
+    'late renderer settlement must not leave the saver flushing',
+  );
+  context.mock.timers.tick(200);
+  await setImmediate();
+  assert.equal(f.writes.length, writes + 2);
+  assert.equal(f.writes.at(-1)?.value.bounds.x, 74);
+  assert.equal(window.destroyed, false);
+  f.controls.flush = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+});
+
+it('an abandoned renderer completion cannot drain bounds or approve a newer close', async (context) => {
+  const flush = WindowStateSaver.prototype.flush;
+  let drains = 0;
+  context.mock.method(
+    WindowStateSaver.prototype,
+    'flush',
+    function (this: WindowStateSaver) {
+      drains++;
+      return flush.call(this);
+    },
+  );
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const abandoned = gate();
+  f.controls.flush = () => abandoned.wait;
+  window.close();
+  await setImmediate();
+  assert.equal(drains, 1);
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  const current = gate();
+  context.after(async () => {
+    abandoned.release();
+    current.release();
+    await setImmediate();
+  });
+  f.controls.flush = () => current.wait;
+  window.close();
+  await setImmediate();
+  assert.equal(drains, 2);
+  const writes = f.writes.length;
+  abandoned.release();
+  await setImmediate();
+  assert.equal(drains, 2, 'only the current close owns a final bounds drain');
+  assert.equal(f.writes.length, writes);
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(f.controls.quits, 0);
+  assert.throws(
+    () =>
+      f.invoke(window, 'handoffReady', '11111111-1111-4111-8111-111111111111'),
+    /closing/,
+  );
+  current.release();
+  await setImmediate();
+  assert.equal(
+    drains,
+    3,
+    'the current close still drains final bounds after its own renderer settles',
+  );
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.prompts, 1);
+});
+
+it('the final bounds gap preserves pre-pause edits and rejects later mutations until close', async () => {
+  const { JSDOM } = require('jsdom');
+  const dom = new JSDOM('<!doctype html><body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0],
+    bounds = gate();
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  f.controls.onClosed = () => {
+    assert.equal(renderer.controller.paused, true);
+  };
+  f.controls.write = async (name) => {
+    if (name === 'window') await bounds.wait;
+  };
+  renderer.setWorkspace((current: any) => ({ ...current, theme: 'light' }));
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(renderer.controller.paused, true);
+  assert.equal(dom.window.document.body.inert, true);
+  renderer.setWorkspace((current: any) => ({ ...current, theme: 'dark' }));
+  await assert.rejects(
+    renderer.api.saveWorkspace({
+      ...renderer.workspaceRef.current,
+      theme: 'dark',
+    }),
+    /closing/,
+  );
+  assert.equal(renderer.workspaceRef.current.theme, 'light');
+  bounds.release();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(
+    f.writes.filter((write) => write.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  assert.equal(f.controls.prompts, 0);
+  dom.window.close();
+});
+
+it('Keep open restores input and stale snapshot completion cannot pause or approve a retry', async () => {
+  const { JSDOM } = require('jsdom');
+  const dom = new JSDOM('<!doctype html><body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0],
+    saving = gate();
+  let first = true;
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    if (first) {
+      first = false;
+      await saving.wait;
+    }
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(renderer.controller.paused, true);
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  renderer.setWorkspace((current: any) => ({ ...current, theme: 'light' }));
+  window.close();
+  await setImmediate();
+  assert.equal(renderer.controller.owner, 2);
+  saving.release();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(
+    f.writes.filter((write) => write.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  assert.deepEqual(renderer.errors(), {});
+  dom.window.close();
+});
+
+it('a save error releases editing and permits a repaired retry', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  const releases: number[] = [];
+  f.controls.release = (attempt) => {
+    releases.push(attempt);
+    renderer.release(attempt);
+  };
+  f.controls.write = async (name) => {
+    if (name === 'workspace') throw Error('disk failure');
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  assert.match(renderer.errors().workspace, /disk failure/);
+  assert.equal(f.controls.prompts, 0);
+  assert.deepEqual(releases, [1]);
+  renderer.setWorkspace((value: any) => ({ ...value, theme: 'light' }));
+  f.controls.write = async () => {};
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(
+    f.writes.filter((w) => w.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  dom.window.close();
+});
+
+it('a close canceled during initial loading cannot start a pause after late load completion', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  await setImmediate();
+  let flushes = 0;
+  f.controls.flush = async () => {
+    flushes++;
+  };
+  const window = f.windows[0];
+  window.close();
+  await setImmediate();
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(flushes, 0);
+  f.releaseLoad();
+  await setImmediate();
+  assert.equal(flushes, 0);
+  window.close();
+  await setImmediate();
+  assert.equal(flushes, 1);
+  assert.equal(window.destroyed, true);
+});
+
+it('deadline cancellation releases the renderer before waiting for the native warning choice', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0],
+    saving = gate(),
+    warning = gate();
+  const renderer = rendererFixture(dom.window.document, async () => {
+    await saving.wait;
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  f.controls.warning = () => warning.wait;
+  window.close();
+  await setImmediate();
+  assert.equal(renderer.controller.paused, true);
+  f.controls.expireClose();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  saving.release();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.deepEqual(renderer.errors(), {});
+  warning.release();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  dom.window.close();
+});
+
+for (const route of ['close', 'quit'])
+  it(`persistent initial read failure supports Keep open, cancel and explicit ${route} without a workspace write`, async () => {
+    const { JSDOM } = require('jsdom'),
+      dom = new JSDOM('<body><button>Edit</button></body>');
+    dom.window.document.body.inert = false;
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    let reads = 0;
+    f.controls.readWorkspace = async () => {
+      reads++;
+      throw Error(
+        "Error invoking remote method 'canopy:loadWorkspace': Error: Saved workspace is unreadable.",
+      );
+    };
+    const renderer = rendererFixture(dom.window.document, async (value) => {
+      await f.invoke(window, 'saveWorkspace', value);
+    });
+    f.controls.flush = (script) => renderer.executeScript(script);
+    f.controls.release = (attempt) => {
+      renderer.release(attempt);
+    };
+    const request = () => (route === 'quit' ? f.app.quit() : window.close());
+    let cleanup = await renderer.initialize(
+      async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+    );
+    const focus = dom.window.document.querySelector('button');
+    focus.focus();
+    for (const action of ['Keep open', 'Escape']) {
+      await assert.rejects(
+        renderer.save(renderer.workspaceRef.current),
+        /not loaded/,
+      );
+      await assert.rejects(renderer.api.flushWorkspace(), /workspace.*load/i);
+      request();
+      await setImmediate();
+      assert.equal(window.destroyed, false);
+      assert.equal(renderer.controller.paused, false);
+      assert.equal(dom.window.document.body.inert, false);
+      assert.equal(dom.window.document.activeElement, focus);
+      assert.equal(f.controls.prompts, action === 'Keep open' ? 1 : 2);
+      assert.match(
+        renderer.errors().workspace,
+        /Couldn’t save workspace: Workspace has not loaded/,
+      );
+      const prompt = f.controls.warnings.at(-1)!;
+      assert.equal(prompt.message, 'The workspace could not load.');
+      assert.deepEqual(Array.from(prompt.buttons), [
+        'Keep open',
+        'Close anyway',
+      ]);
+      assert.equal(prompt.defaultId, 0);
+      assert.equal(prompt.cancelId, 0);
+      assert.match(prompt.detail, /saved workspace will be left unchanged/);
+      assert.match(
+        prompt.detail,
+        /Changes made since loading failed have not been saved and will be lost if you close anyway/,
+      );
+      assert.doesNotMatch(
+        prompt.detail,
+        /renderer is unavailable|Error invoking remote method/i,
+      );
+      await renderer.api.reloadWorkspace();
+      assert.equal(renderer.calls.at(-1), 'canopy:reloadWorkspace');
+      cleanup();
+      cleanup = await renderer.initialize(
+        async () =>
+          (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+      );
+      assert.equal(renderer.context.workspaceLoaded.current, false, action);
+    }
+    assert.equal(reads, 3);
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+    f.controls.consent = 1;
+    request();
+    await setImmediate();
+    assert.equal(window.destroyed, true);
+    assert.equal(f.controls.prompts, 3);
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+    if (route === 'quit') assert.ok(f.controls.quits >= 2);
+    else assert.equal(f.controls.quits, 0);
+    if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
+      await import('node:fs/promises').then((fs) =>
+        fs.writeFile(
+          process.env.CANOPY_CLOSE_EVIDENCE_DIR +
+            `/initial-load-${route}-prompts.json`,
+          JSON.stringify(f.controls.warnings, null, 2) + '\n',
+        ),
+      );
+    cleanup();
+    dom.window.close();
+  });
+
+it('a kept-open initial-load failure can repair storage, reload and close normally without abandonment', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  f.controls.readWorkspace = async () => {
+    throw Error('Initial read failed');
+  };
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  let cleanup = await renderer.initialize(
+    async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+  );
+  window.close();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(window.destroyed, false);
+  const saved: Workspace = {
+    tabs: [],
+    activeTabId: null,
+    theme: 'light',
+    reading: { textSize: 'small', spacing: 'compact' },
+    shortcuts: {},
+    sidebarCollapsed: false,
+  };
+  f.controls.readWorkspace = async () => structuredClone(saved);
+  cleanup();
+  cleanup = await renderer.initialize(
+    async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+  );
+  assert.equal(renderer.context.workspaceLoaded.current, true);
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(
+    f.writes.filter((write) => write.name === 'workspace').at(-1)?.value.theme,
+    'light',
+  );
+  cleanup();
+  dom.window.close();
+});
+
+it('a loaded save error with initialization-like text retains ordinary refusal policy', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  dom.window.document.body.inert = false;
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  const renderer = rendererFixture(dom.window.document, async (value) => {
+    await f.invoke(window, 'saveWorkspace', value);
+  });
+  f.controls.flush = (script) => renderer.executeScript(script);
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  f.controls.write = async (name) => {
+    if (name === 'workspace')
+      throw Error('Workspace could not load: permission denied');
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 0);
+  assert.equal(renderer.controller.paused, false);
+  assert.equal(dom.window.document.body.inert, false);
+  assert.match(renderer.errors().workspace, /permission denied/);
+  assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
+  dom.window.close();
+});
+
+it('a reported initialization failure retains its consent requirement if renderer availability changes', async () => {
+  const { JSDOM } = require('jsdom'),
+    dom = new JSDOM('<body><button>Edit</button></body>');
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  f.controls.readWorkspace = async () => {
+    throw Error('Initial read failed');
+  };
+  const renderer = rendererFixture(dom.window.document);
+  await renderer.initialize(
+    async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+  );
+  f.controls.flush = async (script) => {
+    const result = await renderer.executeScript(script);
+    f.controls.crashed = true;
+    return result;
+  };
+  f.controls.release = (attempt) => {
+    renderer.release(attempt);
+  };
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, false);
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(f.controls.warnings[0].message, 'The workspace could not load.');
+  assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
+  dom.window.close();
 });

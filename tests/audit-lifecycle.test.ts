@@ -5,6 +5,7 @@ import childProcess, { type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, rm, access, readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -42,12 +43,121 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+      return state !== 'Z' && state !== 'X';
+    }
+    if (process.platform === 'darwin') {
+      const state = childProcess
+        .execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        .trim();
+      return state !== '' && !/^[ZX]/.test(state);
+    }
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    if (
+      (error as NodeJS.ErrnoException).code === 'ESRCH' ||
+      (process.platform === 'linux' &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT')
+    )
+      return false;
+    if (process.platform === 'darwin' && (error as any).status === 1)
+      return false;
     throw error;
   }
 };
+
+test('liveness probe distinguishes terminated processes, disappearance and probe failures', () => {
+  const source = ts.createSourceFile(
+    'audit-lifecycle.test.ts',
+    readFileSync(new URL(import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const declaration = source.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .find((entry) => entry.name.getText(source) === 'alive')!;
+  const callback = ts.transpile(declaration.initializer!.getText(source));
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    let killError: unknown;
+    let probeError: unknown;
+    let state = '';
+    let probes = 0;
+    const probe = new Function(
+      'process',
+      'readFileSync',
+      'childProcess',
+      `return (${callback.trim().replace(/;$/, '')});`,
+    )(
+      {
+        platform,
+        kill(pid: number, signal: number) {
+          assert.equal(pid, 42);
+          assert.equal(signal, 0);
+          if (killError) throw killError;
+        },
+      },
+      (file: string, encoding: string) => {
+        assert.equal(file, '/proc/42/stat');
+        assert.equal(encoding, 'utf8');
+        probes++;
+        if (probeError) throw probeError;
+        return `42 (process (with spaces)) ${state} 1 2 3`;
+      },
+      {
+        execFileSync(command: string, args: string[]) {
+          assert.equal(command, 'ps');
+          assert.deepEqual(args, ['-o', 'stat=', '-p', '42']);
+          probes++;
+          if (probeError) throw probeError;
+          return ` ${state} \n`;
+        },
+      },
+    ) as (pid: number) => boolean;
+    for (state of ['R', 'S', 'T', 'T+']) assert.equal(probe(42), true);
+    if (platform !== 'win32') {
+      for (state of ['Z', 'X']) assert.equal(probe(42), false);
+      if (platform === 'darwin') {
+        for (state of ['Z+', 'X+', '']) assert.equal(probe(42), false);
+        probeError = Object.assign(new Error('ps executable missing'), {
+          code: 'ENOENT',
+        });
+        assert.throws(
+          () => probe(42),
+          (error) => error === probeError,
+        );
+      }
+      state = 'S';
+      probeError = Object.assign(new Error('disappeared after kill(0)'), {
+        code: platform === 'linux' ? 'ENOENT' : undefined,
+        status: platform === 'darwin' ? 1 : undefined,
+      });
+      assert.equal(probe(42), false);
+      probeError = Object.assign(new Error('probe failed'), { status: 2 });
+      assert.throws(
+        () => probe(42),
+        (error) => error === probeError,
+      );
+      probeError = undefined;
+    } else assert.equal(probes, 0);
+    killError = Object.assign(new Error('absent'), { code: 'ESRCH' });
+    const before = probes;
+    assert.equal(probe(42), false);
+    assert.equal(probes, before);
+    killError = Object.assign(new Error('permission denied'), {
+      code: 'EPERM',
+    });
+    assert.throws(
+      () => probe(42),
+      (error) => error === killError,
+    );
+  }
+});
 
 async function fixture(
   signalGroup?: ConstructorParameters<typeof AuditOwner>[0]['signalGroup'],

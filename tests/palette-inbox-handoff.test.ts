@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
@@ -93,6 +94,7 @@ function harness(
   };
   const focusOrigin = {};
   const setters = {
+    workspaceClose: { current: new WorkspaceClose() },
     setInboxOpen: (value: boolean) => {
       inboxOpen = value;
     },
@@ -200,6 +202,8 @@ function harness(
     withScrollPositions,
     scrollPositions: { current: new Map<string, number>() },
     workspaceTransferBusy: { current: false },
+    workspaceClose: { current: new WorkspaceClose() },
+    workspaceLoaded: { current: true },
     pendingWorkspaceSave: { current: Promise.resolve() },
     window: {
       canopy: {

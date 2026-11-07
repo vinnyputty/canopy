@@ -1,3 +1,5 @@
+import { workspaceError } from '../src/renderer/workspace-error';
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
@@ -56,6 +58,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     let fixture; const demoMode = demo;
     const demoWorkspace = initial;
     let demoWorkspaceState = structuredClone(initial);
+    let savingWorkspace = Promise.resolve(), receivedWorkspace, retryUnavailableWorkspace = false;
     return {load: ${handler('loadWorkspace')}, save: ${handler('saveWorkspace')}, reset: ${handler('resetDemo')}};
   }`,
     {
@@ -106,6 +109,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     },
   };
   const context = {
+    workspaceError,
     window,
     withScrollPositions,
     scrollPositions: { current: new Map<string, number>() },
@@ -113,6 +117,7 @@ function harness({ demo = true, saveGate = false } = {}) {
     workspaceSaveTimer,
     demoResetting,
     workspaceLoaded,
+    workspaceClose: { current: new WorkspaceClose() },
     workspaceTransferBusy: { current: false },
     workspaceRef,
     setErrors: (

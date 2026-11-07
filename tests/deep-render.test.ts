@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -349,7 +350,7 @@ function run(node: ts.Node, context: object) {
     ts.transpileModule(`(${node.getText(ast)})`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     }).outputText,
-    context,
+    { workspaceClose: { current: new WorkspaceClose() }, ...context },
   );
 }
 const scroll = expression(

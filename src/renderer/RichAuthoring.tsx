@@ -40,7 +40,6 @@ export function RichAuthoring({
   const [retryDraft, setRetryDraft] = useState<AuthoringDraft>();
   const recoveryFailed = useRef(false);
   const owner = useRef({ connectionId, issueKey });
-  owner.current = { connectionId, issueKey };
   const [attempt, setAttempt] = useState(0);
   const [plan, setPlan] = useState<ParentPlan>();
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
@@ -51,6 +50,7 @@ export function RichAuthoring({
   const currentDraft = useRef(draft);
   currentDraft.current = draft;
   useEffect(() => {
+    owner.current = { connectionId, issueKey };
     mounted.current = true;
     setRetryDraft(undefined);
     const reloadDraft = () => {
