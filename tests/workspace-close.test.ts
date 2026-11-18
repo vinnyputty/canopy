@@ -1983,6 +1983,7 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
         } finally {
           try {
             await ui?.close();
+            assert.equal((f.mutations as any).labelSubscribers.size, 0);
           } finally {
             f.dispose();
           }
@@ -2036,6 +2037,9 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
       const editLabels = execute(attr('editLabels'), {
         mutations: f.mutations,
       });
+      const subscribeLabels = execute(attr('subscribeLabels'), {
+        mutations: f.mutations,
+      });
       const trackMutation = execute(attr('trackMutation'), f.h.context);
       ui = await recoveryFixture();
       const previewUI = ui;
@@ -2065,6 +2069,7 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
               },
               onChanged,
               editLabels,
+              subscribeLabels,
               trackMutation,
               onAuthoringChanged() {},
               onPreview() {},
@@ -2080,7 +2085,10 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
       }
       const render = () =>
         act(async () => previewUI.root.render(React.createElement(Preview)));
+      const subscribers = () =>
+        (f.mutations as any).labelSubscribers as Map<string, Set<unknown>>;
       await render();
+      assert.equal(subscribers().get('sample-jira:SAMPLE-1')?.size, 1);
       const host = previewUI.d.window.document.querySelector('#host')!;
       const button = (text: string) =>
         [...host.querySelectorAll('button')].find(
@@ -2113,6 +2121,14 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
         issueKey = 'OTHER-2';
         await render();
       }
+      assert.equal(
+        subscribers().has('sample-jira:SAMPLE-1'),
+        lifetime === 'current',
+      );
+      assert.equal(
+        subscribers().get('sample-jira:OTHER-2')?.size ?? 0,
+        lifetime === 'retargeted' ? 1 : 0,
+      );
       let finished = false;
       const closing = f.h.api.flushWorkspace(10).then(() => {
         finished = true;
@@ -3202,19 +3218,23 @@ for (const firstFails of [false, true])
       /closing/,
     );
     assert.equal(finished, false);
-    await act(async () => second.release());
-    assert.deepEqual(
-      applied,
-      [['bug']],
-      'a ready second response cannot overtake the held first response',
-    );
-    assert.equal(finished, false);
     await act(async () => first.release());
     assert.deepEqual(
       applied,
       [['bug'], firstFails ? ['urgent'] : ['bug', 'urgent']],
       'already admitted second write drains while close is paused',
     );
+    assert.equal(
+      finished,
+      false,
+      'close still waits for the second provider response',
+    );
+    assert.equal(
+      f.h.writes.length,
+      0,
+      'no snapshot before the second provider response',
+    );
+    await act(async () => second.release());
     await assert.doesNotReject(closing);
     const saved = f.h.writes.at(-1)!;
     assert.deepEqual(

@@ -1447,7 +1447,7 @@ for (const owned of [false, true])
         assert.equal((h.mutations as any).confirmedLabels.size, 0);
       });
 
-it('label edits use the retained confirmed issue over stale preview labels', async () => {
+it('label edits preserve newer preview labels over an older retained tree', async () => {
   const patches: string[][] = [];
   const h = harness({
     update: async (_connection, key, patch) => {
@@ -1459,14 +1459,21 @@ it('label edits use the retained confirmed issue over stale preview labels', asy
     },
   });
   const base = snapshot();
-  base.issues[1].labels = [{ id: 'server', name: 'server' }];
+  base.issues[1].labels = [{ id: 'bug', name: 'bug' }];
   const revision = h.mutations.beginRefresh();
   h.mutations.receive(tab(), base, revision);
   h.mutations.endRefresh(revision);
-  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, []);
+  await h.mutations.editLabels('jira', 'A-2', 'triaged', true, [
+    { id: 'bug', name: 'bug' },
+    { id: 'urgent', name: 'urgent' },
+  ]);
   await h.mutations.editLabels('other', 'A-2', 'urgent', true, []);
   await h.mutations.editLabels('jira', 'A-3', 'urgent', true, []);
-  assert.deepEqual(patches, [['server', 'urgent'], ['urgent'], ['urgent']]);
+  assert.deepEqual(patches, [
+    ['bug', 'urgent', 'triaged'],
+    ['urgent'],
+    ['urgent'],
+  ]);
 });
 
 it('last label failure releases confirmed queue state before a fresh retry', async () => {
@@ -1537,11 +1544,12 @@ it('label confirmations reach live matching previews and release all observer ow
   const release = h.mutations.subscribeLabels('jira', 'A-2', (labels) =>
     received.push(labels.map((label) => label.name)),
   );
+  const unexpected: string[] = [];
   const other = h.mutations.subscribeLabels('other', 'A-2', () =>
-    assert.fail('Wrong connection'),
+    unexpected.push('Wrong connection'),
   );
   const different = h.mutations.subscribeLabels('jira', 'A-3', () =>
-    assert.fail('Wrong issue'),
+    unexpected.push('Wrong issue'),
   );
   await h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
   assert.deepEqual(received, [['bug']]);
@@ -1550,7 +1558,9 @@ it('label confirmations reach live matching previews and release all observer ow
     received.push(labels.map((label) => label.name)),
   );
   release();
-  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, []);
+  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, [
+    { id: 'bug', name: 'bug' },
+  ]);
   assert.deepEqual(received, [['bug'], ['bug', 'urgent']]);
   replacement();
   other();
@@ -1558,6 +1568,7 @@ it('label confirmations reach live matching previews and release all observer ow
   assert.equal((h.mutations as any).labelSubscribers.size, 0);
   await h.mutations.editLabels('jira', 'A-2', 'later', true, []);
   assert.equal(received.length, 2);
+  assert.deepEqual(unexpected, []);
   assert.equal((h.mutations as any).confirmedLabels.size, 0);
 });
 
@@ -1608,9 +1619,54 @@ it('label notification uses a stable observer set during consumer changes', asyn
   });
   await h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
   assert.deepEqual(received, []);
-  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, []);
+  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, [
+    { id: 'bug', name: 'bug' },
+  ]);
   assert.deepEqual(received, [['bug', 'urgent']]);
   first();
   late!();
   assert.equal((h.mutations as any).labelSubscribers.size, 0);
 });
+
+for (const selected of [false, true])
+  it(`newer preview removals and additions override retained labels: add=${selected}`, async () => {
+    const calls: string[][] = [];
+    const h = harness({
+      update: async (_connection, key, patch) => {
+        calls.push(patch.labels!);
+        return {
+          ...issue(key),
+          labels: patch.labels!.map((name) => ({ id: name, name })),
+        };
+      },
+    });
+    const base = snapshot();
+    base.issues[1].labels = [
+      { id: 'removed-remotely', name: 'removed-remotely' },
+    ];
+    const revision = h.mutations.beginRefresh();
+    h.mutations.receive(tab(), base, revision);
+    h.mutations.endRefresh(revision);
+    const result = await h.mutations.editLabels(
+      'jira',
+      'A-2',
+      'bug',
+      selected,
+      [
+        { id: 'bug', name: 'bug' },
+        { id: 'remote-new', name: 'remote-new' },
+      ],
+    );
+    const expected = selected ? ['bug', 'remote-new'] : ['remote-new'];
+    assert.deepEqual(calls, [expected]);
+    assert.deepEqual(
+      result.labels?.map((label) => label.name),
+      expected,
+    );
+    assert.deepEqual(
+      h.current.labels?.map((label) => label.name),
+      expected,
+    );
+    assert.equal((h.mutations as any).queues.size, 0);
+    assert.equal((h.mutations as any).confirmedLabels.size, 0);
+  });

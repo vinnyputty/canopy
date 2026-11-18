@@ -440,9 +440,7 @@ export class Mutations {
   ): Promise<Issue> {
     return this.writeIssue(connectionId, key, () => {
       const current = (
-        this.confirmedLabels.get(`${connectionId}:${key}`) ??
-        this.find(connectionId, key)?.labels ??
-        initial
+        this.confirmedLabels.get(`${connectionId}:${key}`) ?? initial
       ).map((label) => label.name);
       return {
         labels: selected

@@ -224,6 +224,25 @@ async function close() {
   page = undefined;
 }
 
+async function windowGeometry() {
+  return app.evaluate(({ BrowserWindow, screen }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    return {
+      bounds: window.getBounds(),
+      normalBounds: window.getNormalBounds(),
+      maximized: window.isMaximized(),
+      displays: screen
+        .getAllDisplays()
+        .map(({ id, bounds, workArea, scaleFactor }) => ({
+          id,
+          bounds,
+          workArea,
+          scaleFactor,
+        })),
+    };
+  });
+}
+
 async function resizeWindow(height) {
   await app.evaluate(({ BrowserWindow, screen }, requestedHeight) => {
     const window = BrowserWindow.getAllWindows()[0];
@@ -2780,9 +2799,8 @@ try {
   await firstTab.dragTo(secondTab);
   await expect(page.getByRole('tab').first()).toContainText('CAN-200');
   await resizeWindow(700);
-  const savedWindowBounds = await app.evaluate(({ BrowserWindow }) =>
-    BrowserWindow.getAllWindows()[0].getNormalBounds(),
-  );
+  const savedWindowGeometry = await windowGeometry();
+  const savedWindowBounds = savedWindowGeometry.normalBounds;
   await page
     .getByRole('button', { name: 'Open issue', exact: true })
     .first()
@@ -2855,7 +2873,11 @@ try {
       tab.selectedKey === 'CAN-202'
     );
   });
+  const closingWindowGeometry = await windowGeometry();
   await close();
+  const persistedWindowState = JSON.parse(
+    await readFile(join(userData, 'window.json'), 'utf8'),
+  );
   // A resized preview persists its width; loaded workspace widths are honored.
   const savedWorkspace = JSON.parse(
     await readFile(join(userData, 'workspace.json'), 'utf8'),
@@ -2875,11 +2897,17 @@ try {
   await expect(
     page.getByRole('separator', { name: 'Sidebar width' }),
   ).toHaveAttribute('aria-valuenow', '400');
-  expect(
-    await app.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()[0].getNormalBounds(),
-    ),
-  ).toEqual(savedWindowBounds);
+  const restoredWindowGeometry = await windowGeometry();
+  console.log(
+    'Window restoration evidence:',
+    JSON.stringify({
+      captured: savedWindowGeometry,
+      beforeClose: closingWindowGeometry,
+      persisted: persistedWindowState,
+      restored: restoredWindowGeometry,
+    }),
+  );
+  expect(restoredWindowGeometry.normalBounds).toEqual(savedWindowBounds);
   await expect(page.getByRole('tab', { name: /CAN-100/ })).toBeVisible();
   await expect(page.getByRole('tab', { name: /CAN-200/ })).toBeVisible();
   await expect(
