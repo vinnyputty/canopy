@@ -35,6 +35,9 @@ function deferred<T>() {
 async function fixture(
   api: Partial<CanopyAPI> = {},
   reconcile: () => void = () => {},
+  subscribeLabels?: React.ComponentProps<
+    typeof IssuePreview
+  >['subscribeLabels'],
 ) {
   const dom = new JSDOM(
     '<button id="origin">Origin</button><div id="host"></div>',
@@ -97,6 +100,7 @@ async function fixture(
           onClose() {
             closed++;
           },
+          subscribeLabels,
           onChanged() {
             changed++;
             reconcile();
@@ -624,4 +628,56 @@ test('confirmed labels remain saved when reconciliation callback throws', async 
   } finally {
     await f.close();
   }
+});
+
+test('label confirmations respect preview generations and clean up subscriptions', async () => {
+  const callbacks: {
+    key: string;
+    listener: (labels: { id: string; name: string }[]) => void;
+  }[] = [];
+  const released: string[] = [];
+  const f = await fixture(
+    {},
+    () => {},
+    (_connection, key, listener) => {
+      callbacks.push({ key, listener });
+      return () => {
+        released.push(key);
+      };
+    },
+  );
+  try {
+    await f.render('ONE-1');
+    await act(async () => callbacks[0].listener([{ id: 'bug', name: 'bug' }]));
+    await f.render('ONE-2');
+    assert.deepEqual(released, ['ONE-1']);
+    await act(async () => callbacks[0].listener([{ id: 'bug', name: 'bug' }]));
+    await f.click('Edit labels');
+    const checkbox = () =>
+      f.host.querySelector<HTMLInputElement>('.github-labels input')!;
+    assert.equal(
+      checkbox().checked,
+      false,
+      'An obsolete subscriber cannot change the new issue',
+    );
+    f.window.canopy.update = async () => {
+      throw Error('Provider refused');
+    };
+    await act(async () => checkbox().click());
+    assert.equal(
+      checkbox().checked,
+      false,
+      'The new issue cannot roll back to the previous issue labels',
+    );
+    assert.match(f.host.textContent!, /Labels were not saved/);
+    await act(async () => callbacks[1].listener([{ id: 'bug', name: 'bug' }]));
+    assert.equal(
+      checkbox().checked,
+      true,
+      'The current subscriber still receives confirmations',
+    );
+  } finally {
+    await f.close();
+  }
+  assert.deepEqual(released, ['ONE-1', 'ONE-2']);
 });

@@ -1,6 +1,7 @@
 import { MAX_TREE_ISSUES } from '../shared/types';
 import type {
   CanopyAPI,
+  Choice,
   EditOptions,
   Issue,
   IssuePatch,
@@ -107,6 +108,25 @@ function optimisticFields(
 // Field writes share an issue queue; ranks share a connection queue.
 export class Mutations {
   revision = 0;
+  private confirmedLabels = new Map<string, Choice[]>();
+  private labelSubscribers = new Map<string, Set<(labels: Choice[]) => void>>();
+  subscribeLabels(
+    connectionId: string,
+    key: string,
+    listener: (labels: Choice[]) => void,
+  ) {
+    const identity = `${connectionId}:${key}`;
+    const listeners =
+      this.labelSubscribers.get(identity) ??
+      new Set<(labels: Choice[]) => void>();
+    this.labelSubscribers.set(identity, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size && this.labelSubscribers.get(identity) === listeners)
+        this.labelSubscribers.delete(identity);
+    };
+  }
   private bases: Record<string, TreeSnapshot> = {};
   private protectedSnapshots = new Set<string>();
   private evicted = new Set<string>();
@@ -404,25 +424,61 @@ export class Mutations {
         this.confirmedEdit?.(connectionId, issue, Object.keys(change.fields));
     }
   }
-  acceptConfirmedLabels(connectionId: string, issue: Issue) {
+  private acceptConfirmedLabels(connectionId: string, issue: Issue) {
     this.confirm(connectionId, {
       key: issue.key,
       fields: { labels: issue.labels },
     });
     this.publish();
   }
+  editLabels(
+    connectionId: string,
+    key: string,
+    name: string,
+    selected: boolean,
+    initial: Choice[],
+  ): Promise<Issue> {
+    return this.writeIssue(connectionId, key, () => {
+      const current = (
+        this.confirmedLabels.get(`${connectionId}:${key}`) ??
+        this.find(connectionId, key)?.labels ??
+        initial
+      ).map((label) => label.name);
+      return {
+        labels: selected
+          ? [...new Set([...current, name])]
+          : current.filter((label) => label !== name),
+      };
+    });
+  }
   async writeIssue(
     connectionId: string,
     key: string,
-    patch: IssuePatch,
+    patch: IssuePatch | (() => IssuePatch),
   ): Promise<Issue> {
     let issue: Issue | undefined;
     let failure: unknown;
     await this.run(async (writes) => {
       try {
-        issue = await this.serialize(`${connectionId}:${key}`, () =>
-          writes.update(connectionId, key, patch),
-        );
+        issue = await this.serialize(`${connectionId}:${key}`, async () => {
+          const next = typeof patch === 'function' ? patch() : patch;
+          const confirmed = await writes.update(connectionId, key, next);
+          if (next.labels !== undefined) {
+            this.confirmedLabels.set(
+              `${connectionId}:${key}`,
+              confirmed.labels ?? [],
+            );
+            for (const listener of [
+              ...(this.labelSubscribers.get(`${connectionId}:${key}`) ?? []),
+            ]) {
+              try {
+                listener(confirmed.labels ?? []);
+              } catch {}
+            }
+            this.acceptConfirmedLabels(connectionId, confirmed);
+          }
+          return confirmed;
+        });
         return true;
       } catch (error) {
         failure = error;
@@ -444,7 +500,10 @@ export class Mutations {
     );
     this.queues.set(queueKey, tail);
     void tail.then(() => {
-      if (this.queues.get(queueKey) === tail) this.queues.delete(queueKey);
+      if (this.queues.get(queueKey) === tail) {
+        this.queues.delete(queueKey);
+        this.confirmedLabels.delete(queueKey);
+      }
     });
     return result;
   }

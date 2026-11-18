@@ -65,6 +65,7 @@ async function fixture() {
     onClosed: () => {},
     warning: async () => {},
     write: async (_name: string) => {},
+    replaceWorkspace: async () => {},
     crashed: false,
     consent: 0,
     prompts: 0,
@@ -206,6 +207,7 @@ async function fixture() {
       next: Workspace,
       validate?: () => void,
     ) {
+      await controls.replaceWorkspace();
       validate?.();
       assert.deepEqual(await controls.readWorkspace(), expected);
       controls.readWorkspace = async () => structuredClone(next);
@@ -2837,8 +2839,12 @@ for (const outcome of ['keep-open', 'close-anyway', 'crash'])
       {},
       'replace',
     )) as any;
+    let replacementStarted = false;
+    f.controls.replaceWorkspace = async () => {
+      replacementStarted = true;
+      await apply.wait;
+    };
     f.controls.write = async (name) => {
-      if (name === 'workspace') await apply.wait;
       if (name === 'window') await bounds.wait;
     };
     const old = f.invoke(
@@ -2851,6 +2857,10 @@ for (const outcome of ['keep-open', 'close-anyway', 'crash'])
       'applyWorkspaceImport',
       preview.token,
     ) as Promise<unknown>;
+    let applyFinished = false;
+    void applying.then(() => {
+      applyFinished = true;
+    });
     f.controls.flush = async () => {
       await applying;
     };
@@ -2871,6 +2881,12 @@ for (const outcome of ['keep-open', 'close-anyway', 'crash'])
       });
     owner.close();
     await setImmediate();
+    assert.equal(replacementStarted, true, 'Apply reached replacement');
+    assert.equal(
+      applyFinished,
+      false,
+      'Apply remains pending after close starts',
+    );
     apply.release();
     await applying;
     await setImmediate();
@@ -2880,6 +2896,7 @@ for (const outcome of ['keep-open', 'close-anyway', 'crash'])
     assert.equal(f.controls.prompts, 1);
     assert.equal(owner.destroyed, false);
     const bytes = JSON.stringify(await f.controls.readWorkspace());
+    assert.equal(JSON.parse(bytes).theme, 'light');
     send('one');
     send('one');
     send('two');
@@ -2962,6 +2979,13 @@ for (const outcome of ['keep-open', 'close-anyway', 'crash'])
       JSON.stringify(await f.controls.readWorkspace()),
       bytes,
       'committed transfer disk barrier survives warning and teardown',
+    );
+    assert.deepEqual(
+      f.writes
+        .filter((write) => write.name === 'workspace')
+        .map((write) => JSON.stringify(write.value)),
+      [bytes],
+      'only the imported workspace is written through close and teardown',
     );
   });
 

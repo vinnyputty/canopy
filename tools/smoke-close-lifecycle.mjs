@@ -85,17 +85,29 @@ export async function auditCloseLifecycle({
       return new Promise(() => {});
     });
   });
-  await app.evaluate(({ BrowserWindow }) =>
-    BrowserWindow.getAllWindows()[0].close(),
-  );
+  await app.evaluate(({ BrowserWindow }) => {
+    globalThis.closeLostSnapshot.startedAt = Date.now();
+    BrowserWindow.getAllWindows()[0].close();
+  });
   await expect
     .poll(() => page.evaluate(() => window.closeFlushStarted))
     .toBe(true);
   await app.evaluate(({ BrowserWindow }) => {
-    const window = BrowserWindow.getAllWindows()[0];
-    window.webContents.forcefullyCrashRenderer();
+    const contents = BrowserWindow.getAllWindows()[0].webContents;
+    return new Promise((resolve) => {
+      contents.once('render-process-gone', () => resolve());
+      contents.forcefullyCrashRenderer();
+    });
   });
   await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 300)));
+  expect(
+    await app.evaluate(
+      () => Date.now() - globalThis.closeLostSnapshot.startedAt,
+    ),
+  ).toBeLessThan(15_000);
+  expect(await app.evaluate(() => !!globalThis.closeLostSnapshot.respond)).toBe(
+    false,
+  );
   expect(
     await app.evaluate(
       ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,

@@ -2033,6 +2033,9 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
         previewRoute: { connectionId: 'sample-jira' },
         allRefreshTabs: [],
       });
+      const editLabels = execute(attr('editLabels'), {
+        mutations: f.mutations,
+      });
       const trackMutation = execute(attr('trackMutation'), f.h.context);
       ui = await recoveryFixture();
       const previewUI = ui;
@@ -2061,6 +2064,7 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
                 setOpen(false);
               },
               onChanged,
+              editLabels,
               trackMutation,
               onAuthoringChanged() {},
               onPreview() {},
@@ -3112,7 +3116,7 @@ for (const firstFails of [false, true])
       previewRoute: { connectionId: 'sample-jira' },
       allRefreshTabs: [],
     };
-    const updateIssue = execute(prop('updateIssue'), context);
+    const editLabels = execute(prop('editLabels'), context);
     const onChanged = execute(prop('onChanged'), context);
     const trackMutation = execute(prop('trackMutation'), context);
     ui = await recoveryFixture();
@@ -3140,7 +3144,7 @@ for (const firstFails of [false, true])
             onWidth() {},
             onClose: () => setOpen(false),
             onChanged,
-            updateIssue,
+            editLabels,
             trackMutation,
             onAuthoringChanged() {},
             onPreview() {},
@@ -3194,7 +3198,7 @@ for (const firstFails of [false, true])
     });
     await tick();
     await assert.rejects(
-      f.mutations.writeIssue('sample-jira', f.issue.key, { labels: ['late'] }),
+      f.mutations.editLabels('sample-jira', f.issue.key, 'late', true, []),
       /closing/,
     );
     assert.equal(finished, false);
@@ -3208,14 +3212,14 @@ for (const firstFails of [false, true])
     await act(async () => first.release());
     assert.deepEqual(
       applied,
-      [['bug'], ['urgent']],
+      [['bug'], firstFails ? ['urgent'] : ['bug', 'urgent']],
       'already admitted second write drains while close is paused',
     );
     await assert.doesNotReject(closing);
     const saved = f.h.writes.at(-1)!;
     assert.deepEqual(
       saved.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1'].fields.Labels,
-      ['urgent'],
+      firstFails ? ['urgent'] : ['bug', 'urgent'],
     );
     assert.deepEqual(
       f
@@ -3223,13 +3227,14 @@ for (const firstFails of [false, true])
         .confirmedSnapshots[backupWorkspace.tabs[0].id].issues[0].labels?.map(
           (l) => l.name,
         ),
-      ['urgent'],
+      firstFails ? ['urgent'] : ['bug', 'urgent'],
     );
     assert.equal(
       (f.mutations as any).queues.size,
       0,
       'queue tail removed after success or failure',
     );
+    assert.equal((f.mutations as any).confirmedLabels.size, 0);
     assert.equal((f.h.controller as any).pending.size, 0);
   });
 
@@ -3369,3 +3374,268 @@ test('Welcome workspace save banner dismisses only the save error', async () => 
     await f.close();
   }
 });
+
+for (const barrier of ['close', 'transfer'])
+  test(`label intent admission refusal leaves no queue state and permits recovery: ${barrier}`, async (t) => {
+    const f = providerFixture();
+    t.after(() => {
+      if (f.h.controller.owner !== undefined) f.h.release(f.h.controller.owner);
+      f.h.controller.endTransfer();
+      f.dispose();
+    });
+    let calls = 0;
+    f.h.forward(async (_name, _connection, key, patch) => {
+      calls++;
+      return {
+        ...f.issue,
+        key,
+        labels: (patch as { labels: string[] }).labels.map((name) => ({
+          id: name,
+          name,
+        })),
+      };
+    });
+    if (barrier === 'close') await f.h.api.flushWorkspace(82);
+    else f.h.controller.beginTransfer(f.d.window.document);
+    await assert.rejects(
+      f.mutations.editLabels('sample-jira', f.issue.key, 'bug', true, []),
+      new RegExp(barrier === 'close' ? 'closing' : 'transfer'),
+    );
+    assert.equal(calls, 0);
+    assert.equal((f.mutations as any).queues.size, 0);
+    assert.equal((f.mutations as any).confirmedLabels.size, 0);
+    if (barrier === 'close') {
+      f.h.release(81);
+      await assert.rejects(
+        f.mutations.editLabels('sample-jira', f.issue.key, 'bug', true, []),
+        /closing/,
+      );
+      f.h.release(82);
+    } else f.h.controller.endTransfer();
+    await f.mutations.editLabels(
+      'sample-jira',
+      f.issue.key,
+      'urgent',
+      true,
+      [],
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(
+      f
+        .view()
+        .confirmedSnapshots[backupWorkspace.tabs[0].id].issues[0].labels?.map(
+          (label) => label.name,
+        ),
+      ['urgent'],
+    );
+    assert.equal((f.mutations as any).queues.size, 0);
+    assert.equal((f.mutations as any).confirmedLabels.size, 0);
+  });
+
+for (const timing of ['overlap', 'settled'])
+  for (const owned of [false, true])
+    for (const firstFails of [false, true])
+      for (const mode of ['normal', 'late-preview', 'second-failure'])
+        if (
+          mode === 'normal' ||
+          (!owned &&
+            !firstFails &&
+            (mode !== 'late-preview' || timing === 'settled'))
+        )
+          test(`stale reopened preview preserves confirmed labels after queue drain: timing=${timing}, owned=${owned}, failure=${firstFails}, mode=${mode}`, async (t) => {
+            const f = providerFixture();
+            if (!owned) f.mutations.forget(backupWorkspace.tabs[0].id);
+            let ui: Awaited<ReturnType<typeof recoveryFixture>> | undefined;
+            const first = gate(),
+              second = gate(),
+              previewRead = gate();
+            let closing: Promise<unknown> | undefined;
+            t.after(async () => {
+              try {
+                await act(async () => {
+                  first.release();
+                  second.release();
+                  previewRead.release();
+                });
+                await closing?.catch(() => {});
+                if (f.h.controller.owner !== undefined)
+                  f.h.release(f.h.controller.owner);
+              } finally {
+                try {
+                  await ui?.close();
+                } finally {
+                  f.dispose();
+                }
+              }
+            });
+            const applied: string[][] = [];
+            f.h.forward(async (name, ...args) => {
+              assert.equal(name, 'canopy:update');
+              const labels = (args[2] as { labels: string[] }).labels;
+              applied.push(labels);
+              if (applied.length === 1) {
+                await first.promise;
+                if (firstFails) throw Error('first labels refused');
+              } else {
+                await second.promise;
+                if (mode === 'second-failure')
+                  throw Error('second labels refused');
+              }
+              return {
+                ...f.issue,
+                labels: labels.map((name) => ({ id: name, name })),
+              };
+            });
+            const ast = sourceFile(
+              process.env.CANOPY_CLOSE_RENDERER_SOURCE ??
+                'src/renderer/App.tsx',
+            );
+            const preview = findNode(
+              ast,
+              (n): n is ts.JsxSelfClosingElement =>
+                ts.isJsxSelfClosingElement(n) &&
+                n.tagName.getText() === 'IssuePreview',
+            );
+            const prop = (name: string) => {
+              const attr = preview.attributes.properties.find(
+                (p) => ts.isJsxAttribute(p) && p.name.getText() === name,
+              ) as ts.JsxAttribute;
+              return (
+                attr.initializer as ts.JsxExpression
+              ).expression!.getText();
+            };
+            const context = {
+              ...f.h.context,
+              mutations: f.mutations,
+              previewRoute: { connectionId: 'sample-jira' },
+              allRefreshTabs: [],
+            };
+            const editLabels = execute(prop('editLabels'), context);
+            const subscribeLabels = execute(prop('subscribeLabels'), context);
+            const onChanged = execute(prop('onChanged'), context);
+            const trackMutation = execute(prop('trackMutation'), context);
+            ui = await recoveryFixture();
+            let previewReads = 0;
+            Object.assign(ui.d.window.canopy, f.h.api, {
+              preview: async () => {
+                previewReads++;
+                if (mode === 'late-preview' && previewReads === 2)
+                  await previewRead.promise;
+                return {
+                  issue: { ...f.issue, labels: [] },
+                  description: '',
+                  comments: [],
+                  totalComments: 0,
+                };
+              },
+              labels: async () =>
+                ['bug', 'urgent'].map((name) => ({ id: name, name })),
+            });
+            let reopen!: () => void;
+            function Preview() {
+              const [open, setOpen] = React.useState(true);
+              reopen = () => setOpen(true);
+              return open
+                ? React.createElement(IssuePreview, {
+                    connectionId: 'sample-jira',
+                    provider: 'github',
+                    connectionName: 'Fixture',
+                    issueKey: f.issue.key,
+                    relationshipsLoading: false,
+                    width: 400,
+                    onWidth() {},
+                    onClose: () => setOpen(false),
+                    onChanged,
+                    editLabels,
+                    subscribeLabels,
+                    trackMutation,
+                    onAuthoringChanged() {},
+                    onPreview() {},
+                    onJump() {},
+                    onOpenExternal() {},
+                    onCopyKeySummary() {},
+                    onWorkBrief() {},
+                    onOpenComment() {},
+                    onRelationships() {},
+                    onMarkSeen() {},
+                  })
+                : null;
+            }
+            await act(async () =>
+              ui!.root.render(React.createElement(Preview)),
+            );
+            const host = ui.d.window.document.querySelector(
+              '#host',
+            ) as HTMLElement;
+            const click = async (label: string) =>
+              act(async () => {
+                const button = [...host.querySelectorAll('button')].find(
+                  (b) => b.textContent === label,
+                )!;
+                assert.ok(button, label);
+                button.click();
+              });
+            const toggle = async (index: number) =>
+              act(async () =>
+                host
+                  .querySelectorAll<HTMLInputElement>('input[type=checkbox]')
+                  [index].click(),
+              );
+            await click('Edit labels');
+            await toggle(0);
+            assert.deepEqual(applied, [['bug']]);
+            await act(async () =>
+              host
+                .querySelector<HTMLButtonElement>(
+                  '[title="Close preview (Escape)"]',
+                )!
+                .click(),
+            );
+            assert.equal(host.textContent, '');
+            await act(async () => reopen());
+            if (mode === 'late-preview') {
+              await act(async () => first.release());
+              await act(async () => previewRead.release());
+            }
+            await click('Edit labels');
+            // Preview fetched [] while the original write was still pending.
+            if (timing === 'settled') {
+              await act(async () => first.release());
+              await tick();
+              assert.equal((f.mutations as any).queues.size, 0);
+              assert.equal((f.mutations as any).confirmedLabels.size, 0);
+            }
+            await toggle(1);
+            if (timing === 'overlap') {
+              assert.deepEqual(applied, [['bug']]);
+              await act(async () => first.release());
+            }
+            assert.equal(
+              host.querySelectorAll<HTMLInputElement>('input[type=checkbox]')[1]
+                .checked,
+              true,
+              'Pending intent stays visible while another preview confirms',
+            );
+            await act(async () => second.release());
+            if (mode === 'second-failure') {
+              assert.equal(
+                host.querySelectorAll<HTMLInputElement>(
+                  'input[type=checkbox]',
+                )[0].checked,
+                true,
+                'Rollback keeps the successful label from the detached preview',
+              );
+              assert.equal(
+                host.querySelectorAll<HTMLInputElement>(
+                  'input[type=checkbox]',
+                )[1].checked,
+                false,
+              );
+              assert.match(host.textContent!, /Labels were not saved/);
+            }
+            assert.deepEqual(
+              applied,
+              [['bug'], firstFails ? ['urgent'] : ['bug', 'urgent']],
+              'a stale open preview must preserve the confirmed first label after queue cleanup',
+            );
+          });

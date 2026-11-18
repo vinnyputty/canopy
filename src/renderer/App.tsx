@@ -4077,11 +4077,13 @@ export function App() {
           ))
             void refreshTab(tab);
         }}
-        updateIssue={(connectionId, key, patch) =>
-          mutations.writeIssue(connectionId, key, patch)
+        subscribeLabels={(connectionId, key, listener) =>
+          mutations.subscribeLabels(connectionId, key, listener)
+        }
+        editLabels={(connectionId, key, name, selected, initial) =>
+          mutations.editLabels(connectionId, key, name, selected, initial)
         }
         onChanged={(issue) => {
-          mutations.acceptConfirmedLabels(previewRoute.connectionId, issue);
           for (const tab of allRefreshTabs.filter((tab) =>
             sameRoot(tab, previewRoute),
           ))

@@ -1346,3 +1346,271 @@ it('raw issue writes share field queues, isolate connections and issues, and rec
   assert.deepEqual(calls, ['jira:A-2', 'jira:A-3', 'other:A-2', 'jira:A-2']);
   assert.equal((h.mutations as any).queues.size, 0);
 });
+
+for (const owned of [false, true])
+  for (const selected of [false, true])
+    for (const firstFails of [false, true])
+      it(`label intents use provider confirmation and release queue state: owned=${owned}, add=${selected}, failure=${firstFails}`, async () => {
+        const held = deferred<Issue>();
+        const calls: string[][] = [];
+        const initial = selected ? [] : [{ id: 'urgent', name: 'urgent' }];
+        const h = harness({
+          update: async (_connection, key, patch) => {
+            calls.push(patch.labels!);
+            if (calls.length === 1) return held.promise;
+            return {
+              ...issue(key),
+              labels: patch.labels!.map((name) => ({ id: name, name })),
+            };
+          },
+        });
+        if (owned) {
+          const base = snapshot();
+          base.issues[1].labels = initial;
+          const revision = h.mutations.beginRefresh();
+          h.mutations.receive(tab(), base, revision);
+          h.mutations.endRefresh(revision);
+        } else {
+          h.mutations.forget('one');
+          h.mutations.forget('two');
+        }
+        const first = h.mutations.editLabels(
+          'jira',
+          'A-2',
+          'bug',
+          true,
+          initial,
+        );
+        const settled = firstFails ? assert.rejects(first, /refused/) : first;
+        const second = h.mutations.editLabels(
+          'jira',
+          'A-2',
+          'urgent',
+          selected,
+          initial,
+        );
+        await tick();
+        assert.deepEqual(calls, [
+          [...initial.map((label) => label.name), 'bug'],
+        ]);
+        if (firstFails) held.reject(Error('provider refused'));
+        else
+          held.resolve({
+            ...issue('A-2'),
+            labels: [
+              ...initial,
+              { id: 'canonical', name: 'canonical' },
+              { id: 'bug', name: 'bug' },
+            ],
+          });
+        await settled;
+        const result = await second;
+        const expected = firstFails
+          ? selected
+            ? ['urgent']
+            : []
+          : selected
+            ? ['canonical', 'bug', 'urgent']
+            : ['canonical', 'bug'];
+        assert.deepEqual(
+          calls[1],
+          expected,
+          'second intent uses confirmed labels, including provider normalization',
+        );
+        assert.deepEqual(
+          result.labels?.map((label) => label.name),
+          expected,
+        );
+        if (owned)
+          assert.deepEqual(
+            h.view.confirmedSnapshots.one.issues[1].labels?.map(
+              (label) => label.name,
+            ),
+            expected,
+          );
+        assert.equal((h.mutations as any).queues.size, 0);
+        assert.equal((h.mutations as any).confirmedLabels.size, 0);
+        const latest = [{ id: 'fresh', name: 'fresh' }];
+        if (owned) {
+          const base = snapshot();
+          base.issues[1].labels = latest;
+          const revision = h.mutations.beginRefresh();
+          h.mutations.receive(tab(), base, revision);
+          h.mutations.endRefresh(revision);
+        }
+        await h.mutations.editLabels('jira', 'A-2', 'urgent', true, latest);
+        assert.deepEqual(
+          calls[2],
+          ['fresh', 'urgent'],
+          'settled queues do not retain old preview labels',
+        );
+        assert.equal((h.mutations as any).confirmedLabels.size, 0);
+      });
+
+it('label edits use the retained confirmed issue over stale preview labels', async () => {
+  const patches: string[][] = [];
+  const h = harness({
+    update: async (_connection, key, patch) => {
+      patches.push(patch.labels!);
+      return {
+        ...issue(key),
+        labels: patch.labels!.map((name) => ({ id: name, name })),
+      };
+    },
+  });
+  const base = snapshot();
+  base.issues[1].labels = [{ id: 'server', name: 'server' }];
+  const revision = h.mutations.beginRefresh();
+  h.mutations.receive(tab(), base, revision);
+  h.mutations.endRefresh(revision);
+  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, []);
+  await h.mutations.editLabels('other', 'A-2', 'urgent', true, []);
+  await h.mutations.editLabels('jira', 'A-3', 'urgent', true, []);
+  assert.deepEqual(patches, [['server', 'urgent'], ['urgent'], ['urgent']]);
+});
+
+it('last label failure releases confirmed queue state before a fresh retry', async () => {
+  const held = deferred<Issue>();
+  const calls: string[][] = [];
+  const h = harness({
+    update: async (_connection, key, patch) => {
+      calls.push(patch.labels!);
+      if (calls.length === 1) return held.promise;
+      if (calls.length === 2) throw Error('last label refused');
+      return {
+        ...issue(key),
+        labels: patch.labels!.map((name) => ({ id: name, name })),
+      };
+    },
+  });
+  h.mutations.forget('one');
+  h.mutations.forget('two');
+  const first = h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
+  const second = assert.rejects(
+    h.mutations.editLabels('jira', 'A-2', 'urgent', true, []),
+    /last label refused/,
+  );
+  held.resolve({ ...issue('A-2'), labels: [{ id: 'bug', name: 'bug' }] });
+  await first;
+  await second;
+  assert.deepEqual(calls, [['bug'], ['bug', 'urgent']]);
+  assert.equal((h.mutations as any).queues.size, 0);
+  assert.equal((h.mutations as any).confirmedLabels.size, 0);
+  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, [
+    { id: 'fresh', name: 'fresh' },
+  ]);
+  assert.deepEqual(calls[2], ['fresh', 'urgent']);
+});
+
+it('repeated label add intents preserve selection without duplicate labels', async () => {
+  const held = deferred<Issue>();
+  const calls: string[][] = [];
+  const h = harness({
+    update: async (_connection, key, patch) => {
+      calls.push(patch.labels!);
+      if (calls.length === 1) return held.promise;
+      return {
+        ...issue(key),
+        labels: patch.labels!.map((name) => ({ id: name, name })),
+      };
+    },
+  });
+  const first = h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
+  const second = h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
+  held.resolve({ ...issue('A-2'), labels: [{ id: 'bug', name: 'bug' }] });
+  await Promise.all([first, second]);
+  assert.deepEqual(calls, [['bug'], ['bug']]);
+  assert.deepEqual(
+    h.current.labels?.map((label) => label.name),
+    ['bug'],
+  );
+});
+
+it('label confirmations reach live matching previews and release all observer ownership', async () => {
+  const h = harness({
+    update: async (_connection, key, patch) => ({
+      ...issue(key),
+      labels: patch.labels!.map((name) => ({ id: name, name })),
+    }),
+  });
+  const received: string[][] = [];
+  const release = h.mutations.subscribeLabels('jira', 'A-2', (labels) =>
+    received.push(labels.map((label) => label.name)),
+  );
+  const other = h.mutations.subscribeLabels('other', 'A-2', () =>
+    assert.fail('Wrong connection'),
+  );
+  const different = h.mutations.subscribeLabels('jira', 'A-3', () =>
+    assert.fail('Wrong issue'),
+  );
+  await h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
+  assert.deepEqual(received, [['bug']]);
+  release();
+  const replacement = h.mutations.subscribeLabels('jira', 'A-2', (labels) =>
+    received.push(labels.map((label) => label.name)),
+  );
+  release();
+  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, []);
+  assert.deepEqual(received, [['bug'], ['bug', 'urgent']]);
+  replacement();
+  other();
+  different();
+  assert.equal((h.mutations as any).labelSubscribers.size, 0);
+  await h.mutations.editLabels('jira', 'A-2', 'later', true, []);
+  assert.equal(received.length, 2);
+  assert.equal((h.mutations as any).confirmedLabels.size, 0);
+});
+
+it('failed label writes do not publish a confirmation and one failed observer cannot hide success from another', async () => {
+  let fails = true;
+  const h = harness({
+    update: async (_connection, key, patch) => {
+      if (fails) throw Error('Provider refused');
+      return {
+        ...issue(key),
+        labels: patch.labels!.map((name) => ({ id: name, name })),
+      };
+    },
+  });
+  const received: string[][] = [];
+  const broken = h.mutations.subscribeLabels('jira', 'A-2', () => {
+    throw Error('Consumer unavailable');
+  });
+  const release = h.mutations.subscribeLabels('jira', 'A-2', (labels) =>
+    received.push(labels.map((label) => label.name)),
+  );
+  await assert.rejects(
+    h.mutations.editLabels('jira', 'A-2', 'bug', true, []),
+    /Provider refused/,
+  );
+  assert.deepEqual(received, []);
+  fails = false;
+  await h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
+  assert.deepEqual(received, [['bug']]);
+  broken();
+  release();
+  assert.equal((h.mutations as any).labelSubscribers.size, 0);
+});
+
+it('label notification uses a stable observer set during consumer changes', async () => {
+  const h = harness({
+    update: async (_connection, key, patch) => ({
+      ...issue(key),
+      labels: patch.labels!.map((name) => ({ id: name, name })),
+    }),
+  });
+  const received: string[][] = [];
+  let late: (() => void) | undefined;
+  const first = h.mutations.subscribeLabels('jira', 'A-2', () => {
+    late ??= h.mutations.subscribeLabels('jira', 'A-2', (labels) =>
+      received.push(labels.map((label) => label.name)),
+    );
+  });
+  await h.mutations.editLabels('jira', 'A-2', 'bug', true, []);
+  assert.deepEqual(received, []);
+  await h.mutations.editLabels('jira', 'A-2', 'urgent', true, []);
+  assert.deepEqual(received, [['bug', 'urgent']]);
+  first();
+  late!();
+  assert.equal((h.mutations as any).labelSubscribers.size, 0);
+});

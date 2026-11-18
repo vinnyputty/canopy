@@ -103,8 +103,6 @@ Toggle **Hide done** and trigger the native logout or shutdown action. Record wh
 
 If the renderer crashes or fails to load while a received workspace write fails, verify a native warning shows the failure with **Keep open** as its default. Keep the window open, repair the destination as below, then retry closing: only the last state received by the main process can be saved. Separately verify **Close anyway** requires an explicit choice and can discard those unsaved changes. An unavailable renderer cannot supply changes it never sent.
 
-If the renderer disappears during an active close before confirming its final workspace save, verify the same **Keep open / Close anyway** warning appears even after older received writes finish. Keep open must preserve the window and permit recovery and another close attempt. Separately verify that losing the renderer after it confirms the final save allows close to finish once bounds persistence completes.
-
 Before restarting Canopy, remove only the empty blocker directory and restore the backup. If the desktop remains available, do this while Canopy is still open, then retry the native action:
 
 ```sh
@@ -116,6 +114,10 @@ mv "$profileDir/workspace.close-check-backup.json" "$profileDir/workspace.json"
 Remove-Item -LiteralPath (Join-Path $profileDir 'workspace.json')
 Move-Item -LiteralPath (Join-Path $profileDir 'workspace.close-check-backup.json') -Destination (Join-Path $profileDir 'workspace.json')
 ```
+
+With the blocker removed and the saved file restored, verify the destination is writable by making a change and saving successfully. Use this writable destination for the following two independent cases so a write failure cannot cause the warning.
+
+If the renderer disappears during an active close before confirming its final workspace save, verify the **Keep open / Close anyway** warning appears even after older received writes finish. Keep open must preserve the window and permit recovery and another close attempt. Separately, hold bounds persistence, allow the renderer to confirm its final workspace save, then lose the renderer. Verify close finishes after releasing bounds persistence without a missing-confirmation warning.
 
 Reopen and verify the latest change persisted. Close the fixture before deleting its disposable profile, and clear `CANOPY_USER_DATA` from a PowerShell session when finished.
 
