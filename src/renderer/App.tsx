@@ -6301,6 +6301,7 @@ export function App() {
       )}
       {childParent && (
         <CreateChildDialog
+          trackMutation={(operation) => workspaceClose.current.track(operation)}
           key={`${childParent.connectionId}:${childParent.issue.key}`}
           connectionId={childParent.connectionId}
           parent={childParent.issue}
@@ -6313,17 +6314,22 @@ export function App() {
           }
           onCreated={(issue) => {
             mutations.insertCreated(childParent.connectionId, issue);
-            updateTab(childParent.tabId, {
-              expanded: [
-                ...new Set([
-                  ...(workspaceRef.current.tabs.find(
-                    (tab) => tab.id === childParent.tabId,
-                  )?.expanded ?? []),
-                  childParent.issue.key,
-                ]),
-              ],
-              selectedKey: issue.key,
+            const reconcile = (current: Workspace) => ({
+              ...current,
+              tabs: current.tabs.map((tab) =>
+                tab.id !== childParent.tabId
+                  ? tab
+                  : {
+                      ...tab,
+                      expanded: [
+                        ...new Set([...tab.expanded, childParent.issue.key]),
+                      ],
+                      selectedKey: issue.key,
+                    },
+              ),
             });
+            workspaceRef.current = reconcile(workspaceRef.current);
+            storeWorkspace(reconcile);
             setReveal({
               tabId: childParent.tabId,
               key: issue.key,

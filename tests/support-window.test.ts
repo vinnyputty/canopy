@@ -1,3 +1,6 @@
+import ts from 'typescript';
+import { sourceFile, findNode, execute, callback } from './source-probe';
+import { backupWorkspace } from './fixtures/workspace-backup';
 import { recoverWorkspaceViews } from '../src/shared/views';
 import type { Workspace } from '../src/shared/types';
 import { rendererFixture } from './fixtures/workspace-close';
@@ -10,6 +13,7 @@ import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { it } from 'node:test';
 import { transformSync } from 'esbuild';
+import { JiraProvider } from '../src/main/jira';
 import { WorkHandoffQueue } from '../src/main/work-handoff';
 import { restoreWindow, type WindowState } from '../src/main/window-state';
 import { WindowStateSaver } from '../src/main/window-state-saver';
@@ -54,6 +58,7 @@ async function fixture() {
   const closeErrors: unknown[][] = [];
   const writes: { name: string; value: any }[] = [];
   const controls = {
+    childProvider: undefined as JiraProvider | undefined,
     flush: async (_script: string) => {},
     release: (_attempt: number) => {},
     reload: () => {},
@@ -298,7 +303,15 @@ async function fixture() {
             }
           },
         };
-      if (name === './providers') return { Providers: class {} };
+      if (name === './providers')
+        return {
+          Providers: class {
+            get() {
+              return controls.childProvider;
+            }
+          },
+        };
+      if (name === './jira') return { JiraProvider };
       if (name === './updates')
         return {
           Updates: class {
@@ -741,7 +754,9 @@ for (const mode of ['close', 'quit'])
     await setImmediate();
     assert.equal(window.destroyed, false);
     assert.equal(f.windows.length, 1);
-    const resumed = window.handoffStates.at(-1);
+    const resumed = window.handoffStates
+      .filter((state) => state.delivery)
+      .at(-1);
     assert.equal(resumed.session, first.session);
     assert.deepEqual(resumed.delivery.intent, {
       kind: 'view',
@@ -1561,12 +1576,12 @@ for (const lost of ['navigation', 'failed-page'])
     window.close();
     await setImmediate();
     assert.equal(window.destroyed, false);
-    assert.equal(f.controls.prompts, 1);
+    assert.equal(f.controls.prompts, lost === 'failed-page' ? 2 : 1);
     assert.equal(
-      f.controls.warnings[0].message,
+      f.controls.warnings.at(-1)!.message,
       'The workspace could not load.',
     );
-    assert.match(f.controls.warnings[0].detail, /Original read failed/);
+    assert.match(f.controls.warnings.at(-1)!.detail, /Original read failed/);
     assert.equal(
       f.writes.filter((write) => write.name === 'workspace').length,
       0,
@@ -1575,7 +1590,7 @@ for (const lost of ['navigation', 'failed-page'])
     window.close();
     await setImmediate();
     assert.equal(window.destroyed, true);
-    assert.equal(f.controls.prompts, 1);
+    assert.equal(f.controls.prompts, lost === 'failed-page' ? 2 : 1);
   });
 
 for (const failure of [false, true])
@@ -1822,8 +1837,8 @@ for (const outcome of [
       await f.invoke(window, 'reloadWorkspace');
       assert.equal(
         window.webContents.listenerCount('did-fail-load'),
-        baseline,
-        'successful replacement clears committed reload tracking',
+        baseline + 1,
+        'a later nontransfer reload installs its own failure tracking',
       );
     }
     assert.equal(JSON.stringify(await f.controls.readWorkspace()), committed);
@@ -2035,6 +2050,20 @@ for (const failure of ['throw', 'async'])
           window.webContents.mainFrame.url,
           true,
         );
+        assert.equal(f.controls.prompts, attempt + 1);
+        assert.equal(f.controls.messageWindows.at(-1), window);
+        assert.deepEqual(
+          JSON.parse(JSON.stringify(f.controls.warnings.at(-1))),
+          {
+            type: 'error',
+            message:
+              'Workspace transferred, but reload failed. Restart Canopy before editing.',
+            buttons: ['OK'],
+            defaultId: 0,
+            cancelId: 0,
+          },
+        );
+        assert.equal(JSON.stringify(await f.controls.readWorkspace()), bytes);
       }
       context.mock.timers.tick(1_000);
     }
@@ -2251,4 +2280,368 @@ it('aborted replacement admits late outgoing readiness within the original pendi
   assert.equal(window.handoffStates.at(-1).delivery.expiresAt, 60_100);
   context.mock.timers.tick(1);
   assert.equal(window.handoffStates.at(-1).rejected, true);
+});
+
+for (const outcome of [
+  'failure',
+  'dialog-refused',
+  'success',
+  'throw',
+  'destroyed',
+  'destroyed-flag',
+  'closed',
+  'stale',
+])
+  it(`nontransfer reload owns recovery and listener cleanup: ${outcome}`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const owner = f.windows[0];
+    const bytes = JSON.stringify(await f.controls.readWorkspace());
+    f.invoke(owner, 'workspaceInitialized', 'Original read failed');
+    const baseline = Object.fromEntries(
+      ['did-fail-load', 'did-finish-load', 'destroyed'].map((name) => [
+        name,
+        owner.webContents.listenerCount(name),
+      ]),
+    );
+    const closed = owner.listenerCount('closed');
+    if (outcome === 'throw')
+      f.controls.reload = () => {
+        throw Error('reload refused');
+      };
+    if (outcome === 'dialog-refused')
+      f.controls.warning = async () => {
+        throw Error('dialog refused');
+      };
+    if (outcome === 'throw')
+      await assert.rejects(
+        async () => f.invoke(owner, 'reloadWorkspace'),
+        /reload refused/,
+      );
+    else {
+      await f.invoke(owner, 'reloadWorkspace');
+      assert.equal(
+        owner.webContents.listenerCount('did-fail-load'),
+        baseline['did-fail-load'] + 1,
+      );
+      const pendingFailure = owner.webContents
+        .listeners('did-fail-load')
+        .at(-1)!;
+      const fail = (code = -2, mainFrame = true) =>
+        owner.webContents.emit(
+          'did-fail-load',
+          {},
+          code,
+          'ERR_FAILED',
+          owner.webContents.mainFrame.url,
+          mainFrame,
+        );
+      fail(-2, false);
+      fail(-3);
+      assert.equal(f.controls.prompts, 0);
+      assert.equal(
+        owner.webContents.listenerCount('did-fail-load'),
+        baseline['did-fail-load'] + 1,
+      );
+      if (outcome === 'success') owner.webContents.emit('did-finish-load');
+      else if (outcome === 'destroyed') owner.webContents.emit('destroyed');
+      else if (outcome === 'destroyed-flag') {
+        owner.destroyed = true;
+        fail();
+        assert.equal(f.controls.prompts, 0);
+        owner.destroyed = false;
+        owner.webContents.emit('destroyed');
+      } else if (outcome === 'closed') owner.emit('closed');
+      else if (outcome === 'stale') {
+        owner.emit('closed');
+        f.app.emit('activate');
+        await setImmediate();
+        assert.notEqual(f.windows.at(-1), owner);
+        pendingFailure(
+          {},
+          -2,
+          'ERR_FAILED',
+          owner.webContents.mainFrame.url,
+          true,
+        );
+      }
+      fail();
+      fail();
+      await setImmediate();
+    }
+    const failed = ['failure', 'dialog-refused'].includes(outcome);
+    assert.equal(f.controls.prompts, failed ? 1 : 0);
+    if (failed) {
+      assert.equal(f.controls.messageWindows[0], owner);
+      assert.deepEqual(JSON.parse(JSON.stringify(f.controls.warnings[0])), {
+        type: 'error',
+        message: 'The workspace could not load. Restart Canopy to try again.',
+        buttons: ['OK'],
+        defaultId: 0,
+        cancelId: 0,
+      });
+      assert.equal(f.controls.reportHandlers, 1);
+    }
+    for (const [name, count] of Object.entries(baseline))
+      assert.equal(owner.webContents.listenerCount(name), count, name);
+    assert.equal(owner.listenerCount('closed'), closed);
+    if (outcome === 'success') {
+      await f.invoke(owner, 'reloadWorkspace');
+      assert.equal(
+        owner.webContents.listenerCount('did-fail-load'),
+        baseline['did-fail-load'] + 1,
+        'successful load permits fresh failure tracking',
+      );
+      owner.webContents.emit('did-finish-load');
+    }
+    assert.equal(JSON.stringify(await f.controls.readWorkspace()), bytes);
+    assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
+  });
+
+for (const outcome of [
+  'keep-open',
+  'close-anyway',
+  'stale',
+  'destroyed-flag',
+  'replaced',
+  'send-refused',
+])
+  it(`missing handoff session retries only after main close settles: ${outcome}`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const owner = f.windows[0],
+      saving = gate(),
+      warning = gate();
+    let retries = 0,
+      released = false,
+      session: any;
+    const register = () => {
+      retries++;
+      return f.invoke(
+        owner,
+        'handoffReady',
+        '11111111-1111-4111-8111-111111111111',
+      );
+    };
+    f.controls.flush = () => saving.wait;
+    f.controls.warning = () => warning.wait;
+    f.controls.consent = outcome === 'close-anyway' ? 1 : 0;
+    f.controls.release = () => {
+      released = true;
+      assert.throws(register, /closing/);
+    };
+    const send = owner.webContents.send;
+    owner.webContents.send = (channel, state: any) => {
+      send(channel, state);
+      if (channel === 'canopy:handoff' && state.closeSettled)
+        session = register();
+    };
+    owner.close();
+    await setImmediate();
+    f.controls.expireClose();
+    await setImmediate();
+    assert.equal(released, true);
+    assert.equal(retries, 1, 'early retry finishes while real warning is open');
+    assert.equal(owner.destroyed, false);
+    assert.equal(Boolean(session), false);
+    if (outcome === 'stale') owner.destroy();
+    if (outcome === 'destroyed-flag') owner.destroyed = true;
+    if (outcome === 'replaced') {
+      owner.emit('closed');
+      f.app.emit('activate');
+      await setImmediate();
+      assert.notEqual(f.windows.at(-1), owner);
+    }
+    if (outcome === 'send-refused')
+      owner.webContents.send = () => {
+        throw Error('renderer gone');
+      };
+    warning.release();
+    await setImmediate();
+    assert.equal(retries, outcome === 'keep-open' ? 2 : 1);
+    if (outcome === 'send-refused')
+      assert.doesNotThrow(() =>
+        f.invoke(owner, 'handoffReady', '22222222-2222-4222-8222-222222222222'),
+      );
+    if (outcome === 'keep-open') {
+      assert.ok(session, 'settled retry registers successfully');
+      f.app.emit('second-instance', {}, [], '/ignored', {
+        canopyMode: 'main',
+        canopyArguments: ['--canopy-open', 'canopy://handoff/view?view=next'],
+      });
+      const delivery = owner.handoffStates.at(-1).delivery;
+      assert.equal(delivery.intent.view, 'next');
+      assert.equal(
+        f.invoke(owner, 'handoffAck', session.session, delivery.id, 'opened'),
+        true,
+      );
+      assert.equal(owner.destroyed, false);
+    }
+    saving.release();
+    await setImmediate();
+  });
+
+for (const phase of ['validation', 'provider'])
+  it(`app quit drains admitted child ${phase} before closing the window`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const owner = f.windows[0],
+      held = gate();
+    let writes = 0;
+    const provider = new JiraProvider(async (url, init) => {
+      if (url.includes('/issue/SAMPLE-1?fields=project')) {
+        if (phase === 'validation') await held.wait;
+        return {
+          id: '1',
+          key: 'SAMPLE-1',
+          fields: {
+            summary: 'Parent',
+            project: { id: 'p', name: 'Project' },
+            issuetype: { id: 'epic', name: 'Epic' },
+          },
+        };
+      }
+      if (url.endsWith('/issuetype/epic')) return { hierarchyLevel: 1 };
+      if (url.includes('/createmeta/p/issuetypes/task?'))
+        return {
+          fields: [{ fieldId: 'summary', name: 'Summary', required: true }],
+          total: 1,
+        };
+      if (url.includes('/createmeta/p/issuetypes?'))
+        return {
+          issueTypes: [{ id: 'task', name: 'Task', hierarchyLevel: 0 }],
+          total: 1,
+        };
+      if (url === '/rest/api/3/issue' && init?.method === 'POST') {
+        writes++;
+        if (phase === 'provider') await held.wait;
+        return { key: 'SAMPLE-2' };
+      }
+      if (url.includes('/issue/SAMPLE-2?'))
+        return {
+          id: '2',
+          key: 'SAMPLE-2',
+          fields: {
+            summary: 'New child',
+            issuetype: { name: 'Task' },
+            status: {
+              id: 'open',
+              name: 'Open',
+              statusCategory: { key: 'new' },
+            },
+            parent: { key: 'SAMPLE-1' },
+          },
+        };
+      throw Error(url);
+    });
+    f.controls.childProvider = provider;
+    const { JSDOM } = require('jsdom');
+    const dom = new JSDOM('<body></body>');
+    const renderer = rendererFixture(dom.window.document, async (value) => {
+      await f.invoke(owner, 'saveWorkspace', value);
+    });
+    renderer.setWorkspace(structuredClone(backupWorkspace));
+    renderer.forward(async (name, ...args) =>
+      f.invoke(owner, name.replace('canopy:', ''), ...args),
+    );
+    const ast = sourceFile(
+      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+    );
+    const dialog = findNode(
+      ast,
+      (n): n is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(n) &&
+        n.tagName.getText() === 'CreateChildDialog',
+    );
+    const attr = (name: string) => {
+      const prop = dialog.attributes.properties.find(
+        (p) => ts.isJsxAttribute(p) && p.name.getText() === name,
+      ) as ts.JsxAttribute;
+      return (prop.initializer as ts.JsxExpression).expression!.getText();
+    };
+    let completed = false;
+    const onCreated = execute(attr('onCreated'), {
+      ...renderer.context,
+      childParent: {
+        connectionId: 'sample-jira',
+        tabId: backupWorkspace.tabs[0].id,
+        issue: { key: 'SAMPLE-1' },
+      },
+      mutations: {
+        insertCreated() {
+          completed = true;
+        },
+      },
+      setReveal() {},
+      setChildParent() {},
+    });
+    const submit = execute(
+      callback(sourceFile('src/renderer/CreateChildDialog.tsx'), 'submit'),
+      {
+        submitting: { current: false },
+        createdUnknown: false,
+        fields: {},
+        summary: 'New child',
+        description: '',
+        assignee: null,
+        priorityId: '',
+        typeId: 'task',
+        connectionId: 'sample-jira',
+        parent: { key: 'SAMPLE-1' },
+        window: { canopy: renderer.api },
+        trackMutation: execute(attr('trackMutation'), renderer.context),
+        onCreated,
+        setError(value: string) {
+          assert.equal(value, '');
+        },
+        setSaving() {},
+        setCreatedUnknown() {},
+      },
+    );
+    const request = submit({ preventDefault() {} });
+    f.controls.flush = (script) => renderer.executeScript(script);
+    f.controls.release = (attempt) => renderer.release(attempt);
+    await setImmediate();
+    f.app.quit();
+    await setImmediate();
+    assert.equal(owner.destroyed, false);
+    assert.equal(completed, false);
+    held.release();
+    await request;
+    await setImmediate();
+    assert.equal(writes, 1);
+    assert.equal(completed, true);
+    assert.equal(owner.destroyed, true);
+    const saved = f.writes.filter((w) => w.name === 'workspace').at(-1)!.value;
+    assert.equal(saved.tabs[0].selectedKey, 'SAMPLE-2');
+    assert.equal(saved.tabs[0].expanded.includes('SAMPLE-1'), true);
+    renderer.dispose();
+    dom.window.close();
+  });
+
+it('nontransfer load success retains initialization failure until explicit successful initialization', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const owner = f.windows[0];
+  f.invoke(owner, 'workspaceInitialized', 'Original read failed');
+  await f.invoke(owner, 'reloadWorkspace');
+  owner.webContents.emit('did-finish-load');
+  owner.webContents.emit('render-process-gone');
+  owner.close();
+  await setImmediate();
+  assert.equal(owner.destroyed, false);
+  assert.match(f.controls.warnings.at(-1)!.detail, /Original read failed/);
+  f.invoke(owner, 'workspaceInitialized', null);
+  owner.close();
+  await setImmediate();
+  assert.equal(owner.destroyed, true);
+  assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
 });

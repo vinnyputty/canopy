@@ -136,6 +136,7 @@ async function fixture(
       await act(async () =>
         root.render(
           React.createElement(CreateChildDialog, {
+            trackMutation: (operation) => operation(),
             connectionId: 'account',
             parent: issue,
             onClose() {

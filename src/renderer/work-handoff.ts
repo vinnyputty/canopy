@@ -98,6 +98,10 @@ export function useWorkHandoff(
     let early: HandoffState | undefined;
     const receive = (state: HandoffState) => {
       if (!live) return;
+      if (state.closeSettled) {
+        register.current?.();
+        return;
+      }
       if (state.session === '' && state.rejected) {
         handlers.current.reject();
         return;

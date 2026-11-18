@@ -316,11 +316,13 @@ async function start(
   let replacingTransferOwner: BrowserWindow | undefined;
   let departingHandoffOwner: BrowserWindow | undefined;
   let clearTransferReload: (() => void) | undefined;
-  const showWorkspaceReloadFailure = (owner: BrowserWindow) =>
+  const showWorkspaceReloadFailure = (
+    owner: BrowserWindow,
+    message = 'Workspace transferred, but reload failed. Restart Canopy before editing.',
+  ) =>
     dialog.showMessageBox(owner, {
       type: 'error',
-      message:
-        'Workspace transferred, but reload failed. Restart Canopy before editing.',
+      message,
       buttons: ['OK'],
       defaultId: 0,
       cancelId: 0,
@@ -328,11 +330,14 @@ async function start(
   const reloadWorkspace = () => {
     const owner = window;
     if (!owner) return;
-    if (committedTransferOwner === owner && !clearTransferReload) {
-      handoffs.replaceRenderer();
-      replacingHandoffRenderer = true;
-      replacingTransferOwner = owner;
-      departingHandoffOwner = owner;
+    if (!clearTransferReload) {
+      const transferred = committedTransferOwner === owner;
+      if (transferred) {
+        handoffs.replaceRenderer();
+        replacingHandoffRenderer = true;
+        replacingTransferOwner = owner;
+        departingHandoffOwner = owner;
+      }
       const contents = owner.webContents;
       const cleanup = () => {
         contents.removeListener('did-fail-load', failed);
@@ -358,7 +363,12 @@ async function start(
         )
           return;
         cleanup();
-        void showWorkspaceReloadFailure(owner).catch(() => {});
+        void showWorkspaceReloadFailure(
+          owner,
+          transferred
+            ? undefined
+            : 'The workspace could not load. Restart Canopy to try again.',
+        ).catch(() => {});
       };
       const loaded = () => {
         cleanup();
@@ -1284,6 +1294,14 @@ async function start(
           handoffs.resume();
           created.removeListener('closed', finishClosing);
           finishClosing();
+          if (window === created && !created.isDestroyed()) {
+            try {
+              created.webContents.send('canopy:handoff', {
+                session: '',
+                closeSettled: true,
+              });
+            } catch {}
+          }
           console.error('Could not save workspace before closing:', error);
         });
     });

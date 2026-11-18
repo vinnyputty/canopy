@@ -264,6 +264,7 @@ export type HandoffDelivery = {
 };
 export type HandoffState = {
   session: string;
+  closeSettled?: boolean;
   delivery?: HandoffDelivery;
   rejected?: boolean;
   canceledId?: string;

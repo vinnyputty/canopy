@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { before, test } from 'node:test';
@@ -52,14 +53,16 @@ function model(
       committedTransferOwner: undefined,
       clearTransferReload: undefined,
       window: {
-        webContents: {
+        on: () => {},
+        once: () => {},
+        webContents: Object.assign(new EventEmitter(), {
           reload() {
             assert(saved, 'Reload must follow completed save');
             events.push('reload');
             visible = false;
             documentAlive = false;
           },
-        },
+        }),
       },
     },
   ) as () => void;

@@ -1937,6 +1937,7 @@ for (const operation of ['rank', 'transitionPath'] as const)
 for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
   for (const failure of [false, true])
     test(`close drains preview label reconciliation and tolerated failure: lifetime=${lifetime}, failure=${failure}`, async (t) => {
+      const warnings = t.mock.method(console, 'error', () => {});
       let dataWrites = 0;
       const useState = React.useState;
       t.mock.method(React, 'useState', ((initial: unknown) => {
@@ -1951,6 +1952,44 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
       }) as typeof React.useState);
       const f = providerFixture(),
         provider = gate();
+      let ui: Awaited<ReturnType<typeof recoveryFixture>> | undefined;
+      t.after(async () => {
+        const host = ui?.d.window.document.querySelector('#host');
+        let pending: number | undefined, paused: boolean | undefined;
+        try {
+          await act(async () => provider.release());
+          if (f.h.controller.owner !== undefined)
+            f.h.release(f.h.controller.owner);
+          pending = (f.h.controller as any).pending.size;
+          paused = f.h.controller.paused;
+        } finally {
+          try {
+            await ui?.close();
+          } finally {
+            f.dispose();
+          }
+        }
+        assert.equal(
+          pending,
+          0,
+          'preview provider work settled before disposal',
+        );
+        assert.equal(paused, false, 'preview close released before disposal');
+        assert.equal(
+          host?.textContent,
+          '',
+          'preview root unmounted during teardown',
+        );
+        assert.equal(
+          warnings.mock.calls.some((call) =>
+            /act\(.*(?:without await|overlapping)|overlapping act|not wrapped in act/.test(
+              call.arguments.join(' '),
+            ),
+          ),
+          false,
+          'preview lifecycle has no unawaited or overlapping act scopes',
+        );
+      });
       f.h.forward(async () => {
         await provider.promise;
         if (failure) throw Error('label refused');
@@ -1977,8 +2016,9 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
         allRefreshTabs: [],
       });
       const trackMutation = execute(attr('trackMutation'), f.h.context);
-      const ui = await recoveryFixture();
-      Object.assign(ui.d.window.canopy, f.h.api, {
+      ui = await recoveryFixture();
+      const previewUI = ui;
+      Object.assign(previewUI.d.window.canopy, f.h.api, {
         preview: async (_connection: string, key: string) => ({
           issue: { ...f.issue, key, labels: [] },
           description: '',
@@ -1987,41 +2027,39 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
         }),
         labels: async () => [{ id: 'bug', name: 'bug' }],
       });
-      let open = true;
       let issueKey = f.issue.key;
+      function Preview() {
+        const [open, setOpen] = React.useState(true);
+        return open
+          ? React.createElement(IssuePreview, {
+              connectionId: 'sample-jira',
+              provider: 'github',
+              connectionName: 'Fixture',
+              issueKey,
+              relationshipsLoading: false,
+              width: 400,
+              onWidth() {},
+              onClose() {
+                setOpen(false);
+              },
+              onChanged,
+              trackMutation,
+              onAuthoringChanged() {},
+              onPreview() {},
+              onJump() {},
+              onOpenExternal() {},
+              onCopyKeySummary() {},
+              onWorkBrief() {},
+              onOpenComment() {},
+              onRelationships() {},
+              onMarkSeen() {},
+            })
+          : null;
+      }
       const render = () =>
-        act(async () =>
-          ui.root.render(
-            open
-              ? React.createElement(IssuePreview, {
-                  connectionId: 'sample-jira',
-                  provider: 'github',
-                  connectionName: 'Fixture',
-                  issueKey,
-                  relationshipsLoading: false,
-                  width: 400,
-                  onWidth() {},
-                  onClose() {
-                    open = false;
-                    void render();
-                  },
-                  onChanged,
-                  trackMutation,
-                  onAuthoringChanged() {},
-                  onPreview() {},
-                  onJump() {},
-                  onOpenExternal() {},
-                  onCopyKeySummary() {},
-                  onWorkBrief() {},
-                  onOpenComment() {},
-                  onRelationships() {},
-                  onMarkSeen() {},
-                })
-              : null,
-          ),
-        );
+        act(async () => previewUI.root.render(React.createElement(Preview)));
       await render();
-      const host = ui.d.window.document.querySelector('#host')!;
+      const host = previewUI.d.window.document.querySelector('#host')!;
       const button = (text: string) =>
         [...host.querySelectorAll('button')].find(
           (node) => node.textContent === text,
@@ -2041,7 +2079,14 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
             ) as HTMLButtonElement
           ).click(),
         );
-      if (lifetime === 'unmounted') await act(async () => ui.root.render(null));
+      if (lifetime === 'closed')
+        assert.equal(
+          host.textContent,
+          '',
+          'Close commits unmount before provider release',
+        );
+      if (lifetime === 'unmounted')
+        await act(async () => previewUI.root.render(null));
       if (lifetime === 'retargeted') {
         issueKey = 'OTHER-2';
         await render();
@@ -2096,8 +2141,6 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
           .fields.Labels;
       assert.deepEqual(labels, failure ? undefined : ['bug']);
       f.h.release(10);
-      await ui.close();
-      f.dispose();
     });
 
 test('a retained admitted issue writer refuses writes after transfer admission', async () => {
@@ -2544,9 +2587,10 @@ for (const kind of ['apply', 'undo'])
     d.window.close();
   });
 
-for (const mode of ['absent', 'existing', 'pending'])
+for (const mode of ['absent', 'existing', 'pending', 'main-settled'])
   test(`handoff retries absent registration after close release and preserves session: mode=${mode}`, async () => {
     const existing = mode === 'existing';
+    let mainClosing = mode === 'main-settled';
     const held = gate();
     const f = await recoveryFixture();
     let deferred = existing ? false : true;
@@ -2565,7 +2609,7 @@ for (const mode of ['absent', 'existing', 'pending'])
           await held.promise;
           throw Error('Canopy is closing.');
         }
-        if (deferred) throw Error('Canopy is closing.');
+        if (deferred || mainClosing) throw Error('Canopy is closing.');
         return { session: 'valid' };
       },
       handoffCancel: async () => {
@@ -2616,7 +2660,19 @@ for (const mode of ['absent', 'existing', 'pending'])
         assert.equal(calls, 1);
         await act(async () => held.release());
       }
-      assert.equal(calls, existing ? 1 : 2);
+      if (mode === 'main-settled') {
+        assert.equal(calls, 2, 'early input release retry is refused by main');
+        mainClosing = false;
+        await act(async () => receive({ session: '', closeSettled: true }));
+      }
+      assert.equal(calls, existing ? 1 : mode === 'main-settled' ? 3 : 2);
+      const registered = calls;
+      await act(async () => receive({ session: '', closeSettled: true }));
+      assert.equal(
+        calls,
+        registered,
+        'settled notification preserves an existing session',
+      );
       assert.equal(canceled, 0);
       await act(async () =>
         receive({
@@ -2634,6 +2690,14 @@ for (const mode of ['absent', 'existing', 'pending'])
       await f.close();
     }
     assert.equal(canceled, 1);
+    const disposedCalls = calls;
+    receive({ session: '', closeSettled: true });
+    await tick();
+    assert.equal(
+      calls,
+      disposedCalls,
+      'disposed hook ignores late settled notifications',
+    );
   });
 
 for (const committed of [false, true])
@@ -2674,3 +2738,213 @@ for (const committed of [false, true])
       await f.close();
     }
   });
+
+for (const phase of ['validation', 'provider'])
+  for (const outcome of ['success', 'failure', 'timeout-release'])
+    test(`close drains admitted child creation through ${phase}: ${outcome}`, async (t) => {
+      const ui = await recoveryFixture();
+      const h = rendererFixture(ui.d.window.document),
+        held = gate();
+      let closing: Promise<unknown> | undefined;
+      t.after(async () => {
+        await act(async () => held.release());
+        await closing?.catch(() => {});
+        if (h.controller.owner !== undefined) h.release(h.controller.owner);
+        await ui.close();
+        h.dispose();
+      });
+      const initial = structuredClone(backupWorkspace);
+      initial.tabs[0].expanded = [];
+      h.setWorkspace(initial);
+      const parent = {
+        id: '1',
+        key: 'SAMPLE-1',
+        summary: 'Parent',
+        type: 'Task',
+        status: { id: 'open', name: 'Open', category: 'new' as const },
+        priority: null,
+        assignee: null,
+        links: [],
+      };
+      const child = {
+        ...parent,
+        id: '2',
+        key: 'SAMPLE-2',
+        parentKey: parent.key,
+      };
+      let validations = 0,
+        writes = 0,
+        inserted = 0;
+      h.forward(async (name) => {
+        if (name !== 'canopy:createChild') throw Error(name);
+        validations++;
+        if (phase === 'validation') await held.promise;
+        if (outcome === 'failure' && phase === 'validation')
+          throw Error('validation refused');
+        writes++;
+        if (phase === 'provider') await held.promise;
+        if (outcome === 'failure') throw Error('provider refused');
+        return child;
+      });
+      const ast = sourceFile(
+        process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+      );
+      const dialog = findNode(
+        ast,
+        (n): n is ts.JsxSelfClosingElement =>
+          ts.isJsxSelfClosingElement(n) &&
+          n.tagName.getText() === 'CreateChildDialog',
+      );
+      const attr = (name: string) => {
+        const prop = dialog.attributes.properties.find(
+          (p) => ts.isJsxAttribute(p) && p.name.getText() === name,
+        ) as ts.JsxAttribute;
+        return (prop.initializer as ts.JsxExpression).expression!.getText();
+      };
+      const onCreated = execute(attr('onCreated'), {
+        ...h.context,
+        storeWorkspace: (_update: unknown) => {},
+        childParent: {
+          connectionId: 'sample-jira',
+          tabId: backupWorkspace.tabs[0].id,
+          issue: parent,
+        },
+        mutations: { insertCreated: () => inserted++ },
+        setReveal() {},
+        setChildParent() {},
+      });
+      let error = '',
+        saving = false;
+      const submit = execute(
+        callback(sourceFile('src/renderer/CreateChildDialog.tsx'), 'submit'),
+        {
+          submitting: { current: false },
+          createdUnknown: false,
+          fields: {},
+          summary: 'New child',
+          description: '',
+          assignee: null,
+          priorityId: '',
+          typeId: 'task',
+          connectionId: 'sample-jira',
+          parent,
+          window: { canopy: h.api },
+          trackMutation: execute(attr('trackMutation'), h.context),
+          onCreated,
+          setError: (value: string) => {
+            error = value;
+          },
+          setSaving: (value: boolean) => {
+            saving = value;
+          },
+          setCreatedUnknown() {},
+        },
+      );
+      const creating = submit({ preventDefault() {} });
+      await tick();
+      assert.equal(validations, 1);
+      assert.equal(saving, true);
+      h.setWorkspace((current: any) => ({ ...current, theme: 'light' }));
+      let finished = false;
+      closing = h.api.flushWorkspace(70).then(() => {
+        finished = true;
+      });
+      void closing.catch(() => {});
+      await tick();
+      assert.equal(finished, false);
+      assert.equal(h.writes.length, 0);
+      await assert.rejects(
+        h.controller.track(async () => {}),
+        /closing/,
+      );
+      await assert.rejects(
+        h.api.createChild('sample-jira', parent.key, {
+          typeId: 'task',
+          summary: 'late',
+        }),
+        /closing/,
+      );
+      h.setWorkspace((current: any) => ({ ...current, theme: 'dark' }));
+      if (outcome === 'timeout-release') h.release(70);
+      await act(async () => held.release());
+      await creating;
+      assert.equal(saving, false);
+      if (outcome === 'timeout-release') {
+        await assert.rejects(closing, /canceled/);
+        closing = undefined;
+        assert.equal(h.writes.length, 0);
+        await h.api.flushWorkspace(71);
+      } else
+        await assert.doesNotReject(
+          closing,
+          'failed child request must still allow closing',
+        );
+      const saved = h.writes.at(-1)!;
+      assert.equal(saved.theme, 'light');
+      assert.equal(inserted, outcome === 'failure' ? 0 : 1);
+      assert.equal(
+        writes,
+        outcome === 'failure' && phase === 'validation' ? 0 : 1,
+      );
+      assert.equal(
+        saved.tabs[0].selectedKey,
+        outcome === 'failure' ? backupWorkspace.tabs[0].selectedKey : child.key,
+      );
+      assert.equal(
+        saved.tabs[0].expanded.includes(parent.key),
+        outcome === 'failure'
+          ? initial.tabs[0].expanded.includes(parent.key)
+          : true,
+      );
+      assert.equal((h.controller as any).pending.size, 0);
+      if (outcome === 'failure') assert.match(error, /refused/);
+    });
+
+test('admitted child completion preserves queued workspace state in the React snapshot', () => {
+  const ast = sourceFile(
+    process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+  );
+  const dialog = findNode(
+    ast,
+    (n): n is ts.JsxSelfClosingElement =>
+      ts.isJsxSelfClosingElement(n) &&
+      n.tagName.getText() === 'CreateChildDialog',
+  );
+  const prop = dialog.attributes.properties.find(
+    (p) => ts.isJsxAttribute(p) && p.name.getText() === 'onCreated',
+  ) as ts.JsxAttribute;
+  const workspaceRef = { current: structuredClone(backupWorkspace) };
+  let state = structuredClone(backupWorkspace);
+  state.tabs[0].expanded = [];
+  workspaceRef.current.tabs[0].expanded = [];
+  const queue: ((current: typeof state) => typeof state)[] = [
+    (current) => ({
+      ...current,
+      theme: 'light',
+      tabs: current.tabs.map((tab) => ({ ...tab, scrollTop: 333 })),
+    }),
+  ];
+  const created = execute(
+    (prop.initializer as ts.JsxExpression).expression!.getText(),
+    {
+      workspaceRef,
+      storeWorkspace: (update: (current: typeof state) => typeof state) =>
+        queue.push(update),
+      childParent: {
+        connectionId: 'sample-jira',
+        tabId: state.tabs[0].id,
+        issue: { key: 'SAMPLE-1' },
+      },
+      mutations: { insertCreated() {} },
+      setReveal() {},
+      setChildParent() {},
+    },
+  );
+  created({ key: 'SAMPLE-2' });
+  for (const update of queue) state = update(state);
+  assert.equal(state.theme, 'light');
+  assert.equal(state.tabs[0].scrollTop, 333);
+  assert.equal(state.tabs[0].selectedKey, 'SAMPLE-2');
+  assert.equal(state.tabs[0].expanded.includes('SAMPLE-1'), true);
+  assert.equal(workspaceRef.current.tabs[0].selectedKey, 'SAMPLE-2');
+});
