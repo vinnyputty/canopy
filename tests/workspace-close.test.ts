@@ -5,7 +5,10 @@ import {
   forgetSidebarConnections,
   emptySidebarSession,
 } from '../src/renderer/sidebar-organization';
-import { workspaceError } from '../src/renderer/workspace-error';
+import {
+  WorkspaceTransferReloadError,
+  workspaceError,
+} from '../src/renderer/workspace-error';
 import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -25,6 +28,8 @@ import { setImmediate as tick } from 'node:timers/promises';
 import React, { act } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
+import { WorkspaceBackupPanel } from '../src/renderer/WorkspaceBackupPanel';
+import { IssuePreview } from '../src/renderer/IssuePreview';
 import { App, WorkspaceLoadRecovery } from '../src/renderer/App';
 import { gate, rendererFixture } from './fixtures/workspace-close';
 
@@ -392,7 +397,15 @@ test('initial read or hydration failure clears loaded authority, preserves exist
       node.expression.getText() === 'useEffect' &&
       node.getText().includes('window.canopy.demoTimeScale()'),
   );
-  for (const failure of ['read', 'hydrate', 'unmounted', 'unmounted-read']) {
+  for (const failure of [
+    'read',
+    'hydrate',
+    'unmounted',
+    'unmounted-read',
+    'report-refused',
+    'empty-error',
+    'report-pending',
+  ]) {
     const d = dom();
     const h = rendererFixture(d.window.document);
     const retained = {
@@ -402,6 +415,7 @@ test('initial read or hydration failure clears loaded authority, preserves exist
     h.workspaceRef.current = retained;
     h.context.workspaceLoaded.current = true;
     const reading = gate();
+    let reportHandlers = 0;
     let error: string | null = null,
       ready = false,
       hydrated = false;
@@ -433,7 +447,21 @@ test('initial read or hydration failure clears loaded authority, preserves exist
       window: {
         canopy: {
           connections: async () => backupConnections,
-          workspaceInitialized: async () => {},
+          workspaceInitialized: () => {
+            const reported =
+              failure === 'report-pending'
+                ? new Promise<void>(() => {})
+                : failure === 'report-refused' || failure === 'empty-error'
+                  ? Promise.reject(Error('report refused'))
+                  : Promise.resolve();
+            const catchReport = reported.catch.bind(reported);
+            void catchReport(() => {});
+            reported.catch = ((...args: Parameters<typeof catchReport>) => {
+              reportHandlers++;
+              return catchReport(...args);
+            }) as typeof reported.catch;
+            return reported;
+          },
           loadWorkspace: async () => {
             await reading.promise;
             return structuredClone(backupWorkspace);
@@ -451,8 +479,16 @@ test('initial read or hydration failure clears loaded authority, preserves exist
     );
     await assert.rejects(h.save(retained), /not loaded/);
     if (failure.startsWith('unmounted')) cleanup();
-    if (failure === 'read' || failure === 'unmounted-read')
-      reading.reject(Error('read failed'));
+    if (
+      [
+        'read',
+        'unmounted-read',
+        'report-refused',
+        'empty-error',
+        'report-pending',
+      ].includes(failure)
+    )
+      reading.reject(Error(failure === 'empty-error' ? '' : 'read failed'));
     else reading.release();
     await tick();
     assert.equal(h.context.workspaceLoaded.current, false);
@@ -462,10 +498,19 @@ test('initial read or hydration failure clears loaded authority, preserves exist
       assert.equal(error, null);
       assert.equal(ready, false);
     } else {
-      assert.match(error!, /failed/);
+      assert.match(
+        error!,
+        failure === 'empty-error' ? /The workspace could not load/ : /failed/,
+      );
       assert.equal(ready, true);
     }
     assert.equal(hydrated, false);
+    if (['report-refused', 'empty-error', 'report-pending'].includes(failure))
+      assert.equal(
+        reportHandlers,
+        1,
+        'load failure report has an effective rejection handler',
+      );
     cleanup();
     const next = {
       ...context,
@@ -473,6 +518,7 @@ test('initial read or hydration failure clears loaded authority, preserves exist
       window: {
         canopy: {
           ...context.window.canopy,
+          workspaceInitialized: async () => {},
           loadWorkspace: async () => structuredClone(backupWorkspace),
         },
       },
@@ -1890,7 +1936,19 @@ for (const operation of ['rank', 'transitionPath'] as const)
 
 for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
   for (const failure of [false, true])
-    test(`close drains preview label reconciliation and tolerated failure: lifetime=${lifetime}, failure=${failure}`, async () => {
+    test(`close drains preview label reconciliation and tolerated failure: lifetime=${lifetime}, failure=${failure}`, async (t) => {
+      let dataWrites = 0;
+      const useState = React.useState;
+      t.mock.method(React, 'useState', ((initial: unknown) => {
+        const [value, setValue] = useState(initial);
+        return [
+          value,
+          (next: any) => {
+            if (next?.issue) dataWrites++;
+            setValue(next);
+          },
+        ];
+      }) as typeof React.useState);
       const f = providerFixture(),
         provider = gate();
       f.h.forward(async () => {
@@ -1919,43 +1977,75 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
         allRefreshTabs: [],
       });
       const trackMutation = execute(attr('trackMutation'), f.h.context);
-      const toggle = findNode(
-        sourceFile(
-          process.env.CANOPY_CLOSE_PREVIEW_SOURCE ??
-            'src/renderer/IssuePreview.tsx',
-        ),
-        (node): node is ts.VariableDeclaration =>
-          ts.isVariableDeclaration(node) &&
-          node.name.getText() === 'toggleLabel',
-      );
-      let saving = false,
-        error = '';
-      const generation = { current: 1 };
-      let dataWrites = 0;
-      const edit = execute(toggle.initializer!.getText(), {
-        data: { issue: { ...f.issue, labels: [] } },
-        savingLabels: false,
-        previewGeneration: generation,
-        connectionId: 'sample-jira',
-        issueKey: f.issue.key,
-        setSavingLabels: (value: boolean) => {
-          saving = value;
-        },
-        setLabelsError: (value: string) => {
-          error = value;
-        },
-        setLabelsSaved() {},
-        setData() {
-          dataWrites++;
-        },
-        trackMutation,
-        onChanged,
-        window: { canopy: f.h.api },
+      const ui = await recoveryFixture();
+      Object.assign(ui.d.window.canopy, f.h.api, {
+        preview: async (_connection: string, key: string) => ({
+          issue: { ...f.issue, key, labels: [] },
+          description: '',
+          comments: [],
+          totalComments: 0,
+        }),
+        labels: async () => [{ id: 'bug', name: 'bug' }],
       });
-      const editing = edit('bug');
-      if (lifetime !== 'current') generation.current++;
-      await tick();
-      assert.equal(saving, true);
+      let open = true;
+      let issueKey = f.issue.key;
+      const render = () =>
+        act(async () =>
+          ui.root.render(
+            open
+              ? React.createElement(IssuePreview, {
+                  connectionId: 'sample-jira',
+                  provider: 'github',
+                  connectionName: 'Fixture',
+                  issueKey,
+                  relationshipsLoading: false,
+                  width: 400,
+                  onWidth() {},
+                  onClose() {
+                    open = false;
+                    void render();
+                  },
+                  onChanged,
+                  trackMutation,
+                  onAuthoringChanged() {},
+                  onPreview() {},
+                  onJump() {},
+                  onOpenExternal() {},
+                  onCopyKeySummary() {},
+                  onWorkBrief() {},
+                  onOpenComment() {},
+                  onRelationships() {},
+                  onMarkSeen() {},
+                })
+              : null,
+          ),
+        );
+      await render();
+      const host = ui.d.window.document.querySelector('#host')!;
+      const button = (text: string) =>
+        [...host.querySelectorAll('button')].find(
+          (node) => node.textContent === text,
+        )!;
+      await act(async () => button('Edit labels').click());
+      await act(async () =>
+        (
+          host.querySelector('input[type=checkbox]') as HTMLInputElement
+        ).click(),
+      );
+      assert.match(host.textContent!, /Saving labels/);
+      if (lifetime === 'closed')
+        await act(async () =>
+          (
+            host.querySelector(
+              '[title="Close preview (Escape)"]',
+            ) as HTMLButtonElement
+          ).click(),
+        );
+      if (lifetime === 'unmounted') await act(async () => ui.root.render(null));
+      if (lifetime === 'retargeted') {
+        issueKey = 'OTHER-2';
+        await render();
+      }
       let finished = false;
       const closing = f.h.api.flushWorkspace(10).then(() => {
         finished = true;
@@ -1963,27 +2053,50 @@ for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
       await tick();
       assert.equal(finished, false);
       assert.equal(f.h.writes.length, 0);
-      provider.release();
-      await editing;
+      const writesBeforeResponse = dataWrites;
+      assert.ok(
+        writesBeforeResponse > 0,
+        'state instrumentation observes real preview updates',
+      );
+      await act(async () => provider.release());
+      assert.equal(
+        dataWrites - writesBeforeResponse,
+        lifetime === 'current' ? 1 : 0,
+        'stale provider completion must not call the preview state setter',
+      );
       await assert.doesNotReject(
         closing,
         'a refused label edit must still allow workspace persistence',
       );
-      assert.equal(saving, lifetime !== 'current');
-      assert.equal(
-        dataWrites,
-        lifetime !== 'current' ? 1 : 2,
-        'stale completion cannot update preview UI',
-      );
-      assert.equal(
-        error.includes('label refused'),
-        failure && lifetime === 'current',
-      );
+      if (lifetime === 'current') {
+        assert.equal(
+          host.textContent!.includes('Labels were not saved'),
+          failure,
+        );
+        assert.equal(
+          (host.querySelector('input[type=checkbox]') as HTMLInputElement)
+            .checked,
+          !failure,
+        );
+      } else if (lifetime === 'retargeted') {
+        assert.match(host.textContent!, /OTHER-2/);
+        assert.doesNotMatch(
+          host.textContent!,
+          /Labels saved|Labels were not saved/,
+        );
+        await act(async () => button('Edit labels').click());
+        assert.equal(
+          (host.querySelector('input[type=checkbox]') as HTMLInputElement)
+            .checked,
+          false,
+        );
+      } else assert.equal(host.textContent, '');
       const labels =
         f.h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
           .fields.Labels;
       assert.deepEqual(labels, failure ? undefined : ['bug']);
       f.h.release(10);
+      await ui.close();
       f.dispose();
     });
 
@@ -2287,10 +2400,11 @@ for (const mode of ['deferred', 'navigation-refused', 'canceled', 'expired'])
   test(`handoff retains delivery through blocked navigation: ${mode}`, async () => {
     const f = await recoveryFixture();
     let receive!: (state: any) => void;
+    let now = Date.now();
     const delivery = {
       session: 'session',
       id: 'delivery',
-      expiresAt: Date.now() + 60_000,
+      expiresAt: now + 60_000,
       intent: { kind: 'view', view: 'triage' },
     };
     const acks: unknown[] = [];
@@ -2328,6 +2442,7 @@ for (const mode of ['deferred', 'navigation-refused', 'canceled', 'expired'])
         useEffect: React.useEffect,
         window: f.d.window,
         crypto: { randomUUID: () => 'owner' },
+        Date: { now: () => now },
       },
     )();
     function Component() {
@@ -2352,7 +2467,7 @@ for (const mode of ['deferred', 'navigation-refused', 'canceled', 'expired'])
         await act(async () =>
           receive({ session: 'session', canceledId: delivery.id }),
         );
-      if (mode === 'expired') delivery.expiresAt = 0;
+      if (mode === 'expired') now = delivery.expiresAt + 1;
       blocked = false;
       deferred = false;
       await act(async () => f.root.render(React.createElement(Component)));
@@ -2427,4 +2542,135 @@ for (const kind of ['apply', 'undo'])
     assert.equal(h.writes.length, 1);
     h.dispose();
     d.window.close();
+  });
+
+for (const mode of ['absent', 'existing', 'pending'])
+  test(`handoff retries absent registration after close release and preserves session: mode=${mode}`, async () => {
+    const existing = mode === 'existing';
+    const held = gate();
+    const f = await recoveryFixture();
+    let deferred = existing ? false : true;
+    let calls = 0,
+      canceled = 0;
+    const acks: unknown[] = [];
+    let receive!: (state: any) => void;
+    Object.assign(f.d.window.canopy, {
+      onHandoff: (fn: typeof receive) => {
+        receive = fn;
+        return () => {};
+      },
+      handoffReady: async () => {
+        calls++;
+        if (mode === 'pending' && calls === 1) {
+          await held.promise;
+          throw Error('Canopy is closing.');
+        }
+        if (deferred) throw Error('Canopy is closing.');
+        return { session: 'valid' };
+      },
+      handoffCancel: async () => {
+        canceled++;
+      },
+      handoffAck: async (...args: unknown[]) => {
+        acks.push(args);
+      },
+    });
+    const declaration = findNode(
+      sourceFile(
+        process.env.CANOPY_HANDOFF_SOURCE ?? 'src/renderer/work-handoff.ts',
+      ),
+      (n): n is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(n) && n.name?.getText() === 'useWorkHandoff',
+    );
+    const hook = execute(
+      `() => { ${declaration.getText().replace(/^export /, '')}; return useWorkHandoff; }`,
+      {
+        useRef: React.useRef,
+        useState: React.useState,
+        useEffect: React.useEffect,
+        window: f.d.window,
+        crypto: { randomUUID: () => 'owner' },
+      },
+    )();
+    function Component() {
+      hook(
+        true,
+        () => {},
+        () => {},
+        deferred,
+      );
+      return null;
+    }
+    const render = () =>
+      act(async () => f.root.render(React.createElement(Component)));
+    try {
+      await render();
+      if (existing) {
+        deferred = true;
+        await render();
+      }
+      assert.equal(calls, 1);
+      deferred = false;
+      await render();
+      if (mode === 'pending') {
+        assert.equal(calls, 1);
+        await act(async () => held.release());
+      }
+      assert.equal(calls, existing ? 1 : 2);
+      assert.equal(canceled, 0);
+      await act(async () =>
+        receive({
+          session: 'valid',
+          delivery: {
+            session: 'valid',
+            id: 'delivery',
+            expiresAt: Date.now() + 1000,
+            intent: { kind: 'view', view: 'triage' },
+          },
+        }),
+      );
+      assert.deepEqual(acks, [['valid', 'delivery', 'opened']]);
+    } finally {
+      await f.close();
+    }
+    assert.equal(canceled, 1);
+  });
+
+for (const committed of [false, true])
+  test(`backup panel scopes recovery instruction to transfer outcome: committed=${committed}`, async () => {
+    const f = await recoveryFixture();
+    Object.assign(f.d.window.canopy, {
+      canUndoWorkspaceImport: async () => true,
+    });
+    try {
+      await act(async () =>
+        f.root.render(
+          React.createElement(WorkspaceBackupPanel, {
+            connections: [],
+            flush: async () => {},
+            onApply: async () => {
+              throw committed
+                ? new WorkspaceTransferReloadError(
+                    'Workspace transferred, but reload failed. Restart Canopy before editing.',
+                  )
+                : Error('transfer refused');
+            },
+          }),
+        ),
+      );
+      const undo = [...f.d.window.document.querySelectorAll('button')].find(
+        (node) => node.textContent === 'Undo last import',
+      )!;
+      await act(async () => undo.click());
+      const text =
+        f.d.window.document.querySelector('[role=alert]')!.textContent!;
+      assert.equal(
+        text.includes('Existing workspace remains intact'),
+        !committed,
+      );
+      assert.equal(text.includes('Preview again'), !committed);
+      assert.equal(text.includes('Restart Canopy before editing'), committed);
+    } finally {
+      await f.close();
+    }
   });

@@ -367,3 +367,81 @@ it('pausing clears both delivery deadlines and queued expiration timers', (conte
   assert.equal(sent.length, 1);
   queue.stop();
 });
+
+it('replacement retains current and pending FIFO, immutable deadlines and stale-session refusal', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+  let rejections = 0;
+  const queue = new WorkHandoffQueue(() => rejections++);
+  queue.receive(args('one'));
+  queue.receive(args('two'));
+  const first = queue.ready(() => {}, 'old');
+  const deadline = first.delivery!.expiresAt;
+  context.mock.timers.tick(4000);
+  queue.replaceRenderer();
+  assert.equal(queue.cancel(first.session), false);
+  assert.equal(
+    queue.acknowledge(first.session, first.delivery!.id, 'opened'),
+    false,
+  );
+  queue.receive(args('one'));
+  const sent: HandoffState[] = [];
+  const replacement = queue.ready((state) => sent.push(state), 'new');
+  assert.notEqual(replacement.session, first.session);
+  assert.equal(replacement.delivery!.expiresAt, deadline);
+  assert.deepEqual(replacement.delivery!.intent, first.delivery!.intent);
+  assert.equal(queue.cancel(first.session), false);
+  assert.equal(
+    queue.acknowledge(first.session, first.delivery!.id, 'opened'),
+    false,
+  );
+  context.mock.timers.tick(5999);
+  assert.equal(rejections, 0);
+  context.mock.timers.tick(1);
+  assert.equal(rejections, 1);
+  assert.equal((sent.at(-1)!.delivery!.intent as { view: string }).view, 'two');
+  const second = sent.at(-1)!.delivery!;
+  assert.equal(
+    queue.acknowledge(replacement.session, second.id, 'opened'),
+    true,
+  );
+  assert.equal(
+    queue.ready(() => {}, 'new').delivery,
+    undefined,
+    'deduped current did not enter FIFO twice',
+  );
+  queue.stop();
+  context.mock.timers.tick(HANDOFF_WAIT_MS);
+  assert.equal(rejections, 1, 'settled timers must be cleaned');
+});
+
+it('replacement expires while absent and preserves queued wait deadline and capacity', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+  let rejections = 0;
+  const queue = new WorkHandoffQueue(() => rejections++);
+  for (let i = 0; i < HANDOFF_CAPACITY; i++) queue.receive(args(`view-${i}`));
+  const old = queue.ready(() => {}, 'old');
+  context.mock.timers.tick(4000);
+  queue.replaceRenderer();
+  queue.receive(args('view-0'));
+  queue.receive(args('overflow'));
+  assert.equal(rejections, 1);
+  context.mock.timers.tick(6000);
+  assert.equal(
+    rejections,
+    2,
+    'current expires on original delivered deadline while absent',
+  );
+  context.mock.timers.tick(HANDOFF_WAIT_MS - HANDOFF_ACK_MS);
+  assert.equal(
+    rejections,
+    HANDOFF_CAPACITY + 1,
+    'pending original deadlines expire without a renderer',
+  );
+  const ready = queue.ready(() => {}, 'new');
+  assert.equal(ready.rejected, true);
+  assert.equal(ready.delivery, undefined);
+  assert.equal(queue.cancel(old.session), false);
+  queue.stop();
+  context.mock.timers.tick(HANDOFF_WAIT_MS);
+  assert.equal(rejections, HANDOFF_CAPACITY + 1);
+});

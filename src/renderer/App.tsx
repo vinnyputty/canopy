@@ -1,4 +1,7 @@
-import { workspaceError } from './workspace-error';
+import {
+  WorkspaceTransferReloadError,
+  workspaceError,
+} from './workspace-error';
 import { flushSync } from 'react-dom';
 import { WorkspaceClose } from './workspace-close';
 import { inboxStamp, InboxInspection, type InboxGraph } from './inbox';
@@ -1530,15 +1533,15 @@ export function App() {
         setWorkspaceLoadError(null);
         setHandoffHydrated(true);
       })
-      .catch(async (error) => {
+      .catch((error) => {
         if (!live) return;
         workspaceLoaded.current = false;
-        const message = workspaceError(error);
-        await window.canopy.workspaceInitialized(message);
-        if (!live) return;
+        const message =
+          workspaceError(error).trim() || 'The workspace could not load.';
         setDialog('recovery');
         setWorkspaceLoadError(message);
         setErrors((value) => ({ ...value, app: message }));
+        void window.canopy.workspaceInitialized(message).catch(() => {});
       })
       .finally(() => live && setReady(true));
     return () => {
@@ -1636,7 +1639,7 @@ export function App() {
       .catch(async (error) => {
         await window.canopy.workspaceReloadFailed().catch(() => {});
         workspaceTransferReload.current = undefined;
-        throw new Error(
+        throw new WorkspaceTransferReloadError(
           'Workspace transferred, but reload failed. Restart Canopy before editing.',
           { cause: error },
         );

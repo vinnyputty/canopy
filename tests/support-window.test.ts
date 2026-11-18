@@ -63,6 +63,7 @@ async function fixture() {
     crashed: false,
     consent: 0,
     prompts: 0,
+    reportHandlers: 0,
     messageWindows: [] as unknown[],
     warnings: [] as {
       type?: string;
@@ -195,6 +196,16 @@ async function fixture() {
       await readGate.wait;
       return controls.saved;
     }
+    async replaceWorkspace(
+      expected: Workspace,
+      next: Workspace,
+      validate?: () => void,
+    ) {
+      validate?.();
+      assert.deepEqual(await controls.readWorkspace(), expected);
+      controls.readWorkspace = async () => structuredClone(next);
+      writes.push({ name: 'workspace', value: structuredClone(next) });
+    }
     async write(name: string, value: unknown) {
       await controls.write(name);
       writes.push({ name, value: structuredClone(value) });
@@ -248,15 +259,23 @@ async function fixture() {
           },
           shell: {},
           dialog: {
-            showMessageBox: async (
+            showMessageBox: (
               window: unknown,
               options: (typeof controls.warnings)[number],
             ) => {
               controls.warnings.push(options);
               controls.messageWindows.push(window);
               controls.prompts++;
-              await controls.warning();
-              return { response: controls.consent };
+              const reported = controls
+                .warning()
+                .then(() => ({ response: controls.consent }));
+              const catchReport = reported.catch.bind(reported);
+              void catchReport(() => {});
+              reported.catch = ((...args: Parameters<typeof catchReport>) => {
+                controls.reportHandlers++;
+                return catchReport(...args);
+              }) as typeof reported.catch;
+              return reported;
             },
             showErrorBox: (_title: string, message: string) =>
               errors.push(message),
@@ -1617,3 +1636,619 @@ for (const failure of [false, true])
     assert.equal(f.controls.quits, 0);
     assert.equal(f.writes.length, 0);
   });
+
+for (const outcome of [
+  'failure',
+  'success',
+  'destroyed',
+  'closed',
+  'stale',
+  'dialog-refused',
+  'reload-throw',
+  'absent-expiry',
+])
+  it(`committed transfer tracks asynchronous replacement load: ${outcome}`, async (context) => {
+    if (outcome === 'absent-expiry')
+      context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    const original: Workspace = {
+      tabs: [],
+      activeTabId: null,
+      theme: 'dark',
+      shortcuts: {},
+      sidebarCollapsed: false,
+    };
+    f.controls.readWorkspace = async () => structuredClone(original);
+    const exported = (await f.invoke(window, 'prepareWorkspaceExport')) as any;
+    exported.backup.workspace.theme = 'light';
+    const preview = (await f.invoke(
+      window,
+      'previewWorkspaceImport',
+      exported.backup,
+      {},
+      'replace',
+    )) as any;
+    await f.invoke(window, 'applyWorkspaceImport', preview.token);
+    const oldSession = f.invoke(
+      window,
+      'handoffReady',
+      '11111111-1111-4111-8111-111111111111',
+    ) as any;
+    for (const view of ['one', 'two'])
+      f.app.emit('second-instance', {}, [], '/ignored', {
+        canopyMode: 'main',
+        canopyArguments: [
+          '--canopy-open',
+          `canopy://handoff/view?view=${view}`,
+        ],
+      });
+    const delivered = window.handoffStates.at(-1).delivery;
+    const committed = JSON.stringify(await f.controls.readWorkspace());
+    const baseline = window.webContents.listenerCount('did-fail-load');
+    let reloads = 0;
+    f.controls.reload = () => {
+      reloads++;
+    };
+    if (outcome === 'reload-throw') {
+      f.controls.reload = () => {
+        throw Error('reload refused');
+      };
+      await assert.rejects(
+        async () => f.invoke(window, 'reloadWorkspace'),
+        /reload refused/,
+      );
+      assert.equal(window.webContents.listenerCount('did-fail-load'), baseline);
+      assert.equal(JSON.stringify(await f.controls.readWorkspace()), committed);
+      assert.equal(f.controls.prompts, 0);
+      return;
+    }
+    await f.invoke(window, 'reloadWorkspace');
+    assert.equal(reloads, 1);
+    assert.equal(
+      f.controls.prompts,
+      0,
+      'void reload succeeds before asynchronous failure',
+    );
+    assert.equal(
+      window.webContents.listenerCount('did-fail-load'),
+      baseline + 1,
+    );
+    window.webContents.emit('did-start-navigation', {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    assert.equal(f.invoke(window, 'handoffCancel', oldSession.session), false);
+    assert.equal(
+      f.invoke(
+        window,
+        'handoffAck',
+        oldSession.session,
+        delivered.id,
+        'opened',
+      ),
+      false,
+    );
+    if (outcome === 'absent-expiry') {
+      const send = window.webContents.send;
+      window.webContents.send = () => {
+        throw Error('departing renderer unavailable');
+      };
+      context.mock.timers.tick(10_000);
+      window.webContents.send = send;
+    }
+    window.webContents.emit('did-navigate');
+    const replacement = f.invoke(
+      window,
+      'handoffReady',
+      '22222222-2222-4222-8222-222222222222',
+    ) as any;
+    assert.ok(
+      replacement.delivery,
+      'unacknowledged request survives committed-transfer navigation',
+    );
+    assert.equal(
+      replacement.delivery.intent.view,
+      outcome === 'absent-expiry' ? 'two' : 'one',
+    );
+    if (outcome === 'absent-expiry') assert.equal(replacement.rejected, true);
+    else assert.equal(replacement.delivery.expiresAt, delivered.expiresAt);
+    assert.notEqual(replacement.session, oldSession.session);
+    assert.equal(
+      f.invoke(
+        window,
+        'handoffAck',
+        replacement.session,
+        replacement.delivery.id,
+        'opened',
+      ),
+      true,
+    );
+    if (outcome !== 'absent-expiry')
+      assert.equal(window.handoffStates.at(-1).delivery.intent.view, 'two');
+    const fail = (code = -2, mainFrame = true) =>
+      window.webContents.emit(
+        'did-fail-load',
+        {},
+        code,
+        'ERR_FAILED',
+        'file:///sample/dist/renderer/index.html',
+        mainFrame,
+      );
+    fail(-2, false);
+    fail(-3);
+    assert.equal(f.controls.prompts, 0);
+    assert.equal(
+      window.webContents.listenerCount('did-fail-load'),
+      baseline + 1,
+    );
+    if (outcome === 'success') window.webContents.emit('did-finish-load');
+    if (outcome === 'destroyed') window.webContents.emit('destroyed');
+    if (outcome === 'closed') window.emit('closed');
+    if (outcome === 'stale') {
+      window.destroyed = true;
+      f.app.emit('activate');
+      await setImmediate();
+    }
+    if (outcome === 'dialog-refused')
+      f.controls.warning = async () => {
+        throw Error('dialog unavailable');
+      };
+    fail();
+    fail();
+    await setImmediate();
+    const failed = ['failure', 'dialog-refused', 'absent-expiry'].includes(
+      outcome,
+    );
+    assert.equal(f.controls.prompts, failed ? 1 : 0);
+    if (failed) {
+      assert.equal(
+        f.controls.reportHandlers,
+        1,
+        'asynchronous native reporting has an effective rejection handler',
+      );
+      assert.equal(f.controls.messageWindows[0], window);
+      assert.match(
+        f.controls.warnings[0].message,
+        /Restart Canopy before editing/,
+      );
+    }
+    if (outcome === 'stale') window.webContents.emit('destroyed');
+    assert.equal(window.webContents.listenerCount('did-fail-load'), baseline);
+    if (outcome === 'success') {
+      await f.invoke(window, 'reloadWorkspace');
+      assert.equal(
+        window.webContents.listenerCount('did-fail-load'),
+        baseline,
+        'successful replacement clears committed reload tracking',
+      );
+    }
+    assert.equal(JSON.stringify(await f.controls.readWorkspace()), committed);
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      1,
+    );
+    assert.equal(f.controls.quits, 0);
+  });
+
+async function committedHandoffFixture(registerOld = true) {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  f.controls.readWorkspace = async () => ({
+    tabs: [],
+    activeTabId: null,
+    theme: 'dark',
+    shortcuts: {},
+    sidebarCollapsed: false,
+  });
+  const exported = (await f.invoke(window, 'prepareWorkspaceExport')) as any;
+  exported.backup.workspace.theme = 'light';
+  const preview = (await f.invoke(
+    window,
+    'previewWorkspaceImport',
+    exported.backup,
+    {},
+    'replace',
+  )) as any;
+  await f.invoke(window, 'applyWorkspaceImport', preview.token);
+  const old = registerOld
+    ? (f.invoke(
+        window,
+        'handoffReady',
+        '11111111-1111-4111-8111-111111111111',
+      ) as any)
+    : undefined;
+  for (const view of ['one', 'two'])
+    f.app.emit('second-instance', {}, [], '/ignored', {
+      canopyMode: 'main',
+      canopyArguments: ['--canopy-open', `canopy://handoff/view?view=${view}`],
+    });
+  return { f, window, old };
+}
+
+for (const registerOld of [false, true])
+  it(`replacement readiness requires a committed document: existing session=${registerOld}`, async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+    const { f, window, old } = await committedHandoffFixture(registerOld);
+    const delivered = window.handoffStates.at(-1)?.delivery;
+    const outgoingFrame = window.webContents.mainFrame;
+    await f.invoke(window, 'reloadWorkspace');
+    const departingReady = () =>
+      f.invoke(window, 'handoffReady', '11111111-1111-4111-8111-111111111111');
+    assert.throws(departingReady, /replacing the workspace/);
+    window.webContents.emit('did-start-navigation', {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    assert.throws(departingReady, /replacing the workspace/);
+    window.webContents.emit(
+      'did-frame-navigate',
+      {},
+      outgoingFrame.url,
+      200,
+      'OK',
+      false,
+    );
+    assert.throws(departingReady, /replacing the workspace/);
+    context.mock.timers.tick(1_000);
+    window.webContents.mainFrame = { url: outgoingFrame.url };
+    window.webContents.emit('did-navigate', {}, outgoingFrame.url, 200, 'OK');
+    assert.throws(
+      () =>
+        f.handlers.get('canopy:handoffReady')!(
+          { sender: window.webContents, senderFrame: outgoingFrame },
+          '11111111-1111-4111-8111-111111111111',
+        ),
+      /Untrusted/,
+    );
+    let replacement: any;
+    assert.doesNotThrow(() => {
+      replacement = f.invoke(
+        window,
+        'handoffReady',
+        '22222222-2222-4222-8222-222222222222',
+      );
+    });
+    assert.equal(replacement.delivery.intent.view, 'one');
+    assert.equal(
+      replacement.delivery.expiresAt,
+      delivered?.expiresAt ?? 11_100,
+    );
+    if (old) {
+      assert.equal(f.invoke(window, 'handoffCancel', old.session), false);
+      assert.equal(
+        f.invoke(window, 'handoffAck', old.session, delivered.id, 'opened'),
+        false,
+      );
+    }
+    window.webContents.emit('did-finish-load');
+    assert.equal(
+      f.invoke(
+        window,
+        'handoffAck',
+        replacement.session,
+        replacement.delivery.id,
+        'opened',
+      ),
+      true,
+    );
+    const second = window.handoffStates.at(-1).delivery;
+    assert.equal(second.intent.view, 'two');
+    assert.equal(f.invoke(window, 'handoffCancel', replacement.session), true);
+    assert.equal(
+      f.invoke(window, 'handoffAck', replacement.session, second.id, 'opened'),
+      false,
+    );
+    assert.equal(
+      (
+        f.invoke(
+          window,
+          'handoffReady',
+          '33333333-3333-4333-8333-333333333333',
+        ) as any
+      ).delivery,
+      undefined,
+    );
+  });
+
+it('synchronous reload refusal reports expiry without registration and preserves the committed barrier', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+  const { f, window, old } = await committedHandoffFixture();
+  const delivered = window.handoffStates.at(-1).delivery;
+  const bytes = JSON.stringify(await f.controls.readWorkspace());
+  const failListeners = window.webContents.listenerCount('did-fail-load');
+  const finishListeners = window.webContents.listenerCount('did-finish-load');
+  f.controls.reload = () => {
+    throw Error('reload refused');
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(
+      async () => f.invoke(window, 'reloadWorkspace'),
+      /reload refused/,
+    );
+    assert.equal(
+      window.webContents.listenerCount('did-fail-load'),
+      failListeners,
+    );
+    assert.equal(
+      window.webContents.listenerCount('did-finish-load'),
+      finishListeners,
+    );
+  }
+  assert.equal(f.invoke(window, 'handoffCancel', old.session), false);
+  assert.equal(
+    f.invoke(window, 'handoffAck', old.session, delivered.id, 'opened'),
+    false,
+  );
+  const before = window.handoffStates.length;
+  context.mock.timers.tick(9_999);
+  assert.equal(window.handoffStates.length, before);
+  context.mock.timers.tick(1);
+  assert.ok(
+    window.handoffStates
+      .slice(before)
+      .some((state) => state.session === '' && state.rejected),
+  );
+  const afterCurrent = window.handoffStates.length;
+  context.mock.timers.tick(49_999);
+  assert.equal(window.handoffStates.length, afterCurrent);
+  context.mock.timers.tick(1);
+  assert.ok(
+    window.handoffStates.slice(afterCurrent).some((state) => state.rejected),
+  );
+  assert.equal(JSON.stringify(await f.controls.readWorkspace()), bytes);
+  assert.equal(f.controls.prompts, 0);
+});
+
+for (const failure of ['throw', 'async'])
+  it(`repeated ${failure} reload failure permits retry with original deadlines`, async (context) => {
+    context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+    const { f, window, old } = await committedHandoffFixture();
+    const delivered = window.handoffStates.at(-1).delivery;
+    const bytes = JSON.stringify(await f.controls.readWorkspace());
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (failure === 'throw') {
+        f.controls.reload = () => {
+          throw Error('reload refused');
+        };
+        await assert.rejects(
+          async () => f.invoke(window, 'reloadWorkspace'),
+          /reload refused/,
+        );
+      } else {
+        await f.invoke(window, 'reloadWorkspace');
+        window.webContents.emit('did-start-navigation', {
+          isMainFrame: true,
+          isSameDocument: false,
+        });
+        window.webContents.emit(
+          'did-fail-load',
+          {},
+          -2,
+          'ERR_FAILED',
+          window.webContents.mainFrame.url,
+          true,
+        );
+      }
+      context.mock.timers.tick(1_000);
+    }
+    f.controls.reload = () => {};
+    await f.invoke(window, 'reloadWorkspace');
+    window.webContents.emit('did-start-navigation', {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    assert.equal(f.invoke(window, 'handoffCancel', old.session), false);
+    window.webContents.emit('did-navigate');
+    let replacement: any;
+    assert.doesNotThrow(() => {
+      replacement = f.invoke(
+        window,
+        'handoffReady',
+        '22222222-2222-4222-8222-222222222222',
+      );
+    });
+    assert.equal(replacement.delivery.intent.view, 'one');
+    assert.equal(replacement.delivery.expiresAt, delivered.expiresAt);
+    context.mock.timers.tick(7_999);
+    assert.equal(window.handoffStates.at(-1).delivery?.intent.view, 'one');
+    context.mock.timers.tick(1);
+    assert.equal(
+      f.invoke(
+        window,
+        'handoffAck',
+        replacement.session,
+        replacement.delivery.id,
+        'opened',
+      ),
+      false,
+    );
+    const second = window.handoffStates.at(-1).delivery;
+    assert.equal(second.intent.view, 'two');
+    assert.equal(second.expiresAt, 20_100);
+    window.webContents.emit('did-finish-load');
+    assert.equal(JSON.stringify(await f.controls.readWorkspace()), bytes);
+  });
+
+for (const loss of ['crash', 'destroyed', 'closed'])
+  for (const ready of [false, true])
+    it(`${loss} cancels retained handoffs and reload listeners: replacement ready=${ready}`, async (context) => {
+      context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+      const { f, window } = await committedHandoffFixture();
+      const baseline = window.webContents.listenerCount('did-fail-load');
+      const finishBaseline =
+        window.webContents.listenerCount('did-finish-load');
+      await f.invoke(window, 'reloadWorkspace');
+      window.webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        isSameDocument: false,
+      });
+      let replacement: any;
+      if (ready) {
+        window.webContents.emit('did-navigate');
+        assert.doesNotThrow(() => {
+          replacement = f.invoke(
+            window,
+            'handoffReady',
+            '22222222-2222-4222-8222-222222222222',
+          );
+        });
+        assert.ok(replacement.delivery);
+        if (loss === 'destroyed')
+          window.webContents.once('destroyed', () => {
+            assert.equal(
+              f.invoke(
+                window,
+                'handoffAck',
+                replacement.session,
+                replacement.delivery.id,
+                'opened',
+              ),
+              false,
+              'destruction cancels before the window closed callback',
+            );
+          });
+      }
+      if (loss === 'crash')
+        window.webContents.emit(
+          'render-process-gone',
+          {},
+          { reason: 'crashed' },
+        );
+      else if (loss === 'destroyed') window.destroy();
+      else {
+        window.destroyed = true;
+        window.emit('closed');
+      }
+      assert.equal(window.webContents.listenerCount('did-fail-load'), baseline);
+      assert.equal(
+        window.webContents.listenerCount('did-finish-load'),
+        finishBaseline,
+      );
+      let next = window;
+      if (loss !== 'crash') {
+        f.app.emit('activate');
+        await setImmediate();
+        next = f.windows[1];
+        assert.ok(next);
+      }
+      const beforeInvalid = next.handoffStates.length;
+      f.app.emit('second-instance', {}, [], '/ignored', {
+        canopyMode: 'main',
+        canopyArguments: ['--invalid-canopy-command'],
+      });
+      await setImmediate();
+      assert.equal(
+        next.handoffStates
+          .slice(beforeInvalid)
+          .some((state) => state.session === '' && state.rejected),
+        true,
+        'renderer loss restores rejection notifications before registration',
+      );
+      let recovered: any;
+      assert.doesNotThrow(() => {
+        recovered = f.invoke(
+          next,
+          'handoffReady',
+          '33333333-3333-4333-8333-333333333333',
+        );
+      });
+      assert.equal(recovered.delivery, undefined);
+      const before = next.handoffStates.length;
+      context.mock.timers.tick(60_000);
+      assert.equal(next.handoffStates.length, before);
+      window.webContents.emit(
+        'did-fail-load',
+        {},
+        -2,
+        'ERR_FAILED',
+        window.webContents.mainFrame.url,
+        true,
+      );
+      assert.equal(f.controls.prompts, 0);
+      if (loss !== 'crash') {
+        f.app.emit('second-instance', {}, [], '/ignored', {
+          canopyMode: 'main',
+          canopyArguments: [
+            '--canopy-open',
+            'canopy://handoff/view?view=fresh',
+          ],
+        });
+        const fresh = next.handoffStates.at(-1).delivery;
+        assert.equal(fresh.intent.view, 'fresh');
+        window.webContents.emit(
+          'render-process-gone',
+          {},
+          { reason: 'crashed' },
+        );
+        window.webContents.emit('destroyed');
+        window.emit('closed');
+        assert.equal(
+          f.invoke(next, 'handoffAck', recovered.session, fresh.id, 'opened'),
+          true,
+        );
+      }
+    });
+
+it('crash cancellation overrides an earlier ordinary navigation cancellation latch', async () => {
+  const { f, window } = await committedHandoffFixture();
+  window.webContents.emit('did-start-navigation', {
+    isMainFrame: true,
+    isSameDocument: false,
+  });
+  f.app.emit('second-instance', {}, [], '/ignored', {
+    canopyMode: 'main',
+    canopyArguments: ['--canopy-open', 'canopy://handoff/view?view=late'],
+  });
+  window.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+  const recovered = f.invoke(
+    window,
+    'handoffReady',
+    '33333333-3333-4333-8333-333333333333',
+  ) as any;
+  assert.equal(recovered.delivery, undefined);
+});
+
+it('aborted replacement admits late outgoing readiness within the original pending deadline', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+  const { f, window } = await committedHandoffFixture(false);
+  f.controls.reload = () => {
+    throw Error('reload refused');
+  };
+  await assert.rejects(
+    async () => f.invoke(window, 'reloadWorkspace'),
+    /reload refused/,
+  );
+  context.mock.timers.tick(59_000);
+  let outgoing: any;
+  assert.doesNotThrow(() => {
+    outgoing = f.invoke(
+      window,
+      'handoffReady',
+      '11111111-1111-4111-8111-111111111111',
+    );
+  });
+  assert.equal(outgoing.delivery.intent.view, 'one');
+  assert.equal(outgoing.delivery.expiresAt, 60_100);
+  context.mock.timers.tick(999);
+  assert.equal(
+    f.invoke(
+      window,
+      'handoffAck',
+      outgoing.session,
+      outgoing.delivery.id,
+      'opened',
+    ),
+    true,
+  );
+  assert.equal(window.handoffStates.at(-1).delivery.intent.view, 'two');
+  assert.equal(window.handoffStates.at(-1).delivery.expiresAt, 60_100);
+  context.mock.timers.tick(1);
+  assert.equal(window.handoffStates.at(-1).rejected, true);
+});

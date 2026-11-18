@@ -1,4 +1,7 @@
-import { workspaceError } from '../../src/renderer/workspace-error';
+import {
+  WorkspaceTransferReloadError,
+  workspaceError,
+} from '../../src/renderer/workspace-error';
 import { DEFAULT_READING } from '../../src/shared/views';
 import { defaultShortcuts } from '../../src/renderer/tree';
 import { migrateViews } from '../../src/renderer/table-view';
@@ -85,6 +88,7 @@ export function rendererFixture(
   };
   const context = {
     workspaceError,
+    WorkspaceTransferReloadError,
     workspaceClose,
     workspaceRef,
     storeWorkspace,

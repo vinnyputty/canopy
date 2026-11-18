@@ -5,9 +5,11 @@ import { withScrollPositions } from '../src/renderer/scroll-position';
 import { WorkspaceClose } from '../src/renderer/workspace-close';
 import { callback, execute, findNode, sourceFile } from './source-probe';
 
-const source = sourceFile(
-  process.env.CANOPY_SCROLL_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
-);
+const rendererSource =
+  process.env.CANOPY_SCROLL_RENDERER_SOURCE ??
+  process.env.CANOPY_CLOSE_RENDERER_SOURCE ??
+  'src/renderer/App.tsx';
+const source = sourceFile(rendererSource);
 const registration = findNode(
   source,
   (node): node is ts.CallExpression =>
@@ -252,7 +254,7 @@ for (const releaseCloseFirst of [false, true])
         removeEventListener() {},
       },
     } as unknown as Document;
-    const h = rendererFixture(document);
+    const h = rendererFixture(document, undefined, true, rendererSource);
     const tab = { id: 'active', scrollTop: 231.75 };
     const viewport = { scrollTop: 0 };
     const pendingScrollRestore = { current: null as string | null };
@@ -277,11 +279,23 @@ for (const releaseCloseFirst of [false, true])
         n.arguments[0]?.getText().includes('!restoreScroll(activeTab)') ===
           true,
     );
+    let dependencies: unknown[] | undefined;
     const render = () =>
-      execute(restoreEffect.arguments[0].getText(), {
+      execute(`() => { ${restoreEffect.getText()}; }`, {
         ...renderContext,
+        workspace: h.workspaceRef.current,
         restoreScroll,
+        useEffect: (effect: () => void, next: unknown[]) => {
+          if (
+            !dependencies ||
+            next.some((value, index) => !Object.is(value, dependencies![index]))
+          ) {
+            dependencies = next;
+            effect();
+          }
+        },
       })();
+    render();
     const store = h.context.storeWorkspace;
     h.context.storeWorkspace = (update) => {
       store(update);

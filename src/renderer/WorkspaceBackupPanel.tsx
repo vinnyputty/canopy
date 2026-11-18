@@ -1,3 +1,4 @@
+import { WorkspaceTransferReloadError } from './workspace-error';
 import React, { useState, useEffect } from 'react';
 import type { Connection, Workspace } from '../shared/types';
 import type {
@@ -31,6 +32,7 @@ export function WorkspaceBackupPanel({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [transferCommitted, setTransferCommitted] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   useEffect(() => {
     void window.canopy
@@ -41,10 +43,12 @@ export function WorkspaceBackupPanel({
   async function run(action: () => Promise<void>) {
     setBusy(true);
     setError('');
+    setTransferCommitted(false);
     setMessage('');
     try {
       await action();
     } catch (error) {
+      setTransferCommitted(error instanceof WorkspaceTransferReloadError);
       setError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
@@ -285,8 +289,9 @@ export function WorkspaceBackupPanel({
       </fieldset>
       {error && (
         <p role="alert" className="dialog-error">
-          {error} Existing workspace remains intact if applying fails. Preview
-          again after changes.
+          {error}
+          {!transferCommitted &&
+            ' Existing workspace remains intact if applying fails. Preview again after changes.'}
         </p>
       )}
       {message && <p role="status">{message}</p>}

@@ -156,7 +156,18 @@ function harness(
       rootKey: 'CAN-1',
       fetchedAt: 1,
       warnings: [],
-      issues: [],
+      issues: [
+        {
+          id: 'CAN-1',
+          key: 'CAN-1',
+          summary: 'Confirmed root',
+          type: 'Task',
+          status: { id: 'open', name: 'Open', category: 'new' },
+          priority: null,
+          assignee: null,
+          links: [],
+        },
+      ],
     },
   };
   const handoff = execute(handoffCall.arguments[1].getText(), {
@@ -443,6 +454,16 @@ test('handoff navigation defers issue and view intents during transfer without U
     assert.deepEqual(h.state(), before);
   }
   h.controller.endTransfer();
+  h.handoff({
+    kind: 'issue',
+    connection: 'fixture',
+    provider: 'jira',
+    host: 'example.invalid',
+    root: 'CAN-1',
+    key: 'CAN-1',
+  });
+  assert.equal(h.state().workspace.tabs[0].selectedKey, 'CAN-1');
+  assert.notDeepEqual(h.state(), before);
   h.handoff({ kind: 'view', view: 'handoff-view' });
   assert.equal(h.state().workspace.activeSavedViewId, 'handoff-view');
 });

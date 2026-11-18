@@ -32,7 +32,10 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
-async function fixture(api: Partial<CanopyAPI> = {}) {
+async function fixture(
+  api: Partial<CanopyAPI> = {},
+  reconcile: () => void = () => {},
+) {
   const dom = new JSDOM(
     '<button id="origin">Origin</button><div id="host"></div>',
     {
@@ -96,6 +99,7 @@ async function fixture(api: Partial<CanopyAPI> = {}) {
           },
           onChanged() {
             changed++;
+            reconcile();
           },
           onAuthoringChanged() {},
           onPreview() {},
@@ -591,6 +595,31 @@ test('unsupported child fields retain the provider completion guidance', async (
       'Continue in Jira to complete the required fields.',
     );
     assert.equal(f.button('Create child').disabled, true);
+  } finally {
+    await f.close();
+  }
+});
+
+test('confirmed labels remain saved when reconciliation callback throws', async () => {
+  const f = await fixture({}, () => {
+    throw Error('reconciliation refused');
+  });
+  try {
+    await f.render();
+    await f.click('Edit labels');
+    await act(async () =>
+      f.host.querySelector<HTMLInputElement>('.github-labels input')!.click(),
+    );
+    assert.equal(f.changed(), 1);
+    assert.equal(
+      f.host.querySelector<HTMLInputElement>('.github-labels input')!.checked,
+      true,
+    );
+    assert.match(f.host.textContent!, /Labels saved/);
+    assert.doesNotMatch(
+      f.host.textContent!,
+      /Labels were not saved|Previous labels restored/,
+    );
   } finally {
     await f.close();
   }

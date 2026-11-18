@@ -248,7 +248,9 @@ export function IssuePreview({
         labels: next.map((value) => ({ id: value, name: value })),
       },
     });
+    let confirmed = false;
     const failed = (reason: unknown) => {
+      if (confirmed) return;
       if (previewGeneration.current === requestGeneration) {
         setData(data);
         setLabelsError(
@@ -262,6 +264,7 @@ export function IssuePreview({
           const issue = await window.canopy.update(connectionId, issueKey, {
             labels: next,
           });
+          confirmed = true;
           if (previewGeneration.current === requestGeneration) {
             setData({ ...data, issue: { ...issue, links: data.issue.links } });
             setLabelsSaved(true);

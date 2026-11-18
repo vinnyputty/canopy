@@ -1,3 +1,5 @@
+export class WorkspaceTransferReloadError extends Error {}
+
 export function workspaceError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   for (const method of ['loadWorkspace', 'saveWorkspace', 'reloadWorkspace']) {

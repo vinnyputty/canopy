@@ -86,6 +86,7 @@ export function useWorkHandoff(
   const handlers = useRef({ navigate, reject });
   handlers.current = { navigate, reject };
   const session = useRef<string | undefined>(undefined);
+  const register = useRef<(() => void) | undefined>(undefined);
   const lastId = useRef<string | undefined>(undefined);
   const [delivery, setDelivery] = useState<HandoffDelivery | null>(null);
   const [completed, setCompleted] = useState<{
@@ -130,7 +131,15 @@ export function useWorkHandoff(
         setDelivery(state.delivery);
     };
     const unsubscribe = window.canopy.onHandoff(receive);
-    if (enabled)
+    let registering = false;
+    let retryRegistration = false;
+    register.current = () => {
+      if (!enabled || session.current) return;
+      if (registering) {
+        retryRegistration = true;
+        return;
+      }
+      registering = true;
       void window.canopy
         .handoffReady(crypto.randomUUID())
         .then((state) => {
@@ -145,8 +154,18 @@ export function useWorkHandoff(
         })
         .catch(() => {
           if (live) handlers.current.reject();
+        })
+        .finally(() => {
+          registering = false;
+          if (live && retryRegistration) {
+            retryRegistration = false;
+            register.current?.();
+          }
         });
+    };
+    if (deferred) register.current();
     return () => {
+      register.current = undefined;
       live = false;
       unsubscribe();
       const owner = session.current;
@@ -154,6 +173,9 @@ export function useWorkHandoff(
       if (owner) void window.canopy.handoffCancel(owner).catch(() => {});
     };
   }, [enabled]);
+  useEffect(() => {
+    if (!deferred) register.current?.();
+  }, [enabled, deferred]);
   useEffect(() => {
     if (
       deferred ||

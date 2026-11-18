@@ -1,3 +1,4 @@
+import { WorkspaceTransferReloadError } from '../src/renderer/workspace-error';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
@@ -141,7 +142,7 @@ import {runInNewContext} from 'node:vm';
 import {withScrollPositions} from ${importPath(root + '/src/renderer/scroll-position')};
 import {Storage} from ${importPath(root + '/src/main/storage')};
 import {WorkspaceClose} from ${importPath(root + '/src/renderer/workspace-close')};
-import {workspaceError} from ${importPath(root + '/src/renderer/workspace-error')};
+import {WorkspaceTransferReloadError,workspaceError} from ${importPath(root + '/src/renderer/workspace-error')};
 import {WorkspaceTransfer} from ${importPath(root + '/src/main/workspace-transfer')};
 import {createBackup} from ${importPath(root + '/src/shared/workspace-backup')};
 import {recoverWorkspaceViews} from ${importPath(root + '/src/shared/views')};
@@ -165,6 +166,7 @@ let active=false,dialog='backup',reload;
 const setWorkspaceTransferActive=value=>active=value, setDialog=value=>dialog=typeof value==='function'?value(dialog):value;
 const setAppearancePreview=()=>{},setWorkspace=value=>workspaceRef.current=typeof value==='function'?value(workspaceRef.current):value;
 let savingWorkspace=Promise.resolve(),receivedWorkspace,retryUnavailableWorkspace=false;
+let committedTransferOwner;
 const pendingWorkspaceTransfers=new Set();
 const trackWorkspaceTransfer=${mainCallback('trackWorkspaceTransfer')};
 const useCallback=fn=>fn;const storeWorkspace=setWorkspace;
@@ -536,6 +538,7 @@ for (const outcome of ['success', 'disconnect-failure', 'write-failure'])
           : closing;
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(h.writes.length, 0);
+      assert.deepEqual(h.saveArguments, []);
       assert.equal(completed, false);
       await assert.rejects(
         disconnect('old', () => {}),
@@ -547,9 +550,15 @@ for (const outcome of ['success', 'disconnect-failure', 'write-failure'])
       await settled;
       await flushed;
       assert.equal(completed, outcome !== 'disconnect-failure');
-      if (outcome === 'write-failure')
+      if (outcome === 'write-failure') {
         assert.match(h.errors().workspace, /final workspace write failed/);
-      else {
+        assert.equal(h.saveArguments.length, 1);
+        assert.deepEqual(h.saveArguments.at(-1)![0], {
+          ...initial,
+          tabs: [],
+          activeTabId: null,
+        });
+      } else {
         assert.deepEqual(
           h.writes.at(-1),
           outcome === 'disconnect-failure'
@@ -772,8 +781,8 @@ for (const kind of ['apply', 'undo'])
           assert.equal(d.window.document.activeElement, focus);
           focus.click();
           assert.equal(clicks, 1);
-          h.setWorkspace((value: any) => ({ ...value, theme: 'dark' }));
-          assert.equal(h.workspaceRef.current.theme, 'dark');
+          h.setWorkspace((value: any) => ({ ...value, theme: 'light' }));
+          assert.equal(h.workspaceRef.current.theme, 'light');
           await assert.doesNotReject(() => h.api.update('sample', 'ONE', {}));
         } else {
           await assert.rejects(h.save(original), /transfer is in progress/);
