@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createRequire } from 'node:module';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -7,7 +8,12 @@ import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { build, transformSync } from 'esbuild';
 import { rendererFixture, gate } from './fixtures/workspace-close';
-import { execute, findNode, sourceFile } from './source-probe';
+import {
+  callback as callbackOf,
+  execute,
+  findNode,
+  sourceFile,
+} from './source-probe';
 
 const importPath = (path: string) => JSON.stringify(path);
 
@@ -146,7 +152,7 @@ const hydrate=saved=>{const hasDemo=nextConnections.some(c=>c.id==='demo'),tabs=
 const bytes=()=>fs.readFile(${JSON.stringify(join(directory, 'workspace.json'))},'utf8');
 const persisted=value=>JSON.parse(JSON.stringify(value));
 const workspaceRef={current:baseline},pendingWorkspaceSave={current:Promise.resolve()},workspaceSaveTimer={current:null},workspaceTransferBusy={current:false},workspaceTransferCommitted={current:false},workspaceLoaded={current:true},appearanceSaving={current:false},demoResetting={current:false};
-const workspaceClose={current:new WorkspaceClose()};
+const workspaceClose={current:new WorkspaceClose()},workspaceTransferReload={current:undefined};
 const document={body:{inert:false},activeElement:null,defaultView:{HTMLElement:class{},addEventListener(){},removeEventListener(){}}};
 const flushSync=operation=>operation(), scrollSaveTimer={current:undefined};
 const workspaceLoadError='Fixture initial read failed';
@@ -159,11 +165,13 @@ const setAppearancePreview=()=>{},setWorkspace=value=>workspaceRef.current=typeo
 let savingWorkspace=Promise.resolve(),receivedWorkspace,retryUnavailableWorkspace=false;
 const pendingWorkspaceTransfers=new Set();
 const trackWorkspaceTransfer=${mainCallback('trackWorkspaceTransfer')};
-const storeWorkspace=setWorkspace;
+const useCallback=fn=>fn;const storeWorkspace=setWorkspace;
+const reloadTransferredWorkspace=${(find((n) => ts.isVariableDeclaration(n) && n.name.getText(ast) === 'reloadTransferredWorkspace') as ts.VariableDeclaration).initializer!.getText(ast)};
+
 const window={clearTimeout(){},canopy:{workspaceInitialized:async()=>{},saveWorkspace:value=>{receivedWorkspace=value;return savingWorkspace=storage.write('workspace',value);},reloadWorkspace:()=>reload?.()}};
 const text=value=>{assert.equal(typeof value,'string');return value;};
 const applyWorkspaceImport=${mainCallback('applyWorkspaceImport')},rollbackWorkspaceImport=${mainCallback('rollbackWorkspaceImport')};
-const saveWorkspace=${save.arguments[0].getText(ast)},onApply=${attribute(panel.attributes, 'onApply')},flush=${attribute(panel.attributes, 'flush')},onSave=${attribute(appearance.attributes, 'onSave')},close=${attribute(backupDialog.attributes, 'onClose')},onKey=${onKey.initializer!.getText(ast)};
+const saveWorkspace=${save.arguments[0].getText(ast)},productionOnApply=${attribute(panel.attributes, 'onApply')},onApply=operation=>productionOnApply(async beforeTransfer=>{await beforeTransfer();return operation();}),flush=${attribute(panel.attributes, 'flush')},onSave=${attribute(appearance.attributes, 'onSave')},close=${attribute(backupDialog.attributes, 'onClose')},onKey=${onKey.initializer!.getText(ast)};
 const workspaceCloseFlush=${closeFlush.arguments[0].getText(ast)};
 let preloadApi;
 const ipcRenderer=Object.assign(new EventEmitter(),{invoke:async(channel,...args)=>window.canopy[channel.slice('canopy:'.length)](...args)});
@@ -239,7 +247,7 @@ assert.deepEqual(await storage.read('workspace'),persisted(preview.workspace));
 console.log('PASS held actual staging, dismissal/global/direct saves, duplicate Apply, and held/completed reload preserve imported data');
 // New renderer hydration owns its own open barrier and flushes before guarded Undo.
 const beforeUndoFlush=await bytes();
-workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;active=false;
+workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;
 let undoEnter,undoRelease;const undoEntered=new Promise(r=>undoEnter=r),undoHeld=new Promise(r=>undoRelease=r);
 globalThis.rendererStageGate=async(file,contents)=>{if(file.includes('workspace.json.')&&file.endsWith('.tmp')&&JSON.parse(contents).theme===baseline.theme){globalThis.rendererStageGate=undefined;undoEnter();await undoHeld;}};
 let undoReloadEnter,undoReloadRelease;const undoReloading=new Promise(r=>undoReloadEnter=r),undoReloadHeld=new Promise(r=>undoReloadRelease=r);reload=()=>{undoReloadEnter();return undoReloadHeld;};
@@ -257,7 +265,7 @@ assert.equal(await bytes(),heldUndoBytes);const lostUndoClose=await attemptMainQ
 assert.equal(await bytes(),JSON.stringify(baseline));await assert.rejects(saveWorkspace(baseline),/transfer is in progress/);
 assert.equal(await bytes(),JSON.stringify(baseline));undoReloadRelease();await undoing;assert.deepEqual(await storage.read('workspace'),persisted(baseline));
 console.log('PASS Undo after hydration and explicit flush restores original workspace');
-workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
+workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;workspaceRef.current=baseline;
 await assert.rejects(onApply(async()=>{throw Error('failed transfer');}),/failed transfer/);assert.equal(active,false);await assert.doesNotReject(()=>saveWorkspace(baseline));
 workspaceRef.current={...baseline,theme:'system'};const recoveredClose=await attemptMainQuit();assert.equal(recoveredClose.closed,true);assert.equal(recoveredClose.quitCalls,1);assert.deepEqual(recoveredClose.errors,[]);assert.equal((await storage.read('workspace')).theme,'system');workspaceRef.current=baseline;await saveWorkspace(baseline);
 const regularSave=window.canopy.saveWorkspace;let operationCalled=false;const beforeRejectedFlush=await bytes();window.canopy.saveWorkspace=async()=>{throw Error('pre-transfer save failed');};
@@ -268,7 +276,7 @@ await assert.rejects(onApply(()=>transfer.apply(next.token)),/Restart Canopy/);
 await assert.rejects(saveWorkspace(baseline),/transfer is in progress/);assert.deepEqual(await storage.read('workspace'),persisted(next.workspace));
 const failedReloadBytes=await bytes();const restartClose=await attemptMainQuit();assert.equal(restartClose.closed,true);assert.equal(restartClose.quitCalls,1);assert.deepEqual(restartClose.errors,[]);assert.equal(workspaceTransferBusy.current,true);assert.equal(await bytes(),failedReloadBytes);await assert.rejects(saveWorkspace(baseline),/transfer is in progress/);assert.equal(await bytes(),failedReloadBytes);
 console.log('PASS failed transfer restores normal quit; failed reload after committed transfer retains old-document barrier and permits clean quit without changing bytes');
-workspaceTransferBusy.current=false;active=false;reload=()=>{};
+workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;reload=()=>{};
 workspaceRef.current={...migrateViews(recoverWorkspaceViews(await storage.read('workspace'))),reading:{...baseline.reading,textSize:'medium'}};
 await saveWorkspace(workspaceRef.current);const edited=await storage.read('workspace');
 await assert.rejects(onApply(()=>rollbackWorkspaceImport()),/changed after preview/);
@@ -291,15 +299,15 @@ async function transferDuringCloseSave(operation) {
   assert.deepEqual(result.errors,[]);
   assert.equal(workspaceTransferCommitted.current,false);
 }
-workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;reload=()=>{};
+workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;workspaceRef.current=baseline;reload=()=>{};
 await saveWorkspace(baseline);
 const concurrentPreview=await transfer.preview(backup,mapping,'replace');
 await transferDuringCloseSave(()=>transfer.apply(concurrentPreview.token));
 assert.equal(await bytes(),JSON.stringify(baseline));
-workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;active=false;
+workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;
 await transferDuringCloseSave(()=>rollbackWorkspaceImport());
 assert.equal(await bytes(),JSON.stringify(workspaceRef.current));
-workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
+workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;workspaceRef.current=baseline;
 const ordinaryClose=await attemptMainQuit();assert.equal(ordinaryClose.closed,true);assert.equal(ordinaryClose.quitCalls,1);assert.deepEqual(ordinaryClose.errors,[]);
 console.log('PASS numbered preload close pauses input and refuses new Apply/Undo during final save; ordinary close recovers');
 async function healthyTransferClose(operation,expected) {
@@ -315,12 +323,12 @@ async function healthyTransferClose(operation,expected) {
   assert.equal(closing.closed,true);assert.deepEqual(closing.errors,[]);
   assert.equal(await bytes(),JSON.stringify(expected));
 }
-workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
+workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;workspaceRef.current=baseline;
 const healthyPreview=await transfer.preview(backup,mapping,'replace');
 await healthyTransferClose(()=>applyWorkspaceImport(healthyPreview.token),healthyPreview.workspace);
-workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;active=false;
+workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;
 await healthyTransferClose(()=>rollbackWorkspaceImport(),baseline);
-workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
+workspaceTransferBusy.current=false;workspaceClose.current.endTransfer();workspaceTransferReload.current=undefined;active=false;workspaceRef.current=baseline;
 let failHealthyEnter,failHealthyRelease;const failHealthyEntered=new Promise(r=>failHealthyEnter=r),failHealthyHeld=new Promise(r=>failHealthyRelease=r);
 const rejectedTransfer=assert.rejects(onApply(async()=>{failHealthyEnter();await failHealthyHeld;throw Error('healthy held failure');}),/healthy held failure/);
 await failHealthyEntered;
@@ -550,3 +558,205 @@ for (const outcome of ['success', 'disconnect-failure', 'write-failure'])
       h.dispose();
     }
   });
+
+for (const kind of ['apply', 'undo'])
+  for (const outcome of [
+    'close',
+    'keep-open',
+    'reload-failure',
+    'save-failure',
+    'transfer-failure',
+  ])
+    test(`real preload ${kind} admission across held pre-transfer save: ${outcome}`, async () => {
+      const { JSDOM } = createRequire(import.meta.url)('jsdom');
+      const d = new JSDOM('<body><button>Edit</button>', {
+        pretendToBeVisual: true,
+      });
+      d.window.document.body.inert = false;
+      const focus = d.window.document.querySelector('button');
+      focus.focus();
+      const held = gate();
+      const h = rendererFixture(d.window.document, async () => {}, false);
+      h.context.pendingWorkspaceSave.current = held.promise;
+      const ast = sourceFile(
+        process.env.CANOPY_TRANSFER_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+      );
+      const panel = findNode(
+        ast,
+        (node): node is ts.JsxSelfClosingElement =>
+          ts.isJsxSelfClosingElement(node) &&
+          node.tagName.getText() === 'WorkspaceBackupPanel',
+      );
+      const attribute = panel.attributes.properties.find(
+        (p) => ts.isJsxAttribute(p) && p.name.getText() === 'onApply',
+      ) as ts.JsxAttribute;
+      const reloadRef = { current: undefined as Promise<void> | undefined };
+      let transfers = 0,
+        reloads = 0;
+      let disk = JSON.stringify(h.workspaceRef.current);
+      const committed = JSON.stringify({
+        ...h.workspaceRef.current,
+        theme: 'light',
+      });
+      h.forward(async (name) => {
+        if (name === 'canopy:reloadWorkspace') {
+          reloads++;
+          if (outcome === 'reload-failure') throw Error('reload refused');
+          return;
+        }
+        if (name === 'canopy:update') return;
+        assert.equal(
+          name,
+          kind === 'apply'
+            ? 'canopy:applyWorkspaceImport'
+            : 'canopy:rollbackWorkspaceImport',
+        );
+        transfers++;
+        if (outcome === 'transfer-failure') throw Error('transfer refused');
+        disk = committed;
+        return JSON.parse(committed);
+      });
+      h.context.reloadTransferredWorkspace = execute(
+        callbackOf(ast, 'reloadTransferredWorkspace'),
+        { ...h.context, workspaceTransferReload: reloadRef },
+      );
+      let redraws = 0;
+      const storeWorkspace = h.context.storeWorkspace;
+      h.context.storeWorkspace = (update) => {
+        redraws++;
+        storeWorkspace(update);
+      };
+      h.register();
+      const onApply = execute(
+        (attribute.initializer as ts.JsxExpression).expression!.getText(),
+        {
+          ...h.context,
+          saveWorkspace: h.save,
+          setWorkspaceTransferActive() {},
+        },
+      );
+      const panelAst = sourceFile('src/renderer/WorkspaceBackupPanel.tsx');
+      const call = findNode(
+        panelAst,
+        (node): node is ts.CallExpression =>
+          ts.isCallExpression(node) &&
+          node.expression.getText() === 'onApply' &&
+          node.arguments[0]
+            .getText()
+            .includes(
+              kind === 'apply'
+                ? 'applyWorkspaceImport'
+                : 'rollbackWorkspaceImport',
+            ),
+      );
+      const operation = execute(call.arguments[0].getText(), {
+        window: { canopy: h.api },
+        token: 'accepted',
+      });
+      const applying = onApply(operation);
+      const observed =
+        outcome === 'save-failure' || outcome === 'transfer-failure'
+          ? assert.rejects(applying, /save refused|transfer refused/)
+          : applying;
+      assert.equal(d.window.document.body.inert, true);
+      assert.throws(
+        () => h.controller.beginTransfer(d.window.document),
+        /transfer is in progress/,
+      );
+      await assert.rejects(
+        h.controller.track(async () => {}),
+        /transfer is in progress/,
+      );
+      let clicks = 0;
+      focus.addEventListener('click', () => clicks++);
+      focus.click();
+      assert.equal(clicks, 0);
+      const original = h.workspaceRef.current;
+      h.setWorkspace((value: any) => ({ ...value, theme: 'dark' }));
+      assert.equal(h.workspaceRef.current, original);
+      await assert.rejects(
+        h.api.update('sample', 'ONE', {}),
+        /transfer is in progress/,
+      );
+      await assert.rejects(
+        h.api.saveWorkspace(original),
+        /transfer is in progress/,
+      );
+      assert.equal(transfers, 0);
+      // Keep the final save in flight while the confirmed provider edit is tested elsewhere.
+      const closing = assert.doesNotReject(() => h.api.flushWorkspace(7));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(h.controller.paused, true);
+      for (const method of [
+        () => h.api.applyWorkspaceImport('late'),
+        () => h.api.rollbackWorkspaceImport(),
+      ])
+        await assert.rejects(method, /Workspace is closing/);
+      if (outcome === 'save-failure') {
+        // The production save closure already holds the API object.
+        const originalSave = h.api.saveWorkspace;
+        h.api.saveWorkspace = async () => {
+          h.api.saveWorkspace = originalSave;
+          throw Error('save refused');
+        };
+        held.release();
+        await assert.doesNotReject(() => observed);
+        h.api.saveWorkspace = originalSave;
+      } else {
+        held.release();
+        await assert.doesNotReject(() => observed);
+      }
+      await closing;
+      assert.equal(transfers, outcome === 'save-failure' ? 0 : 1);
+      assert.equal(reloads, 0, 'reload must defer while close owns the pause');
+      const failed =
+        outcome === 'save-failure' || outcome === 'transfer-failure';
+      assert.equal(h.controller.blocked, true);
+      const beforeRelease = redraws;
+      h.release(6);
+      assert.equal(
+        redraws,
+        beforeRelease,
+        'stale release cannot redraw or retry',
+      );
+      assert.equal(h.controller.paused, true);
+      assert.equal(reloads, 0);
+      if (outcome !== 'close') {
+        h.release(7);
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(h.controller.paused, false);
+        assert.equal(h.controller.blocked, !failed);
+        assert.equal(d.window.document.body.inert, !failed);
+        assert.equal(reloads, failed ? 0 : 1);
+        if (outcome === 'reload-failure')
+          assert.match(h.errors().workspace, /Restart Canopy/);
+        if (failed) {
+          assert.equal(d.window.document.activeElement, focus);
+          focus.click();
+          assert.equal(clicks, 1);
+          h.setWorkspace((value: any) => ({ ...value, theme: 'dark' }));
+          assert.equal(h.workspaceRef.current.theme, 'dark');
+          await assert.doesNotReject(() => h.api.update('sample', 'ONE', {}));
+        } else {
+          await assert.rejects(h.save(original), /transfer is in progress/);
+          const count = h.writes.length;
+          await h.api.flushWorkspace(8);
+          assert.equal(
+            h.writes.length,
+            count,
+            'committed transfer close preserves disk',
+          );
+          assert.equal(disk, committed);
+          h.release(8);
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.equal(
+            reloads,
+            outcome === 'reload-failure' ? 2 : 1,
+            'release retries failure and reuses successful reload',
+          );
+        }
+      }
+      assert.equal(disk, failed ? JSON.stringify(original) : committed);
+      h.dispose();
+      d.window.close();
+    });

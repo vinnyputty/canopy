@@ -11,6 +11,8 @@ import type {
 import { reconcileSnapshot } from './tree';
 import type { StatusPath } from './status-paths';
 
+type IssueWrites = Pick<CanopyAPI, 'update' | 'rank'>;
+
 type Fields = Partial<
   Pick<Issue, 'summary' | 'priority' | 'assignee' | 'status' | 'labels'>
 >;
@@ -225,6 +227,9 @@ export class Mutations {
     private snapshotBudget = 64 * 1024 * 1024,
     private sharedSnapshots?: (tab: TabState) => (TreeSnapshot | undefined)[],
     private displayedIssues?: (tab: TabState) => Iterable<Issue>,
+    private run: (
+      operation: (writes: IssueWrites) => Promise<boolean>,
+    ) => Promise<boolean> = (operation) => operation(this.api),
   ) {}
 
   beginRefresh() {
@@ -455,13 +460,36 @@ export class Mutations {
     record = true,
     token?: symbol,
     ifCurrent?: (issue?: Issue) => boolean,
+  ): Promise<boolean> {
+    return this.run((writes) =>
+      this.updateIssue(
+        writes,
+        connectionId,
+        key,
+        patch,
+        options,
+        record,
+        token,
+        ifCurrent,
+      ),
+    );
+  }
+  private updateIssue(
+    writes: IssueWrites,
+    connectionId: string,
+    key: string,
+    patch: IssuePatch,
+    options?: Partial<EditOptions>,
+    record = true,
+    token?: symbol,
+    ifCurrent?: (issue?: Issue) => boolean,
   ) {
     return this.enqueue(
       connectionId,
       { key, fields: optimisticFields(patch, options) },
       async (entry) => {
         if (ifCurrent && !ifCurrent(entry.before)) return { key, fields: {} };
-        const issue = await this.api.update(connectionId, key, patch);
+        const issue = await writes.update(connectionId, key, patch);
         const fields: Fields = {};
         if (patch.summary !== undefined) fields.summary = issue.summary;
         if (patch.priorityId !== undefined) fields.priority = issue.priority;
@@ -498,9 +526,20 @@ export class Mutations {
     key: string,
     origin: Status,
     path: StatusPath,
+  ): Promise<boolean> {
+    return this.run((writes) =>
+      this.transitionIssuePath(writes, connectionId, key, origin, path),
+    );
+  }
+  private transitionIssuePath(
+    writes: IssueWrites,
+    connectionId: string,
+    key: string,
+    origin: Status,
+    path: StatusPath,
   ) {
     return this.enqueue(connectionId, { key, fields: {} }, async (entry) => {
-      let current = await this.api.update(connectionId, key, {});
+      let current = await writes.update(connectionId, key, {});
       if (current.status.id !== origin.id)
         throw new Error(
           `Status changed to ${current.status.name}. Refresh the path and try again.`,
@@ -518,7 +557,7 @@ export class Mutations {
             );
           if (visited.has(step.to.id))
             throw new Error('The planned path contains a cycle.');
-          current = await this.api.update(connectionId, key, {
+          current = await writes.update(connectionId, key, {
             transitionId: step.id,
           });
           stepReturned = true;
@@ -531,7 +570,7 @@ export class Mutations {
         } catch (error) {
           let statusLabel = 'Actual status';
           try {
-            current = await this.api.update(connectionId, key, {});
+            current = await writes.update(connectionId, key, {});
             if (current.status.id !== entry.statusPath.at(-1)?.id) {
               if (stepReturned) entry.statusPath.push(current.status);
               else entry.undoUnavailable = true;
@@ -551,6 +590,27 @@ export class Mutations {
     });
   }
   rank(
+    connectionId: string,
+    key: string,
+    anchor: string,
+    position: 'before' | 'after' = 'before',
+    record = true,
+    verifiedSnapshot?: TreeSnapshot,
+  ): Promise<boolean> {
+    return this.run((writes) =>
+      this.rankIssue(
+        writes,
+        connectionId,
+        key,
+        anchor,
+        position,
+        record,
+        verifiedSnapshot,
+      ),
+    );
+  }
+  private rankIssue(
+    writes: IssueWrites,
     connectionId: string,
     key: string,
     anchor: string,
@@ -596,13 +656,19 @@ export class Mutations {
         entry.order = base?.issues
           .filter((issue) => issue.parentKey === moving.parentKey)
           .map((issue) => issue.key);
-        await this.api.rank(connectionId, key, anchor, position);
+        await writes.rank(connectionId, key, anchor, position);
         return { key, anchor, position };
       },
       record,
     );
   }
-  async undo(
+  undo(connectionId?: string, key?: string, token?: symbol): Promise<boolean> {
+    return this.run((writes) =>
+      this.undoIssue(writes, connectionId, key, token),
+    );
+  }
+  private async undoIssue(
+    writes: IssueWrites,
     connectionId?: string,
     key?: string,
     token?: symbol,
@@ -675,7 +741,7 @@ export class Mutations {
               throw new UndoUnavailable(
                 `No supported reverse transition from ${actual.name} to ${path[index].name}.`,
               );
-            const result = await this.api.update(connectionId, change.key, {
+            const result = await writes.update(connectionId, change.key, {
               transitionId: reverse.id,
             });
             actual = result.status;
@@ -694,8 +760,7 @@ export class Mutations {
         } catch (error) {
           let statusLabel = 'Actual status';
           try {
-            actual = (await this.api.update(connectionId, change.key, {}))
-              .status;
+            actual = (await writes.update(connectionId, change.key, {})).status;
             this.confirm(connectionId, {
               key: change.key,
               fields: { status: actual },
@@ -825,8 +890,16 @@ export class Mutations {
       }
       assertCurrent();
       const success = patch
-        ? await this.update(connectionId, change.key, patch, options, false)
-        : await this.rank(
+        ? await this.updateIssue(
+            writes,
+            connectionId,
+            change.key,
+            patch,
+            options,
+            false,
+          )
+        : await this.rankIssue(
+            writes,
             connectionId,
             change.key,
             anchor!,

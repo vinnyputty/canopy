@@ -390,6 +390,9 @@ export interface CanopyAPI {
     accountId: string,
     refresh?: boolean,
   ): Promise<Choice | null>;
+  withIssueMutations(
+    operation: (writes: Pick<CanopyAPI, 'update' | 'rank'>) => Promise<boolean>,
+  ): Promise<boolean>;
   update(connectionId: string, key: string, patch: IssuePatch): Promise<Issue>;
   childCreateOptions(
     connectionId: string,
@@ -426,13 +429,23 @@ export interface CanopyAPI {
     mapping: Record<string, string>,
     mode: import('./workspace-backup').ImportMode,
   ): Promise<import('./workspace-backup').ImportPreview>;
-  applyWorkspaceImport(token: string): Promise<Workspace>;
-  rollbackWorkspaceImport(): Promise<Workspace>;
+  applyWorkspaceImport(
+    token: string,
+    beforeTransfer?: () => Promise<void>,
+  ): Promise<Workspace>;
+  rollbackWorkspaceImport(
+    beforeTransfer?: () => Promise<void>,
+  ): Promise<Workspace>;
   canUndoWorkspaceImport(): Promise<boolean>;
   reloadWorkspace(): Promise<void>;
   workspaceInitialized(error: string | null): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
-  saveWorkspace(workspace: Workspace, closeAttempt?: number): Promise<void>;
+  saveWorkspace(
+    workspace: Workspace,
+    closeAttempt?: number,
+    explicitFlush?: boolean,
+    transferFlush?: boolean,
+  ): Promise<void>;
   onWorkspaceFlush(
     handler: (closeAttempt?: number) => Promise<void | WorkspaceFlushFailure>,
     release?: (closeAttempt: number) => void,

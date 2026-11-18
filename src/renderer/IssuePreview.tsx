@@ -47,6 +47,7 @@ export function IssuePreview({
   onWidth,
   onClose,
   onChanged,
+  trackMutation = (operation) => operation(),
   onAuthoringChanged,
   onPreview,
   onJump,
@@ -69,6 +70,7 @@ export function IssuePreview({
   onWidth: (width: number) => void;
   onClose: () => void;
   onChanged: (issue: Issue) => void;
+  trackMutation?: (operation: () => Promise<void>) => Promise<void>;
   onAuthoringChanged: () => void;
   onPreview: (key: string) => void;
   onJump: (key: string) => void;
@@ -246,22 +248,31 @@ export function IssuePreview({
         labels: next.map((value) => ({ id: value, name: value })),
       },
     });
-    try {
-      const issue = await window.canopy.update(connectionId, issueKey, {
-        labels: next,
-      });
-      if (previewGeneration.current === requestGeneration) {
-        setData({ ...data, issue: { ...issue, links: data.issue.links } });
-        onChanged(issue);
-        setLabelsSaved(true);
-      }
-    } catch (reason) {
+    const failed = (reason: unknown) => {
       if (previewGeneration.current === requestGeneration) {
         setData(data);
         setLabelsError(
           `Labels were not saved. Previous labels restored; try the change again or open GitHub. ${String(reason)}`,
         );
       }
+    };
+    try {
+      await trackMutation(async () => {
+        try {
+          const issue = await window.canopy.update(connectionId, issueKey, {
+            labels: next,
+          });
+          if (previewGeneration.current === requestGeneration) {
+            setData({ ...data, issue: { ...issue, links: data.issue.links } });
+            onChanged(issue);
+            setLabelsSaved(true);
+          }
+        } catch (reason) {
+          failed(reason);
+        }
+      });
+    } catch (reason) {
+      failed(reason);
     } finally {
       if (previewGeneration.current === requestGeneration)
         setSavingLabels(false);

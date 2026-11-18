@@ -484,7 +484,7 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
           ipcMain.handle(
             channel,
             channel === 'canopy:saveWorkspace'
-              ? (event, submitted) => {
+              ? (event, submitted, explicitFlush) => {
                   if (!audit.stopWatchingDocument) {
                     const contents = event.sender;
                     const committed = () => {
@@ -494,7 +494,8 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
                     audit.stopWatchingDocument = () =>
                       contents.removeListener('did-navigate', committed);
                   }
-                  audit.submittedWorkspace = structuredClone(submitted);
+                  if (!audit.readingSubmission || explicitFlush)
+                    audit.submittedWorkspace = structuredClone(submitted);
                   return handler(event, saved);
                 }
               : channel === 'canopy:tree'
@@ -598,8 +599,10 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
         page.getByRole('tree', { name: `${active.rootKey} issue tree` }),
       ).toBeVisible();
       await app.evaluate(() => {
-        if (globalThis.selfConnectionAudit)
+        if (globalThis.selfConnectionAudit) {
           delete globalThis.selfConnectionAudit.submittedWorkspace;
+          globalThis.selfConnectionAudit.readingSubmission = true;
+        }
       });
       await page.evaluate(() => window.canopy.flushWorkspace());
       const submission = await app.evaluate(() => {
@@ -735,6 +738,7 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
             errors.push(error);
           }
         }
+        audit.readingSubmission = false;
         audit.stopWatchingDocument?.();
         for (const reject of audit.refreshGates ?? [])
           reject(new Error('Workspace restoration refresh canceled.'));

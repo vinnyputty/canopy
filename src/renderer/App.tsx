@@ -280,7 +280,7 @@ export function App() {
   );
   const setWorkspace = useCallback(
     (update: React.SetStateAction<Workspace>) => {
-      if (workspaceClose.current.paused) return;
+      if (workspaceClose.current.blocked) return;
       storeWorkspace((current) => {
         if (typeof update !== 'function') return update;
         const overlaid = withScrollPositions(current, scrollPositions.current);
@@ -436,6 +436,7 @@ export function App() {
   const workspaceRef = useRef(workspace);
   const workspaceTransferBusy = useRef(false);
   const workspaceTransferCommitted = useRef(false);
+  const workspaceTransferReload = useRef<Promise<void> | undefined>(undefined);
   const [workspaceTransferActive, setWorkspaceTransferActive] = useState(false);
   const workspaceSaveTimer = useRef<number | null>(null);
   const pendingWorkspaceSave = useRef<Promise<void>>(Promise.resolve());
@@ -455,7 +456,7 @@ export function App() {
   const sidebarSessionRef = useRef(sidebarSession);
   sidebarSessionRef.current = sidebarSession;
   const organize = (action: OrganizationAction) => {
-    if (workspaceClose.current.paused) return;
+    if (workspaceClose.current.blocked) return;
     const next = organizeSidebar(
       workspaceRef.current,
       sidebarSessionRef.current,
@@ -864,8 +865,8 @@ export function App() {
           setUndoState({ label: view.undoLabel, busy: view.undoBusy });
         },
         (message) => setErrors((current) => ({ ...current, edit: message })),
-        (connectionId, issue, fields) =>
-          setWorkspace((current) => ({
+        (connectionId, issue, fields) => {
+          const reconcile = (current: Workspace) => ({
             ...current,
             seenRoots: reconcileOwnEdit(
               current.seenRoots ?? {},
@@ -873,7 +874,10 @@ export function App() {
               issue,
               fields.map((field) => field[0].toUpperCase() + field.slice(1)),
             ),
-          })),
+          });
+          workspaceRef.current = reconcile(workspaceRef.current);
+          storeWorkspace(reconcile);
+        },
         undefined,
         (tab) => [rootRefreshes.current.snapshot(refreshRootKey(tab))],
         function* (tab) {
@@ -885,6 +889,10 @@ export function App() {
             pending.push(...node.children);
           }
         },
+        (operation) =>
+          workspaceClose.current.track(() =>
+            window.canopy.withIssueMutations(operation),
+          ),
       ),
   );
   const editSession = useRef(0);
@@ -1546,7 +1554,12 @@ export function App() {
   }, [workspace.theme, workspace.palette, appearancePreview]);
 
   const saveWorkspace = useCallback(
-    (value: Workspace, transferFlush = false, closeAttempt?: number) => {
+    (
+      value: Workspace,
+      transferFlush = false,
+      closeAttempt?: number,
+      explicitFlush = false,
+    ) => {
       if (demoResetting.current) return Promise.resolve();
       const allowed = () => {
         if (!workspaceLoaded.current)
@@ -1578,6 +1591,8 @@ export function App() {
             return window.canopy.saveWorkspace(
               withScrollPositions(value, scrollPositions.current),
               closeAttempt ?? workspaceClose.current.owner,
+              explicitFlush,
+              transferFlush,
             );
         });
       pendingWorkspaceSave.current = save;
@@ -1607,6 +1622,25 @@ export function App() {
         workspaceSaveTimer.current = null;
     };
   }, [workspace, ready, saveWorkspace]);
+
+  const reloadTransferredWorkspace = useCallback(() => {
+    if (workspaceClose.current.paused) return Promise.resolve();
+    return (workspaceTransferReload.current ??= Promise.resolve()
+      .then(() => {
+        if (workspaceClose.current.paused) {
+          workspaceTransferReload.current = undefined;
+          return;
+        }
+        return window.canopy.reloadWorkspace();
+      })
+      .catch((error) => {
+        workspaceTransferReload.current = undefined;
+        throw new Error(
+          'Workspace transferred, but reload failed. Restart Canopy before editing.',
+          { cause: error },
+        );
+      }));
+  }, []);
 
   useLayoutEffect(() => {
     if (!ready) return;
@@ -1647,7 +1681,7 @@ export function App() {
             if (closeAttempt !== undefined)
               workspaceClose.current.assertOwner(closeAttempt);
             saved = workspaceRef.current;
-            await saveWorkspace(saved, false, closeAttempt);
+            await saveWorkspace(saved, false, closeAttempt, true);
             if (closeAttempt !== undefined)
               workspaceClose.current.assertOwner(closeAttempt);
           } while (
@@ -1670,6 +1704,13 @@ export function App() {
         if (workspaceClose.current.owner !== closeAttempt) return;
         workspaceClose.current.release(closeAttempt);
         storeWorkspace((current) => ({ ...current }));
+        if (workspaceTransferCommitted.current)
+          void reloadTransferredWorkspace().catch((error) =>
+            setErrors((value) => ({
+              ...value,
+              workspace: workspaceError(error),
+            })),
+          );
       },
     );
     return () => {
@@ -1677,7 +1718,7 @@ export function App() {
       if (workspaceClose.current.owner !== undefined)
         workspaceClose.current.release(workspaceClose.current.owner);
     };
-  }, [ready, saveWorkspace]);
+  }, [ready, saveWorkspace, reloadTransferredWorkspace]);
 
   const cancelledTrees = useRef(new Set<string>());
   const treeRequests = useRef(new Map<string, { id: string; epoch: number }>());
@@ -2146,7 +2187,7 @@ export function App() {
   }, [editor, saving, online, allRefreshTabs, refreshTab]);
 
   const restoreScroll = useCallback((tab: TabState) => {
-    if (workspaceClose.current.paused) return false;
+    if (workspaceClose.current.blocked) return false;
     const element = scrollRef.current;
     if (!element) return false;
     const savedTop = scrollPositions.current.get(tab.id) ?? tab.scrollTop;
@@ -2195,7 +2236,7 @@ export function App() {
   }, [activeTab, Boolean(snapshot), restoreScroll, workspace]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
-    if (workspaceClose.current.paused) return;
+    if (workspaceClose.current.blocked) return;
     if (patch.scrollTop !== undefined) scrollPositions.current.delete(tabId);
     setWorkspace((current) => {
       const tab = current.tabs.find((tab) => tab.id === tabId);
@@ -2216,7 +2257,7 @@ export function App() {
   }, []);
 
   const navigate = useCallback((tab: TabState, restoring = false) => {
-    if (workspaceClose.current.paused) return;
+    if (workspaceClose.current.blocked) return;
     setInboxOpen(false);
     const current = workspaceRef.current;
     const from = current.tabs.find((item) => item.id === current.activeTabId);
@@ -3971,6 +4012,7 @@ export function App() {
   const previewPane = previewOpen ? (
     previewRoute && previewKey ? (
       <IssuePreview
+        trackMutation={(operation) => workspaceClose.current.track(operation)}
         key={JSON.stringify([previewRoute.connectionId, previewKey])}
         provider={previewRoute.provider}
         connectionName={
@@ -5656,7 +5698,7 @@ export function App() {
                   style={tableStyle(view) as React.CSSProperties}
                   ref={scrollRef}
                   onScroll={(event) => {
-                    if (workspaceClose.current.paused) return;
+                    if (workspaceClose.current.blocked) return;
                     // Placeholder/layout scrolling must not replace a saved position
                     // before the restored tree has been rendered and positioned.
                     if (
@@ -5674,7 +5716,7 @@ export function App() {
                     );
                     clearTimeout(scrollSaveTimer.current);
                     scrollSaveTimer.current = setTimeout(() => {
-                      if (workspaceClose.current.paused) return;
+                      if (workspaceClose.current.blocked) return;
                       void saveWorkspace(workspaceRef.current).catch(
                         (error: unknown) => {
                           setErrors((current) => ({
@@ -6479,25 +6521,20 @@ export function App() {
               }
               const failure = await workspaceClose.current.track(async () => {
                 try {
-                  // This is the only save admitted after the persistence barrier closes.
-                  await saveWorkspace(workspaceRef.current, true);
-                  await operation();
+                  workspaceClose.current.beginTransfer(document);
+                  await operation(() =>
+                    saveWorkspace(workspaceRef.current, true),
+                  );
                   workspaceTransferCommitted.current = true;
                 } catch (error) {
                   workspaceTransferBusy.current = false;
+                  workspaceClose.current.endTransfer();
                   setWorkspaceTransferActive(false);
                   return { error };
                 }
               });
               if (failure) throw failure.error;
-              try {
-                await window.canopy.reloadWorkspace();
-              } catch (error) {
-                throw new Error(
-                  'Workspace transferred, but reload failed. Restart Canopy before editing.',
-                  { cause: error },
-                );
-              }
+              await reloadTransferredWorkspace();
             }}
           />
         </Dialog>

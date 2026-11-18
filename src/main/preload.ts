@@ -5,6 +5,24 @@ let flushHandler:
 let releaseHandler: ((attempt: number) => void) | undefined;
 let closeAttempt: number | undefined;
 let releasedThrough = 0;
+let transferInProgress = false;
+async function transferWorkspace(
+  channel: string,
+  beforeTransfer?: () => Promise<void>,
+  token?: string,
+) {
+  transferInProgress = true;
+  try {
+    await beforeTransfer?.();
+    return await ipcRenderer.invoke(
+      channel,
+      ...(token === undefined ? [] : [token]),
+    );
+  } catch (error) {
+    transferInProgress = false;
+    throw error;
+  }
+}
 ipcRenderer.on('canopy:workspaceCloseReleased', (_event, attempt: number) => {
   releasedThrough = Math.max(releasedThrough, attempt);
   if (closeAttempt === attempt) closeAttempt = undefined;
@@ -22,6 +40,7 @@ const mutations = new Set([
   'connect',
   'connectGithub',
   'disconnect',
+  'withIssueMutations',
   'update',
   'author',
   'createChild',
@@ -158,6 +177,26 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:assignees', id, key, query, startAt, refresh),
   validateAssignee: (id, key, accountId, refresh) =>
     ipcRenderer.invoke('canopy:validateAssignee', id, key, accountId, refresh),
+  withIssueMutations: async (operation) => {
+    let active = true;
+    const invoke = (channel: string, ...args: unknown[]) => {
+      if (!active)
+        return Promise.reject(new Error('Issue mutation has finished.'));
+      if (transferInProgress)
+        return Promise.reject(
+          new Error('Workspace transfer is in progress; wait for reload.'),
+        );
+      return ipcRenderer.invoke(channel, ...args);
+    };
+    try {
+      return await operation({
+        update: (...args) => invoke('canopy:update', ...args),
+        rank: (...args) => invoke('canopy:rank', ...args),
+      });
+    } finally {
+      active = false;
+    }
+  },
   update: (id, key, patch) =>
     ipcRenderer.invoke('canopy:update', id, key, patch),
   childCreateOptions: (id, key, refresh) =>
@@ -178,24 +217,28 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:chooseWorkspaceBackup'),
   previewWorkspaceImport: (backup, mapping, mode) =>
     ipcRenderer.invoke('canopy:previewWorkspaceImport', backup, mapping, mode),
-  applyWorkspaceImport: (token) =>
-    ipcRenderer.invoke('canopy:applyWorkspaceImport', token),
+  applyWorkspaceImport: (token, beforeTransfer) =>
+    transferWorkspace('canopy:applyWorkspaceImport', beforeTransfer, token),
   canUndoWorkspaceImport: () =>
     ipcRenderer.invoke('canopy:canUndoWorkspaceImport'),
-  rollbackWorkspaceImport: () =>
-    ipcRenderer.invoke('canopy:rollbackWorkspaceImport'),
+  rollbackWorkspaceImport: (beforeTransfer) =>
+    transferWorkspace('canopy:rollbackWorkspaceImport', beforeTransfer),
   reloadWorkspace: () => ipcRenderer.invoke('canopy:reloadWorkspace'),
   workspaceInitialized: (error) =>
     ipcRenderer.invoke('canopy:workspaceInitialized', error),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
-  saveWorkspace: (workspace, attempt) => {
+  saveWorkspace: (workspace, attempt, explicitFlush, transferFlush) => {
+    if (transferInProgress && !transferFlush)
+      return Promise.reject(
+        new Error('Workspace transfer is in progress; wait for reload.'),
+      );
     if (closeAttempt !== undefined && attempt !== closeAttempt)
       return Promise.reject(
         new Error('Workspace is closing; wait for saving to finish.'),
       );
     if (attempt !== undefined && attempt <= releasedThrough)
       return Promise.reject(new Error('Workspace close was canceled.'));
-    return ipcRenderer.invoke('canopy:saveWorkspace', workspace);
+    return ipcRenderer.invoke('canopy:saveWorkspace', workspace, explicitFlush);
   },
   copyIssueLink: (id, key) =>
     ipcRenderer.invoke('canopy:copyIssueLink', id, key),
@@ -211,6 +254,10 @@ for (const [name, method] of Object.entries(api)) {
       if (closeAttempt !== undefined)
         return Promise.reject(
           new Error('Workspace is closing; wait for saving to finish.'),
+        );
+      if (transferInProgress && name !== 'reloadWorkspace')
+        return Promise.reject(
+          new Error('Workspace transfer is in progress; wait for reload.'),
         );
       return method(...args);
     },

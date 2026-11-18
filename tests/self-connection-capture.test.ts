@@ -471,17 +471,26 @@ function restoreModel(
   };
   const window = {
     canopy: {
-      saveWorkspace: (value: unknown) =>
-        handlers.get('canopy:saveWorkspace')!(event, value),
+      saveWorkspace: (value: unknown, explicitFlush = false) =>
+        handlers.get('canopy:saveWorkspace')!(event, value, explicitFlush),
       flushWorkspace: async () => {
-        if (options.missingSubmission && reloads) return;
+        if (
+          (options.missingSubmission ||
+            options.autosaveSubmission ||
+            options.autosaveAfterFlush) &&
+          reloads
+        ) {
+          if (options.autosaveSubmission)
+            await window.canopy.saveWorkspace(rendered);
+          return;
+        }
         if (options.unobservedRefresh && reloads) {
           const baseline =
             rendered.seenRoots!['demo:CAN-100'].issues['CAN-100'];
           baseline.fields.Priority = 'High';
           baseline.commentCount = 42;
         }
-        await window.canopy.saveWorkspace(rendered);
+        await window.canopy.saveWorkspace(rendered, true);
         if (options.lateRefresh && reloads) {
           const active = rendered.tabs.find(
             (tab) => tab.id === rendered.activeTabId,
@@ -715,6 +724,11 @@ function restoreModel(
         'cleanupFailure' in options
       )
         throw options.cleanupFailure;
+      if (
+        options.autosaveAfterFlush &&
+        callback.toString().includes('workspace: audit.submittedWorkspace')
+      )
+        void window.canopy.saveWorkspace(rendered);
       cleaningHandlers = callback.toString().includes('const errors = []');
       if (cleaningHandlers) cleanupAudit = owner.selfConnectionAudit;
       try {
@@ -794,6 +808,7 @@ for (const firstActive of [false, true])
     for (const [key, handler] of m.originals)
       assert.equal(m.handlers.get(key), handler);
     assert.equal(m.owner.selfConnectionAudit, undefined);
+    assert.equal(m.cleanupAudit()?.readingSubmission, false);
     await m.originalSave(m.event, m.fixture);
     assert.deepEqual(m.store.load(), m.fixture);
     assert.throws(
@@ -823,12 +838,15 @@ for (const option of [
   'wrongReading',
   'wrongRootViews',
   'missingSubmission',
+  'autosaveSubmission',
+  'autosaveAfterFlush',
 ])
   test(`restoration refuses ${option} and releases save ownership`, async () => {
     const m = restoreModel({ [option]: true });
     await assert.rejects(m.run(), { code: 'ERR_ASSERTION' });
     assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
     assert.equal(m.owner.selfConnectionAudit, undefined);
+    assert.equal(m.cleanupAudit()?.readingSubmission, false);
   });
 
 for (const primary of [
@@ -872,7 +890,8 @@ test('cleanup failure refuses an otherwise successful restoration', async () => 
 });
 
 const renderer = readFileSync(
-  new URL('../src/renderer/App.tsx', import.meta.url),
+  process.env.CANOPY_CLOSE_RENDERER_SOURCE ??
+    new URL('../src/renderer/App.tsx', import.meta.url),
   'utf8',
 );
 const rendererAst = ts.createSourceFile(
@@ -1001,12 +1020,16 @@ function lifecycle(
       },
       canopy: {
         loadWorkspace: () => call('loadWorkspace'),
-        saveWorkspace: async (value: unknown) => {
+        saveWorkspace: async (
+          value: unknown,
+          _attempt?: number,
+          explicitFlush?: boolean,
+        ) => {
           const pending = gate;
           gate = undefined;
           if (pending === hydrated?.held) hydrated?.started.resolve();
           if (pending) await pending.promise;
-          return call('saveWorkspace', value);
+          return call('saveWorkspace', value, explicitFlush);
         },
         flushWorkspace: async () => {
           flushes += 1;
@@ -1567,6 +1590,8 @@ for (const option of [
   'lostValidScroll',
   'wrongViewportScroll',
   'missingSubmission',
+  'autosaveSubmission',
+  'autosaveAfterFlush',
   'missingViewport',
 ])
   test(`production reload restoration rejects ${option} and preserves fixture ownership`, async () => {

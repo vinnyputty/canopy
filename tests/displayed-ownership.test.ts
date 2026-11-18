@@ -5,10 +5,15 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { relationshipChangedKeys } from '../src/renderer/relationships';
 import { Mutations } from '../src/renderer/mutations';
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import { RootRefreshGate } from '../src/renderer/refresh';
 import { buildIssueTree, type IssueNode } from '../src/renderer/tree';
 import { retainEditingOrder } from '../src/renderer/edit-navigation';
-import { markRootSeen, unseenChanges } from '../src/renderer/seen';
+import {
+  markRootSeen,
+  unseenChanges,
+  reconcileOwnEdit,
+} from '../src/renderer/seen';
 import type {
   CanopyAPI,
   Issue,
@@ -116,7 +121,18 @@ function app(budget: number, api: Partial<CanopyAPI> = {}) {
   const context = {
     useState: (initialize: () => Mutations) => [initialize()],
     Mutations,
-    window: { canopy: api },
+    window: {
+      canopy: {
+        ...api,
+        withIssueMutations: (
+          operation: Parameters<CanopyAPI['withIssueMutations']>[0],
+        ) => operation(api as CanopyAPI),
+      },
+    },
+    workspaceClose: { current: new WorkspaceClose() },
+    workspaceRef: { current: { seenRoots: {} } },
+    storeWorkspace: () => {},
+    reconcileOwnEdit,
     tabsRef,
     relationshipChangedKeys,
     relationshipConfirmedSnapshots: {

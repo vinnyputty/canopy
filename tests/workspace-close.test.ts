@@ -1,3 +1,5 @@
+import { Mutations } from '../src/renderer/mutations';
+import { reconcileOwnEdit } from '../src/renderer/seen';
 import { removeConnection } from '../src/renderer/workspace';
 import {
   forgetSidebarConnections,
@@ -499,7 +501,23 @@ test('real React commits edits accepted before pause and keeps the final ref sta
     },
     false,
   );
-  const ast = sourceFile('src/renderer/App.tsx');
+  h.setWorkspace({
+    ...h.workspaceRef.current,
+    seenRoots: {
+      'sample-jira:SAMPLE-1': {
+        touchedAt: 1,
+        issues: { 'SAMPLE-1': { seenAt: 1, fields: { Summary: 'Before' } } },
+      },
+    },
+  });
+  let confirmedEdit!: (
+    connection: string,
+    issue: any,
+    fields: string[],
+  ) => void;
+  const ast = sourceFile(
+    process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+  );
   const registration = findNode(
     ast,
     (node): node is ts.CallExpression =>
@@ -528,6 +546,15 @@ test('real React commits edits accepted before pause and keeps the final ref sta
       useCallback: React.useCallback,
     };
     execute(`() => {${refGuard.getText()}}`, { ...context, workspace })();
+    const constructor = findNode(
+      ast,
+      (node): node is ts.NewExpression =>
+        ts.isNewExpression(node) && node.expression.getText() === 'Mutations',
+    );
+    confirmedEdit = execute(constructor.arguments![3].getText(), {
+      ...context,
+      reconcileOwnEdit,
+    });
     update = execute(callback(ast, 'setWorkspace'), context);
     const saveWorkspace = execute(callback(ast, 'saveWorkspace'), context);
     const panel = findNode(
@@ -596,9 +623,32 @@ test('real React commits edits accepted before pause and keeps the final ref sta
       const closing = h.api.flushWorkspace(2);
       await tick();
       assert.equal(h.controller.paused, true);
+      confirmedEdit(
+        'sample-jira',
+        {
+          key: 'SAMPLE-1',
+          summary: 'Confirmed',
+          type: 'Task',
+          priority: null,
+          assignee: null,
+          status: { name: 'Open', category: 'new' },
+          links: [],
+        },
+        ['summary'],
+      );
+      const reconciled =
+        h.workspaceRef.current.seenRoots!['sample-jira:SAMPLE-1'].issues[
+          'SAMPLE-1'
+        ].fields.Summary;
+      redraw();
       saving.release();
       await accepted;
       await closing;
+      assert.equal(
+        reconciled,
+        'Confirmed',
+        'confirmed completion updates the paused ref before React commits',
+      );
     });
     assert.equal(
       f.d.window.document.querySelector('#host')!.textContent,
@@ -606,6 +656,11 @@ test('real React commits edits accepted before pause and keeps the final ref sta
       'an accepted appearance save commits its React state while the snapshot waits',
     );
     assert.equal(h.writes.at(-1)?.theme, 'light');
+    assert.equal(
+      h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
+        .fields.Summary,
+      'Confirmed',
+    );
     h.release(2);
   } finally {
     if (h.controller.owner !== undefined) h.release(h.controller.owner);
@@ -1143,3 +1198,748 @@ for (const outcome of ['success', 'keep-open'])
       await f.close();
     }
   });
+
+function providerFixture() {
+  const d = dom();
+  const h = rendererFixture(d.window.document);
+  const initial = structuredClone(backupWorkspace);
+  initial.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1'].fields = {
+    Summary: 'Before',
+  };
+  h.setWorkspace(initial);
+  const issue = {
+    id: 'one',
+    key: 'SAMPLE-1',
+    summary: 'Before',
+    type: 'Task',
+    priority: { id: 'low', name: 'Low' },
+    assignee: { id: 'old', name: 'Old' },
+    status: { id: 'open', name: 'Open', category: 'new' as const },
+    links: [],
+  };
+  const ast = sourceFile(
+    process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+  );
+  const constructor = findNode(
+    ast,
+    (node): node is ts.NewExpression =>
+      ts.isNewExpression(node) && node.expression.getText() === 'Mutations',
+  );
+  const errors: string[] = [];
+  let view: import('../src/renderer/mutations').MutationView;
+  const mutations = new Mutations(
+    h.api,
+    (next) => {
+      view = next;
+    },
+    (message) => errors.push(message),
+    execute(constructor.arguments![3].getText(), {
+      ...h.context,
+      reconcileOwnEdit,
+    }),
+    undefined,
+    undefined,
+    undefined,
+    execute(constructor.arguments![7].getText(), h.context),
+  );
+  const snapshot = (current: import('../src/shared/types').Issue = issue) => ({
+    rootKey: issue.key,
+    issues: [current],
+    warnings: [],
+    fetchedAt: 1,
+  });
+  mutations.receive(initial.tabs[0], snapshot(), 0);
+  return {
+    d,
+    h,
+    issue,
+    snapshot,
+    mutations,
+    errors,
+    view: () => view!,
+    baseline: () =>
+      h.workspaceRef.current.seenRoots!['sample-jira:SAMPLE-1'].issues[
+        'SAMPLE-1'
+      ].fields.Summary,
+    saved: () =>
+      h.writes.at(-1)?.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
+        .fields.Summary,
+    dispose: () => {
+      h.dispose();
+      d.window.close();
+    },
+  };
+}
+
+for (const failure of [false, true])
+  test(`close drains already queued issue updates and cleans up: failure=${failure}`, async () => {
+    const f = providerFixture(),
+      first = gate(),
+      second = gate();
+    let calls = 0;
+    f.h.forward(async (name, ...args) => {
+      assert.equal(name, 'canopy:update');
+      calls++;
+      await (calls === 1 ? first : second).promise;
+      if (failure && calls === 1) throw Error('provider refused');
+      return { ...f.issue, summary: (args[2] as any).summary };
+    });
+    const a = f.mutations.update('sample-jira', f.issue.key, {
+      summary: 'First',
+    });
+    const b = f.mutations.update('sample-jira', f.issue.key, {
+      summary: 'Confirmed',
+    });
+    await tick();
+    let finished = false;
+    const closing = f.h.api.flushWorkspace(10).then(() => {
+      finished = true;
+    });
+    await tick();
+    assert.equal(finished, false);
+    assert.equal(calls, 1);
+    first.release();
+    assert.equal(await a, !failure);
+    await tick();
+    assert.equal(
+      calls,
+      2,
+      'queued accepted write must reach provider during close',
+    );
+    assert.equal(finished, false);
+    assert.equal(f.h.writes.length, 0);
+    second.release();
+    assert.equal(await b, true);
+    await closing;
+    assert.equal(f.saved(), 'Confirmed');
+    assert.equal(f.view().saving.size, 0);
+    assert.equal((f.mutations as any).queues.size, 0);
+    assert.equal(f.errors.length, failure ? 1 : 0);
+    f.h.release(10);
+    const later = f.mutations.update('sample-jira', f.issue.key, {
+      summary: 'Later',
+    });
+    assert.equal(await later, true);
+    await f.h.save(f.h.workspaceRef.current);
+    assert.equal(f.saved(), 'Later');
+    f.dispose();
+  });
+
+for (const phase of [
+  'tree',
+  'priorities',
+  'transitions',
+  'validateAssignee',
+] as const)
+  for (const failure of [false, true])
+    test(`close drains Undo through ${phase}: failure=${failure}`, async () => {
+      const f = providerFixture(),
+        validation = gate(),
+        provider = gate();
+      let undo = false,
+        updates = 0;
+      const field =
+        phase === 'priorities'
+          ? 'priorityId'
+          : phase === 'transitions'
+            ? 'transitionId'
+            : phase === 'validateAssignee'
+              ? 'assigneeId'
+              : 'summary';
+      const changed = {
+        ...f.issue,
+        summary: 'Edited',
+        priority: { id: 'high', name: 'High' },
+        assignee: { id: 'new', name: 'New' },
+        status: { id: 'done', name: 'Done', category: 'done' as const },
+      };
+      f.h.forward(async (name) => {
+        if (name === 'canopy:update') {
+          updates++;
+          if (undo) await provider.promise;
+          return undo ? f.issue : changed;
+        }
+        if (name === `canopy:${phase}`) {
+          await validation.promise;
+          if (failure) throw Error('validation refused');
+        }
+        if (name === 'canopy:tree') return f.snapshot(changed);
+        if (name === 'canopy:priorities') return [f.issue.priority];
+        if (name === 'canopy:transitions')
+          return [{ id: 'back', name: 'Back', to: f.issue.status }];
+        if (name === 'canopy:validateAssignee') return f.issue.assignee;
+        throw Error(name);
+      });
+      const options = {
+        priorities: [changed.priority],
+        assignees: [changed.assignee],
+        transitions: [
+          {
+            id: 'finish',
+            name: 'Finish',
+            requiresFields: false,
+            to: changed.status,
+          },
+        ],
+      };
+      await f.mutations.update(
+        'sample-jira',
+        f.issue.key,
+        {
+          [field]:
+            field === 'summary'
+              ? 'Edited'
+              : field === 'priorityId'
+                ? 'high'
+                : field === 'assigneeId'
+                  ? 'new'
+                  : 'finish',
+        },
+        options,
+      );
+      undo = true;
+      const editing = f.mutations.undo();
+      await tick();
+      assert.equal(
+        f.view().saving.size,
+        0,
+        'Undo is validating before enqueue',
+      );
+      let finished = false;
+      const closing = f.h.api.flushWorkspace(10).then(() => {
+        finished = true;
+      });
+      await tick();
+      assert.equal(finished, false);
+      assert.equal(f.h.writes.length, 0);
+      validation.release();
+      await tick();
+      if (!failure) {
+        assert.equal(
+          updates,
+          2,
+          'validated Undo may write during its admitted close pause',
+        );
+        assert.equal(finished, false);
+      }
+      provider.release();
+      assert.equal(await editing, !failure);
+      await closing;
+      assert.equal(f.view().saving.size, 0);
+      assert.equal(f.view().undoBusy, false);
+      assert.equal((f.mutations as any).queues.size, 0);
+      if (phase === 'tree')
+        assert.equal(f.saved(), failure ? 'Edited' : 'Before');
+      else {
+        const name =
+          phase === 'priorities'
+            ? 'Priority'
+            : phase === 'transitions'
+              ? 'Status'
+              : 'Assignee';
+        const expected =
+          phase === 'priorities'
+            ? failure
+              ? 'High'
+              : 'Low'
+            : phase === 'transitions'
+              ? failure
+                ? 'Done'
+                : 'Open'
+              : failure
+                ? 'New'
+                : 'Old';
+        assert.equal(
+          f.h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues[
+            'SAMPLE-1'
+          ].fields[name],
+          expected,
+        );
+      }
+      assert.equal(f.errors.length, failure ? 1 : 0);
+      f.h.release(10);
+      await f.h.api.flushWorkspace(11);
+      f.h.release(11);
+      f.dispose();
+    });
+
+for (const failure of [false, true])
+  test(`provider drain preserves cancel, stale release and later saves: failure=${failure}`, async () => {
+    const f = providerFixture(),
+      provider = gate();
+    f.h.forward(async () => {
+      await provider.promise;
+      if (failure) throw Error('provider refused');
+      return { ...f.issue, summary: 'Confirmed' };
+    });
+    const editing = f.mutations.update('sample-jira', f.issue.key, {
+      summary: 'Confirmed',
+    });
+    await tick();
+    const abandoned = assert.rejects(f.h.api.flushWorkspace(10), /canceled/);
+    await tick();
+    f.h.release(9);
+    assert.equal(f.h.controller.owner, 10);
+    f.h.release(10);
+    assert.equal(f.h.controller.blocked, false);
+    f.h.setWorkspace((value: any) => ({ ...value, theme: 'light' }));
+    let finished = false;
+    const retry = f.h.api.flushWorkspace(11).then(() => {
+      finished = true;
+    });
+    await tick();
+    f.h.release(10);
+    assert.equal(f.h.controller.owner, 11);
+    assert.equal(finished, false);
+    provider.release();
+    assert.equal(await editing, !failure);
+    await abandoned;
+    await retry;
+    assert.equal(
+      f.h.writes.length,
+      1,
+      'canceled drain must not save under a new owner',
+    );
+    assert.equal(f.saved(), failure ? 'Before' : 'Confirmed');
+    assert.equal(f.h.writes[0].theme, 'light');
+    assert.equal(f.view().saving.size, 0);
+    f.h.release(11);
+    await f.h.save(f.h.workspaceRef.current);
+    assert.equal(
+      f.h.writes.length,
+      2,
+      'normal saving resumes after owning release',
+    );
+    f.dispose();
+  });
+
+for (const transfer of [false, true])
+  for (const failure of [false, true])
+    test(`admitted confirmed provider edit reconciles close snapshot: transfer=${transfer}, failure=${failure}`, async () => {
+      const d = dom();
+      const writing = gate(),
+        provider = gate();
+      let hold = false;
+      const h = rendererFixture(d.window.document, async () => {
+        if (hold) await writing.promise;
+      });
+      const initial = structuredClone(backupWorkspace);
+      initial.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1'].fields = {
+        Summary: 'Before',
+      };
+      h.setWorkspace(initial);
+      const issue = {
+        id: 'one',
+        key: 'SAMPLE-1',
+        summary: 'Confirmed',
+        type: 'Task',
+        priority: null,
+        assignee: null,
+        status: { id: 'open', name: 'Open', category: 'new' as const },
+        links: [],
+      };
+      h.forward(async (name) => {
+        assert.equal(name, 'canopy:update');
+        await provider.promise;
+        if (failure) throw Error('provider refused');
+        return issue;
+      });
+      const ast = sourceFile(
+        process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+      );
+      const constructor = findNode(
+        ast,
+        (node): node is ts.NewExpression =>
+          ts.isNewExpression(node) && node.expression.getText() === 'Mutations',
+      );
+      const confirmed = execute(constructor.arguments![3].getText(), {
+        ...h.context,
+        reconcileOwnEdit,
+        setWorkspace: h.setWorkspace,
+      });
+      const mutations = new Mutations(
+        h.api,
+        () => {},
+        () => {},
+        confirmed,
+        undefined,
+        undefined,
+        undefined,
+        execute(constructor.arguments![7].getText(), h.context),
+      );
+      mutations.receive(
+        initial.tabs[0],
+        {
+          rootKey: issue.key,
+          issues: [{ ...issue, summary: 'Before' }],
+          warnings: [],
+          fetchedAt: 1,
+        },
+        0,
+      );
+      const editing = mutations.update('sample-jira', issue.key, {
+        summary: 'Confirmed',
+      });
+      await tick();
+      if (transfer) {
+        h.controller.beginTransfer(d.window.document);
+        h.context.workspaceTransferBusy.current = true;
+        h.context.workspaceTransferCommitted.current = true;
+      }
+      let finished = false;
+      const closing = h.api.flushWorkspace(10).then(() => {
+        finished = true;
+      });
+      await tick();
+      assert.equal(
+        finished,
+        false,
+        'close must await admitted provider completion',
+      );
+      assert.equal(
+        h.writes.length,
+        0,
+        'final snapshot must follow provider completion',
+      );
+      await assert.rejects(
+        mutations.update('sample-jira', issue.key, { summary: 'late' }),
+        /closing|transfer/,
+      );
+      h.setWorkspace((value: any) => ({ ...value, theme: 'light' }));
+      assert.equal(h.workspaceRef.current.theme, initial.theme);
+      provider.release();
+      await editing;
+      assert.equal(
+        h.workspaceRef.current.seenRoots!['sample-jira:SAMPLE-1'].issues[
+          'SAMPLE-1'
+        ].fields.Summary,
+        failure ? 'Before' : 'Confirmed',
+      );
+      writing.release();
+      await closing;
+      if (transfer)
+        assert.equal(
+          h.writes.length,
+          0,
+          'confirmed completion cannot write outgoing transfer state',
+        );
+      else
+        assert.equal(
+          h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
+            .fields.Summary,
+          failure ? 'Before' : 'Confirmed',
+        );
+      h.release(9);
+      assert.equal(h.controller.paused, true);
+      h.release(10);
+      assert.equal(h.controller.blocked, transfer);
+      hold = false;
+      if (!transfer) {
+        await h.api.flushWorkspace();
+        assert.equal(
+          h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
+            .fields.Summary,
+          failure ? 'Before' : 'Confirmed',
+        );
+      }
+      h.dispose();
+      d.window.close();
+    });
+
+test('transfer barrier refuses direct navigation, organization and scroll mutations', () => {
+  const d = dom(),
+    h = rendererFixture(d.window.document);
+  const ast = sourceFile(
+    process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+  );
+  const tab = { ...backupWorkspace.tabs[0], scrollTop: 100 };
+  h.setWorkspace({
+    ...h.workspaceRef.current,
+    tabs: [tab],
+    activeTabId: tab.id,
+  });
+  const viewport = { scrollTop: 0 };
+  let inbox = true,
+    organizations = 0,
+    saves = 0;
+  let timer!: () => void;
+  const context = {
+    ...h.context,
+    setWorkspace: h.setWorkspace,
+    scrollRef: { current: viewport },
+    snapshot: {},
+    activeTab: tab,
+    pendingScrollRestore: { current: null },
+    setInboxOpen: (value: boolean) => {
+      inbox = value;
+    },
+    setHistory() {},
+    historyRef: { current: {} },
+    visit: () => ({}),
+    sameRoot: () => true,
+    activateTab: (value: any) => value,
+    sidebarSessionRef: { current: {} },
+    connectionsRef: { current: [] },
+    organizeSidebar: () => {
+      organizations++;
+      return { workspace: h.workspaceRef.current, session: {} };
+    },
+    setSidebarSession() {},
+    saveWorkspace: async () => {
+      saves++;
+    },
+    clearTimeout() {},
+    setTimeout: (callback: () => void) => {
+      timer = callback;
+      return 1;
+    },
+  };
+  const scroll = findNode(
+    ast,
+    (node): node is ts.JsxAttribute =>
+      ts.isJsxAttribute(node) &&
+      node.name.getText() === 'onScroll' &&
+      node
+        .initializer!.getText()
+        .includes('workspaceRef.current = withScrollPositions'),
+  );
+  const onScroll = execute(
+    (scroll.initializer as ts.JsxExpression).expression!.getText(),
+    context,
+  );
+  // An autosave timer admitted before transfer must also refuse after admission.
+  onScroll({ currentTarget: { scrollTop: 42 } });
+  assert.equal(h.context.scrollPositions.current.get(tab.id), 42);
+  h.controller.beginTransfer(d.window.document);
+  execute(callback(ast, 'organize'), context)({ type: 'undo' });
+  assert.equal(organizations, 0);
+  execute(callback(ast, 'navigate'), context)(tab, true);
+  assert.equal(inbox, true);
+  execute(callback(ast, 'updateTab'), context)(tab.id, { scrollTop: 300 });
+  assert.equal(h.context.scrollPositions.current.get(tab.id), 42);
+  execute(callback(ast, 'restoreScroll'), context)(tab);
+  assert.equal(viewport.scrollTop, 0);
+  onScroll({ currentTarget: { scrollTop: 300 } });
+  assert.equal(h.context.scrollPositions.current.get(tab.id), 42);
+  timer();
+  assert.equal(saves, 0);
+  h.controller.endTransfer();
+  execute(callback(ast, 'navigate'), context)(tab, true);
+  assert.equal(inbox, false);
+  h.dispose();
+  d.window.close();
+});
+
+for (const failure of [false, true])
+  test(`preload issue mutation admission expires after settlement: failure=${failure}`, async () => {
+    const f = providerFixture();
+    let retained!: Pick<
+      import('../src/shared/types').CanopyAPI,
+      'update' | 'rank'
+    >;
+    f.h.forward(async () => f.issue);
+    const run = f.h.api.withIssueMutations(async (writes) => {
+      retained = writes;
+      await writes.update('sample-jira', f.issue.key, {});
+      if (failure) throw Error('operation failed');
+      return true;
+    });
+    if (failure) await assert.rejects(run, /operation failed/);
+    else assert.equal(await run, true);
+    await assert.rejects(
+      retained.update('sample-jira', f.issue.key, {}),
+      /finished/,
+    );
+    await assert.rejects(
+      retained.rank('sample-jira', f.issue.key, 'other'),
+      /finished/,
+    );
+    await f.h.api.flushWorkspace(10);
+    await assert.rejects(
+      f.h.api.withIssueMutations(async () => true),
+      /closing/,
+    );
+    await assert.rejects(
+      f.h.api.update('sample-jira', f.issue.key, {}),
+      /closing/,
+    );
+    f.h.release(10);
+    await assert.rejects(
+      f.h.api.applyWorkspaceImport('fixture', async () => {
+        throw Error('abort transfer');
+      }),
+      /abort transfer/,
+    );
+    assert.equal(await f.h.api.withIssueMutations(async () => true), true);
+    await f.h.api.applyWorkspaceImport('fixture');
+    await assert.rejects(
+      f.h.api.withIssueMutations(async () => true),
+      /transfer/,
+    );
+    f.dispose();
+  });
+
+for (const operation of ['rank', 'transitionPath'] as const)
+  for (const failure of [false, true])
+    test(`close drains admitted ${operation}: failure=${failure}`, async () => {
+      const f = providerFixture(),
+        provider = gate();
+      f.mutations.receive(
+        backupWorkspace.tabs[0],
+        {
+          ...f.snapshot(),
+          issues: [
+            { ...f.issue, parentKey: 'ROOT' },
+            { ...f.issue, key: 'SAMPLE-2', parentKey: 'ROOT' },
+          ],
+          ranking: { state: 'supported', issueKeys: [f.issue.key, 'SAMPLE-2'] },
+        },
+        0,
+      );
+      const done = { id: 'done', name: 'Done', category: 'done' as const };
+      f.h.forward(async (name, ...args) => {
+        if (name === 'canopy:transitions') return [{ id: 'finish', to: done }];
+        await provider.promise;
+        if (failure) throw Error('provider refused');
+        if (name === 'canopy:rank') return;
+        return {
+          ...f.issue,
+          status: (args[2] as any).transitionId ? done : f.issue.status,
+        };
+      });
+      const editing =
+        operation === 'rank'
+          ? f.mutations.rank('sample-jira', f.issue.key, 'SAMPLE-2')
+          : f.mutations.transitionPath(
+              'sample-jira',
+              f.issue.key,
+              f.issue.status,
+              { destination: done, steps: [{ id: 'finish', to: done }] },
+            );
+      await tick();
+      let finished = false;
+      const closing = f.h.api.flushWorkspace(10).then(() => {
+        finished = true;
+      });
+      await tick();
+      assert.equal(finished, false);
+      assert.equal(f.h.writes.length, 0);
+      provider.release();
+      assert.equal(await editing, !failure);
+      await closing;
+      assert.equal(f.view().saving.size, 0);
+      assert.equal((f.mutations as any).queues.size, 0);
+      if (operation === 'transitionPath')
+        assert.equal(
+          f.mutations.confirmedSnapshot(backupWorkspace.tabs[0].id)!.issues[0]
+            .status.id,
+          failure ? 'open' : 'done',
+        );
+      assert.deepEqual(f.h.writes.at(-1), f.h.workspaceRef.current);
+      f.h.release(10);
+      f.dispose();
+    });
+
+for (const failure of [false, true])
+  test(`close drains preview label reconciliation and tolerated failure: failure=${failure}`, async () => {
+    const f = providerFixture(),
+      provider = gate();
+    f.h.forward(async () => {
+      await provider.promise;
+      if (failure) throw Error('label refused');
+      return { ...f.issue, labels: [{ id: 'bug', name: 'bug' }] };
+    });
+    const ast = sourceFile(
+      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+    );
+    const preview = findNode(
+      ast,
+      (node): node is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(node) &&
+        node.tagName.getText() === 'IssuePreview',
+    );
+    const attr = (name: string) => {
+      const prop = preview.attributes.properties.find(
+        (prop) => ts.isJsxAttribute(prop) && prop.name.getText() === name,
+      ) as ts.JsxAttribute;
+      return (prop.initializer as ts.JsxExpression).expression!.getText();
+    };
+    const onChanged = execute(attr('onChanged'), {
+      mutations: f.mutations,
+      previewRoute: { connectionId: 'sample-jira' },
+      allRefreshTabs: [],
+    });
+    const trackMutation = execute(attr('trackMutation'), f.h.context);
+    const toggle = findNode(
+      sourceFile('src/renderer/IssuePreview.tsx'),
+      (node): node is ts.VariableDeclaration =>
+        ts.isVariableDeclaration(node) && node.name.getText() === 'toggleLabel',
+    );
+    let saving = false,
+      error = '';
+    const edit = execute(toggle.initializer!.getText(), {
+      data: { issue: { ...f.issue, labels: [] } },
+      savingLabels: false,
+      previewGeneration: { current: 1 },
+      connectionId: 'sample-jira',
+      issueKey: f.issue.key,
+      setSavingLabels: (value: boolean) => {
+        saving = value;
+      },
+      setLabelsError: (value: string) => {
+        error = value;
+      },
+      setLabelsSaved() {},
+      setData() {},
+      trackMutation,
+      onChanged,
+      window: { canopy: f.h.api },
+    });
+    const editing = edit('bug');
+    await tick();
+    assert.equal(saving, true);
+    let finished = false;
+    const closing = f.h.api.flushWorkspace(10).then(() => {
+      finished = true;
+    });
+    await tick();
+    assert.equal(finished, false);
+    assert.equal(f.h.writes.length, 0);
+    provider.release();
+    await editing;
+    await assert.doesNotReject(
+      closing,
+      'a refused label edit must still allow workspace persistence',
+    );
+    assert.equal(saving, false);
+    assert.equal(error.includes('label refused'), failure);
+    const labels =
+      f.h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
+        .fields.Labels;
+    assert.deepEqual(labels, failure ? undefined : ['bug']);
+    f.h.release(10);
+    f.dispose();
+  });
+
+test('a retained admitted issue writer refuses writes after transfer admission', async () => {
+  const f = providerFixture(),
+    transfer = gate();
+  const pending = f.h.api.withIssueMutations(async (writes) => {
+    await transfer.promise;
+    await assert.rejects(
+      writes.update('sample-jira', f.issue.key, {}),
+      /transfer/,
+    );
+    await assert.rejects(
+      writes.rank('sample-jira', f.issue.key, 'other'),
+      /transfer/,
+    );
+    return true;
+  });
+  await f.h.api.applyWorkspaceImport('fixture');
+  transfer.release();
+  assert.equal(await pending, true);
+  assert.equal(f.h.calls.includes('canopy:update'), false);
+  assert.equal(f.h.calls.includes('canopy:rank'), false);
+  f.dispose();
+});

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
+import { withScrollPositions } from '../src/renderer/scroll-position';
 import { WorkspaceClose } from '../src/renderer/workspace-close';
 import { callback, execute, findNode, sourceFile } from './source-probe';
 
@@ -78,6 +79,7 @@ for (const route of ['same-tab', 'new-tab', 'stale-marker'])
       })();
     const release = execute(registration.arguments[1].getText(), {
       workspaceClose: { current: controller },
+      workspaceTransferCommitted: { current: false },
       storeWorkspace: (
         update: (current: typeof workspace) => typeof workspace,
       ) => {
@@ -132,7 +134,7 @@ for (const route of ['same-tab', 'new-tab', 'stale-marker'])
     assert.equal(writes, 0);
   });
 
-test('snapshot refresh during close restores and persists a native clamp after refusal', () => {
+test('snapshot refresh during close restores and persists a native clamp after refusal', async () => {
   const controller = new WorkspaceClose();
   let workspace = { activeTabId: 'tab', tabs: [{ id: 'tab', scrollTop: 600 }] };
   const pendingScrollRestore = { current: null as string | null };
@@ -155,11 +157,21 @@ test('snapshot refresh during close restores and persists a native clamp after r
       removeEventListener() {},
     },
   };
-  const setWorkspace = (
-    update: (current: typeof workspace) => typeof workspace,
+  const workspaceRef = { current: workspace };
+  const storeWorkspace = (
+    update:
+      typeof workspace | ((current: typeof workspace) => typeof workspace),
   ) => {
-    workspace = update(workspace);
+    workspace = typeof update === 'function' ? update(workspace) : update;
+    workspaceRef.current = workspace;
   };
+  const setWorkspace = execute(callback(source, 'setWorkspace'), {
+    useCallback: (fn: unknown) => fn,
+    workspaceClose: { current: controller },
+    scrollPositions,
+    withScrollPositions,
+    storeWorkspace,
+  });
   const restoreScroll = execute(callback(source, 'restoreScroll'), {
     useCallback: (fn: unknown) => fn,
     workspaceClose: { current: controller },
@@ -190,17 +202,39 @@ test('snapshot refresh during close restores and persists a native clamp after r
   assert.equal(pendingScrollRestore.current, 'tab');
   const release = execute(registration.arguments[1].getText(), {
     workspaceClose: { current: controller },
+    workspaceTransferCommitted: { current: false },
     storeWorkspace: (
       update: (current: typeof workspace) => typeof workspace,
     ) => {
-      setWorkspace(update);
+      storeWorkspace(update);
       execute(restoreEffect.arguments[0].getText(), context())();
     },
   });
   release(7);
   assert.equal(controller.paused, false);
   assert.equal(pendingScrollRestore.current, null);
-  assert.equal(workspace.tabs[0].scrollTop, 200);
+  assert.equal(workspace.tabs[0].scrollTop, 600);
   assert.equal(scrollPositions.current.get('tab'), 200);
   assert.equal(viewport.scrollTop, 200);
+  const submissions: (typeof workspace)[] = [];
+  const saveWorkspace = execute(callback(source, 'saveWorkspace'), {
+    useCallback: (fn: unknown) => fn,
+    workspaceClose: { current: controller },
+    workspaceLoaded: { current: true },
+    workspaceTransferBusy: { current: false },
+    demoResetting: { current: false },
+    pendingWorkspaceSave: { current: Promise.resolve() },
+    scrollPositions,
+    withScrollPositions,
+    window: {
+      canopy: {
+        saveWorkspace: async (value: typeof workspace) => {
+          submissions.push(value);
+        },
+      },
+    },
+  });
+  await saveWorkspace(workspaceRef.current);
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0].tabs[0].scrollTop, 200);
 });

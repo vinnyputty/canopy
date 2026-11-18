@@ -2,15 +2,30 @@
 export class WorkspaceClose {
   owner: number | undefined;
   private releasedThrough = 0;
+  private transferring = false;
   private restoreInput: (() => void) | undefined;
   private pending = new Set<Promise<unknown>>();
 
   get paused() {
     return this.owner !== undefined;
   }
+  get blocked() {
+    return this.paused || this.transferring;
+  }
+  beginTransfer(document: Document) {
+    this.assertWritable();
+    this.transferring = true;
+    this.pauseInput(document);
+  }
+  endTransfer() {
+    this.transferring = false;
+    this.resumeInput();
+  }
   assertWritable() {
     if (this.paused)
       throw new Error('Workspace is closing; wait for saving to finish.');
+    if (this.transferring)
+      throw new Error('Workspace transfer is in progress; wait for reload.');
   }
   assertOwner(attempt: number) {
     if (this.owner !== attempt || attempt <= this.releasedThrough)
@@ -25,52 +40,7 @@ export class WorkspaceClose {
     if (!this.paused) {
       commit();
       this.owner = attempt;
-      const body = document.body;
-      const inert = body.inert;
-      const focus = document.activeElement;
-      const block = (event: Event) => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      };
-      const events = [
-        'keydown',
-        'keyup',
-        'keypress',
-        'dblclick',
-        'contextmenu',
-        'pointerup',
-        'mouseup',
-        'cut',
-        'paste',
-        'wheel',
-        'touchmove',
-        'beforeinput',
-        'input',
-        'change',
-        'click',
-        'pointerdown',
-        'mousedown',
-        'submit',
-        'drop',
-        'dragstart',
-      ];
-      for (const name of events)
-        document.defaultView!.addEventListener(name, block, {
-          capture: true,
-          passive: false,
-        });
-      body.inert = true;
-      this.restoreInput = () => {
-        body.inert = inert;
-        for (const name of events)
-          document.defaultView!.removeEventListener(name, block, true);
-        if (
-          !inert &&
-          focus instanceof document.defaultView!.HTMLElement &&
-          focus.isConnected
-        )
-          focus.focus();
-      };
+      this.pauseInput(document);
     }
     this.owner = attempt;
   }
@@ -78,6 +48,59 @@ export class WorkspaceClose {
     this.releasedThrough = Math.max(this.releasedThrough, attempt);
     if (this.owner !== attempt) return;
     this.owner = undefined;
+    this.resumeInput();
+  }
+  private pauseInput(document: Document) {
+    if (this.restoreInput) return;
+    const body = document.body;
+    const inert = body.inert;
+    const focus = document.activeElement;
+    const block = (event: Event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    const events = [
+      'keydown',
+      'keyup',
+      'keypress',
+      'dblclick',
+      'contextmenu',
+      'pointerup',
+      'mouseup',
+      'cut',
+      'paste',
+      'wheel',
+      'touchmove',
+      'beforeinput',
+      'input',
+      'change',
+      'click',
+      'pointerdown',
+      'mousedown',
+      'submit',
+      'drop',
+      'dragstart',
+    ];
+    for (const name of events)
+      document.defaultView!.addEventListener(name, block, {
+        capture: true,
+        passive: false,
+      });
+    body.inert = true;
+    this.restoreInput = () => {
+      body.inert = inert;
+      for (const name of events)
+        document.defaultView!.removeEventListener(name, block, true);
+      if (
+        !inert &&
+        focus instanceof document.defaultView!.HTMLElement &&
+        focus.isConnected
+      )
+        focus.focus();
+    };
+  }
+  private resumeInput() {
+    if (this.blocked) return;
     this.restoreInput?.();
     this.restoreInput = undefined;
   }
