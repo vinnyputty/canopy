@@ -163,7 +163,7 @@ export class WorkHandoffQueue {
   }
 
   replaceRenderer(): void {
-    if (this.stopped || this.paused) return;
+    if (this.stopped) return;
     if (this.current) {
       const item = this.current;
       clearTimeout(item.expires);

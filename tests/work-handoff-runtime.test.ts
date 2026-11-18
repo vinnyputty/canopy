@@ -445,3 +445,49 @@ it('replacement expires while absent and preserves queued wait deadline and capa
   context.mock.timers.tick(HANDOFF_WAIT_MS);
   assert.equal(rejections, HANDOFF_CAPACITY + 1);
 });
+
+it('paused replacement preserves arrivals, dedupe, capacity and original expiration without delivery', (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+  let rejected = 0;
+  const queue = new WorkHandoffQueue(() => rejected++);
+  const states: HandoffState[] = [];
+  const old = queue.ready((state) => states.push(state), 'old');
+  queue.pause();
+  queue.receive(args('one'));
+  context.mock.timers.tick(1000);
+  queue.replaceRenderer();
+  queue.receive(args('one'));
+  for (let i = 2; i <= 16; i++) queue.receive(args(String(i)));
+  queue.receive(args('overflow'));
+  assert.equal(rejected, 1, 'dedupe does not consume a capacity slot');
+  assert.equal(
+    states.length,
+    0,
+    'paused replacement does not send to old owner',
+  );
+  assert.throws(() => queue.ready(() => {}, 'new'), /closing/);
+  assert.equal(
+    queue.cancel(old.session),
+    false,
+    'old cancellation cannot erase arrivals',
+  );
+  assert.equal(queue.acknowledge(old.session, 'stale', 'opened'), false);
+  context.mock.timers.tick(59000);
+  assert.equal(
+    rejected,
+    2,
+    'first arrival expires at its original deadline while paused',
+  );
+  queue.resume();
+  const next = queue.ready((state) => states.push(state), 'new');
+  assert.equal(next.delivery!.intent.kind, 'view');
+  assert.deepEqual(next.delivery!.intent, { kind: 'view', view: '2' });
+  assert.equal(
+    next.delivery!.expiresAt,
+    61100,
+    'later arrivals retain original expiry',
+  );
+  queue.stop();
+  context.mock.timers.tick(60000);
+  assert.equal(rejected, 2, 'stop cancels remaining timers');
+});

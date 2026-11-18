@@ -151,6 +151,7 @@ export function useWorkHandoff(
             void window.canopy.handoffCancel(state.session).catch(() => {});
             return;
           }
+          if (state.closeSettled === false) return;
           session.current = state.session;
           receive(state);
           if (early) receive(early);

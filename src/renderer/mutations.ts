@@ -411,6 +411,43 @@ export class Mutations {
     });
     this.publish();
   }
+  async writeIssue(
+    connectionId: string,
+    key: string,
+    patch: IssuePatch,
+  ): Promise<Issue> {
+    let issue: Issue | undefined;
+    let failure: unknown;
+    await this.run(async (writes) => {
+      try {
+        issue = await this.serialize(`${connectionId}:${key}`, () =>
+          writes.update(connectionId, key, patch),
+        );
+        return true;
+      } catch (error) {
+        failure = error;
+        return false;
+      }
+    });
+    if (!issue) throw failure;
+    return issue;
+  }
+  private serialize<T>(
+    queueKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.queues.get(queueKey) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(
+      () => {},
+      () => {},
+    );
+    this.queues.set(queueKey, tail);
+    void tail.then(() => {
+      if (this.queues.get(queueKey) === tail) this.queues.delete(queueKey);
+    });
+    return result;
+  }
   private enqueue(
     connectionId: string,
     change: Change,
@@ -422,8 +459,7 @@ export class Mutations {
     this.entries.push(entry);
     this.publish();
     const queueKey = `${connectionId}:${change.fields ? change.key : 'rank'}`;
-    const previous = this.queues.get(queueKey) ?? Promise.resolve();
-    const result = previous.then(async () => {
+    const result = this.serialize(queueKey, async () => {
       entry.before = this.find(connectionId, change.key);
       try {
         const confirmed = await execute(entry);
@@ -444,11 +480,6 @@ export class Mutations {
         this.entries = this.entries.filter((value) => value !== entry);
         this.publish();
       }
-    });
-    const tail = result.then(() => {});
-    this.queues.set(queueKey, tail);
-    void tail.then(() => {
-      if (this.queues.get(queueKey) === tail) this.queues.delete(queueKey);
     });
     return result;
   }

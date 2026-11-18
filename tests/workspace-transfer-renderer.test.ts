@@ -160,6 +160,7 @@ const document={body:{inert:false},activeElement:null,defaultView:{HTMLElement:c
 const flushSync=operation=>operation(), scrollSaveTimer={current:undefined};
 const workspaceLoadError='Fixture initial read failed';
 ${mainCallback('WorkspaceLoadFailure')}
+${mainCallback('WorkspaceSnapshotUnconfirmed')}
 const scrollPositions={current:new Map()};
 let reportedErrors={};const setErrors=update=>reportedErrors=update(reportedErrors);
 let active=false,dialog='backup',reload;

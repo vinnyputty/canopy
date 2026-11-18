@@ -1315,3 +1315,34 @@ it('keeps rank undo retryable while the provider preserves lagging sibling order
   assert.equal(writes, 2);
   assert.equal(h.view.undoLabel, undefined);
 });
+
+it('raw issue writes share field queues, isolate connections and issues, and recover after failure', async () => {
+  const held = deferred<Issue>();
+  const calls: string[] = [];
+  const h = harness({
+    update: async (connection, key, patch) => {
+      calls.push(`${connection}:${key}`);
+      if (patch.labels?.includes('held')) return held.promise;
+      return {
+        ...issue(key),
+        labels: patch.labels?.map((name) => ({ id: name, name })),
+      };
+    },
+  });
+  const first = h.mutations.writeIssue('jira', 'A-2', { labels: ['held'] });
+  const rejection = assert.rejects(first, /provider refused/);
+  const second = h.mutations.update('jira', 'A-2', { summary: 'next' });
+  const otherIssue = h.mutations.writeIssue('jira', 'A-3', {
+    labels: ['other'],
+  });
+  const otherConnection = h.mutations.writeIssue('other', 'A-2', {
+    labels: ['other'],
+  });
+  await Promise.all([otherIssue, otherConnection]);
+  assert.deepEqual(calls, ['jira:A-2', 'jira:A-3', 'other:A-2']);
+  held.reject(Error('provider refused'));
+  await rejection;
+  assert.equal(await second, true);
+  assert.deepEqual(calls, ['jira:A-2', 'jira:A-3', 'other:A-2', 'jira:A-2']);
+  assert.equal((h.mutations as any).queues.size, 0);
+});

@@ -47,6 +47,8 @@ export function IssuePreview({
   onWidth,
   onClose,
   onChanged,
+  updateIssue = (connectionId, key, patch) =>
+    window.canopy.update(connectionId, key, patch),
   trackMutation = (operation) => operation(),
   onAuthoringChanged,
   onPreview,
@@ -70,6 +72,7 @@ export function IssuePreview({
   onWidth: (width: number) => void;
   onClose: () => void;
   onChanged: (issue: Issue) => void;
+  updateIssue?: import('../shared/types').CanopyAPI['update'];
   trackMutation?: (operation: () => Promise<void>) => Promise<void>;
   onAuthoringChanged: () => void;
   onPreview: (key: string) => void;
@@ -261,7 +264,7 @@ export function IssuePreview({
     try {
       await trackMutation(async () => {
         try {
-          const issue = await window.canopy.update(connectionId, issueKey, {
+          const issue = await updateIssue(connectionId, issueKey, {
             labels: next,
           });
           confirmed = true;

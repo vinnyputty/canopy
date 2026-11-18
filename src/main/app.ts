@@ -86,6 +86,14 @@ let focusWindow = () => {
 };
 const html = join(__dirname, 'renderer/index.html');
 class WorkspaceLoadFailure extends Error {}
+class WorkspaceSnapshotUnconfirmed extends Error {
+  constructor(cause?: unknown) {
+    super(
+      'The renderer disappeared before confirming the final workspace save.',
+      { cause },
+    );
+  }
+}
 
 function text(value: unknown, limit = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit)
@@ -438,8 +446,10 @@ async function start(
         )
       )
         throw new Error('Invalid handoff owner.');
-      if (quitting || closingWindow || !window || window.isDestroyed())
+      if (!window || window.isDestroyed())
         throw new Error('Canopy is closing.');
+      if (closingWindow) return { session: '', closeSettled: false };
+      if (quitting) throw new Error('Canopy is closing.');
       const owner = window;
       if (departingHandoffOwner === owner)
         throw new Error('Canopy is replacing the workspace.');
@@ -1103,7 +1113,9 @@ async function start(
         created.webContents.getURL() !== pathToFileURL(html).href;
     });
     const flushRenderer = async (signal: AbortSignal, closeAttempt: number) => {
-      if (!rendererUnavailable && !created.webContents.isCrashed()) {
+      const requestedFinalSnapshot =
+        !rendererUnavailable && !created.webContents.isCrashed();
+      if (requestedFinalSnapshot) {
         let unavailable: () => void;
         const failedLoad = (
           _event: unknown,
@@ -1153,29 +1165,37 @@ async function start(
           unsubscribe();
         }
       }
-      // Preserve writes already received when an unavailable renderer cannot
-      // supply newer state. The overall close deadline also bounds this drain.
-      if (
-        retryUnavailableWorkspace &&
-        receivedWorkspace &&
-        workspaceOwner === created
-      ) {
-        retryUnavailableWorkspace = false;
-        savingWorkspace = storage.write('workspace', receivedWorkspace);
-      }
       try {
-        await savingWorkspace;
+        // Preserve writes already received when an unavailable renderer cannot
+        // supply newer state. The overall close deadline also bounds this drain.
+        if (
+          retryUnavailableWorkspace &&
+          receivedWorkspace &&
+          workspaceOwner === created
+        ) {
+          retryUnavailableWorkspace = false;
+          savingWorkspace = storage.write('workspace', receivedWorkspace);
+        }
+        try {
+          await savingWorkspace;
+        } catch (error) {
+          if (workspaceOwner === created && !created.isDestroyed())
+            retryUnavailableWorkspace = true;
+          throw error;
+        }
+        while (pendingWorkspaceTransfers.size)
+          await Promise.all(pendingWorkspaceTransfers);
+        if (workspaceInitializationError)
+          throw new WorkspaceLoadFailure(
+            `Workspace could not load: ${workspaceInitializationError}`,
+          );
+        signal.throwIfAborted();
       } catch (error) {
-        if (workspaceOwner === created && !created.isDestroyed())
-          retryUnavailableWorkspace = true;
+        if (requestedFinalSnapshot && !(error instanceof WorkspaceLoadFailure))
+          throw new WorkspaceSnapshotUnconfirmed(error);
         throw error;
       }
-      while (pendingWorkspaceTransfers.size)
-        await Promise.all(pendingWorkspaceTransfers);
-      if (workspaceInitializationError)
-        throw new WorkspaceLoadFailure(
-          `Workspace could not load: ${workspaceInitializationError}`,
-        );
+      if (requestedFinalSnapshot) throw new WorkspaceSnapshotUnconfirmed();
       return true;
     };
     const flushBeforeClose = async () => {
@@ -1210,6 +1230,7 @@ async function start(
         if (
           error !== timedOut &&
           !(error instanceof WorkspaceLoadFailure) &&
+          !(error instanceof WorkspaceSnapshotUnconfirmed) &&
           !rendererUnavailable &&
           !created.webContents.isCrashed()
         )
@@ -1225,7 +1246,8 @@ async function start(
           detail:
             error instanceof WorkspaceLoadFailure
               ? `${error.message}\n\nYour saved workspace will be left unchanged. Changes made since loading failed have not been saved and will be lost if you close anyway. Keep Canopy open to repair the problem or use Reload workspace.`
-              : error === timedOut
+              : error === timedOut ||
+                  error instanceof WorkspaceSnapshotUnconfirmed
                 ? 'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.'
                 : `${error instanceof Error ? error.message : String(error)}\n\nThe renderer is unavailable. Keep Canopy open to repair storage and retry closing; only workspace changes already received can be retried. Closing anyway abandons those changes.`,
           buttons: ['Keep open', 'Close anyway'],

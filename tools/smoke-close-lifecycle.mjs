@@ -64,6 +64,20 @@ export async function auditCloseLifecycle({
   await expect
     .poll(() => app.evaluate(() => !!globalThis.closePendingWrite.release))
     .toBe(true);
+  await app.evaluate(({ dialog }) => {
+    globalThis.closeLostSnapshot = {
+      options: null,
+      respond: null,
+      original: dialog.showMessageBox,
+    };
+    dialog.showMessageBox = (_window, options) => {
+      globalThis.closeLostSnapshot.options = options;
+      return new Promise((resolve) => {
+        globalThis.closeLostSnapshot.respond = () =>
+          resolve({ response: 1, checkboxChecked: false });
+      });
+    };
+  });
   // A renderer can die after executeJavaScript has begun awaiting its flush.
   await page.evaluate(() => {
     window.canopy.onWorkspaceFlush(() => {
@@ -87,9 +101,28 @@ export async function auditCloseLifecycle({
       ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
     ),
   ).toBe(1);
-  const crashClosed = closed(app);
   await app.evaluate(() => globalThis.closePendingWrite.release());
+  await expect
+    .poll(() => app.evaluate(() => !!globalThis.closeLostSnapshot.respond))
+    .toBe(true);
+  const lostSnapshot = await app.evaluate(
+    () => globalThis.closeLostSnapshot.options,
+  );
+  expect(lostSnapshot.message).toBe('The workspace could not be saved.');
+  expect(lostSnapshot.buttons).toEqual(['Keep open', 'Close anyway']);
+  expect(lostSnapshot.defaultId).toBe(0);
+  expect(lostSnapshot.cancelId).toBe(0);
+  expect(
+    await app.evaluate(
+      ({ BrowserWindow }) => BrowserWindow.getAllWindows().length,
+    ),
+  ).toBe(1);
+  const crashClosed = closed(app);
+  await app.evaluate(() => globalThis.closeLostSnapshot.respond());
   await crashClosed;
+  await app.evaluate(({ dialog }) => {
+    dialog.showMessageBox = globalThis.closeLostSnapshot.original;
+  });
   await close();
   expect(
     JSON.parse(await readFile(join(userData, 'workspace.json'), 'utf8'))
@@ -140,10 +173,17 @@ export async function auditCloseLifecycle({
     await expect
       .poll(() => app.evaluate(() => !!globalThis.closeFailedWrite.release))
       .toBe(true);
-    await app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer();
-      BrowserWindow.getAllWindows()[0].close();
-    });
+    await app.evaluate(
+      ({ BrowserWindow }) =>
+        new Promise((resolve) => {
+          const contents = BrowserWindow.getAllWindows()[0].webContents;
+          contents.once('render-process-gone', () => resolve());
+          contents.forcefullyCrashRenderer();
+        }),
+    );
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].close(),
+    );
     await app.evaluate(() => globalThis.closeFailedWrite.release());
     await expect
       .poll(() => app.evaluate(() => globalThis.closeFailureDialogs.length))

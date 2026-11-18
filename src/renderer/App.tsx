@@ -4077,6 +4077,9 @@ export function App() {
           ))
             void refreshTab(tab);
         }}
+        updateIssue={(connectionId, key, patch) =>
+          mutations.writeIssue(connectionId, key, patch)
+        }
         onChanged={(issue) => {
           mutations.acceptConfirmedLabels(previewRoute.connectionId, issue);
           for (const tab of allRefreshTabs.filter((tab) =>
@@ -6043,6 +6046,18 @@ export function App() {
               <div className="error-banner" role="alert">
                 <AlertCircle size={15} />
                 <span>{errors.workspace}</span>
+                <button
+                  aria-label="Dismiss workspace save error"
+                  onClick={() =>
+                    setErrors((value) => {
+                      const copy = { ...value };
+                      delete copy.workspace;
+                      return copy;
+                    })
+                  }
+                >
+                  <X size={14} />
+                </button>
               </div>
             )}
             <Welcome

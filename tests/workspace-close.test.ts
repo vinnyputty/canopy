@@ -964,6 +964,24 @@ test('production App recovery occupies the main content column and uses existing
       currentSaveError.textContent!,
       /Couldn’t save workspace: Could not write saved workspace/,
     );
+    assert.equal(currentSaveError.getAttribute('role'), 'alert');
+    const dismiss = currentSaveError.querySelector(
+      '[aria-label="Dismiss workspace save error"]',
+    ) as HTMLButtonElement;
+    assert.ok(dismiss, 'Welcome save error is dismissible');
+    await act(async () => dismiss.click());
+    assert.equal(
+      f.d.window.document.querySelector(
+        '[aria-label="Dismiss workspace save error"]',
+      ),
+      null,
+    );
+    const appError = f.d.window.document.querySelector('.welcome-error');
+    assert.ok(
+      appError,
+      'dismissing a workspace error retains the unrelated app error',
+    );
+    assert.match(appError.textContent!, /Demo could not open/);
     if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
       await writeFile(
         join(
@@ -2595,7 +2613,8 @@ for (const mode of ['absent', 'existing', 'pending', 'main-settled'])
     const f = await recoveryFixture();
     let deferred = existing ? false : true;
     let calls = 0,
-      canceled = 0;
+      canceled = 0,
+      rejected = 0;
     const acks: unknown[] = [];
     let receive!: (state: any) => void;
     Object.assign(f.d.window.canopy, {
@@ -2607,9 +2626,10 @@ for (const mode of ['absent', 'existing', 'pending', 'main-settled'])
         calls++;
         if (mode === 'pending' && calls === 1) {
           await held.promise;
-          throw Error('Canopy is closing.');
+          return { session: '', closeSettled: false };
         }
-        if (deferred || mainClosing) throw Error('Canopy is closing.');
+        if (deferred || mainClosing)
+          return { session: '', closeSettled: false };
         return { session: 'valid' };
       },
       handoffCancel: async () => {
@@ -2640,7 +2660,9 @@ for (const mode of ['absent', 'existing', 'pending', 'main-settled'])
       hook(
         true,
         () => {},
-        () => {},
+        () => {
+          rejected++;
+        },
         deferred,
       );
       return null;
@@ -2665,6 +2687,7 @@ for (const mode of ['absent', 'existing', 'pending', 'main-settled'])
         mainClosing = false;
         await act(async () => receive({ session: '', closeSettled: true }));
       }
+      assert.equal(rejected, 0, 'close deferral is not a failed command');
       assert.equal(calls, existing ? 1 : mode === 'main-settled' ? 3 : 2);
       const registered = calls;
       await act(async () => receive({ session: '', closeSettled: true }));
@@ -2686,6 +2709,11 @@ for (const mode of ['absent', 'existing', 'pending', 'main-settled'])
         }),
       );
       assert.deepEqual(acks, [['valid', 'delivery', 'opened']]);
+      assert.equal(
+        rejected,
+        0,
+        'successful retry leaves no command failure feedback',
+      );
     } finally {
       await f.close();
     }
@@ -2739,20 +2767,52 @@ for (const committed of [false, true])
     }
   });
 
+const childCleanupRecords: {
+  host: Element;
+  previousWindow: unknown;
+  previousDocument: unknown;
+  renderer?: ReturnType<typeof rendererFixture>;
+  ownerBeforeDispose?: number;
+  pendingBeforeDispose?: number;
+}[] = [];
 for (const phase of ['validation', 'provider'])
   for (const outcome of ['success', 'failure', 'timeout-release'])
     test(`close drains admitted child creation through ${phase}: ${outcome}`, async (t) => {
+      const previousWindow = globalThis.window,
+        previousDocument = globalThis.document;
       const ui = await recoveryFixture();
-      const h = rendererFixture(ui.d.window.document),
-        held = gate();
+      let acquired: ReturnType<typeof rendererFixture> | undefined;
+      const held = gate();
       let closing: Promise<unknown> | undefined;
       t.after(async () => {
-        await act(async () => held.release());
-        await closing?.catch(() => {});
-        if (h.controller.owner !== undefined) h.release(h.controller.owner);
-        await ui.close();
-        h.dispose();
+        try {
+          await act(async () => held.release());
+          if (acquired?.controller.owner !== undefined)
+            acquired.release(acquired.controller.owner);
+          await closing?.catch(() => {});
+        } finally {
+          record.ownerBeforeDispose = acquired?.controller.owner;
+          record.pendingBeforeDispose = acquired
+            ? (acquired.controller as any).pending.size
+            : undefined;
+          try {
+            acquired?.dispose();
+          } finally {
+            await ui.close();
+          }
+        }
       });
+      const record = {
+        host: ui.d.window.document.querySelector('#host')!,
+        previousWindow,
+        previousDocument,
+        renderer: undefined as ReturnType<typeof rendererFixture> | undefined,
+        ownerBeforeDispose: undefined as number | undefined,
+        pendingBeforeDispose: undefined as number | undefined,
+      };
+      childCleanupRecords.push(record);
+      const h = (acquired = rendererFixture(ui.d.window.document));
+      record.renderer = h;
       const initial = structuredClone(backupWorkspace);
       initial.tabs[0].expanded = [];
       h.setWorkspace(initial);
@@ -2900,6 +2960,54 @@ for (const phase of ['validation', 'provider'])
       if (outcome === 'failure') assert.match(error, /refused/);
     });
 
+test('child acquisition cleanup sentinel', async () => {
+  assert.equal(childCleanupRecords.length, 6);
+  for (const record of childCleanupRecords) {
+    assert.equal(
+      record.host.textContent,
+      '',
+      'UI root unmounted even after renderer setup or teardown failure',
+    );
+    assert.equal(
+      globalThis.window === record.previousWindow,
+      true,
+      'window restored',
+    );
+    assert.equal(
+      globalThis.document === record.previousDocument,
+      true,
+      'document restored',
+    );
+    if (record.renderer) {
+      assert.equal(
+        record.ownerBeforeDispose,
+        undefined,
+        'close released before renderer disposal',
+      );
+      assert.equal(
+        record.pendingBeforeDispose,
+        0,
+        'provider settled before renderer disposal',
+      );
+      assert.equal(
+        record.renderer.controller.owner,
+        undefined,
+        'close ownership released',
+      );
+      assert.equal(
+        (record.renderer.controller as any).pending.size,
+        0,
+        'held provider settled',
+      );
+      await assert.rejects(
+        record.renderer.api.flushWorkspace(),
+        /not ready to save/,
+        'renderer flush subscription disposed',
+      );
+    }
+  }
+});
+
 test('admitted child completion preserves queued workspace state in the React snapshot', () => {
   const ast = sourceFile(
     process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
@@ -2947,4 +3055,317 @@ test('admitted child completion preserves queued workspace state in the React sn
   assert.equal(state.tabs[0].selectedKey, 'SAMPLE-2');
   assert.equal(state.tabs[0].expanded.includes('SAMPLE-1'), true);
   assert.equal(workspaceRef.current.tabs[0].selectedKey, 'SAMPLE-2');
+});
+
+for (const firstFails of [false, true])
+  test(`reopened preview label writes serialize and persist the latest baseline: failure=${firstFails}`, async (t) => {
+    const f = providerFixture();
+    let ui: Awaited<ReturnType<typeof recoveryFixture>> | undefined;
+    const first = gate(),
+      second = gate();
+    let closing: Promise<unknown> | undefined;
+    t.after(async () => {
+      try {
+        await act(async () => {
+          first.release();
+          second.release();
+        });
+        await closing?.catch(() => {});
+        if (f.h.controller.owner !== undefined)
+          f.h.release(f.h.controller.owner);
+      } finally {
+        try {
+          await ui?.close();
+        } finally {
+          f.dispose();
+        }
+      }
+    });
+    const applied: string[][] = [];
+    f.h.forward(async (name, ...args) => {
+      assert.equal(name, 'canopy:update');
+      const labels = (args[2] as { labels: string[] }).labels;
+      applied.push(labels);
+      if (applied.length === 1) {
+        await first.promise;
+        if (firstFails) throw Error('first labels refused');
+      } else await second.promise;
+      return { ...f.issue, labels: labels.map((name) => ({ id: name, name })) };
+    });
+    const ast = sourceFile(
+      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+    );
+    const preview = findNode(
+      ast,
+      (n): n is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(n) && n.tagName.getText() === 'IssuePreview',
+    );
+    const prop = (name: string) => {
+      const attr = preview.attributes.properties.find(
+        (p) => ts.isJsxAttribute(p) && p.name.getText() === name,
+      ) as ts.JsxAttribute;
+      return (attr.initializer as ts.JsxExpression).expression!.getText();
+    };
+    const context = {
+      ...f.h.context,
+      mutations: f.mutations,
+      previewRoute: { connectionId: 'sample-jira' },
+      allRefreshTabs: [],
+    };
+    const updateIssue = execute(prop('updateIssue'), context);
+    const onChanged = execute(prop('onChanged'), context);
+    const trackMutation = execute(prop('trackMutation'), context);
+    ui = await recoveryFixture();
+    Object.assign(ui.d.window.canopy, f.h.api, {
+      preview: async () => ({
+        issue: { ...f.issue, labels: [] },
+        description: '',
+        comments: [],
+        totalComments: 0,
+      }),
+      labels: async () => ['bug', 'urgent'].map((name) => ({ id: name, name })),
+    });
+    let reopen!: () => void;
+    function Preview() {
+      const [open, setOpen] = React.useState(true);
+      reopen = () => setOpen(true);
+      return open
+        ? React.createElement(IssuePreview, {
+            connectionId: 'sample-jira',
+            provider: 'github',
+            connectionName: 'Fixture',
+            issueKey: f.issue.key,
+            relationshipsLoading: false,
+            width: 400,
+            onWidth() {},
+            onClose: () => setOpen(false),
+            onChanged,
+            updateIssue,
+            trackMutation,
+            onAuthoringChanged() {},
+            onPreview() {},
+            onJump() {},
+            onOpenExternal() {},
+            onCopyKeySummary() {},
+            onWorkBrief() {},
+            onOpenComment() {},
+            onRelationships() {},
+            onMarkSeen() {},
+          })
+        : null;
+    }
+    await act(async () => ui!.root.render(React.createElement(Preview)));
+    const host = ui.d.window.document.querySelector('#host') as HTMLElement;
+    const click = async (label: string) =>
+      act(async () => {
+        const button = [...host.querySelectorAll('button')].find(
+          (b) => b.textContent === label,
+        )!;
+        assert.ok(button, label);
+        button.click();
+      });
+    const toggle = async (index: number) =>
+      act(async () =>
+        host
+          .querySelectorAll<HTMLInputElement>('input[type=checkbox]')
+          [index].click(),
+      );
+    await click('Edit labels');
+    await toggle(0);
+    assert.deepEqual(applied, [['bug']]);
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>('[title="Close preview (Escape)"]')!
+        .click(),
+    );
+    assert.equal(host.textContent, '');
+    await act(async () => reopen());
+    await click('Edit labels');
+    await toggle(1);
+    assert.match(host.textContent!, /Saving labels/);
+    assert.deepEqual(
+      applied,
+      [['bug']],
+      'second provider write cannot overtake first response',
+    );
+    let finished = false;
+    closing = f.h.api.flushWorkspace(81).then(() => {
+      finished = true;
+    });
+    await tick();
+    await assert.rejects(
+      f.mutations.writeIssue('sample-jira', f.issue.key, { labels: ['late'] }),
+      /closing/,
+    );
+    assert.equal(finished, false);
+    await act(async () => second.release());
+    assert.deepEqual(
+      applied,
+      [['bug']],
+      'a ready second response cannot overtake the held first response',
+    );
+    assert.equal(finished, false);
+    await act(async () => first.release());
+    assert.deepEqual(
+      applied,
+      [['bug'], ['urgent']],
+      'already admitted second write drains while close is paused',
+    );
+    await assert.doesNotReject(closing);
+    const saved = f.h.writes.at(-1)!;
+    assert.deepEqual(
+      saved.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1'].fields.Labels,
+      ['urgent'],
+    );
+    assert.deepEqual(
+      f
+        .view()
+        .confirmedSnapshots[backupWorkspace.tabs[0].id].issues[0].labels?.map(
+          (l) => l.name,
+        ),
+      ['urgent'],
+    );
+    assert.equal(
+      (f.mutations as any).queues.size,
+      0,
+      'queue tail removed after success or failure',
+    );
+    assert.equal((f.h.controller as any).pending.size, 0);
+  });
+
+for (const disposed of [false, true])
+  test(`unexpected handoff registration failure feedback respects disposal: disposed=${disposed}`, async () => {
+    const f = await recoveryFixture(),
+      pending = gate();
+    let rejected = 0,
+      receive!: (state: any) => void,
+      calls = 0;
+    Object.assign(f.d.window.canopy, {
+      onHandoff: (fn: typeof receive) => {
+        receive = fn;
+        return () => {};
+      },
+      handoffReady: async () => {
+        calls++;
+        await pending.promise;
+        throw Error('unexpected IPC failure');
+      },
+    });
+    const declaration = findNode(
+      sourceFile(
+        process.env.CANOPY_HANDOFF_SOURCE ?? 'src/renderer/work-handoff.ts',
+      ),
+      (n): n is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(n) && n.name?.getText() === 'useWorkHandoff',
+    );
+    const hook = execute(
+      `() => { ${declaration.getText().replace(/^export /, '')}; return useWorkHandoff; }`,
+      {
+        useRef: React.useRef,
+        useState: React.useState,
+        useEffect: React.useEffect,
+        window: f.d.window,
+        crypto: { randomUUID: () => 'owner' },
+      },
+    )();
+    function Component() {
+      hook(
+        true,
+        () => {},
+        () => {
+          rejected++;
+        },
+      );
+      return null;
+    }
+    let closed = false;
+    try {
+      await act(async () => f.root.render(React.createElement(Component)));
+      assert.equal(calls, 1);
+      if (disposed) {
+        await f.close();
+        closed = true;
+      }
+      await act(async () => pending.release());
+      assert.equal(
+        rejected,
+        disposed ? 0 : 1,
+        'real failure is visible only to its live hook',
+      );
+      if (disposed) {
+        receive({ session: '', closeSettled: true });
+        await tick();
+        assert.equal(
+          calls,
+          1,
+          'late settled event cannot revive disposed hook',
+        );
+      }
+    } finally {
+      pending.release();
+      if (!closed) await f.close();
+    }
+  });
+
+test('Welcome workspace save banner dismisses only the save error', async () => {
+  const f = await recoveryFixture();
+  try {
+    const ast = sourceFile(
+      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+    );
+    const welcome = ast
+      .getText()
+      .indexOf('        {!activeTab && !activeSavedView');
+    assert.ok(welcome > 0);
+    const banner = findNode(
+      ast,
+      (node): node is ts.JsxElement =>
+        ts.isJsxElement(node) &&
+        node.getStart() > welcome &&
+        node.openingElement.tagName.getText() === 'div' &&
+        node.openingElement.attributes.getText().includes('error-banner'),
+    );
+    const renderBanner = execute(
+      `(errors, setErrors) => (${banner.getText()})`,
+      {
+        __jsx: React.createElement,
+        AlertCircle: () => null,
+        X: () => null,
+      },
+    );
+    function View() {
+      const [errors, setErrors] = React.useState({
+        workspace: 'Couldn’t save workspace: disk refused',
+        app: 'Demo could not open',
+      });
+      return React.createElement(
+        'main',
+        null,
+        errors.workspace ? renderBanner(errors, setErrors) : null,
+        React.createElement('p', { role: 'alert' }, errors.app),
+      );
+    }
+    await act(async () => f.root.render(React.createElement(View)));
+    const host = f.d.window.document.querySelector('#host')!;
+    const alert = host.querySelector('.error-banner')!;
+    assert.equal(alert.getAttribute('role'), 'alert');
+    assert.match(alert.textContent!, /Couldn’t save workspace: disk refused/);
+    const dismiss = alert.querySelector(
+      '[aria-label="Dismiss workspace save error"]',
+    ) as HTMLButtonElement;
+    assert.ok(dismiss, 'Welcome error exposes its existing dismiss action');
+    await act(async () => dismiss.click());
+    assert.equal(
+      host.querySelector('.error-banner'),
+      null,
+      'save error dismissed',
+    );
+    assert.equal(
+      host.querySelector('[role=alert]')!.textContent,
+      'Demo could not open',
+      'unrelated app error retained',
+    );
+  } finally {
+    await f.close();
+  }
 });

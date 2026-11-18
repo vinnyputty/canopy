@@ -741,14 +741,15 @@ for (const mode of ['close', 'quit'])
       f.invoke(window, 'handoffAck', first.session, old.id, 'opened'),
       false,
     );
-    assert.throws(
-      () =>
+    assert.equal(
+      (
         f.invoke(
           window,
           'handoffReady',
           '11111111-1111-4111-8111-111111111111',
-        ),
-      /closing/,
+        ) as any
+      ).closeSettled,
+      false,
     );
     renderer.reject(new Error('save refused quit'));
     await setImmediate();
@@ -921,10 +922,15 @@ it('an abandoned renderer completion cannot drain bounds or approve a newer clos
   assert.equal(window.destroyed, false);
   assert.equal(f.controls.prompts, 1);
   assert.equal(f.controls.quits, 0);
-  assert.throws(
-    () =>
-      f.invoke(window, 'handoffReady', '11111111-1111-4111-8111-111111111111'),
-    /closing/,
+  assert.equal(
+    (
+      f.invoke(
+        window,
+        'handoffReady',
+        '11111111-1111-4111-8111-111111111111',
+      ) as any
+    ).closeSettled,
+    false,
   );
   current.release();
   await setImmediate();
@@ -2432,7 +2438,9 @@ for (const outcome of [
     f.controls.consent = outcome === 'close-anyway' ? 1 : 0;
     f.controls.release = () => {
       released = true;
-      assert.throws(register, /closing/);
+      const state = register() as any;
+      assert.equal(state.session, '');
+      assert.equal(state.closeSettled, false);
     };
     const send = owner.webContents.send;
     owner.webContents.send = (channel, state: any) => {
@@ -2546,7 +2554,11 @@ for (const phase of ['validation', 'provider'])
     const renderer = rendererFixture(dom.window.document, async (value) => {
       await f.invoke(owner, 'saveWorkspace', value);
     });
-    renderer.setWorkspace(structuredClone(backupWorkspace));
+    const initial = structuredClone(backupWorkspace);
+    initial.tabs[0].expanded = initial.tabs[0].expanded.filter(
+      (key) => key !== 'SAMPLE-1',
+    );
+    renderer.setWorkspace(initial);
     renderer.forward(async (name, ...args) =>
       f.invoke(owner, name.replace('canopy:', ''), ...args),
     );
@@ -2644,4 +2656,592 @@ it('nontransfer load success retains initialization failure until explicit succe
   await setImmediate();
   assert.equal(owner.destroyed, true);
   assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
+});
+
+for (const mode of ['close', 'quit'])
+  for (const confirmed of [false, true])
+    for (const recovered of [false, true])
+      it(`renderer loss during ${mode} requires attempt-local final snapshot confirmation: confirmed=${confirmed}, recovered=${recovered}`, async (t) => {
+        const f = await fixture();
+        f.releaseRead();
+        f.releaseLoad();
+        await setImmediate();
+        const owner = f.windows[0],
+          renderer = gate(),
+          disk = gate(),
+          bounds = gate();
+        t.after(async () => {
+          renderer.release();
+          disk.release();
+          bounds.release();
+          await setImmediate();
+        });
+        const old = {
+          tabs: [],
+          theme: 'dark',
+          shortcuts: {},
+          sidebarCollapsed: false,
+        };
+        const latest = { ...old, theme: 'light' };
+        f.controls.write = async (name) => {
+          if (name === 'workspace') await disk.wait;
+          if (name === 'window') await bounds.wait;
+        };
+        const saving = Promise.resolve(f.invoke(owner, 'saveWorkspace', old));
+        let attempts = 0;
+        f.controls.flush = async () => {
+          attempts++;
+          if (!confirmed) await renderer.wait;
+          else {
+            await f.invoke(owner, 'saveWorkspace', latest);
+          }
+        };
+        const listeners = owner.webContents.listenerCount(
+          'render-process-gone',
+        );
+        if (mode === 'quit') f.app.quit();
+        else owner.close();
+        await setImmediate();
+        assert.equal(attempts, 1);
+        if (confirmed) {
+          disk.release();
+          await setImmediate();
+        }
+        f.controls.crashed = true;
+        owner.webContents.emit('render-process-gone');
+        await setImmediate();
+        assert.equal(
+          owner.destroyed,
+          false,
+          'received writes and bounds still drain',
+        );
+        if (recovered) {
+          f.controls.crashed = false;
+          owner.webContents.emit('did-finish-load');
+        }
+        disk.release();
+        bounds.release();
+        await saving;
+        await setImmediate();
+        assert.equal(f.controls.prompts, confirmed ? 0 : 1);
+        assert.equal(owner.destroyed, confirmed);
+        assert.equal(
+          owner.webContents.listenerCount('render-process-gone'),
+          listeners,
+        );
+        if (!confirmed) {
+          assert.deepEqual(Array.from(f.controls.warnings[0].buttons), [
+            'Keep open',
+            'Close anyway',
+          ]);
+          assert.equal(
+            f.controls.warnings[0].message,
+            'The workspace could not be saved.',
+          );
+          assert.equal(
+            f.writes.filter((w) => w.name === 'workspace').at(-1)!.value.theme,
+            'dark',
+            'old drained writes do not certify the unsent light theme',
+          );
+          renderer.release();
+          await setImmediate();
+          assert.equal(
+            owner.destroyed,
+            false,
+            'late completion cannot approve refused attempt',
+          );
+          f.controls.crashed = false;
+          owner.webContents.emit('did-finish-load');
+          f.controls.flush = async () => {
+            await f.invoke(owner, 'saveWorkspace', latest);
+          };
+          owner.close();
+          await setImmediate();
+          assert.equal(
+            owner.destroyed,
+            true,
+            'Keep open permits a confirmed retry',
+          );
+          assert.equal(
+            f.writes.filter((w) => w.name === 'workspace').at(-1)!.value.theme,
+            'light',
+          );
+        }
+      });
+
+it('renderer loss permits Close anyway only after the existing warning consent', async (t) => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const owner = f.windows[0],
+    renderer = gate(),
+    warning = gate();
+  t.after(async () => {
+    renderer.release();
+    warning.release();
+    await setImmediate();
+  });
+  f.controls.flush = () => renderer.wait;
+  f.controls.warning = () => warning.wait;
+  f.controls.consent = 1;
+  owner.close();
+  await setImmediate();
+  f.controls.crashed = true;
+  owner.webContents.emit('render-process-gone');
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(owner.destroyed, false);
+  warning.release();
+  await setImmediate();
+  assert.equal(owner.destroyed, true);
+  renderer.release();
+  await setImmediate();
+  assert.equal(
+    f.writes.filter((w) => w.name === 'workspace').length,
+    0,
+    'late abandoned flush does not synthesize a save',
+  );
+});
+
+for (const outcome of ['keep-open', 'close-anyway', 'crash'])
+  it(`transfer reload detaches the old owner while the real close warning remains paused: ${outcome}`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const owner = f.windows[0],
+      apply = gate(),
+      bounds = gate(),
+      warning = gate();
+    t.after(async () => {
+      apply.release();
+      bounds.release();
+      warning.release();
+      await setImmediate();
+    });
+    f.controls.readWorkspace = async () => ({
+      tabs: [],
+      activeTabId: null,
+      theme: 'dark',
+      shortcuts: {},
+      sidebarCollapsed: false,
+    });
+    const exported = (await f.invoke(owner, 'prepareWorkspaceExport')) as any;
+    exported.backup.workspace.theme = 'light';
+    const preview = (await f.invoke(
+      owner,
+      'previewWorkspaceImport',
+      exported.backup,
+      {},
+      'replace',
+    )) as any;
+    f.controls.write = async (name) => {
+      if (name === 'workspace') await apply.wait;
+      if (name === 'window') await bounds.wait;
+    };
+    const old = f.invoke(
+      owner,
+      'handoffReady',
+      '11111111-1111-4111-8111-111111111111',
+    ) as any;
+    const applying = f.invoke(
+      owner,
+      'applyWorkspaceImport',
+      preview.token,
+    ) as Promise<unknown>;
+    f.controls.flush = async () => {
+      await applying;
+    };
+    f.controls.warning = () => warning.wait;
+    f.controls.consent = outcome === 'close-anyway' ? 1 : 0;
+    let released = false;
+    f.controls.release = () => {
+      released = true;
+      void f.invoke(owner, 'reloadWorkspace');
+    };
+    const send = (view: string) =>
+      f.app.emit('second-instance', {}, [], '/ignored', {
+        canopyMode: 'main',
+        canopyArguments: [
+          '--canopy-open',
+          `canopy://handoff/view?view=${view}`,
+        ],
+      });
+    owner.close();
+    await setImmediate();
+    apply.release();
+    await applying;
+    await setImmediate();
+    f.controls.expireClose();
+    await setImmediate();
+    assert.equal(released, true);
+    assert.equal(f.controls.prompts, 1);
+    assert.equal(owner.destroyed, false);
+    const bytes = JSON.stringify(await f.controls.readWorkspace());
+    send('one');
+    send('one');
+    send('two');
+    const before = owner.handoffStates.length;
+    const outgoing = owner.webContents.mainFrame;
+    owner.webContents.emit('did-start-navigation', {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    owner.webContents.mainFrame = { url: outgoing.url };
+    owner.webContents.emit('did-navigate');
+    assert.equal(
+      (
+        f.invoke(
+          owner,
+          'handoffReady',
+          '22222222-2222-4222-8222-222222222222',
+        ) as any
+      ).closeSettled,
+      false,
+    );
+    assert.equal(
+      owner.handoffStates.length,
+      before,
+      'new readiness cannot deliver during the warning',
+    );
+    assert.equal(
+      f.invoke(owner, 'handoffCancel', old.session),
+      false,
+      'departing document cannot cancel retained arrivals',
+    );
+    t.mock.timers.tick(1000);
+    if (outcome === 'crash') owner.webContents.emit('render-process-gone');
+    warning.release();
+    bounds.release();
+    await setImmediate();
+    if (outcome === 'close-anyway') assert.equal(owner.destroyed, true);
+    else {
+      const next = f.invoke(
+        owner,
+        'handoffReady',
+        '33333333-3333-4333-8333-333333333333',
+      ) as any;
+      if (outcome === 'crash')
+        assert.equal(
+          next.delivery,
+          undefined,
+          'crash explicitly cancels retained work',
+        );
+      else {
+        assert.equal(next.delivery.intent.view, 'one');
+        assert.equal(next.delivery.expiresAt, 11100);
+        assert.equal(
+          f.invoke(
+            owner,
+            'handoffAck',
+            next.session,
+            next.delivery.id,
+            'opened',
+          ),
+          true,
+        );
+        const second = owner.handoffStates.at(-1).delivery;
+        assert.equal(
+          second.intent.view,
+          'two',
+          'FIFO and dedupe survive paused replacement',
+        );
+        assert.equal(
+          f.invoke(owner, 'handoffAck', next.session, second.id, 'opened'),
+          true,
+        );
+        assert.equal(
+          owner.handoffStates.filter((state) => state.delivery).length,
+          1,
+        );
+      }
+    }
+    assert.equal(
+      JSON.stringify(await f.controls.readWorkspace()),
+      bytes,
+      'committed transfer disk barrier survives warning and teardown',
+    );
+  });
+
+for (const mode of ['close', 'quit'])
+  for (const consent of [0, 1])
+    it(`recovered renderer still needs original lost-snapshot consent: ${mode}, consent=${consent}`, async (t) => {
+      const f = await fixture();
+      f.releaseRead();
+      f.releaseLoad();
+      await setImmediate();
+      const owner = f.windows[0],
+        renderer = gate(),
+        disk = gate(),
+        warning = gate();
+      t.after(async () => {
+        renderer.release();
+        disk.release();
+        warning.release();
+        await setImmediate();
+      });
+      f.controls.write = async (name) => {
+        if (name === 'workspace') await disk.wait;
+      };
+      const old = {
+        tabs: [],
+        theme: 'dark',
+        shortcuts: {},
+        sidebarCollapsed: false,
+      };
+      const saving = Promise.resolve(f.invoke(owner, 'saveWorkspace', old));
+      f.controls.flush = () => renderer.wait;
+      f.controls.warning = () => warning.wait;
+      f.controls.consent = consent;
+      if (mode === 'quit') f.app.quit();
+      else owner.close();
+      await setImmediate();
+      f.controls.crashed = true;
+      owner.webContents.emit('render-process-gone');
+      await setImmediate();
+      assert.equal(f.controls.prompts, 0, 'received write still drains');
+      f.controls.crashed = false;
+      owner.webContents.emit('did-finish-load');
+      disk.release();
+      await saving;
+      await setImmediate();
+      assert.equal(
+        f.controls.prompts,
+        1,
+        'recovery does not confirm the original final snapshot',
+      );
+      assert.equal(
+        owner.destroyed,
+        false,
+        'warning must await explicit consent',
+      );
+      assert.equal(f.controls.messageWindows.at(-1), owner);
+      const options = f.controls.warnings.at(-1)!;
+      assert.equal(options.message, 'The workspace could not be saved.');
+      assert.match(
+        options.detail,
+        /Keep Canopy open to allow saving or recovery/,
+      );
+      assert.doesNotMatch(options.detail, /renderer is unavailable/);
+      assert.deepEqual(Array.from(options.buttons), [
+        'Keep open',
+        'Close anyway',
+      ]);
+      assert.equal(options.defaultId, 0);
+      assert.equal(options.cancelId, 0);
+      warning.release();
+      await setImmediate();
+      assert.equal(owner.destroyed, consent === 1);
+      renderer.release();
+      await setImmediate();
+      assert.equal(
+        owner.destroyed,
+        consent === 1,
+        'late original response cannot approve a refused attempt',
+      );
+      assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 1);
+      assert.equal(
+        f.writes.filter((w) => w.name === 'workspace')[0].value.theme,
+        'dark',
+      );
+      if (consent === 0) {
+        f.controls.flush = async () => {
+          await f.invoke(owner, 'saveWorkspace', { ...old, theme: 'light' });
+        };
+        owner.close();
+        await setImmediate();
+        assert.equal(
+          owner.destroyed,
+          true,
+          'a fresh confirmed attempt can close',
+        );
+        assert.equal(
+          f.controls.prompts,
+          1,
+          'the confirmed retry needs no extra consent',
+        );
+        assert.equal(
+          f.writes.filter((w) => w.name === 'workspace').at(-1)!.value.theme,
+          'light',
+        );
+      }
+    });
+
+for (const mode of ['close', 'quit'])
+  for (const consent of [0, 1])
+    it(`received failure retains lost snapshot consent: ${mode}, consent=${consent}`, async (t) => {
+      const f = await fixture();
+      f.releaseRead();
+      f.releaseLoad();
+      await setImmediate();
+      const owner = f.windows[0],
+        renderer = gate(),
+        disk = gate(),
+        warning = gate();
+      t.after(async () => {
+        renderer.release();
+        disk.release();
+        warning.release();
+        await setImmediate();
+      });
+      const listeners = owner.webContents.listenerCount('render-process-gone');
+      f.controls.write = async (name) => {
+        if (name === 'workspace') await disk.wait;
+      };
+      const old = {
+        tabs: [],
+        theme: 'dark',
+        shortcuts: {},
+        sidebarCollapsed: false,
+      };
+      const saving = Promise.resolve(
+        f.invoke(owner, 'saveWorkspace', old),
+      ).catch(() => {});
+      f.controls.flush = () => renderer.wait;
+      f.controls.warning = () => warning.wait;
+      f.controls.consent = consent;
+      if (mode === 'quit') f.app.quit();
+      else owner.close();
+      await setImmediate();
+      f.controls.crashed = true;
+      owner.webContents.emit('render-process-gone');
+      await setImmediate();
+      assert.equal(f.controls.prompts, 0);
+      f.controls.crashed = false;
+      owner.webContents.emit('did-finish-load');
+      const receivedError = new Error('Received workspace write failed');
+      disk.reject(receivedError);
+      await saving;
+      await setImmediate();
+      assert.equal(owner.destroyed, false);
+      assert.equal(
+        f.controls.prompts,
+        1,
+        'known loss still requires original consent when the received write rejects after recovery',
+      );
+      assert.equal(
+        owner.webContents.listenerCount('render-process-gone'),
+        listeners,
+      );
+      assert.doesNotMatch(
+        f.controls.warnings.at(-1)!.detail,
+        /renderer is unavailable/,
+      );
+      warning.release();
+      await setImmediate();
+      assert.equal(owner.destroyed, consent === 1);
+      renderer.release();
+      await setImmediate();
+      assert.equal(
+        owner.destroyed,
+        consent === 1,
+        'abandoned completion cannot approve refusal',
+      );
+      if (!consent) {
+        assert.equal((f.closeErrors.at(-1)![1] as Error).cause, receivedError);
+        f.controls.write = async () => {};
+        f.controls.flush = async () => {
+          await f.invoke(owner, 'saveWorkspace', { ...old, theme: 'light' });
+        };
+        owner.close();
+        await setImmediate();
+        assert.equal(owner.destroyed, true, 'fresh confirmed retry succeeds');
+        assert.equal(f.controls.prompts, 1);
+        assert.equal(
+          f.writes.filter((w) => w.name === 'workspace').at(-1)!.value.theme,
+          'light',
+        );
+      }
+    });
+for (const unavailable of [false, true])
+  it(`ordinary disk failure policy remains unchanged: unavailable=${unavailable}`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const owner = f.windows[0];
+    f.controls.write = async (name) => {
+      if (name === 'workspace') throw new Error('ordinary write failure');
+    };
+    const old = {
+      tabs: [],
+      theme: 'dark',
+      shortcuts: {},
+      sidebarCollapsed: false,
+    };
+    if (unavailable) {
+      f.controls.crashed = true;
+      owner.webContents.emit('render-process-gone');
+      await Promise.resolve(f.invoke(owner, 'saveWorkspace', old)).catch(
+        () => {},
+      );
+    } else
+      f.controls.flush = async () => {
+        await f.invoke(owner, 'saveWorkspace', old);
+      };
+    owner.close();
+    await setImmediate();
+    assert.equal(owner.destroyed, false);
+    assert.equal(f.controls.prompts, unavailable ? 1 : 0);
+    if (unavailable) {
+      assert.match(
+        f.controls.warnings.at(-1)!.detail,
+        /ordinary write failure/,
+      );
+      assert.match(
+        f.controls.warnings.at(-1)!.detail,
+        /renderer is unavailable/,
+      );
+    }
+  });
+
+it('lost-snapshot drain retains the initialization-failure warning classification', async (t) => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const owner = f.windows[0],
+    renderer = gate(),
+    disk = gate();
+  t.after(async () => {
+    renderer.release();
+    disk.release();
+    await setImmediate();
+  });
+  f.invoke(owner, 'workspaceInitialized', 'Original read failed');
+  f.controls.write = async (name) => {
+    if (name === 'workspace') await disk.wait;
+  };
+  const saving = Promise.resolve(
+    f.invoke(owner, 'saveWorkspace', {
+      tabs: [],
+      theme: 'dark',
+      shortcuts: {},
+      sidebarCollapsed: false,
+    }),
+  );
+  f.controls.flush = () => renderer.wait;
+  owner.close();
+  await setImmediate();
+  f.controls.crashed = true;
+  owner.webContents.emit('render-process-gone');
+  await setImmediate();
+  f.controls.crashed = false;
+  owner.webContents.emit('did-finish-load');
+  disk.release();
+  await saving;
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(owner.destroyed, false);
+  assert.equal(
+    f.controls.warnings.at(-1)!.message,
+    'The workspace could not load.',
+  );
+  assert.match(f.controls.warnings.at(-1)!.detail, /Original read failed/);
+  assert.match(
+    f.controls.warnings.at(-1)!.detail,
+    /saved workspace will be left unchanged/,
+  );
 });

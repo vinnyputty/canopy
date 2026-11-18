@@ -103,6 +103,8 @@ Toggle **Hide done** and trigger the native logout or shutdown action. Record wh
 
 If the renderer crashes or fails to load while a received workspace write fails, verify a native warning shows the failure with **Keep open** as its default. Keep the window open, repair the destination as below, then retry closing: only the last state received by the main process can be saved. Separately verify **Close anyway** requires an explicit choice and can discard those unsaved changes. An unavailable renderer cannot supply changes it never sent.
 
+If the renderer disappears during an active close before confirming its final workspace save, verify the same **Keep open / Close anyway** warning appears even after older received writes finish. Keep open must preserve the window and permit recovery and another close attempt. Separately verify that losing the renderer after it confirms the final save allows close to finish once bounds persistence completes.
+
 Before restarting Canopy, remove only the empty blocker directory and restore the backup. If the desktop remains available, do this while Canopy is still open, then retry the native action:
 
 ```sh
