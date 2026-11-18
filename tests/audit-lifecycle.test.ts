@@ -49,12 +49,23 @@ const alive = (pid: number) => {
       return state !== 'Z' && state !== 'X';
     }
     if (process.platform === 'darwin') {
-      const state = childProcess
-        .execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+      const result = childProcess.spawnSync(
+        'ps',
+        ['-o', 'stat=', '-p', String(pid)],
+        {
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
-        })
-        .trim();
+          timeout: 1000,
+        },
+      );
+      if (result.error) throw result.error;
+      if (result.stderr.trim() || (result.status !== 0 && result.status !== 1))
+        throw new Error(
+          `Process probe failed: ${result.stderr || result.signal || result.status}`,
+        );
+      const state = result.stdout.trim();
+      if (result.status === 1 && state)
+        throw new Error('Process probe failed.');
       return state !== '' && !/^[ZX]/.test(state);
     }
     return true;
@@ -64,8 +75,6 @@ const alive = (pid: number) => {
       (process.platform === 'linux' &&
         (error as NodeJS.ErrnoException).code === 'ENOENT')
     )
-      return false;
-    if (process.platform === 'darwin' && (error as any).status === 1)
       return false;
     throw error;
   }
@@ -87,6 +96,8 @@ test('liveness probe distinguishes terminated processes, disappearance and probe
     let killError: unknown;
     let probeError: unknown;
     let state = '';
+    let stderr = '';
+    let status = 0;
     let probes = 0;
     const probe = new Function(
       'process',
@@ -110,12 +121,12 @@ test('liveness probe distinguishes terminated processes, disappearance and probe
         return `42 (process (with spaces)) ${state} 1 2 3`;
       },
       {
-        execFileSync(command: string, args: string[]) {
+        spawnSync(command: string, args: string[], options: any) {
+          assert.equal(options.timeout, 1000);
           assert.equal(command, 'ps');
           assert.deepEqual(args, ['-o', 'stat=', '-p', '42']);
           probes++;
-          if (probeError) throw probeError;
-          return ` ${state} \n`;
+          return { error: probeError, status, stdout: ` ${state} \n`, stderr };
         },
       },
     ) as (pid: number) => boolean;
@@ -137,7 +148,35 @@ test('liveness probe distinguishes terminated processes, disappearance and probe
         code: platform === 'linux' ? 'ENOENT' : undefined,
         status: platform === 'darwin' ? 1 : undefined,
       });
+      if (platform === 'darwin') {
+        probeError = undefined;
+        status = 1;
+        state = '';
+      }
       assert.equal(probe(42), false);
+      if (platform === 'darwin') {
+        stderr = 'ps: allocation failed';
+        assert.throws(() => probe(42), /Process probe failed/);
+        status = 0;
+        stderr = 'ps: sysctl failed';
+        assert.throws(() => probe(42), /Process probe failed/);
+        stderr = '';
+        status = 2;
+        assert.throws(() => probe(42), /Process probe failed/);
+        status = 1;
+        state = 'S';
+        assert.throws(() => probe(42), /Process probe failed/);
+        status = 0;
+        probeError = Object.assign(new Error('timed out'), {
+          code: 'ETIMEDOUT',
+          status: null,
+        });
+        assert.throws(
+          () => probe(42),
+          (error) => error === probeError,
+        );
+        status = 0;
+      }
       probeError = Object.assign(new Error('probe failed'), { status: 2 });
       assert.throws(
         () => probe(42),

@@ -1,3 +1,8 @@
+import { removeConnection } from '../src/renderer/workspace';
+import {
+  forgetSidebarConnections,
+  emptySidebarSession,
+} from '../src/renderer/sidebar-organization';
 import { workspaceError } from '../src/renderer/workspace-error';
 import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
@@ -258,12 +263,19 @@ async function recoveryFixture() {
     previous.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     Object.defineProperty(globalThis, name, { configurable: true, value });
   }
+  d.window.HTMLElement.prototype.scrollIntoView = () => {};
   const root = createRoot(d.window.document.querySelector('#host')!);
+  let recoveryOpen = true;
   const render = () =>
     act(async () =>
       root.render(
         React.createElement(WorkspaceLoadRecovery, {
           error: 'Could not read saved workspace.',
+          open: recoveryOpen,
+          onOpenChange: (open: boolean) => {
+            recoveryOpen = open;
+            void render();
+          },
         }),
       ),
     );
@@ -391,6 +403,7 @@ test('initial read or hydration failure clears loaded authority, preserves exist
       ...h.context,
       document: d.window.document,
       demoTimeScale: { current: 1 },
+      setDialog() {},
       setWorkspaceLoadError: (value: string | null) => {
         error = value;
       },
@@ -414,6 +427,7 @@ test('initial read or hydration failure clears loaded authority, preserves exist
       window: {
         canopy: {
           connections: async () => backupConnections,
+          workspaceInitialized: async () => {},
           loadWorkspace: async () => {
             await reading.promise;
             return structuredClone(backupWorkspace);
@@ -666,6 +680,15 @@ test('unsubscribed flush registration stops release notifications as well as sav
 });
 
 test('production App recovery occupies the main content column and uses existing dialog styles with clean storage reasons', async () => {
+  const previousGlobals = new Map(
+    [
+      'window',
+      'document',
+      'HTMLElement',
+      'requestAnimationFrame',
+      'IS_REACT_ACT_ENVIRONMENT',
+    ].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
+  );
   const f = await recoveryFixture();
   let flush!: (attempt?: number) => Promise<unknown>;
   let readFails = true;
@@ -685,6 +708,9 @@ test('production App recovery occupies the main content column and uses existing
       },
       demoMode: async () => false,
       demoTimeScale: async () => 1,
+      launchDemo: async () => {
+        throw Error('Demo could not open');
+      },
       onWorkspaceFlush: (handler: typeof flush) => {
         flush = handler;
         return () => {};
@@ -700,10 +726,10 @@ test('production App recovery occupies the main content column and uses existing
     },
   );
   Object.assign(f.d.window, { canopy: api });
-  const style = f.d.window.document.createElement('style');
-  style.textContent = readFileSync('src/renderer/styles.css', 'utf8');
-  f.d.window.document.head.append(style);
   try {
+    const style = f.d.window.document.createElement('style');
+    style.textContent = readFileSync('src/renderer/styles.css', 'utf8');
+    f.d.window.document.head.append(style);
     await act(async () => f.root.render(React.createElement(App)));
     const banner = () =>
       [...f.d.window.document.querySelectorAll('.error-banner')].find(
@@ -716,6 +742,26 @@ test('production App recovery occupies the main content column and uses existing
       'recovery must not be auto-placed into the sidebar grid column',
     );
     const dialog = f.d.window.document.querySelector('[role=dialog]')!;
+    for (const modifiers of [{ ctrlKey: true }, { metaKey: true }]) {
+      await act(async () => {
+        f.d.window.dispatchEvent(
+          new f.d.window.KeyboardEvent('keydown', {
+            key: 'k',
+            bubbles: true,
+            ...modifiers,
+          }),
+        );
+      });
+      assert.equal(
+        f.d.window.document.querySelectorAll('[role=dialog]').length,
+        1,
+      );
+      assert.equal(
+        f.d.window.document.querySelectorAll('#dialog-title').length,
+        1,
+      );
+      assert.equal(f.d.window.document.querySelector('[role=dialog]'), dialog);
+    }
     const content = dialog.querySelector('.workspace-recovery-dialog')!;
     assert.ok(content);
     assert.equal(f.d.window.getComputedStyle(content).paddingTop, '15px');
@@ -738,6 +784,11 @@ test('production App recovery occupies the main content column and uses existing
         f.d.window.document.querySelector('#host')!.innerHTML,
       );
     await act(async () => keep.click());
+    assert.equal(
+      f.d.window.document.querySelector('[role=dialog]'),
+      null,
+      'Keep open dismisses the only modal',
+    );
     const hide = f.d.window.document.querySelector(
       '[aria-label="Hide sidebar"]',
     ) as HTMLButtonElement;
@@ -751,7 +802,12 @@ test('production App recovery occupies the main content column and uses existing
       await flush();
     });
     const welcome = f.d.window.document.querySelector('.welcome-error')!;
-    assert.match(welcome.textContent!, /Workspace has not loaded/);
+    assert.match(welcome.textContent!, /Could not read saved workspace/);
+    assert.ok(
+      [...f.d.window.document.querySelectorAll('.error-banner')].some((node) =>
+        /Workspace has not loaded/.test(node.textContent!),
+      ),
+    );
     assert.doesNotMatch(
       welcome.textContent!,
       /connection recovery|Error invoking remote method/,
@@ -772,7 +828,9 @@ test('production App recovery occupies the main content column and uses existing
     await act(async () => {
       await assert.rejects(flush(), /Could not write saved workspace/);
     });
-    const savedError = f.d.window.document.querySelector('.welcome-error')!;
+    const savedError = [
+      ...f.d.window.document.querySelectorAll('.error-banner'),
+    ].find((node) => /Couldn’t save workspace/.test(node.textContent!))!;
     assert.match(
       savedError.textContent!,
       /Couldn’t save workspace: Could not write saved workspace/,
@@ -782,6 +840,18 @@ test('production App recovery occupies the main content column and uses existing
       /Error invoking remote method|connection recovery/,
     );
 
+    const demo = [...f.d.window.document.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Try demo',
+    )!;
+    await act(async () => demo.click());
+    assert.match(
+      f.d.window.document.querySelector('.welcome-error')!.textContent!,
+      /Demo could not open/,
+    );
+    assert.match(
+      savedError.textContent!,
+      /Couldn’t save workspace: Could not write saved workspace/,
+    );
     if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
       await writeFile(
         join(
@@ -792,6 +862,12 @@ test('production App recovery occupies the main content column and uses existing
       );
   } finally {
     await f.close();
+    for (const [name, descriptor] of previousGlobals)
+      assert.deepEqual(
+        Object.getOwnPropertyDescriptor(globalThis, name),
+        descriptor,
+        `Restored ${name}`,
+      );
   }
 });
 
@@ -810,4 +886,252 @@ for (const method of ['loadWorkspace', 'saveWorkspace', 'reloadWorkspace'])
       "Error invoking remote method 'canopy:author': Error: reason",
     ])
       assert.equal(workspaceError(value), value);
+  });
+
+for (const outcome of ['success', 'failure', 'keep-open'])
+  test(`accepted Disconnect drains workspace cleanup through ${outcome}`, async () => {
+    const d = dom(),
+      h = rendererFixture(d.window.document);
+    const source = sourceFile('src/renderer/App.tsx');
+    const connectionsNode = findNode(
+      source,
+      (node): node is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(node) &&
+        node.tagName.getText() === 'Connections',
+    );
+    const attribute = (name: string) => {
+      const value = connectionsNode.attributes.properties.find(
+        (node) => ts.isJsxAttribute(node) && node.name.getText() === name,
+      ) as ts.JsxAttribute;
+      return (value.initializer as ts.JsxExpression).expression!.getText();
+    };
+    const pending = gate();
+    let calls = 0;
+    const initial = structuredClone(backupWorkspace);
+    h.setWorkspace(initial);
+    const removed = initial.tabs[0].connectionId;
+    const connections = [{ id: removed }];
+    let stored = initial;
+    const clean = execute(attribute('setConnections'), {
+      ...h.context,
+      connections,
+      workspace: initial,
+      setConnections() {},
+      forgetSidebarConnections,
+      sidebarSessionRef: { current: emptySidebarSession() },
+      setSidebarSession() {},
+      cooldowns: { current: {} },
+      setCooldownTimes() {},
+      forgetTabs() {},
+      removeConnection,
+      storeWorkspace: (value: React.SetStateAction<typeof initial>) => {
+        stored = typeof value === 'function' ? value(stored) : value;
+        h.context.storeWorkspace(value);
+      },
+      setHistory() {},
+    });
+    const disconnect = execute(attribute('disconnect'), {
+      ...h.context,
+      window: {
+        canopy: {
+          disconnect: async () => {
+            calls++;
+            await pending.promise;
+          },
+        },
+      },
+    });
+    try {
+      const accepted = disconnect(removed, () => clean([]));
+      const settled =
+        outcome === 'failure'
+          ? assert.rejects(accepted, /disconnect failed/)
+          : accepted;
+      const closing = h.api.flushWorkspace(1);
+      const flushed =
+        outcome === 'failure'
+          ? assert.rejects(closing, /disconnect failed/)
+          : outcome === 'keep-open'
+            ? assert.rejects(closing, /canceled/)
+            : closing;
+      await tick();
+      assert.equal(h.writes.length, 0);
+      await assert.rejects(
+        disconnect(removed, () => {}),
+        /Workspace is closing/,
+      );
+      assert.equal(calls, 1);
+      if (outcome === 'keep-open') h.release(1);
+      if (outcome === 'failure') pending.reject(Error('disconnect failed'));
+      else pending.release();
+      await settled;
+      await flushed;
+      if (outcome === 'failure') {
+        assert.deepEqual(h.workspaceRef.current, initial);
+        assert.equal(h.writes.length, 0);
+        h.release(1);
+      } else {
+        const expected = removeConnection(initial, removed);
+        assert.deepEqual(h.workspaceRef.current, expected);
+        assert.deepEqual(stored, expected);
+        if (outcome === 'success') assert.deepEqual(h.writes.at(-1), expected);
+        else {
+          await h.api.flushWorkspace(2);
+          assert.deepEqual(h.writes.at(-1), expected);
+        }
+      }
+    } finally {
+      h.dispose();
+      d.window.close();
+    }
+  });
+
+for (const outcome of ['success', 'keep-open'])
+  test(`batched Disconnect preserves queued refresh through ${outcome} and final save`, async () => {
+    const f = await recoveryFixture();
+    const saving = gate();
+    let hold = false;
+    const h = rendererFixture(
+      f.d.window.document,
+      async () => {
+        if (hold) await saving.promise;
+      },
+      false,
+    );
+    const ast = sourceFile('src/renderer/App.tsx');
+    const refGuard = findNode(
+      ast,
+      (node): node is ts.IfStatement =>
+        ts.isIfStatement(node) &&
+        ts.isExpressionStatement(node.thenStatement) &&
+        ts.isBinaryExpression(node.thenStatement.expression) &&
+        node.thenStatement.expression.left.getText() === 'workspaceRef.current',
+    );
+    const jsx = findNode(
+      ast,
+      (node): node is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(node) &&
+        node.tagName.getText() === 'Connections',
+    );
+    const attr = (name: string) =>
+      (
+        (
+          jsx.attributes.properties.find(
+            (p) => ts.isJsxAttribute(p) && p.name.getText() === name,
+          ) as ts.JsxAttribute
+        ).initializer as ts.JsxExpression
+      ).expression!.getText();
+    const initial = structuredClone(backupWorkspace);
+    let update!: (value: any) => void,
+      disconnect!: (id: string, complete: () => void) => Promise<void>,
+      clean!: (next: any[]) => void,
+      state = initial;
+    const pending = gate();
+    function Component() {
+      const [workspace, storeWorkspace] = React.useState(initial);
+      state = workspace;
+      const context = {
+        ...h.context,
+        storeWorkspace,
+        flushSync,
+        useCallback: React.useCallback,
+      };
+      execute(`()=>{${refGuard.getText()}}`, { ...context, workspace })();
+      update = execute(callback(ast, 'setWorkspace'), context);
+      clean = execute(attr('setConnections'), {
+        ...context,
+        connections: [{ id: initial.tabs[0].connectionId }],
+        workspace,
+        setConnections() {},
+        forgetSidebarConnections,
+        sidebarSessionRef: { current: emptySidebarSession() },
+        setSidebarSession() {},
+        cooldowns: { current: {} },
+        setCooldownTimes() {},
+        forgetTabs() {},
+        removeConnection,
+        setHistory() {},
+      });
+      disconnect = execute(attr('disconnect'), {
+        ...context,
+        window: { canopy: { disconnect: () => pending.promise } },
+      });
+      const saveWorkspace = execute(callback(ast, 'saveWorkspace'), context);
+      React.useLayoutEffect(() => {
+        const registration = findNode(
+          ast,
+          (node): node is ts.CallExpression =>
+            ts.isCallExpression(node) &&
+            node.expression.getText() === 'window.canopy.onWorkspaceFlush',
+        );
+        h.api.onWorkspaceFlush(
+          execute(registration.arguments[0].getText(), {
+            ...context,
+            saveWorkspace,
+          }),
+          execute(registration.arguments[1].getText(), context),
+        );
+      }, []);
+      return null;
+    }
+    try {
+      await act(async () => f.root.render(React.createElement(Component)));
+      const operation = disconnect(initial.tabs[0].connectionId, () =>
+        clean([]),
+      );
+      await act(async () => {
+        update((current: any) => ({
+          ...current,
+          seenRoots: {
+            ...current.seenRoots,
+            'other:CAN-999': { touchedAt: 123, issues: {} },
+          },
+        }));
+        pending.release();
+        await operation;
+      });
+      assert.ok(
+        state.seenRoots?.['other:CAN-999'],
+        'Disconnect must preserve the queued refresh',
+      );
+      const expected = removeConnection(
+        {
+          ...initial,
+          seenRoots: {
+            ...initial.seenRoots,
+            'other:CAN-999': { touchedAt: 123, issues: {} },
+          },
+        },
+        initial.tabs[0].connectionId,
+      );
+      assert.deepEqual(state, expected);
+      assert.deepEqual(h.workspaceRef.current, expected);
+      hold = true;
+      await act(async () => {
+        const closing = h.api.flushWorkspace(1);
+        const flushed =
+          outcome === 'keep-open'
+            ? assert.rejects(closing, /canceled/)
+            : closing;
+        await tick();
+        if (outcome === 'keep-open') h.release(1);
+        saving.release();
+        await flushed;
+      });
+      if (outcome === 'keep-open') {
+        await act(async () => {
+          await h.api.flushWorkspace(2);
+        });
+      }
+      assert.deepEqual(
+        h.writes.at(-1),
+        expected,
+        'final close must retain refresh and disconnect cleanup',
+      );
+      assert.deepEqual(state, expected);
+      if (h.controller.owner !== undefined) h.release(h.controller.owner);
+    } finally {
+      h.dispose();
+      await f.close();
+    }
   });

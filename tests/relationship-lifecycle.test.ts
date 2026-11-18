@@ -129,6 +129,8 @@ function mainRequests() {
   const webContents = new EventEmitter();
   let updateCancellations = 0;
   const context = {
+    workspaceDocument: 0,
+    workspaceInitializationError: undefined,
     initialLoad: false,
     cancelHandoffs: () => {},
     AbortController,

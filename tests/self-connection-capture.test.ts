@@ -4,7 +4,7 @@ import { DemoProvider } from '../src/main/demo-provider';
 import { demoWorkspace } from '../src/main/demo';
 import { DEFAULT_READING } from '../src/shared/views';
 import { defaultShortcuts } from '../src/renderer/tree';
-import { migrateViews } from '../src/renderer/table-view';
+import { DEFAULT_VIEW, migrateViews } from '../src/renderer/table-view';
 import { starterViews } from '../src/renderer/saved-views';
 import { boundRoots, seedOrExtend, seenRootKey } from '../src/renderer/seen';
 import { WorkspaceClose } from '../src/renderer/workspace-close';
@@ -332,6 +332,7 @@ function restoreModel(
     ['canopy:saveWorkspace', originalSave],
     ['canopy:loadWorkspace', trusted(store.load)],
     ['canopy:connections', () => 'original connections'],
+    ['canopy:tree', (_event, _connection, key) => new DemoProvider().tree(key)],
   ]);
   const handlers = new Map<string, (...args: any[]) => any>(
     [...originals].map(([key]) => [key, () => undefined]),
@@ -356,11 +357,26 @@ function restoreModel(
   let reloads = 0,
     rendered: Workspace & { privatePayload: string } = structuredClone(fixture);
   let offset = 0;
+  let evaluating = false;
   const viewport = {
+    get scrollHeight() {
+      return (
+        Number(
+          options.viewportMetricMax ??
+            Math.round(Number(options.viewportMax ?? 1000)),
+        ) + 100
+      );
+    },
+    clientHeight: 100,
     get scrollTop() {
       return offset;
     },
     set scrollTop(value: number) {
+      assert.equal(
+        evaluating,
+        false,
+        'Audit must not mutate the live viewport',
+      );
       offset = Math.max(
         0,
         Math.min(Number(options.viewportMax ?? 1000), value),
@@ -387,8 +403,14 @@ function restoreModel(
     },
   };
   const page = {
-    evaluate: (callback: (...args: any[]) => unknown, value: unknown) =>
-      execute(`(${callback})`, { window, document })(value),
+    evaluate: async (callback: (...args: any[]) => unknown, value: unknown) => {
+      evaluating = true;
+      try {
+        return await execute(`(${callback})`, { window, document })(value);
+      } finally {
+        evaluating = false;
+      }
+    },
     reload: async () => {
       reloads++;
       // A pending renderer save must still write the captured snapshot here.
@@ -406,8 +428,36 @@ function restoreModel(
         const active = rendered.tabs.find(
           (tab) => tab.id === rendered.activeTabId,
         )!;
-        const confirmed = await new DemoProvider().tree(active.rootKey);
-        confirmed.fetchedAt = 1794020324655;
+        const confirmed = await handlers.get('canopy:tree')!(
+          event,
+          active.connectionId,
+          active.rootKey,
+        );
+        confirmed.fetchedAt = options.unobservedRefresh
+          ? rendered.seenRoots![
+              seenRootKey(active.connectionId, active.rootKey)
+            ].touchedAt
+          : 1794020324655;
+        if (options.refreshedValues) {
+          confirmed.issues[0].summary = 'Observed newer summary';
+          confirmed.issues[0].commentCount = 42;
+          confirmed.issues.find(
+            (issue: TreeSnapshot['issues'][number]) => issue.key === 'CAN-101',
+          )!.commentCount = 99;
+        }
+        if (options.newIssue)
+          confirmed.issues.push({
+            ...structuredClone(confirmed.issues[0]),
+            key: 'CAN-999',
+            summary: 'New issue',
+          });
+        owner.selfConnectionAudit.refreshedRoots[
+          seenRootKey(active.connectionId, active.rootKey)
+        ] = structuredClone(confirmed);
+        if (options.unobservedRefresh)
+          delete owner.selfConnectionAudit.refreshedRoots[
+            seenRootKey(active.connectionId, active.rootKey)
+          ];
         refreshedAt = confirmed.fetchedAt;
         const refresh = findNode(
           rendererAst,
@@ -457,10 +507,23 @@ function restoreModel(
         rendered.activeSavedViewId = 'assigned-to-me';
       if (options.wrongSeenBaseline)
         Object.values(rendered.seenRoots!)[0].issues['CAN-100'].seenAt++;
+      if (options.wrongSeenField)
+        rendered.seenRoots!['demo:CAN-100'].issues['CAN-100'].fields.Summary =
+          'Corrupted summary';
+      if (options.wrongSeenCount)
+        rendered.seenRoots!['demo:CAN-100'].issues['CAN-101'].commentCount =
+          999;
       if (options.wrongTouchedAt)
         Object.values(rendered.seenRoots!)[0].touchedAt = 1;
       if (options.invalidTouchedAt)
         Object.values(rendered.seenRoots!)[0].touchedAt = Number.NaN;
+      if (options.unexpectedIssue)
+        Object.values(rendered.seenRoots!)[0].issues['CAN-998'] = {
+          seenAt: 1,
+          fields: { Summary: 'Unexpected' },
+        };
+      if (options.historicalTouchedAt)
+        rendered.seenRoots!['demo:CAN-9999'].touchedAt++;
       if (options.wrongSubmittedScroll)
         rendered.tabs.find(
           (tab) => tab.id === rendered.activeTabId,
@@ -508,6 +571,8 @@ function restoreModel(
       ),
     toBeDefined: () => assert.notEqual(value, undefined),
     toBe: (expected: unknown) => assert.equal(value, expected),
+    toBeLessThan: (expected: number) =>
+      assert.ok(value < expected, `${value} must be less than ${expected}`),
     toBeVisible: async () => {
       const active = rendered.tabs.find((t) => t.id === rendered.activeTabId);
       assert.equal(value.role, 'tree');
@@ -694,20 +759,29 @@ function lifecycle(
 ) {
   const saved = {
     ...workspace(['CAN-100', 'CAN-106']),
+    theme: 'system',
+    shortcuts: {},
+    sidebarCollapsed: false,
     activeTabId: 'can-106',
     tabs: [
       {
         ...tab('CAN-100'),
+        expanded: [],
+        hideDone: false,
         scrollTop: 0,
-        view: { filters: { assignee: 'alex' } },
+        view: { ...structuredClone(DEFAULT_VIEW), filters: { assignee: 'me' } },
       },
       {
         ...tab('CAN-106'),
+        expanded: [],
+        hideDone: true,
         scrollTop: 0,
-        view: { hideDone: true, scrollTop: 124 },
+        view: { ...structuredClone(DEFAULT_VIEW), hideDone: true },
       },
     ],
-    rootViews: { second: { hideDone: true, scrollTop: 124 } },
+    rootViews: {
+      [JSON.stringify(['demo', 'CAN-106'])]: structuredClone(DEFAULT_VIEW),
+    },
   };
   let persisted: unknown = workspace(['CAN-100']);
   let rendered = saved;
@@ -725,6 +799,7 @@ function lifecycle(
   const failure = new Error('cleanup failure');
   const handlers = new Map<string, (...args: any[]) => unknown>();
   const originalSave = (_event: unknown, value: unknown) => {
+    validateWorkspace(value as Workspace);
     if (options.saveFailure) throw failure;
     persisted = structuredClone(value);
   };
@@ -783,7 +858,11 @@ function lifecycle(
       },
     },
     document: {
-      querySelector: () => ({ scrollTop: 0 }),
+      querySelector: () => ({
+        scrollTop: 0,
+        scrollHeight: 100,
+        clientHeight: 100,
+      }),
       querySelectorAll: () =>
         rendered.tabs.map((item) => ({
           querySelector: () => ({ textContent: item.rootKey }),
@@ -843,6 +922,7 @@ function lifecycle(
       expect: (locator: { role: string; name?: string; index?: number }) => ({
         toBeDefined: () => assert.notEqual(locator, undefined),
         toBe: (value: unknown) => assert.equal(locator, value),
+        toBeLessThan: (value: number) => assert.ok(Number(locator) < value),
         toHaveText: async (roots: string[]) =>
           assert.deepEqual(
             rendered.tabs.map((item) => item.rootKey),
@@ -934,6 +1014,7 @@ function lifecycle(
   };
   return {
     saved,
+    originalSave,
     render: (value: typeof saved) => {
       rendered = value;
       refs.workspaceRef.current = value;
@@ -1206,6 +1287,7 @@ async function hydrateWorkspace(saved: Workspace): Promise<Workspace> {
     migrateViews,
     window: {
       canopy: {
+        workspaceInitialized: async () => {},
         connections: async () => [{ id: 'demo' }],
         loadWorkspace: async () => saved,
         demoMode: async () => false,
@@ -1241,8 +1323,12 @@ async function capturedReloadWorkspace() {
       },
     ],
     activeTabId: 'captured-0',
-    seenRoots: { 'demo:CAN-100': seedOrExtend(undefined, baseline) },
+    seenRoots: {
+      'demo:CAN-100': seedOrExtend(undefined, baseline),
+      'demo:CAN-9999': { touchedAt: 123, issues: {} },
+    },
   });
+  captured.seenRoots!['demo:CAN-100'].issues['CAN-101'].commentCount = 7;
   return JSON.parse(JSON.stringify(captured)) as Workspace;
 }
 
@@ -1281,6 +1367,8 @@ test('reload restoration keeps a valid scroll offset exactly', async () => {
   assert.equal(model.rendered().tabs[0].scrollTop, 34);
 });
 for (const option of [
+  'unexpectedIssue',
+  'historicalTouchedAt',
   'wrongReading',
   'wrongRootViews',
   'wrongOrder',
@@ -1291,6 +1379,8 @@ for (const option of [
   'wrongActiveSavedView',
   'wrongSelectedKey',
   'wrongSeenBaseline',
+  'wrongSeenField',
+  'wrongSeenCount',
   'wrongTouchedAt',
   'invalidTouchedAt',
   'wrongInactiveScroll',
@@ -1328,4 +1418,292 @@ for (const option of [
     );
     assert.equal(model.owner.selfConnectionAudit, undefined);
     assert.deepEqual(model.store.load(), model.saved);
+  });
+
+test('controlled refresh adds only the new issue baseline and keeps saved baseline values and unrelated recency', async () => {
+  const captured = await capturedReloadWorkspace();
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      viewportMax: 100,
+      newIssue: true,
+    },
+    captured,
+  );
+  await model.run();
+  assert.equal(
+    model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-999'].fields
+      .Summary,
+    'New issue',
+  );
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'],
+      ),
+    ),
+    captured.seenRoots!['demo:CAN-100'].issues['CAN-100'],
+  );
+  assert.deepEqual(
+    model.rendered().seenRoots!['demo:CAN-9999'],
+    captured.seenRoots!['demo:CAN-9999'],
+  );
+});
+
+test('lifecycle save double rejects invalid views and filters before attempting a write', () => {
+  const model = lifecycle();
+  assert.throws(
+    () =>
+      model.originalSave(null, {
+        ...model.saved,
+        rootViews: { invalid: { hideDone: true } },
+      }),
+    /Invalid table view/,
+  );
+  assert.throws(
+    () =>
+      model.originalSave(null, {
+        ...model.saved,
+        tabs: model.saved.tabs.map((tab) => ({
+          ...tab,
+          filters: { assignee: 'alex' },
+        })),
+      }),
+    /Invalid assignee filter/,
+  );
+});
+
+for (const viewportMetricMax of [20, 21])
+  test(`reload restoration accepts fractional clamp with integer range ${viewportMetricMax}`, async () => {
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        viewportMax: 20.5,
+        viewportMetricMax,
+      },
+      await capturedReloadWorkspace(),
+    );
+    await model.run();
+    assert.equal(model.offset(), 20.5);
+    assert.equal(model.rendered().tabs[0].scrollTop, 20.5);
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+test('reload restoration preserves fractional in-range offsets exactly', async () => {
+  const captured = await capturedReloadWorkspace();
+  captured.tabs[0].scrollTop = 12.25;
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      viewportMax: 20.5,
+      viewportMetricMax: 21,
+    },
+    captured,
+  );
+  await model.run();
+  assert.equal(model.offset(), 12.25);
+  assert.equal(model.rendered().tabs[0].scrollTop, 12.25);
+  assert.deepEqual(model.store.load(), model.saved);
+  assert.deepEqual(model.handlers, model.originals);
+});
+
+for (const option of [
+  'wrongViewportScroll',
+  'lostValidScroll',
+  'wrongSubmittedScroll',
+])
+  test(`fractional in-range restoration refuses ${option} and restores ownership`, async () => {
+    const captured = await capturedReloadWorkspace();
+    captured.tabs[0].scrollTop = 12.25;
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        viewportMax: 20.5,
+        viewportMetricMax: 21,
+        [option]: true,
+      },
+      captured,
+    );
+    await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+for (const unobservedRefresh of [false, true])
+  test(`existing baseline enrichment ${unobservedRefresh ? 'refuses unobserved additions' : 'accepts observed missing fields and counts'}`, async () => {
+    const captured = await capturedReloadWorkspace();
+    const baseline = captured.seenRoots!['demo:CAN-100'].issues['CAN-100'];
+    delete baseline.fields.Priority;
+    delete baseline.commentCount;
+    const retained = structuredClone(
+      captured.seenRoots!['demo:CAN-100'].issues['CAN-101'],
+    );
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        refreshedValues: true,
+        unobservedRefresh,
+      },
+      captured,
+    );
+    if (unobservedRefresh) {
+      await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+      assert.equal(
+        model.rendered().seenRoots!['demo:CAN-100'].touchedAt,
+        captured.seenRoots!['demo:CAN-100'].touchedAt,
+      );
+      assert.equal(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'].fields
+          .Priority,
+        'High',
+      );
+      assert.equal(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100']
+          .commentCount,
+        42,
+      );
+    } else {
+      await model.run();
+      const enriched =
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'];
+      assert.equal(enriched.fields.Priority, 'High');
+      assert.equal(enriched.commentCount, 42);
+      assert.equal(enriched.fields.Summary, baseline.fields.Summary);
+      assert.equal(enriched.seenAt, baseline.seenAt);
+      assert.deepEqual(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-101'],
+        retained,
+      );
+      assert.deepEqual(
+        model.rendered().seenRoots!['demo:CAN-9999'],
+        captured.seenRoots!['demo:CAN-9999'],
+      );
+    }
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+test('reload restoration refuses a whole-pixel boundary discrepancy', async () => {
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      viewportMax: 19,
+      viewportMetricMax: 20,
+    },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+  assert.deepEqual(model.handlers, model.originals);
+  assert.deepEqual(model.store.load(), model.saved);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+});
+
+for (const full of [false, true])
+  test(`baseline restoration ${full ? 'refuses admission at' : 'admits below'} the retained issue limit`, async () => {
+    const captured = await capturedReloadWorkspace();
+    const root = captured.seenRoots!['demo:CAN-100'];
+    for (let n = 0; Object.keys(root.issues).length < (full ? 1000 : 999); n++)
+      root.issues[`OLD-${n}`] = {
+        seenAt: 1,
+        fields: { Summary: 'Retained historical issue' },
+      };
+    validateWorkspace(captured);
+    const model = restoreModel(
+      { firstActive: true, productionReload: true, newIssue: true },
+      captured,
+    );
+    await model.run();
+    const restored = model.rendered().seenRoots!['demo:CAN-100'];
+    assert.equal(Object.keys(restored.issues).length, 1000);
+    assert.equal(Boolean(restored.issues['CAN-999']), !full);
+    for (const [key, issue] of Object.entries(root.issues))
+      assert.deepEqual(JSON.parse(JSON.stringify(restored.issues[key])), issue);
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+for (const missingRoot of [false, true])
+  for (const unexpectedIssue of [false, true])
+    test(`shared baseline byte pressure ${missingRoot ? 'without an active baseline' : 'with an active baseline'} ${unexpectedIssue ? 'rejects unobserved additions' : 'retains saved baselines and refuses observed admission'}`, async () => {
+      const captured = await capturedReloadWorkspace();
+      if (missingRoot) delete captured.seenRoots!['demo:CAN-100'];
+      for (const key of [
+        missingRoot ? 'demo:CAN-7777' : 'demo:CAN-100',
+        'demo:CAN-9999',
+        'demo:CAN-8888',
+      ]) {
+        const root = (captured.seenRoots![key] ??= {
+          touchedAt: 123,
+          issues: {},
+        });
+        for (let n = 0; n < 400; n++)
+          root.issues[`OLD-${n}`] = {
+            seenAt: 1,
+            fields: { Summary: '界'.repeat(300), Type: '界'.repeat(300) },
+          };
+      }
+      validateWorkspace(captured);
+      assert.ok(
+        new TextEncoder().encode(JSON.stringify(captured.seenRoots))
+          .byteLength > 2_000_000,
+      );
+      const model = restoreModel(
+        {
+          firstActive: true,
+          productionReload: true,
+          newIssue: true,
+          unexpectedIssue,
+        },
+        captured,
+      );
+      if (unexpectedIssue)
+        await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+      else await model.run();
+      const restored = model.rendered().seenRoots!;
+      assert.equal(restored['demo:CAN-100']?.issues['CAN-999'], undefined);
+      if (missingRoot) assert.equal(restored['demo:CAN-100'], undefined);
+      if (!unexpectedIssue) assert.deepEqual(restored, captured.seenRoots);
+      assert.deepEqual(model.store.load(), model.saved);
+      assert.deepEqual(model.handlers, model.originals);
+      assert.equal(model.owner.selfConnectionAudit, undefined);
+    });
+
+for (const full of [false, true])
+  test(`baseline restoration ${full ? 'refuses admission at' : 'admits below'} the retained root limit`, async () => {
+    const captured = await capturedReloadWorkspace();
+    delete captured.seenRoots!['demo:CAN-100'];
+    for (
+      let n = 0;
+      Object.keys(captured.seenRoots!).length < (full ? 12 : 11);
+      n++
+    )
+      captured.seenRoots![`demo:OLD-${n}`] = {
+        touchedAt: 123,
+        issues: { 'OLD-1': { seenAt: 1, fields: { Summary: 'Historical' } } },
+      };
+    validateWorkspace(captured);
+    const model = restoreModel(
+      { firstActive: true, productionReload: true },
+      captured,
+    );
+    await model.run();
+    const restored = model.rendered().seenRoots!;
+    assert.equal(Object.keys(restored).length, 12);
+    assert.equal(Boolean(restored['demo:CAN-100']), !full);
+    for (const [key, root] of Object.entries(captured.seenRoots!))
+      assert.deepEqual(restored[key], root);
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
   });

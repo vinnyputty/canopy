@@ -661,6 +661,8 @@ test('main renderer navigation/destruction aborts reads when unload cancellation
         trees,
         searches,
         updates,
+        workspaceDocument: 0,
+        workspaceInitializationError: undefined,
         initialLoad: false,
         cancelHandoffs: () => handoffCancellations++,
         clearRelationshipRequests: () => {},

@@ -471,6 +471,7 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
       await app.evaluate(({ ipcMain }, saved) => {
         const audit = globalThis.selfConnectionAudit;
         if (!audit) return;
+        audit.refreshedRoots = {};
         for (const [channel, handler] of audit.handlers) {
           ipcMain.removeHandler(channel);
           // Saves from the fixture renderer must preserve the captured workspace.
@@ -481,7 +482,19 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
                   audit.submittedWorkspace = structuredClone(submitted);
                   return handler(event, saved);
                 }
-              : handler,
+              : channel === 'canopy:tree'
+                ? async (event, connection, key, ...args) => {
+                    const snapshot = await handler(
+                      event,
+                      connection,
+                      key,
+                      ...args,
+                    );
+                    audit.refreshedRoots[`${connection}:${key}`] =
+                      structuredClone(snapshot);
+                    return snapshot;
+                  }
+                : handler,
           );
         }
       }, workspace);
@@ -516,7 +529,12 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
       await page.evaluate(() => window.canopy.flushWorkspace());
       const submission = await app.evaluate(() => {
         const audit = globalThis.selfConnectionAudit;
-        return audit ? { workspace: audit.submittedWorkspace } : null;
+        return audit
+          ? {
+              workspace: audit.submittedWorkspace,
+              refreshedRoots: audit.refreshedRoots,
+            }
+          : null;
       });
       if (submission) {
         expect(submission.workspace).toBeDefined();
@@ -527,26 +545,98 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
           if (!element)
             throw new Error('Restored tree has no scroll viewport.');
           const observed = element.scrollTop;
-          // Probe the native clamp without repairing a lost, still-valid offset.
-          try {
-            element.scrollTop = savedTop;
-            return { observed, clamped: element.scrollTop };
-          } finally {
-            element.scrollTop = observed;
-          }
+          const maximum = Math.max(
+            0,
+            element.scrollHeight - element.clientHeight,
+          );
+          return { observed, maximum, savedTop };
         }, active.scrollTop ?? 0);
-        expect(scroll.observed).toBe(scroll.clamped);
+        const clamped = Math.max(0, Math.min(scroll.savedTop, scroll.maximum));
+        // Integer layout metrics can round a fractional range boundary.
+        if (scroll.savedTop >= scroll.maximum - 1)
+          expect(Math.abs(scroll.observed - clamped)).toBeLessThan(1);
+        else expect(scroll.observed).toBe(clamped);
         expected.tabs.find((tab) => tab.id === active.id).scrollTop =
-          scroll.clamped;
-        // Refresh advances root recency; every unread baseline stays exact.
-        for (const [key, root] of Object.entries(expected.seenRoots ?? {})) {
-          const reloaded = actual.seenRoots?.[key];
-          expect(reloaded).toBeDefined();
-          expect(
-            Number.isFinite(reloaded.touchedAt) &&
-              reloaded.touchedAt >= root.touchedAt,
-          ).toBe(true);
-          reloaded.touchedAt = root.touchedAt;
+          scroll.observed;
+        const sizeOf = (value) =>
+          new TextEncoder().encode(JSON.stringify(value)).byteLength;
+        for (const [key, snapshot] of Object.entries(
+          submission.refreshedRoots ?? {},
+        )) {
+          const roots = (expected.seenRoots ??= {});
+          let retained = roots[key];
+          if (!retained) {
+            if (Object.keys(roots).length >= 12) continue;
+            const empty = { touchedAt: snapshot.fetchedAt, issues: {} };
+            const delta =
+              sizeOf({ [key]: empty }) - (Object.keys(roots).length ? 1 : 2);
+            if (sizeOf(roots) + delta > 2_000_000) continue;
+            retained = roots[key] = empty;
+          }
+          const root = structuredClone(retained);
+          root.touchedAt = snapshot.fetchedAt;
+          for (const issue of snapshot.issues.slice(0, 1000)) {
+            const previous = root.issues[issue.key];
+            const unavailable = new Set(issue.unavailableFields);
+            const fields = {};
+            const clipped = (value) => value.slice(0, 300);
+            for (const [field, title, value] of [
+              ['summary', 'Summary', issue.summary],
+              ['type', 'Type', issue.type],
+              ['parent', 'Parent', issue.parentKey ?? null],
+              ['priority', 'Priority', issue.priority?.name || null],
+              ['assignee', 'Assignee', issue.assignee?.name || null],
+              ['status', 'Status', issue.status.name],
+            ])
+              if (!unavailable.has(field))
+                fields[title] = value === null ? null : clipped(value);
+            if (issue.updated) fields['Last activity'] = clipped(issue.updated);
+            if (
+              issue.labels &&
+              issue.labels.length <= 20 &&
+              !unavailable.has('labels')
+            )
+              fields.Labels = issue.labels
+                .map((label) => label.name.slice(0, 80))
+                .sort();
+            const current = {
+              seenAt: snapshot.fetchedAt,
+              fields,
+              ...(Number.isSafeInteger(issue.commentCount) &&
+              issue.commentCount >= 0
+                ? { commentCount: issue.commentCount }
+                : {}),
+            };
+            root.issues[issue.key] = previous
+              ? {
+                  ...previous,
+                  fields: { ...current.fields, ...previous.fields },
+                  ...((previous.commentCount ?? current.commentCount) !==
+                  undefined
+                    ? {
+                        commentCount:
+                          previous.commentCount ?? current.commentCount,
+                      }
+                    : {}),
+                }
+              : current;
+          }
+          let bytes = sizeOf(expected.seenRoots);
+          let count = Object.keys(retained.issues).length;
+          for (const [issueKey, issue] of Object.entries(root.issues)) {
+            const previous = retained.issues[issueKey];
+            if (!previous && count >= 1000) continue;
+            const size = sizeOf([issueKey, issue]);
+            const delta = previous
+              ? size - sizeOf([issueKey, previous])
+              : size - 2 + (count ? 1 : 0);
+            if (bytes + delta > 2_000_000) continue;
+            if (!previous) count++;
+            retained.issues[issueKey] = issue;
+            bytes += delta;
+          }
+          const delta = sizeOf(root.touchedAt) - sizeOf(retained.touchedAt);
+          if (bytes + delta <= 2_000_000) retained.touchedAt = root.touchedAt;
         }
         expect(actual).toEqual(expected);
       }

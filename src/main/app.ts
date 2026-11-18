@@ -307,6 +307,9 @@ async function start(
   };
   let receivedWorkspace: Workspace | undefined;
   let retryUnavailableWorkspace = false;
+  let workspaceOwner: BrowserWindow | undefined;
+  let workspaceDocument = 0;
+  let workspaceInitializationError: string | undefined;
   let reviewedDiagnostics: string | undefined;
   let creatingWindow: Promise<void> | null = null;
   let supportPending = false;
@@ -834,10 +837,22 @@ async function start(
     canUndoWorkspaceImport: () => transfer.canUndo(),
     rollbackWorkspaceImport: () => trackWorkspaceTransfer(transfer.rollback()),
     reloadWorkspace: () => window?.webContents.reload(),
+    workspaceInitialized: (error: string | null) => {
+      workspaceInitializationError =
+        error === null ? undefined : text(error, 10000);
+    },
     loadWorkspace: async () => {
       if (demoMode) return structuredClone(demoWorkspaceState);
-      const saved = await storage.read<Workspace>('workspace');
-      return saved ? recoverWorkspaceViews(saved) : null;
+      const document = workspaceDocument;
+      try {
+        const saved = await storage.read<Workspace>('workspace');
+        return saved ? recoverWorkspaceViews(saved) : null;
+      } catch (error) {
+        if (document === workspaceDocument)
+          workspaceInitializationError =
+            error instanceof Error ? error.message : String(error);
+        throw error;
+      }
     },
     saveWorkspace: (value: Workspace) => {
       const valid = validateWorkspace(value);
@@ -845,6 +860,7 @@ async function start(
         demoWorkspaceState = structuredClone(valid);
         return;
       }
+      workspaceOwner = window ?? undefined;
       receivedWorkspace = valid;
       retryUnavailableWorkspace = false;
       savingWorkspace = storage.write('workspace', valid);
@@ -922,6 +938,8 @@ async function start(
       },
     });
     const created = window;
+    workspaceInitializationError = undefined;
+    workspaceDocument++;
     let initialLoad = true;
     let handoffCanceled = false;
     const cancelHandoffs = () => {
@@ -934,6 +952,8 @@ async function start(
     };
     created.webContents.on('did-start-navigation', (details) => {
       if (!details.isMainFrame || details.isSameDocument) return;
+      workspaceDocument++;
+      workspaceInitializationError = undefined;
       // Reload/navigation can destroy the renderer before its cancellation IPC
       // arrives. Release the departing document's provider reads in main too.
       for (const controller of trees.values()) controller.abort();
@@ -1032,18 +1052,27 @@ async function start(
       }
       // Preserve writes already received when an unavailable renderer cannot
       // supply newer state. The overall close deadline also bounds this drain.
-      if (retryUnavailableWorkspace && receivedWorkspace) {
+      if (
+        retryUnavailableWorkspace &&
+        receivedWorkspace &&
+        workspaceOwner === created
+      ) {
         retryUnavailableWorkspace = false;
         savingWorkspace = storage.write('workspace', receivedWorkspace);
       }
       try {
         await savingWorkspace;
       } catch (error) {
-        retryUnavailableWorkspace = true;
+        if (workspaceOwner === created && !created.isDestroyed())
+          retryUnavailableWorkspace = true;
         throw error;
       }
       while (pendingWorkspaceTransfers.size)
         await Promise.all(pendingWorkspaceTransfers);
+      if (workspaceInitializationError)
+        throw new WorkspaceLoadFailure(
+          `Workspace could not load: ${workspaceInitializationError}`,
+        );
       return true;
     };
     const flushBeforeClose = async () => {
@@ -1101,6 +1130,12 @@ async function start(
           cancelId: 0,
         });
         if (response !== 1) throw error;
+        if (workspaceOwner === created) {
+          workspaceOwner = undefined;
+          retryUnavailableWorkspace = false;
+          receivedWorkspace = undefined;
+          savingWorkspace = Promise.resolve();
+        }
         return true;
       } finally {
         attempt.abort();

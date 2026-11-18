@@ -15,6 +15,7 @@ const mutations = new Set([
   'applyWorkspaceImport',
   'rollbackWorkspaceImport',
   'reloadWorkspace',
+  'workspaceInitialized',
   'resetDemo',
   'launchDemo',
   'closeDemo',
@@ -184,6 +185,8 @@ const api: CanopyAPI = {
   rollbackWorkspaceImport: () =>
     ipcRenderer.invoke('canopy:rollbackWorkspaceImport'),
   reloadWorkspace: () => ipcRenderer.invoke('canopy:reloadWorkspace'),
+  workspaceInitialized: (error) =>
+    ipcRenderer.invoke('canopy:workspaceInitialized', error),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
   saveWorkspace: (workspace, attempt) => {
     if (closeAttempt !== undefined && attempt !== closeAttempt)

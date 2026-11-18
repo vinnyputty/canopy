@@ -151,7 +151,7 @@ let savingWorkspace=Promise.resolve(),receivedWorkspace,retryUnavailableWorkspac
 const pendingWorkspaceTransfers=new Set();
 const trackWorkspaceTransfer=${mainCallback('trackWorkspaceTransfer')};
 const storeWorkspace=setWorkspace;
-const window={clearTimeout(){},canopy:{saveWorkspace:value=>{receivedWorkspace=value;return savingWorkspace=storage.write('workspace',value);},reloadWorkspace:()=>reload?.()}};
+const window={clearTimeout(){},canopy:{workspaceInitialized:async()=>{},saveWorkspace:value=>{receivedWorkspace=value;return savingWorkspace=storage.write('workspace',value);},reloadWorkspace:()=>reload?.()}};
 const text=value=>{assert.equal(typeof value,'string');return value;};
 const applyWorkspaceImport=${mainCallback('applyWorkspaceImport')},rollbackWorkspaceImport=${mainCallback('rollbackWorkspaceImport')};
 const saveWorkspace=${save.arguments[0].getText(ast)},onApply=${attribute(panel.attributes, 'onApply')},flush=${attribute(panel.attributes, 'flush')},onSave=${attribute(appearance.attributes, 'onSave')},close=${attribute(backupDialog.attributes, 'onClose')},onKey=${onKey.initializer!.getText(ast)};
@@ -164,6 +164,7 @@ async function attemptMainQuit({unavailable=false,onPending=async()=>{},consent=
   const console={error:(...args)=>{errors.push(args);complete();}};
   const created=new EventEmitter();created.webContents=Object.assign(new EventEmitter(),{isCrashed:()=>unavailable,executeJavaScript:()=>workspaceCloseFlush(),send:(channel,id)=>{if(channel==='canopy:workspaceCloseReleased')workspaceClose.current.release(id);}});
   created.isDestroyed=()=>closed;created.destroy=()=>{closed=true;created.emit('closed');complete();};
+  let workspaceOwner=created,workspaceInitializationError;
   const rendererUnavailable=unavailable,rendererLoaded=Promise.resolve();
   const windowStateSaver={flush:async()=>{},resume(){}},handoffs={pause(){},resume(){}},saveBounds=()=>{};
   const dialog={showMessageBox:async(_window,options)=>{warnings.push(options);if(!unavailable&&!initialFailure)throw Error('Healthy renderer must not require abandonment consent');prompts++;return {response:consent};}};

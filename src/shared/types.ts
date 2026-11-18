@@ -430,6 +430,7 @@ export interface CanopyAPI {
   rollbackWorkspaceImport(): Promise<Workspace>;
   canUndoWorkspaceImport(): Promise<boolean>;
   reloadWorkspace(): Promise<void>;
+  workspaceInitialized(error: string | null): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(workspace: Workspace, closeAttempt?: number): Promise<void>;
   onWorkspaceFlush(

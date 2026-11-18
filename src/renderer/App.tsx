@@ -339,6 +339,7 @@ export function App() {
     | 'connect'
     | 'setup'
     | 'support'
+    | 'recovery'
     | null
   >(null);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
@@ -1461,7 +1462,7 @@ export function App() {
       window.canopy.demoMode(),
       window.canopy.demoTimeScale(),
     ])
-      .then(([nextConnections, saved, isDemo, timeScale]) => {
+      .then(async ([nextConnections, saved, isDemo, timeScale]) => {
         if (!live) return;
         demoTimeScale.current = timeScale;
         setDemoMode(isDemo);
@@ -1515,14 +1516,19 @@ export function App() {
                 },
           ),
         );
+        await window.canopy.workspaceInitialized(null);
+        if (!live) return;
         workspaceLoaded.current = true;
         setWorkspaceLoadError(null);
         setHandoffHydrated(true);
       })
-      .catch((error) => {
+      .catch(async (error) => {
         if (!live) return;
         workspaceLoaded.current = false;
         const message = workspaceError(error);
+        await window.canopy.workspaceInitialized(message);
+        if (!live) return;
+        setDialog('recovery');
         setWorkspaceLoadError(message);
         setErrors((value) => ({ ...value, app: message }));
       })
@@ -2776,7 +2782,7 @@ export function App() {
         event.preventDefault();
         return;
       }
-      if (workBrief) return;
+      if (workBrief || dialog === 'recovery') return;
       const command = Object.keys(workspace.shortcuts).find((id) =>
         matchesShortcut(event, workspace.shortcuts[id]),
       );
@@ -4182,6 +4188,12 @@ export function App() {
           <Connections
             connections={connections}
             demoMode={demoMode}
+            disconnect={(id, complete) =>
+              workspaceClose.current.track(async () => {
+                await window.canopy.disconnect(id);
+                complete();
+              })
+            }
             setConnections={(nextConnections) => {
               setConnections(nextConnections);
               const removed = connections.filter(
@@ -4205,7 +4217,11 @@ export function App() {
                   )
                   .map((tab) => tab.id),
               );
-              setWorkspace((current) =>
+              workspaceRef.current = removed.reduce(
+                (value, item) => removeConnection(value, item.id),
+                workspaceRef.current,
+              );
+              storeWorkspace((current) =>
                 removed.reduce(
                   (value, item) => removeConnection(value, item.id),
                   current,
@@ -4311,7 +4327,11 @@ export function App() {
 
       <main className="main">
         {workspaceLoadError !== null && (
-          <WorkspaceLoadRecovery error={workspaceLoadError} />
+          <WorkspaceLoadRecovery
+            error={workspaceLoadError}
+            open={dialog === 'recovery'}
+            onOpenChange={(open) => setDialog(open ? 'recovery' : null)}
+          />
         )}
         <RefreshStatus
           message={refreshAnnouncement}
@@ -5950,17 +5970,25 @@ export function App() {
             </header>
           )}
         {!activeTab && !activeSavedView && (
-          <Welcome
-            onOpen={() => setDialog('open')}
-            onConnect={() => setDialog('connect')}
-            onDemo={launchDemo}
-            onHelp={() => setDialog('setup')}
-            onShortcuts={() => setDialog('shortcuts')}
-            loading={!ready}
-            demoMode={demoMode}
-            hasConnections={connections.length > 0}
-            error={errors.workspace ?? errors.app}
-          />
+          <>
+            {errors.workspace && (
+              <div className="error-banner" role="alert">
+                <AlertCircle size={15} />
+                <span>{errors.workspace}</span>
+              </div>
+            )}
+            <Welcome
+              onOpen={() => setDialog('open')}
+              onConnect={() => setDialog('connect')}
+              onDemo={launchDemo}
+              onHelp={() => setDialog('setup')}
+              onShortcuts={() => setDialog('shortcuts')}
+              loading={!ready}
+              demoMode={demoMode}
+              hasConnections={connections.length > 0}
+              error={errors.app}
+            />
+          </>
         )}
       </main>
 
@@ -6507,12 +6535,14 @@ function Connections({
   connections,
   demoMode,
   setConnections,
+  disconnect: disconnectConnection,
   onConnect,
   onError,
 }: {
   connections: Connection[];
   demoMode: boolean;
   setConnections: (value: Connection[]) => void;
+  disconnect: (id: string, complete: () => void) => Promise<void>;
   onConnect: () => void;
   onError: (value: string) => void;
 }) {
@@ -6520,8 +6550,9 @@ function Connections({
   const disconnect = async (id: string) => {
     setBusy(true);
     try {
-      await window.canopy.disconnect(id);
-      setConnections(connections.filter((item) => item.id !== id));
+      await disconnectConnection(id, () =>
+        setConnections(connections.filter((item) => item.id !== id)),
+      );
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -9293,8 +9324,15 @@ function WorkBriefDialog({
   );
 }
 
-export function WorkspaceLoadRecovery({ error }: { error: string }) {
-  const [open, setOpen] = useState(true);
+export function WorkspaceLoadRecovery({
+  error,
+  open,
+  onOpenChange: setOpen,
+}: {
+  error: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const [reloading, setReloading] = useState(false);
   const [reloadError, setReloadError] = useState('');
   return (

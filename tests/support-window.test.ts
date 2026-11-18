@@ -56,6 +56,7 @@ async function fixture() {
   const controls = {
     flush: async (_script: string) => {},
     release: (_attempt: number) => {},
+    reload: async () => {},
     onClosed: () => {},
     warning: async () => {},
     write: async (_name: string) => {},
@@ -101,6 +102,7 @@ async function fixture() {
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: '' },
       isCrashed: () => controls.crashed,
+      reload: () => controls.reload(),
       executeJavaScript: (script: string) => controls.flush(script),
       getURL: () => this.webContents.mainFrame.url,
       session: { setPermissionRequestHandler() {} },
@@ -1211,9 +1213,16 @@ it('a kept-open initial-load failure can repair storage, reload and close normal
   f.controls.readWorkspace = async () => {
     throw Error('Initial read failed');
   };
-  const renderer = rendererFixture(dom.window.document, async (value) => {
-    await f.invoke(window, 'saveWorkspace', value);
-  });
+  const createRenderer = () => {
+    const next = rendererFixture(dom.window.document, async (value) => {
+      await f.invoke(window, 'saveWorkspace', value);
+    });
+    next.forward((name, value) =>
+      f.invoke(window, name.replace('canopy:', ''), value),
+    );
+    return next;
+  };
+  let renderer = createRenderer();
   f.controls.flush = (script) => renderer.executeScript(script);
   f.controls.release = (attempt) => {
     renderer.release(attempt);
@@ -1221,6 +1230,14 @@ it('a kept-open initial-load failure can repair storage, reload and close normal
   let cleanup = await renderer.initialize(
     async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
   );
+  f.controls.reload = async () => {
+    cleanup();
+    renderer.dispose();
+    renderer = createRenderer();
+    cleanup = await renderer.initialize(
+      async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
+    );
+  };
   window.close();
   await setImmediate();
   assert.equal(f.controls.prompts, 1);
@@ -1233,11 +1250,11 @@ it('a kept-open initial-load failure can repair storage, reload and close normal
     shortcuts: {},
     sidebarCollapsed: false,
   };
+  await renderer.api.reloadWorkspace();
+  assert.equal(renderer.context.workspaceLoaded.current, false);
+  await assert.rejects(renderer.save(saved), /Workspace has not loaded/);
   f.controls.readWorkspace = async () => structuredClone(saved);
-  cleanup();
-  cleanup = await renderer.initialize(
-    async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
-  );
+  await renderer.api.reloadWorkspace();
   assert.equal(renderer.context.workspaceLoaded.current, true);
   window.close();
   await setImmediate();
@@ -1312,4 +1329,159 @@ it('a reported initialization failure retains its consent requirement if rendere
   assert.equal(f.controls.warnings[0].message, 'The workspace could not load.');
   assert.equal(f.writes.filter((w) => w.name === 'workspace').length, 0);
   dom.window.close();
+});
+
+for (const loss of ['before-close', 'before-reply'])
+  it(`known initial read failure warns when renderer crashes ${loss}`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    f.controls.readWorkspace = async () => {
+      throw Error('Initial read failed');
+    };
+    await assert.rejects(
+      Promise.resolve(f.invoke(window, 'loadWorkspace')),
+      /Initial read failed/,
+    );
+    const reply = gate();
+    f.controls.flush = () => reply.wait;
+    if (loss === 'before-close') f.controls.crashed = true;
+    window.close();
+    await setImmediate();
+    if (loss === 'before-reply') {
+      f.controls.crashed = true;
+      window.webContents.emit('render-process-gone');
+    }
+    await setImmediate();
+    assert.equal(f.controls.prompts, 1);
+    assert.equal(window.destroyed, false);
+    assert.equal(
+      f.controls.warnings[0].message,
+      'The workspace could not load.',
+    );
+    assert.match(
+      f.controls.warnings[0].detail,
+      /saved workspace will be left unchanged/,
+    );
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+    reply.release();
+  });
+
+for (const lateFailure of [false, true])
+  it(`Close anyway revokes received state across recreation${lateFailure ? ' even after a late rejection' : ''}`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    const pending = gate();
+    let attempts = 0;
+    f.controls.write = async (name) => {
+      if (name === 'workspace') {
+        attempts++;
+        if (lateFailure) await pending.wait;
+        else throw Error('disk failure');
+      }
+    };
+    const save = Promise.resolve(
+      f.invoke(window, 'saveWorkspace', {
+        tabs: [],
+        theme: 'dark',
+        shortcuts: {},
+        sidebarCollapsed: false,
+      }),
+    );
+    const rejected = assert.rejects(save, /disk failure/);
+    f.controls.crashed = true;
+    f.controls.consent = 1;
+    window.close();
+    await setImmediate();
+    if (lateFailure) {
+      f.controls.expireClose();
+      await setImmediate();
+    }
+    assert.equal(window.destroyed, true);
+    if (lateFailure) pending.reject(Error('disk failure'));
+    await rejected;
+    await setImmediate();
+    f.controls.write = async (name) => {
+      if (name === 'workspace') attempts++;
+    };
+    f.app.emit('activate');
+    await setImmediate();
+    assert.equal(f.windows.length, 2);
+    const replacement = f.windows[1];
+    replacement.close();
+    await setImmediate();
+    assert.equal(replacement.destroyed, true);
+    assert.equal(attempts, 1);
+    assert.equal(
+      f.controls.prompts,
+      1,
+      'Replacement must not inherit the abandoned failure',
+    );
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+  });
+
+it('initialization status is trusted, clears after successful initialization, and ignores obsolete read failures', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  assert.throws(
+    () =>
+      f.handlers.get('canopy:workspaceInitialized')!(
+        { sender: {}, senderFrame: {} },
+        'failure',
+      ),
+    /Untrusted application window/,
+  );
+  f.invoke(window, 'workspaceInitialized', 'Connections failed');
+  f.controls.crashed = true;
+  window.close();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(window.destroyed, false);
+  const pending = gate();
+  f.controls.readWorkspace = async () => {
+    await pending.wait;
+    return null;
+  };
+  const read = Promise.resolve(f.invoke(window, 'loadWorkspace'));
+  const rejected = assert.rejects(read, /obsolete read/);
+  window.webContents.emit('did-start-navigation', {
+    isMainFrame: true,
+    isSameDocument: false,
+  });
+  f.invoke(window, 'workspaceInitialized', null);
+  pending.reject(Error('obsolete read'));
+  await rejected;
+  window.close();
+  await setImmediate();
+  assert.equal(f.controls.prompts, 1);
+  assert.equal(window.destroyed, true);
+});
+
+it('successful initialization clears the remembered warning before renderer loss', async () => {
+  const f = await fixture();
+  f.releaseRead();
+  f.releaseLoad();
+  await setImmediate();
+  const window = f.windows[0];
+  f.invoke(window, 'workspaceInitialized', 'Connections failed');
+  f.invoke(window, 'workspaceInitialized', null);
+  f.controls.crashed = true;
+  window.close();
+  await setImmediate();
+  assert.equal(window.destroyed, true);
+  assert.equal(f.controls.prompts, 0);
 });

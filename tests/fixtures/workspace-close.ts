@@ -46,13 +46,14 @@ export function rendererFixture(
     writes: Workspace[] = [];
   let errors: Record<string, string> = {};
   let api!: CanopyAPI;
+  let forward: ((name: string, value: unknown) => unknown) | undefined;
   const ipc = Object.assign(new EventEmitter(), {
     invoke: async (name: string, value: Workspace) => {
       calls.push(name);
       if (name === 'canopy:saveWorkspace') {
         await write(value);
         writes.push(structuredClone(value));
-      }
+      } else return forward?.(name, value);
     },
   });
   const preload = transformSync(
@@ -145,6 +146,9 @@ export function rendererFixture(
   );
   return {
     api,
+    forward: (handler: (name: string, value: unknown) => unknown) => {
+      forward = handler;
+    },
     register,
     dispose: () => dispose?.(),
     controller,
@@ -183,6 +187,7 @@ export function rendererFixture(
         setWorkspaceLoadError: (message: string | null) => {
           context.workspaceLoadError = message;
         },
+        setDialog() {},
         setDemoMode() {},
         setConnections() {},
         setHandoffHydrated() {},
