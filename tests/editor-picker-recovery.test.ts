@@ -41,6 +41,7 @@ function fixture() {
   const pending: Promise<void>[] = [];
   const opened: unknown[][] = [];
   const scope = {
+    workspaceClose: { current: { blocked: false } },
     useCallback: (run: unknown) => run,
     editor: null as Editor | null,
     options: {} as Record<string, PickerOptions>,

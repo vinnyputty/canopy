@@ -63,7 +63,9 @@ async function fixture() {
     crashed: false,
     consent: 0,
     prompts: 0,
+    messageWindows: [] as unknown[],
     warnings: [] as {
+      type?: string;
       message: string;
       detail: string;
       buttons: string[];
@@ -247,10 +249,11 @@ async function fixture() {
           shell: {},
           dialog: {
             showMessageBox: async (
-              _window: unknown,
+              window: unknown,
               options: (typeof controls.warnings)[number],
             ) => {
               controls.warnings.push(options);
+              controls.messageWindows.push(window);
               controls.prompts++;
               await controls.warning();
               return { response: controls.consent };
@@ -1554,4 +1557,63 @@ for (const lost of ['navigation', 'failed-page'])
     await setImmediate();
     assert.equal(window.destroyed, true);
     assert.equal(f.controls.prompts, 1);
+  });
+
+for (const failure of [false, true])
+  it(`transfer reload recovery uses the owned native window: dialog failure=${failure}`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    const held = gate();
+    f.controls.warning = () => held.wait;
+    let settled = false;
+    const showing = f.invoke(window, 'workspaceReloadFailed') as Promise<void>;
+    const result = showing.then(
+      () => {
+        settled = true;
+      },
+      (error) => {
+        settled = true;
+        throw error;
+      },
+    );
+    assert.equal(f.controls.prompts, 1);
+    assert.equal(f.controls.messageWindows[0], window);
+    const options = f.controls.warnings[0];
+    assert.equal(options.type, 'error');
+    assert.equal(
+      options.message,
+      'Workspace transferred, but reload failed. Restart Canopy before editing.',
+    );
+    assert.deepEqual(Array.from(options.buttons), ['OK']);
+    assert.equal(options.defaultId, 0);
+    assert.equal(options.cancelId, 0);
+    await setImmediate();
+    assert.equal(settled, false);
+    assert.equal(window.destroyed, false);
+    assert.equal(f.controls.quits, 0);
+    assert.equal(f.writes.length, 0);
+    assert.throws(
+      () =>
+        f.handlers.get('canopy:workspaceReloadFailed')!({
+          sender: {},
+          senderFrame: {},
+        }),
+      /Untrusted application window/,
+    );
+    assert.equal(f.controls.prompts, 1);
+    if (failure) {
+      const rejected = assert.rejects(result, /native dialog unavailable/);
+      held.reject(Error('native dialog unavailable'));
+      await rejected;
+    } else {
+      held.release();
+      await result;
+    }
+    assert.equal(settled, true);
+    assert.equal(window.destroyed, false);
+    assert.equal(f.controls.quits, 0);
+    assert.equal(f.writes.length, 0);
   });

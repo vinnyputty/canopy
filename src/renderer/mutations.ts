@@ -452,6 +452,14 @@ export class Mutations {
     });
     return result;
   }
+  private async admit(operation: (writes: IssueWrites) => Promise<boolean>) {
+    try {
+      return await this.run(operation);
+    } catch (error) {
+      this.error(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }
   update(
     connectionId: string,
     key: string,
@@ -461,7 +469,7 @@ export class Mutations {
     token?: symbol,
     ifCurrent?: (issue?: Issue) => boolean,
   ): Promise<boolean> {
-    return this.run((writes) =>
+    return this.admit((writes) =>
       this.updateIssue(
         writes,
         connectionId,
@@ -527,7 +535,7 @@ export class Mutations {
     origin: Status,
     path: StatusPath,
   ): Promise<boolean> {
-    return this.run((writes) =>
+    return this.admit((writes) =>
       this.transitionIssuePath(writes, connectionId, key, origin, path),
     );
   }
@@ -597,7 +605,7 @@ export class Mutations {
     record = true,
     verifiedSnapshot?: TreeSnapshot,
   ): Promise<boolean> {
-    return this.run((writes) =>
+    return this.admit((writes) =>
       this.rankIssue(
         writes,
         connectionId,
@@ -663,7 +671,7 @@ export class Mutations {
     );
   }
   undo(connectionId?: string, key?: string, token?: symbol): Promise<boolean> {
-    return this.run((writes) =>
+    return this.admit((writes) =>
       this.undoIssue(writes, connectionId, key, token),
     );
   }

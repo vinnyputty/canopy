@@ -15,15 +15,17 @@ import {
   sourceFile,
 } from './source-probe';
 
+const rendererSource =
+  process.env.CANOPY_TRANSFER_RENDERER_SOURCE ??
+  process.env.CANOPY_CLOSE_RENDERER_SOURCE ??
+  'src/renderer/App.tsx';
+
 const importPath = (path: string) => JSON.stringify(path);
 
 // Extract production callbacks rather than reproducing the renderer's persistence controller.
 test('held import and reload reject old-renderer saves and preserve actual imported data and Undo', async () => {
   const root = resolve('.');
-  const text = await readFile(
-    process.env.CANOPY_TRANSFER_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
-    'utf8',
-  );
+  const text = await readFile(rendererSource, 'utf8');
   const ast = ts.createSourceFile(
     'App.tsx',
     text,
@@ -168,7 +170,7 @@ const trackWorkspaceTransfer=${mainCallback('trackWorkspaceTransfer')};
 const useCallback=fn=>fn;const storeWorkspace=setWorkspace;
 const reloadTransferredWorkspace=${(find((n) => ts.isVariableDeclaration(n) && n.name.getText(ast) === 'reloadTransferredWorkspace') as ts.VariableDeclaration).initializer!.getText(ast)};
 
-const window={clearTimeout(){},canopy:{workspaceInitialized:async()=>{},saveWorkspace:value=>{receivedWorkspace=value;return savingWorkspace=storage.write('workspace',value);},reloadWorkspace:()=>reload?.()}};
+const window={clearTimeout(){},canopy:{workspaceReloadFailed:async()=>{},workspaceInitialized:async()=>{},saveWorkspace:value=>{receivedWorkspace=value;return savingWorkspace=storage.write('workspace',value);},reloadWorkspace:()=>reload?.()}};
 const text=value=>{assert.equal(typeof value,'string');return value;};
 const applyWorkspaceImport=${mainCallback('applyWorkspaceImport')},rollbackWorkspaceImport=${mainCallback('rollbackWorkspaceImport')};
 const saveWorkspace=${save.arguments[0].getText(ast)},productionOnApply=${attribute(panel.attributes, 'onApply')},onApply=operation=>productionOnApply(async beforeTransfer=>{await beforeTransfer();return operation();}),flush=${attribute(panel.attributes, 'flush')},onSave=${attribute(appearance.attributes, 'onSave')},close=${attribute(backupDialog.attributes, 'onClose')},onKey=${onKey.initializer!.getText(ast)};
@@ -464,9 +466,7 @@ test('generated renderer imports resolve paths with spaces, quotes and backslash
 
 for (const outcome of ['success', 'disconnect-failure', 'write-failure'])
   test(`Disconnect settlement preserves final snapshot semantics through ${outcome}`, async () => {
-    const source = sourceFile(
-      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
-    );
+    const source = sourceFile(rendererSource);
     const connections = findNode(
       source,
       (node): node is ts.JsxSelfClosingElement =>
@@ -487,10 +487,15 @@ for (const outcome of ['success', 'disconnect-failure', 'write-failure'])
       },
     };
     const pending = gate();
-    const h = rendererFixture(document as unknown as Document, async () => {
-      if (outcome === 'write-failure')
-        throw Error('final workspace write failed');
-    });
+    const h = rendererFixture(
+      document as unknown as Document,
+      async () => {
+        if (outcome === 'write-failure')
+          throw Error('final workspace write failed');
+      },
+      true,
+      rendererSource,
+    );
     const initial = {
       ...h.workspaceRef.current,
       closedTabs: [],
@@ -576,11 +581,17 @@ for (const kind of ['apply', 'undo'])
       const focus = d.window.document.querySelector('button');
       focus.focus();
       const held = gate();
-      const h = rendererFixture(d.window.document, async () => {}, false);
-      h.context.pendingWorkspaceSave.current = held.promise;
-      const ast = sourceFile(
-        process.env.CANOPY_TRANSFER_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+      let disk = '';
+      const h = rendererFixture(
+        d.window.document,
+        async (value) => {
+          disk = JSON.stringify(value);
+        },
+        false,
+        rendererSource,
       );
+      h.context.pendingWorkspaceSave.current = held.promise;
+      const ast = sourceFile(rendererSource);
       const panel = findNode(
         ast,
         (node): node is ts.JsxSelfClosingElement =>
@@ -593,7 +604,8 @@ for (const kind of ['apply', 'undo'])
       const reloadRef = { current: undefined as Promise<void> | undefined };
       let transfers = 0,
         reloads = 0;
-      let disk = JSON.stringify(h.workspaceRef.current);
+      h.workspaceRef.current = { ...h.workspaceRef.current, theme: 'dark' };
+      disk = JSON.stringify({ ...h.workspaceRef.current, theme: 'system' });
       const committed = JSON.stringify({
         ...h.workspaceRef.current,
         theme: 'light',
@@ -604,7 +616,8 @@ for (const kind of ['apply', 'undo'])
           if (outcome === 'reload-failure') throw Error('reload refused');
           return;
         }
-        if (name === 'canopy:update') return;
+        if (name === 'canopy:update' || name === 'canopy:workspaceReloadFailed')
+          return;
         assert.equal(
           name,
           kind === 'apply'
@@ -674,6 +687,7 @@ for (const kind of ['apply', 'undo'])
       const original = h.workspaceRef.current;
       h.setWorkspace((value: any) => ({ ...value, theme: 'dark' }));
       assert.equal(h.workspaceRef.current, original);
+      await new Promise((resolve) => setImmediate(resolve));
       await assert.rejects(
         h.api.update('sample', 'ONE', {}),
         /transfer is in progress/,
@@ -683,10 +697,19 @@ for (const kind of ['apply', 'undo'])
         /transfer is in progress/,
       );
       assert.equal(transfers, 0);
-      // Keep the final save in flight while the confirmed provider edit is tested elsewhere.
-      const closing = assert.doesNotReject(() => h.api.flushWorkspace(7));
+      let closeSettled = false;
+      const closing = assert
+        .doesNotReject(() => h.api.flushWorkspace(7))
+        .then(() => {
+          closeSettled = true;
+        });
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(h.controller.paused, true);
+      assert.equal(
+        closeSettled,
+        false,
+        'close must await the held transfer save',
+      );
       for (const method of [
         () => h.api.applyWorkspaceImport('late'),
         () => h.api.rollbackWorkspaceImport(),
@@ -707,10 +730,25 @@ for (const kind of ['apply', 'undo'])
         await assert.doesNotReject(() => observed);
       }
       await closing;
+      assert.equal(closeSettled, true);
+      if (outcome === 'save-failure' || outcome === 'transfer-failure')
+        assert.equal(
+          JSON.stringify(h.writes.at(-1)),
+          JSON.stringify(h.workspaceRef.current),
+          'failed transfer close saves current payload',
+        );
       assert.equal(transfers, outcome === 'save-failure' ? 0 : 1);
       assert.equal(reloads, 0, 'reload must defer while close owns the pause');
       const failed =
         outcome === 'save-failure' || outcome === 'transfer-failure';
+      if (failed) {
+        assert.equal(
+          h.writes.length,
+          outcome === 'save-failure' ? 1 : 2,
+          'failed transfer must perform its final close write',
+        );
+        assert.equal(h.saveArguments.at(-1)![1], true);
+      }
       assert.equal(h.controller.blocked, true);
       const beforeRelease = redraws;
       h.release(6);
@@ -760,3 +798,95 @@ for (const kind of ['apply', 'undo'])
       h.dispose();
       d.window.close();
     });
+
+for (const dialogFailure of [false, true])
+  test(`failed transfer reload reports natively and preserves barriers: dialog failure=${dialogFailure}`, async () => {
+    const { JSDOM } = createRequire(import.meta.url)('jsdom');
+    const d = new JSDOM('<body><button>Edit</button>', {
+      pretendToBeVisual: true,
+    });
+    d.window.document.body.inert = false;
+    const rendererSource =
+      process.env.CANOPY_TRANSFER_RENDERER_SOURCE ??
+      process.env.CANOPY_CLOSE_RENDERER_SOURCE ??
+      'src/renderer/App.tsx';
+    const h = rendererFixture(
+      d.window.document,
+      async () => {},
+      true,
+      rendererSource,
+    );
+    const message = gate();
+    const original = Error('reload refused');
+    let reports = 0;
+    let reloads = 0;
+    h.forward(async (name) => {
+      if (name === 'canopy:rollbackWorkspaceImport')
+        return h.workspaceRef.current;
+      if (name === 'canopy:reloadWorkspace') {
+        reloads++;
+        throw original;
+      }
+      assert.equal(name, 'canopy:workspaceReloadFailed');
+      reports++;
+      assert.equal(d.window.document.body.inert, true);
+      assert.equal(h.controller.blocked, true);
+      await message.promise;
+    });
+    await h.api.rollbackWorkspaceImport();
+    h.controller.beginTransfer(d.window.document);
+    const ref = { current: undefined as Promise<void> | undefined };
+    const reload = execute(
+      callbackOf(sourceFile(rendererSource), 'reloadTransferredWorkspace'),
+      { ...h.context, workspaceTransferReload: ref },
+    );
+    let settled = false;
+    const result = reload().finally(() => {
+      settled = true;
+    });
+    const rejected = assert.rejects(result, (error) => {
+      assert.equal(
+        (error as Error).message,
+        'Workspace transferred, but reload failed. Restart Canopy before editing.',
+      );
+      assert.equal((error as Error).cause, original);
+      return true;
+    });
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(reports, 1);
+      assert.equal(reloads, 1);
+      assert.equal(settled, false);
+      assert.equal(reload(), ref.current, 'in-flight recovery must be reused');
+      await assert.rejects(
+        h.api.update('sample', 'SAMPLE-1', { summary: 'blocked' }),
+        /transfer is in progress/,
+      );
+      await assert.rejects(
+        h.api.saveWorkspace(h.workspaceRef.current),
+        /transfer is in progress/,
+      );
+      if (dialogFailure) message.reject(Error('native dialog unavailable'));
+      else message.release();
+      await rejected;
+      assert.ok(
+        ref.current === undefined,
+        'completed recovery must release the retry promise',
+      );
+      assert.equal(h.controller.blocked, true);
+      assert.equal(d.window.document.body.inert, true);
+      assert.equal(h.writes.length, 0);
+      assert.equal(reports, 1);
+      h.setWorkspace((value: typeof h.workspaceRef.current) => ({
+        ...value,
+        theme: 'light',
+      }));
+      assert.equal(h.workspaceRef.current.theme, 'system');
+    } finally {
+      message.release();
+      await rejected;
+      h.dispose();
+      h.controller.endTransfer();
+      d.window.close();
+    }
+  });

@@ -238,3 +238,106 @@ test('snapshot refresh during close restores and persists a native clamp after r
   assert.equal(submissions.length, 1);
   assert.equal(submissions[0].tabs[0].scrollTop, 200);
 });
+
+for (const releaseCloseFirst of [false, true])
+  test(`failed transfer restores pending active-tab scroll after both barriers: closeFirst=${releaseCloseFirst}`, async () => {
+    const { rendererFixture, gate } =
+      await import('./fixtures/workspace-close');
+    const document = {
+      body: { inert: false },
+      activeElement: null,
+      defaultView: {
+        HTMLElement: class {},
+        addEventListener() {},
+        removeEventListener() {},
+      },
+    } as unknown as Document;
+    const h = rendererFixture(document);
+    const tab = { id: 'active', scrollTop: 231.75 };
+    const viewport = { scrollTop: 0 };
+    const pendingScrollRestore = { current: null as string | null };
+    const renderContext = {
+      ...h.context,
+      useCallback: (fn: unknown) => fn,
+      activeTab: tab,
+      snapshot: {},
+      scrollRef: { current: viewport },
+      pendingScrollRestore,
+      setWorkspace: h.setWorkspace,
+    };
+    const restoreScroll = execute(
+      callback(source, 'restoreScroll'),
+      renderContext,
+    );
+    const layout = findNode(
+      source,
+      (n): n is ts.CallExpression =>
+        ts.isCallExpression(n) &&
+        n.expression.getText() === 'useLayoutEffect' &&
+        n.arguments[0]?.getText().includes('!restoreScroll(activeTab)') ===
+          true,
+    );
+    const render = () =>
+      execute(restoreEffect.arguments[0].getText(), {
+        ...renderContext,
+        restoreScroll,
+      })();
+    const store = h.context.storeWorkspace;
+    h.context.storeWorkspace = (update) => {
+      store(update);
+      render();
+    };
+    h.dispose();
+    h.register();
+    const panel = findNode(
+      source,
+      (n): n is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(n) &&
+        n.tagName.getText() === 'WorkspaceBackupPanel',
+    );
+    const attr = panel.attributes.properties.find(
+      (p) => ts.isJsxAttribute(p) && p.name.getText() === 'onApply',
+    ) as ts.JsxAttribute;
+    const transfer = gate();
+    const applying = execute(
+      (attr.initializer as ts.JsxExpression).expression!.getText(),
+      {
+        ...h.context,
+        saveWorkspace: h.save,
+        setWorkspaceTransferActive() {},
+      },
+    )(async () => {
+      await transfer.promise;
+      throw Error('transfer refused');
+    });
+    const observed = assert.rejects(applying, /transfer refused/);
+    execute(layout.arguments[0].getText(), {
+      ...renderContext,
+      restoreScroll,
+    })();
+    assert.equal(
+      pendingScrollRestore.current,
+      tab.id,
+      'transfer-blocked restoration must remain pending',
+    );
+    let closeFinished = false;
+    const closing = h.api.flushWorkspace(60).then(() => {
+      closeFinished = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closeFinished, false);
+    if (releaseCloseFirst) h.release(60);
+    assert.equal(viewport.scrollTop, 0);
+    transfer.release();
+    await observed;
+    if (releaseCloseFirst) await assert.rejects(closing, /canceled/);
+    else {
+      await closing;
+      assert.equal(viewport.scrollTop, 0, 'close pause still owns restoration');
+      h.release(60);
+    }
+    assert.equal(h.controller.blocked, false);
+    assert.equal(viewport.scrollTop, tab.scrollTop);
+    assert.equal(pendingScrollRestore.current, null);
+    h.dispose();
+  });

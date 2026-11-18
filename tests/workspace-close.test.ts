@@ -1601,9 +1601,9 @@ for (const transfer of [false, true])
         0,
         'final snapshot must follow provider completion',
       );
-      await assert.rejects(
-        mutations.update('sample-jira', issue.key, { summary: 'late' }),
-        /closing|transfer/,
+      assert.equal(
+        await mutations.update('sample-jira', issue.key, { summary: 'late' }),
+        false,
       );
       h.setWorkspace((value: any) => ({ ...value, theme: 'light' }));
       assert.equal(h.workspaceRef.current.theme, initial.theme);
@@ -1797,15 +1797,33 @@ for (const operation of ['rank', 'transitionPath'] as const)
         0,
       );
       const done = { id: 'done', name: 'Done', category: 'done' as const };
+      const intermediate = {
+        id: 'progress',
+        name: 'In Progress',
+        category: 'indeterminate' as const,
+      };
+      let writes = 0,
+        reads = 0;
+      let current: import('../src/shared/types').Issue = f.issue;
       f.h.forward(async (name, ...args) => {
-        if (name === 'canopy:transitions') return [{ id: 'finish', to: done }];
+        if (name === 'canopy:transitions')
+          return [
+            { id: 'start', to: intermediate },
+            { id: 'finish', to: done },
+          ];
+        if (name === 'canopy:rank') {
+          await provider.promise;
+          return;
+        }
+        if (!(args[2] as any).transitionId) {
+          reads++;
+          return current;
+        }
+        writes++;
+        if (writes === 1)
+          return (current = { ...f.issue, status: intermediate });
         await provider.promise;
-        if (failure) throw Error('provider refused');
-        if (name === 'canopy:rank') return;
-        return {
-          ...f.issue,
-          status: (args[2] as any).transitionId ? done : f.issue.status,
-        };
+        return (current = { ...f.issue, status: done });
       });
       const editing =
         operation === 'rank'
@@ -1814,9 +1832,130 @@ for (const operation of ['rank', 'transitionPath'] as const)
               'sample-jira',
               f.issue.key,
               f.issue.status,
-              { destination: done, steps: [{ id: 'finish', to: done }] },
+              {
+                destination: done,
+                steps: [
+                  { id: 'start', to: intermediate },
+                  { id: 'finish', to: done },
+                ],
+              },
             );
       await tick();
+      if (operation === 'transitionPath') {
+        assert.equal(
+          writes,
+          2,
+          'second transition write must be held before close',
+        );
+        assert.equal(current.status.id, 'progress');
+        assert.equal(reads, 1);
+      }
+      let finished = false;
+      const closing = f.h.api.flushWorkspace(10).then(() => {
+        finished = true;
+      });
+      await tick();
+      assert.equal(finished, false);
+      assert.equal(f.h.writes.length, 0);
+      if (failure) provider.reject(Error('provider refused'));
+      else provider.release();
+      assert.equal(await editing, operation === 'transitionPath' || !failure);
+      await closing;
+      assert.equal(f.view().saving.size, 0);
+      assert.equal((f.mutations as any).queues.size, 0);
+      if (operation === 'transitionPath')
+        assert.equal(
+          f.mutations.confirmedSnapshot(backupWorkspace.tabs[0].id)!.issues[0]
+            .status.id,
+          failure ? 'progress' : 'done',
+        );
+      if (operation === 'transitionPath') {
+        assert.equal(writes, 2);
+        assert.equal(
+          reads,
+          failure ? 2 : 1,
+          'failed second write must recover confirmed status',
+        );
+        assert.equal(
+          f.h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues[
+            'SAMPLE-1'
+          ].fields.Status,
+          failure ? 'In Progress' : 'Done',
+        );
+      }
+      assert.deepEqual(f.h.writes.at(-1), f.h.workspaceRef.current);
+      f.h.release(10);
+      f.dispose();
+    });
+
+for (const lifetime of ['current', 'closed', 'unmounted', 'retargeted'])
+  for (const failure of [false, true])
+    test(`close drains preview label reconciliation and tolerated failure: lifetime=${lifetime}, failure=${failure}`, async () => {
+      const f = providerFixture(),
+        provider = gate();
+      f.h.forward(async () => {
+        await provider.promise;
+        if (failure) throw Error('label refused');
+        return { ...f.issue, labels: [{ id: 'bug', name: 'bug' }] };
+      });
+      const ast = sourceFile(
+        process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+      );
+      const preview = findNode(
+        ast,
+        (node): node is ts.JsxSelfClosingElement =>
+          ts.isJsxSelfClosingElement(node) &&
+          node.tagName.getText() === 'IssuePreview',
+      );
+      const attr = (name: string) => {
+        const prop = preview.attributes.properties.find(
+          (prop) => ts.isJsxAttribute(prop) && prop.name.getText() === name,
+        ) as ts.JsxAttribute;
+        return (prop.initializer as ts.JsxExpression).expression!.getText();
+      };
+      const onChanged = execute(attr('onChanged'), {
+        mutations: f.mutations,
+        previewRoute: { connectionId: 'sample-jira' },
+        allRefreshTabs: [],
+      });
+      const trackMutation = execute(attr('trackMutation'), f.h.context);
+      const toggle = findNode(
+        sourceFile(
+          process.env.CANOPY_CLOSE_PREVIEW_SOURCE ??
+            'src/renderer/IssuePreview.tsx',
+        ),
+        (node): node is ts.VariableDeclaration =>
+          ts.isVariableDeclaration(node) &&
+          node.name.getText() === 'toggleLabel',
+      );
+      let saving = false,
+        error = '';
+      const generation = { current: 1 };
+      let dataWrites = 0;
+      const edit = execute(toggle.initializer!.getText(), {
+        data: { issue: { ...f.issue, labels: [] } },
+        savingLabels: false,
+        previewGeneration: generation,
+        connectionId: 'sample-jira',
+        issueKey: f.issue.key,
+        setSavingLabels: (value: boolean) => {
+          saving = value;
+        },
+        setLabelsError: (value: string) => {
+          error = value;
+        },
+        setLabelsSaved() {},
+        setData() {
+          dataWrites++;
+        },
+        trackMutation,
+        onChanged,
+        window: { canopy: f.h.api },
+      });
+      const editing = edit('bug');
+      if (lifetime !== 'current') generation.current++;
+      await tick();
+      assert.equal(saving, true);
       let finished = false;
       const closing = f.h.api.flushWorkspace(10).then(() => {
         finished = true;
@@ -1825,101 +1964,28 @@ for (const operation of ['rank', 'transitionPath'] as const)
       assert.equal(finished, false);
       assert.equal(f.h.writes.length, 0);
       provider.release();
-      assert.equal(await editing, !failure);
-      await closing;
-      assert.equal(f.view().saving.size, 0);
-      assert.equal((f.mutations as any).queues.size, 0);
-      if (operation === 'transitionPath')
-        assert.equal(
-          f.mutations.confirmedSnapshot(backupWorkspace.tabs[0].id)!.issues[0]
-            .status.id,
-          failure ? 'open' : 'done',
-        );
-      assert.deepEqual(f.h.writes.at(-1), f.h.workspaceRef.current);
+      await editing;
+      await assert.doesNotReject(
+        closing,
+        'a refused label edit must still allow workspace persistence',
+      );
+      assert.equal(saving, lifetime !== 'current');
+      assert.equal(
+        dataWrites,
+        lifetime !== 'current' ? 1 : 2,
+        'stale completion cannot update preview UI',
+      );
+      assert.equal(
+        error.includes('label refused'),
+        failure && lifetime === 'current',
+      );
+      const labels =
+        f.h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
+          .fields.Labels;
+      assert.deepEqual(labels, failure ? undefined : ['bug']);
       f.h.release(10);
       f.dispose();
     });
-
-for (const failure of [false, true])
-  test(`close drains preview label reconciliation and tolerated failure: failure=${failure}`, async () => {
-    const f = providerFixture(),
-      provider = gate();
-    f.h.forward(async () => {
-      await provider.promise;
-      if (failure) throw Error('label refused');
-      return { ...f.issue, labels: [{ id: 'bug', name: 'bug' }] };
-    });
-    const ast = sourceFile(
-      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
-    );
-    const preview = findNode(
-      ast,
-      (node): node is ts.JsxSelfClosingElement =>
-        ts.isJsxSelfClosingElement(node) &&
-        node.tagName.getText() === 'IssuePreview',
-    );
-    const attr = (name: string) => {
-      const prop = preview.attributes.properties.find(
-        (prop) => ts.isJsxAttribute(prop) && prop.name.getText() === name,
-      ) as ts.JsxAttribute;
-      return (prop.initializer as ts.JsxExpression).expression!.getText();
-    };
-    const onChanged = execute(attr('onChanged'), {
-      mutations: f.mutations,
-      previewRoute: { connectionId: 'sample-jira' },
-      allRefreshTabs: [],
-    });
-    const trackMutation = execute(attr('trackMutation'), f.h.context);
-    const toggle = findNode(
-      sourceFile('src/renderer/IssuePreview.tsx'),
-      (node): node is ts.VariableDeclaration =>
-        ts.isVariableDeclaration(node) && node.name.getText() === 'toggleLabel',
-    );
-    let saving = false,
-      error = '';
-    const edit = execute(toggle.initializer!.getText(), {
-      data: { issue: { ...f.issue, labels: [] } },
-      savingLabels: false,
-      previewGeneration: { current: 1 },
-      connectionId: 'sample-jira',
-      issueKey: f.issue.key,
-      setSavingLabels: (value: boolean) => {
-        saving = value;
-      },
-      setLabelsError: (value: string) => {
-        error = value;
-      },
-      setLabelsSaved() {},
-      setData() {},
-      trackMutation,
-      onChanged,
-      window: { canopy: f.h.api },
-    });
-    const editing = edit('bug');
-    await tick();
-    assert.equal(saving, true);
-    let finished = false;
-    const closing = f.h.api.flushWorkspace(10).then(() => {
-      finished = true;
-    });
-    await tick();
-    assert.equal(finished, false);
-    assert.equal(f.h.writes.length, 0);
-    provider.release();
-    await editing;
-    await assert.doesNotReject(
-      closing,
-      'a refused label edit must still allow workspace persistence',
-    );
-    assert.equal(saving, false);
-    assert.equal(error.includes('label refused'), failure);
-    const labels =
-      f.h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
-        .fields.Labels;
-    assert.deepEqual(labels, failure ? undefined : ['bug']);
-    f.h.release(10);
-    f.dispose();
-  });
 
 test('a retained admitted issue writer refuses writes after transfer admission', async () => {
   const f = providerFixture(),
@@ -1943,3 +2009,422 @@ test('a retained admitted issue writer refuses writes after transfer admission',
   assert.equal(f.h.calls.includes('canopy:rank'), false);
   f.dispose();
 });
+
+test('real preload receives explicit flush provenance and ordinary save false', async () => {
+  const d = dom(),
+    h = rendererFixture(d.window.document);
+  await h.save(h.workspaceRef.current);
+  assert.equal(h.saveArguments.length, 1);
+  assert.equal(h.saveArguments[0][1], false);
+  await h.api.flushWorkspace(20);
+  assert.equal(h.saveArguments.length, 2);
+  assert.equal(h.saveArguments[1][1], true);
+  h.release(20);
+  await h.save(h.workspaceRef.current);
+  assert.equal(h.saveArguments.at(-1)![1], false);
+  h.dispose();
+  d.window.close();
+});
+
+for (const kind of ['apply', 'undo'])
+  for (const failure of [false, true])
+    test(`transfer drains admitted two-step status path before preload barrier: ${kind}, failure=${failure}`, async () => {
+      const f = providerFixture(),
+        lookup = gate(),
+        transfer = gate();
+      const progress = {
+        id: 'progress',
+        name: 'In Progress',
+        category: 'indeterminate' as const,
+      };
+      const done = { id: 'done', name: 'Done', category: 'done' as const };
+      let current: import('../src/shared/types').Issue = f.issue;
+      let lookups = 0,
+        transfers = 0,
+        reads = 0;
+      f.h.forward(async (name, ...args) => {
+        if (name === 'canopy:transitions') {
+          if (++lookups === 2) await lookup.promise;
+          return [
+            { id: 'start', to: progress },
+            { id: 'finish', to: done },
+          ];
+        }
+        if (name === 'canopy:update') {
+          const patch = args[2] as any;
+          if (!patch.transitionId) {
+            reads++;
+            return current;
+          }
+          current = {
+            ...current,
+            status: patch.transitionId === 'start' ? progress : done,
+          };
+          return current;
+        }
+        transfers++;
+        assert.equal(
+          name,
+          kind === 'apply'
+            ? 'canopy:applyWorkspaceImport'
+            : 'canopy:rollbackWorkspaceImport',
+        );
+        await transfer.promise;
+        if (failure) throw Error('transfer refused');
+        return f.h.workspaceRef.current;
+      });
+      const editing = f.mutations.transitionPath(
+        'sample-jira',
+        f.issue.key,
+        f.issue.status,
+        {
+          destination: done,
+          steps: [
+            { id: 'start', to: progress },
+            { id: 'finish', to: done },
+          ],
+        },
+      );
+      await tick();
+      assert.equal(current.status.id, 'progress');
+      assert.equal(lookups, 2);
+      const ast = sourceFile(
+        process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+      );
+      const panel = findNode(
+        ast,
+        (n): n is ts.JsxSelfClosingElement =>
+          ts.isJsxSelfClosingElement(n) &&
+          n.tagName.getText() === 'WorkspaceBackupPanel',
+      );
+      const attr = panel.attributes.properties.find(
+        (p) => ts.isJsxAttribute(p) && p.name.getText() === 'onApply',
+      ) as ts.JsxAttribute;
+      const onApply = execute(
+        (attr.initializer as ts.JsxExpression).expression!.getText(),
+        {
+          ...f.h.context,
+          saveWorkspace: f.h.save,
+          setWorkspaceTransferActive() {},
+        },
+      );
+      const applying = onApply(
+        (before: () => Promise<void>, drain: () => Promise<void>) =>
+          kind === 'apply'
+            ? f.h.api.applyWorkspaceImport('accepted', before, drain)
+            : f.h.api.rollbackWorkspaceImport(before, drain),
+      );
+      const observed = failure
+        ? assert.rejects(applying, /transfer refused/)
+        : applying;
+      assert.equal(f.h.controller.blocked, true);
+      assert.equal(
+        await f.mutations.update('sample-jira', f.issue.key, {
+          summary: 'late',
+        }),
+        false,
+      );
+      await tick();
+      await assert.rejects(
+        f.h.api.saveWorkspace(f.h.workspaceRef.current),
+        /transfer/,
+      );
+      await assert.rejects(
+        f.h.api.update('sample-jira', f.issue.key, {}),
+        /transfer/,
+      );
+      assert.equal(transfers, 0);
+      assert.equal(
+        f.h.writes.length,
+        0,
+        'snapshot must wait for admitted provider work',
+      );
+      let closed = false;
+      const closing = f.h.api.flushWorkspace(30).then(() => {
+        closed = true;
+      });
+      await tick();
+      assert.equal(closed, false);
+      lookup.release();
+      assert.equal(
+        await editing,
+        true,
+        'admitted second write must survive transfer admission and close',
+      );
+      await tick();
+      assert.equal(current.status.id, 'done');
+      assert.equal(reads, 1);
+      assert.equal(transfers, 1);
+      assert.equal(
+        closed,
+        false,
+        'close waits for the held transfer operation',
+      );
+      assert.equal(
+        f.h.writes[0].seenRoots!['sample-jira:SAMPLE-1'].issues['SAMPLE-1']
+          .fields.Status,
+        'Done',
+      );
+      transfer.release();
+      await observed;
+      await closing;
+      assert.equal(f.h.controller.blocked, true);
+      assert.equal(f.view().saving.size, 0);
+      assert.equal((f.mutations as any).queues.size, 0);
+      if (failure)
+        assert.equal(
+          f.h.writes.at(-1)!.seenRoots!['sample-jira:SAMPLE-1'].issues[
+            'SAMPLE-1'
+          ].fields.Status,
+          'Done',
+        );
+      f.h.release(30);
+      assert.equal(f.h.controller.blocked, !failure);
+      if (failure) {
+        assert.equal(
+          await f.mutations.update('sample-jira', f.issue.key, {}),
+          true,
+        );
+        await f.h.save(f.h.workspaceRef.current);
+      }
+      f.dispose();
+    });
+
+for (const method of ['update', 'rank', 'transitionPath', 'undo'] as const)
+  test(`close admission refusal preserves mutation false/error contract: ${method}`, async () => {
+    const f = providerFixture();
+    await f.h.api.flushWorkspace(40);
+    let calls = 0;
+    f.h.forward(async () => {
+      calls++;
+      return f.issue;
+    });
+    const result =
+      method === 'update'
+        ? f.mutations.update('sample-jira', f.issue.key, { summary: 'late' })
+        : method === 'rank'
+          ? f.mutations.rank('sample-jira', f.issue.key, 'other')
+          : method === 'undo'
+            ? f.mutations.undo()
+            : f.mutations.transitionPath(
+                'sample-jira',
+                f.issue.key,
+                f.issue.status,
+                { destination: f.issue.status, steps: [] },
+              );
+    assert.equal(await result, false);
+    assert.match(f.errors.at(-1)!, /closing/);
+    assert.equal(calls, 0);
+    assert.equal(f.view().saving.size, 0);
+    assert.equal((f.mutations as any).queues.size, 0);
+    f.h.release(40);
+    assert.equal(
+      await f.mutations.update('sample-jira', f.issue.key, {}),
+      true,
+    );
+    f.dispose();
+  });
+
+test('assignee validation completing during close restores picker after admission refusal', async () => {
+  const f = providerFixture(),
+    validation = gate();
+  const tab = backupWorkspace.tabs[0];
+  let cleared = 0;
+  let editor: any = {
+    tabId: tab.id,
+    connectionId: tab.connectionId,
+    key: f.issue.key,
+    field: 'assignee',
+  };
+  const rejected: string[] = [];
+  const update = execute(
+    callback(
+      sourceFile(
+        process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+      ),
+      'updateIssue',
+    ),
+    {
+      useCallback: (fn: unknown) => fn,
+      activeTab: tab,
+      workspaceClose: f.h.context.workspaceClose,
+      activeIdRef: { current: tab.id },
+      editSession: { current: 1 },
+      setEditor: (fn: (value: unknown) => unknown) => {
+        editor = fn(editor);
+        if (editor === null) cleared++;
+      },
+      mutations: f.mutations,
+      pickers: {
+        validate: async () => {
+          await validation.promise;
+          return true;
+        },
+        values: {},
+        rejected: (_connection: string, _key: string, field: string) =>
+          rejected.push(field),
+      },
+    },
+  );
+  const editing = update(f.issue.key, { assigneeId: 'new' });
+  await f.h.api.flushWorkspace(50);
+  validation.release();
+  await assert.doesNotReject(editing);
+  assert.deepEqual(rejected, ['assignee']);
+  assert.equal(cleared, 0, 'refused admission must preserve the open picker');
+  assert.deepEqual(editor, {
+    tabId: tab.id,
+    connectionId: tab.connectionId,
+    key: f.issue.key,
+    field: 'assignee',
+  });
+  assert.match(f.errors.at(-1)!, /closing/);
+  f.h.release(50);
+  f.dispose();
+});
+
+for (const mode of ['deferred', 'navigation-refused', 'canceled', 'expired'])
+  test(`handoff retains delivery through blocked navigation: ${mode}`, async () => {
+    const f = await recoveryFixture();
+    let receive!: (state: any) => void;
+    const delivery = {
+      session: 'session',
+      id: 'delivery',
+      expiresAt: Date.now() + 60_000,
+      intent: { kind: 'view', view: 'triage' },
+    };
+    const acks: unknown[] = [];
+    let attempts = 0,
+      navigated = 0,
+      rejected = 0,
+      canceled = 0;
+    let blocked = true,
+      deferred = mode !== 'navigation-refused';
+    Object.assign(f.d.window.canopy, {
+      onHandoff: (fn: typeof receive) => {
+        receive = fn;
+        return () => {};
+      },
+      handoffReady: async () => ({ session: 'session', delivery }),
+      handoffAck: async (...args: unknown[]) => {
+        acks.push(args);
+      },
+      handoffCancel: async () => {
+        canceled++;
+      },
+    });
+    const declaration = findNode(
+      sourceFile(
+        process.env.CANOPY_HANDOFF_SOURCE ?? 'src/renderer/work-handoff.ts',
+      ),
+      (n): n is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(n) && n.name?.getText() === 'useWorkHandoff',
+    );
+    const hook = execute(
+      `() => { ${declaration.getText().replace(/^export /, '')}; return useWorkHandoff; }`,
+      {
+        useRef: React.useRef,
+        useState: React.useState,
+        useEffect: React.useEffect,
+        window: f.d.window,
+        crypto: { randomUUID: () => 'owner' },
+      },
+    )();
+    function Component() {
+      hook(
+        true,
+        () => {
+          attempts++;
+          if (blocked) return false;
+          navigated++;
+        },
+        () => rejected++,
+        deferred,
+      );
+      return null;
+    }
+    try {
+      await act(async () => f.root.render(React.createElement(Component)));
+      assert.equal(navigated, 0);
+      assert.equal(attempts, mode === 'navigation-refused' ? 1 : 0);
+      assert.deepEqual(acks, [], 'blocked delivery cannot acknowledge opened');
+      if (mode === 'canceled')
+        await act(async () =>
+          receive({ session: 'session', canceledId: delivery.id }),
+        );
+      if (mode === 'expired') delivery.expiresAt = 0;
+      blocked = false;
+      deferred = false;
+      await act(async () => f.root.render(React.createElement(Component)));
+      if (mode === 'canceled') {
+        assert.equal(navigated, 0);
+        assert.deepEqual(acks, []);
+      } else {
+        assert.equal(navigated, mode === 'expired' ? 0 : 1);
+        assert.equal(rejected, mode === 'expired' ? 1 : 0);
+        assert.deepEqual(acks, [
+          ['session', 'delivery', mode === 'expired' ? 'rejected' : 'opened'],
+        ]);
+      }
+    } finally {
+      await f.close();
+    }
+    assert.equal(canceled, 1);
+  });
+
+for (const kind of ['apply', 'undo'])
+  test(`failed provider drain releases preload transfer admission and renderer ownership: ${kind}`, async () => {
+    const d = dom();
+    d.window.document.body.inert = false;
+    const h = rendererFixture(d.window.document),
+      prior = gate();
+    const editing = h.controller.track(async () => {
+      await prior.promise;
+    });
+    const rejectedEdit = assert.rejects(editing, /provider failed/);
+    const ast = sourceFile(
+      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+    );
+    const panel = findNode(
+      ast,
+      (n): n is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(n) &&
+        n.tagName.getText() === 'WorkspaceBackupPanel',
+    );
+    const attr = panel.attributes.properties.find(
+      (p) => ts.isJsxAttribute(p) && p.name.getText() === 'onApply',
+    ) as ts.JsxAttribute;
+    const applying = execute(
+      (attr.initializer as ts.JsxExpression).expression!.getText(),
+      {
+        ...h.context,
+        saveWorkspace: h.save,
+        setWorkspaceTransferActive() {},
+      },
+    )((before: () => Promise<void>, drain: () => Promise<void>) =>
+      kind === 'apply'
+        ? h.api.applyWorkspaceImport('accepted', before, drain)
+        : h.api.rollbackWorkspaceImport(before, drain),
+    );
+    const rejectedApply = assert.rejects(applying, /provider failed/);
+    assert.equal(h.controller.blocked, true);
+    await assert.rejects(h.api.update('sample', 'ONE', {}), /transfer/);
+    prior.reject(Error('provider failed'));
+    await rejectedEdit;
+    await rejectedApply;
+    assert.equal(h.controller.blocked, false);
+    assert.equal(d.window.document.body.inert, false);
+    assert.equal(h.writes.length, 0);
+    assert.equal(h.calls.includes('canopy:applyWorkspaceImport'), false);
+    assert.equal(h.calls.includes('canopy:rollbackWorkspaceImport'), false);
+    await assert.doesNotReject(() =>
+      h.api.withIssueMutations(async (writes) => {
+        await writes.update('sample', 'ONE', {});
+        return true;
+      }),
+    );
+    await assert.doesNotReject(() => h.save(h.workspaceRef.current));
+    assert.equal(h.writes.length, 1);
+    h.dispose();
+    d.window.close();
+  });

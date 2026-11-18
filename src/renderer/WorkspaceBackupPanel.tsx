@@ -14,7 +14,10 @@ export function WorkspaceBackupPanel({
   connections: Connection[];
   flush: () => Promise<void>;
   onApply: (
-    operation: (beforeTransfer: () => Promise<void>) => Promise<Workspace>,
+    operation: (
+      beforeTransfer: () => Promise<void>,
+      beforeBarrier: () => Promise<void>,
+    ) => Promise<Workspace>,
   ) => Promise<void>;
 }) {
   const [exported, setExported] = useState<{
@@ -241,10 +244,11 @@ export function WorkspaceBackupPanel({
                     void run(async () => {
                       const token = preview.token;
                       setPreview(null);
-                      await onApply((beforeTransfer) =>
+                      await onApply((beforeTransfer, beforeBarrier) =>
                         window.canopy.applyWorkspaceImport(
                           token,
                           beforeTransfer,
+                          beforeBarrier,
                         ),
                       );
                       setCanUndo(true);
@@ -264,8 +268,11 @@ export function WorkspaceBackupPanel({
           <button
             onClick={() =>
               void run(async () => {
-                await onApply((beforeTransfer) =>
-                  window.canopy.rollbackWorkspaceImport(beforeTransfer),
+                await onApply((beforeTransfer, beforeBarrier) =>
+                  window.canopy.rollbackWorkspaceImport(
+                    beforeTransfer,
+                    beforeBarrier,
+                  ),
                 );
                 setCanUndo(false);
                 setMessage('Import undone.');

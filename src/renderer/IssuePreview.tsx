@@ -264,9 +264,9 @@ export function IssuePreview({
           });
           if (previewGeneration.current === requestGeneration) {
             setData({ ...data, issue: { ...issue, links: data.issue.links } });
-            onChanged(issue);
             setLabelsSaved(true);
           }
+          onChanged(issue);
         } catch (reason) {
           failed(reason);
         }

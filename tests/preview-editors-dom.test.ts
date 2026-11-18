@@ -375,7 +375,7 @@ test('an earlier label save cannot release or overwrite a later issue save', asy
       f.host.querySelector<HTMLInputElement>('.github-labels input')!.click(),
     );
     await act(async () => first.resolve(issue));
-    assert.equal(f.changed(), 0);
+    assert.equal(f.changed(), 1);
     assert.equal(
       f.host.querySelector<HTMLInputElement>('.github-labels input')!.disabled,
       true,
@@ -388,7 +388,7 @@ test('an earlier label save cannot release or overwrite a later issue save', asy
         labels: [{ id: 'bug', name: 'bug' }],
       }),
     );
-    assert.equal(f.changed(), 1);
+    assert.equal(f.changed(), 2);
     assert.equal(
       f.host.querySelector<HTMLInputElement>('.github-labels input')!.disabled,
       false,
@@ -423,7 +423,7 @@ for (const outcome of ['success', 'failure'] as const) {
           first.resolve({ ...issue, summary: 'Outdated issue result' });
         else first.reject(new Error('Outdated issue failure'));
       });
-      assert.equal(f.changed(), 0);
+      assert.equal(f.changed(), outcome === 'success' ? 1 : 0);
       assert.doesNotMatch(f.host.textContent!, /Outdated issue/);
       assert.equal(
         f.host.querySelector<HTMLInputElement>('.github-labels input')!
@@ -434,7 +434,7 @@ for (const outcome of ['success', 'failure'] as const) {
       await act(async () =>
         second.resolve({ ...issue, labels: [{ id: 'bug', name: 'bug' }] }),
       );
-      assert.equal(f.changed(), 1);
+      assert.equal(f.changed(), outcome === 'success' ? 2 : 1);
       assert.equal(
         f.host.querySelector<HTMLInputElement>('.github-labels input')!
           .disabled,

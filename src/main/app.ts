@@ -837,6 +837,16 @@ async function start(
     canUndoWorkspaceImport: () => transfer.canUndo(),
     rollbackWorkspaceImport: () => trackWorkspaceTransfer(transfer.rollback()),
     reloadWorkspace: () => window?.webContents.reload(),
+    workspaceReloadFailed: async () => {
+      await dialog.showMessageBox(window!, {
+        type: 'error',
+        message:
+          'Workspace transferred, but reload failed. Restart Canopy before editing.',
+        buttons: ['OK'],
+        defaultId: 0,
+        cancelId: 0,
+      });
+    },
     workspaceInitialized: (error: string | null) => {
       workspaceInitializationError =
         error === null ? undefined : text(error, 10000);

@@ -432,12 +432,15 @@ export interface CanopyAPI {
   applyWorkspaceImport(
     token: string,
     beforeTransfer?: () => Promise<void>,
+    beforeBarrier?: () => Promise<void>,
   ): Promise<Workspace>;
   rollbackWorkspaceImport(
     beforeTransfer?: () => Promise<void>,
+    beforeBarrier?: () => Promise<void>,
   ): Promise<Workspace>;
   canUndoWorkspaceImport(): Promise<boolean>;
   reloadWorkspace(): Promise<void>;
+  workspaceReloadFailed(): Promise<void>;
   workspaceInitialized(error: string | null): Promise<void>;
   loadWorkspace(): Promise<Workspace | null>;
   saveWorkspace(

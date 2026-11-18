@@ -471,8 +471,18 @@ function restoreModel(
   };
   const window = {
     canopy: {
-      saveWorkspace: (value: unknown, explicitFlush = false) =>
-        handlers.get('canopy:saveWorkspace')!(event, value, explicitFlush),
+      saveWorkspace: (value: unknown, explicitFlush = false) => {
+        const result = handlers.get('canopy:saveWorkspace')!(
+          event,
+          value,
+          explicitFlush,
+        );
+        if (saveEvents.at(-1) === 'flush-returned') {
+          assert.equal(explicitFlush, false);
+          saveEvents.push('ordinary-save-handler');
+        }
+        return result;
+      },
       flushWorkspace: async () => {
         if (
           (options.missingSubmission ||
@@ -482,6 +492,7 @@ function restoreModel(
         ) {
           if (options.autosaveSubmission)
             await window.canopy.saveWorkspace(rendered);
+          if (options.autosaveAfterFlush) lateAutosave = true;
           return;
         }
         if (options.unobservedRefresh && reloads) {
@@ -503,9 +514,20 @@ function restoreModel(
       loadWorkspace: () => handlers.get('canopy:loadWorkspace')!(event),
     },
   };
+  const saveEvents: string[] = [];
+  let lateAutosave = false;
   const page = {
     evaluate: async (callback: (...args: any[]) => unknown, value: unknown) => {
-      return await execute(`(${callback})`, { window, document })(value);
+      const result = await execute(`(${callback})`, { window, document })(
+        value,
+      );
+      if (lateAutosave) {
+        lateAutosave = false;
+        saveEvents.push('flush-returned');
+        await window.canopy.saveWorkspace(rendered);
+        saveEvents.push('ordinary-save-handled');
+      }
+      return result;
     },
     reload: async () => {
       if (options.outgoingBeforeReload) {
@@ -724,11 +746,21 @@ function restoreModel(
         'cleanupFailure' in options
       )
         throw options.cleanupFailure;
-      if (
-        options.autosaveAfterFlush &&
-        callback.toString().includes('workspace: audit.submittedWorkspace')
-      )
-        void window.canopy.saveWorkspace(rendered);
+      if (saveEvents.at(-1) === 'ordinary-save-handled') {
+        const audit = owner.selfConnectionAudit;
+        let submitted = audit.submittedWorkspace;
+        Object.defineProperty(audit, 'submittedWorkspace', {
+          configurable: true,
+          get() {
+            if (saveEvents.at(-1) === 'ordinary-save-handled')
+              saveEvents.push('submission-read');
+            return submitted;
+          },
+          set(value) {
+            submitted = value;
+          },
+        });
+      }
       cleaningHandlers = callback.toString().includes('const errors = []');
       if (cleaningHandlers) cleanupAudit = owner.selfConnectionAudit;
       try {
@@ -756,6 +788,7 @@ function restoreModel(
     )();
   return {
     run,
+    saveEvents,
     saved,
     fixture,
     store,
@@ -844,6 +877,14 @@ for (const option of [
   test(`restoration refuses ${option} and releases save ownership`, async () => {
     const m = restoreModel({ [option]: true });
     await assert.rejects(m.run(), { code: 'ERR_ASSERTION' });
+    if (option === 'autosaveAfterFlush')
+      assert.deepEqual(m.saveEvents, [
+        'flush-returned',
+        'ordinary-save-handler',
+        'ordinary-save-handled',
+        'submission-read',
+      ]);
+    if (option === 'missingSubmission') assert.deepEqual(m.saveEvents, []);
     assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
     assert.equal(m.owner.selfConnectionAudit, undefined);
     assert.equal(m.cleanupAudit()?.readingSubmission, false);
@@ -1610,6 +1651,14 @@ for (const option of [
         ? /has no scroll viewport/
         : { code: 'ERR_ASSERTION' },
     );
+    if (option === 'autosaveAfterFlush')
+      assert.deepEqual(model.saveEvents, [
+        'flush-returned',
+        'ordinary-save-handler',
+        'ordinary-save-handled',
+        'submission-read',
+      ]);
+    if (option === 'missingSubmission') assert.deepEqual(model.saveEvents, []);
     if (option === 'lostValidScroll' || option === 'wrongViewportScroll')
       assert.equal(
         model.offset(),

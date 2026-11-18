@@ -16,6 +16,7 @@ export class WorkspaceClose {
     this.assertWritable();
     this.transferring = true;
     this.pauseInput(document);
+    return Promise.all(this.pending);
   }
   endTransfer() {
     this.transferring = false;

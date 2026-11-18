@@ -79,8 +79,9 @@ export function handoffNavigation(
 /** Acknowledge after React commits navigation; no polling, stale session or async navigation. */
 export function useWorkHandoff(
   enabled: boolean,
-  navigate: (intent: WorkHandoff) => void,
+  navigate: (intent: WorkHandoff) => void | false,
   reject: () => void,
+  deferred = false,
 ): void {
   const handlers = useRef({ navigate, reject });
   handlers.current = { navigate, reject };
@@ -155,23 +156,24 @@ export function useWorkHandoff(
   }, [enabled]);
   useEffect(() => {
     if (
+      deferred ||
       !delivery ||
       delivery.session !== session.current ||
       delivery.id === lastId.current
     )
       return;
-    lastId.current = delivery.id;
     let result: 'opened' | 'rejected' = 'rejected';
     try {
       if (delivery.expiresAt <= Date.now()) throw new Error('Expired command.');
-      handlers.current.navigate(delivery.intent);
+      if (handlers.current.navigate(delivery.intent) === false) return;
       result = 'opened';
     } catch {
       handlers.current.reject();
     }
+    lastId.current = delivery.id;
     setDelivery(null);
     setCompleted({ delivery, result });
-  }, [delivery]);
+  }, [delivery, deferred, navigate]);
   useEffect(() => {
     if (!completed || completed.delivery.session !== session.current) return;
     const { delivery, result } = completed;

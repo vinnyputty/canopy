@@ -6,13 +6,17 @@ let releaseHandler: ((attempt: number) => void) | undefined;
 let closeAttempt: number | undefined;
 let releasedThrough = 0;
 let transferInProgress = false;
+let transferAdmitted = false;
 async function transferWorkspace(
   channel: string,
   beforeTransfer?: () => Promise<void>,
   token?: string,
+  beforeBarrier?: () => Promise<void>,
 ) {
-  transferInProgress = true;
+  transferAdmitted = true;
   try {
+    if (beforeBarrier) await beforeBarrier();
+    transferInProgress = true;
     await beforeTransfer?.();
     return await ipcRenderer.invoke(
       channel,
@@ -20,6 +24,7 @@ async function transferWorkspace(
     );
   } catch (error) {
     transferInProgress = false;
+    transferAdmitted = false;
     throw error;
   }
 }
@@ -217,18 +222,30 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:chooseWorkspaceBackup'),
   previewWorkspaceImport: (backup, mapping, mode) =>
     ipcRenderer.invoke('canopy:previewWorkspaceImport', backup, mapping, mode),
-  applyWorkspaceImport: (token, beforeTransfer) =>
-    transferWorkspace('canopy:applyWorkspaceImport', beforeTransfer, token),
+  applyWorkspaceImport: (token, beforeTransfer, beforeBarrier) =>
+    transferWorkspace(
+      'canopy:applyWorkspaceImport',
+      beforeTransfer,
+      token,
+      beforeBarrier,
+    ),
   canUndoWorkspaceImport: () =>
     ipcRenderer.invoke('canopy:canUndoWorkspaceImport'),
-  rollbackWorkspaceImport: (beforeTransfer) =>
-    transferWorkspace('canopy:rollbackWorkspaceImport', beforeTransfer),
+  rollbackWorkspaceImport: (beforeTransfer, beforeBarrier) =>
+    transferWorkspace(
+      'canopy:rollbackWorkspaceImport',
+      beforeTransfer,
+      undefined,
+      beforeBarrier,
+    ),
   reloadWorkspace: () => ipcRenderer.invoke('canopy:reloadWorkspace'),
+  workspaceReloadFailed: () =>
+    ipcRenderer.invoke('canopy:workspaceReloadFailed'),
   workspaceInitialized: (error) =>
     ipcRenderer.invoke('canopy:workspaceInitialized', error),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
   saveWorkspace: (workspace, attempt, explicitFlush, transferFlush) => {
-    if (transferInProgress && !transferFlush)
+    if (transferAdmitted && !transferFlush)
       return Promise.reject(
         new Error('Workspace transfer is in progress; wait for reload.'),
       );
@@ -255,7 +272,7 @@ for (const [name, method] of Object.entries(api)) {
         return Promise.reject(
           new Error('Workspace is closing; wait for saving to finish.'),
         );
-      if (transferInProgress && name !== 'reloadWorkspace')
+      if (transferAdmitted && name !== 'reloadWorkspace')
         return Promise.reject(
           new Error('Workspace transfer is in progress; wait for reload.'),
         );

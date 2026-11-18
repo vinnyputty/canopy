@@ -1633,7 +1633,8 @@ export function App() {
         }
         return window.canopy.reloadWorkspace();
       })
-      .catch((error) => {
+      .catch(async (error) => {
+        await window.canopy.workspaceReloadFailed().catch(() => {});
         workspaceTransferReload.current = undefined;
         throw new Error(
           'Workspace transferred, but reload failed. Restart Canopy before editing.',
@@ -2219,7 +2220,7 @@ export function App() {
       activeTab &&
       snapshot &&
       !restoreScroll(activeTab) &&
-      workspaceClose.current.paused
+      workspaceClose.current.blocked
     )
       pendingScrollRestore.current = activeTab.id;
   }, [snapshot, restoreScroll]);
@@ -3035,17 +3036,19 @@ export function App() {
         !(await pickers.validate(connectionId, key, patch.assigneeId))
       )
         return;
-      setEditor((current) =>
-        current?.connectionId === connectionId && current.key === key
-          ? null
-          : current,
-      );
-      const success = await mutations.update(
+      const updating = mutations.update(
         connectionId,
         key,
         patch,
         pickers.values[`${connectionId}:${key}`],
       );
+      if (!workspaceClose.current.blocked)
+        setEditor((current) =>
+          current?.connectionId === connectionId && current.key === key
+            ? null
+            : current,
+        );
+      const success = await updating;
       if (success && field === 'status') pickers.invalidate(connectionId, key);
       if (!success && field !== 'summary') {
         pickers.rejected(connectionId, key, field);
@@ -3971,6 +3974,7 @@ export function App() {
   useWorkHandoff(
     handoffEnabled,
     (intent) => {
+      if (workspaceClose.current.blocked) return false;
       const data = allRefreshTabs.flatMap((tab) =>
         confirmedSnapshots[tab.id]
           ? [
@@ -4007,6 +4011,7 @@ export function App() {
       }
     },
     () => setErrors((current) => ({ ...current, app: HANDOFF_REJECTION })),
+    workspaceClose.current.blocked,
   );
 
   const previewPane = previewOpen ? (
@@ -6521,15 +6526,25 @@ export function App() {
               }
               const failure = await workspaceClose.current.track(async () => {
                 try {
-                  workspaceClose.current.beginTransfer(document);
-                  await operation(() =>
-                    saveWorkspace(workspaceRef.current, true),
+                  const admitted =
+                    workspaceClose.current.beginTransfer(document);
+                  await operation(
+                    () =>
+                      saveWorkspace(
+                        workspaceRef.current,
+                        true,
+                        workspaceClose.current.owner,
+                      ),
+                    async () => {
+                      await admitted;
+                    },
                   );
                   workspaceTransferCommitted.current = true;
                 } catch (error) {
                   workspaceTransferBusy.current = false;
                   workspaceClose.current.endTransfer();
                   setWorkspaceTransferActive(false);
+                  storeWorkspace((current) => ({ ...current }));
                   return { error };
                 }
               });

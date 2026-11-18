@@ -27,10 +27,10 @@ export function rendererFixture(
   document: Document,
   write: (value: Workspace) => Promise<void> = async () => {},
   registerImmediately = true,
+  rendererSource = process.env.CANOPY_CLOSE_RENDERER_SOURCE ??
+    'src/renderer/App.tsx',
 ) {
-  const source = sourceFile(
-    process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
-  );
+  const source = sourceFile(rendererSource);
   const controller = new WorkspaceClose();
   const workspaceClose = { current: controller };
   const workspaceRef = {
@@ -44,6 +44,7 @@ export function rendererFixture(
   };
   const calls: string[] = [],
     writes: Workspace[] = [];
+  const saveArguments: unknown[][] = [];
   let errors: Record<string, string> = {};
   let api!: CanopyAPI;
   let forward: ((name: string, ...values: unknown[]) => unknown) | undefined;
@@ -52,6 +53,7 @@ export function rendererFixture(
       const value = values[0] as Workspace;
       calls.push(name);
       if (name === 'canopy:saveWorkspace') {
+        saveArguments.push(values);
         await write(value);
         writes.push(structuredClone(value));
       } else return forward?.(name, ...values);
@@ -157,6 +159,7 @@ export function rendererFixture(
     workspaceRef,
     calls,
     writes,
+    saveArguments,
     context,
     setWorkspace,
     save,
