@@ -953,7 +953,6 @@ async function start(
     created.webContents.on('did-start-navigation', (details) => {
       if (!details.isMainFrame || details.isSameDocument) return;
       workspaceDocument++;
-      workspaceInitializationError = undefined;
       // Reload/navigation can destroy the renderer before its cancellation IPC
       // arrives. Release the departing document's provider reads in main too.
       for (const controller of trees.values()) controller.abort();

@@ -324,6 +324,10 @@ function restoreModel(
       html,
       pathToFileURL,
     });
+  const rendererApply = deferred();
+  const originalGate = deferred();
+  const originalStarted = deferred();
+  let cleanupAudit: Record<string, any> | undefined;
   const originalSave = trusted((value: unknown) => {
     if ('saveFailure' in options) throw options.saveFailure;
     store.save(value);
@@ -332,7 +336,36 @@ function restoreModel(
     ['canopy:saveWorkspace', originalSave],
     ['canopy:loadWorkspace', trusted(store.load)],
     ['canopy:connections', () => 'original connections'],
-    ['canopy:tree', (_event, _connection, key) => new DemoProvider().tree(key)],
+    ...(options.productionReload
+      ? [
+          [
+            'canopy:tree',
+            async (_event: unknown, connection: string, key: string) => {
+              originalTreeCalls++;
+              originalStarted.resolve();
+              if (options.cancelBeforeProvider) await originalGate.promise;
+              const confirmed = await new DemoProvider().tree(key);
+              confirmed.fetchedAt = options.unobservedRefresh
+                ? saved.seenRoots![seenRootKey(connection, key)].touchedAt
+                : 1794020324655;
+              if (options.refreshedValues) {
+                confirmed.issues[0].summary = 'Observed newer summary';
+                confirmed.issues[0].commentCount = 42;
+                confirmed.issues.find(
+                  (issue) => issue.key === 'CAN-101',
+                )!.commentCount = 99;
+              }
+              if (options.newIssue)
+                confirmed.issues.push({
+                  ...structuredClone(confirmed.issues[0]),
+                  key: 'CAN-999',
+                  summary: 'New issue',
+                });
+              return confirmed;
+            },
+          ] as [string, (...args: any[]) => any],
+        ]
+      : []),
   ]);
   const handlers = new Map<string, (...args: any[]) => any>(
     [...originals].map(([key]) => [key, () => undefined]),
@@ -347,8 +380,20 @@ function restoreModel(
     },
     selfConnectionAudit: { handlers: originals },
   };
+  let cleaningHandlers = false;
+  const attemptedRestorations: string[] = [];
   const ipcMain = {
-    removeHandler: (key: string) => handlers.delete(key),
+    removeHandler: (key: string) => {
+      if (cleaningHandlers) {
+        attemptedRestorations.push(key);
+        if (
+          key === 'canopy:loadWorkspace' &&
+          'handlerCleanupFailure' in options
+        )
+          throw options.handlerCleanupFailure;
+      }
+      return handlers.delete(key);
+    },
     handle: (key: string, handler: (...args: any[]) => any) => {
       assert(!handlers.has(key));
       handlers.set(key, handler);
@@ -357,7 +402,6 @@ function restoreModel(
   let reloads = 0,
     rendered: Workspace & { privatePayload: string } = structuredClone(fixture);
   let offset = 0;
-  let evaluating = false;
   const viewport = {
     get scrollHeight() {
       return (
@@ -372,24 +416,45 @@ function restoreModel(
       return offset;
     },
     set scrollTop(value: number) {
-      assert.equal(
-        evaluating,
-        false,
-        'Audit must not mutate the live viewport',
-      );
       offset = Math.max(
         0,
         Math.min(Number(options.viewportMax ?? 1000), value),
       );
     },
   };
+  const auditViewport = {
+    get scrollHeight() {
+      return viewport.scrollHeight;
+    },
+    get clientHeight() {
+      return viewport.clientHeight;
+    },
+    get scrollTop() {
+      return viewport.scrollTop;
+    },
+    set scrollTop(_value: number) {
+      assert.fail('Audit must not mutate the live viewport');
+    },
+  };
   const document = {
     querySelector: (selector: string) => {
       assert.equal(selector, '.tree-scroll');
-      return options.missingViewport ? null : viewport;
+      return options.missingViewport ? null : auditViewport;
     },
   };
   let refreshedAt: number | undefined;
+  let refreshWork = Promise.resolve();
+  let originalTreeCalls = 0;
+  const heldReplies: Promise<unknown>[] = [];
+  const settledReplies: unknown[] = [];
+  const holdReply = (key: string) => {
+    const promise = handlers.get('canopy:tree')!(event, 'demo', key);
+    heldReplies.push(
+      promise.catch((error: unknown) => {
+        settledReplies.push(error);
+      }),
+    );
+  };
   const window = {
     canopy: {
       saveWorkspace: (value: unknown) =>
@@ -397,6 +462,13 @@ function restoreModel(
       flushWorkspace: async () => {
         if (options.missingSubmission && reloads) return;
         await window.canopy.saveWorkspace(rendered);
+        if (options.lateRefresh && reloads) {
+          const active = rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!;
+          holdReply(active.rootKey);
+          holdReply('INACTIVE-999');
+        }
         if (options.corruptPersistence && reloads) store.save(fixture);
       },
       loadWorkspace: () => handlers.get('canopy:loadWorkspace')!(event),
@@ -404,12 +476,7 @@ function restoreModel(
   };
   const page = {
     evaluate: async (callback: (...args: any[]) => unknown, value: unknown) => {
-      evaluating = true;
-      try {
-        return await execute(`(${callback})`, { window, document })(value);
-      } finally {
-        evaluating = false;
-      }
+      return await execute(`(${callback})`, { window, document })(value);
     },
     reload: async () => {
       reloads++;
@@ -423,132 +490,118 @@ function restoreModel(
         saved,
         'Save guard must own persistence through reload',
       );
-      if (options.productionReload) {
-        rendered = (await hydrateWorkspace(rendered)) as typeof saved;
-        const active = rendered.tabs.find(
-          (tab) => tab.id === rendered.activeTabId,
-        )!;
-        const confirmed = await handlers.get('canopy:tree')!(
-          event,
-          active.connectionId,
-          active.rootKey,
-        );
-        confirmed.fetchedAt = options.unobservedRefresh
-          ? rendered.seenRoots![
-              seenRootKey(active.connectionId, active.rootKey)
-            ].touchedAt
-          : 1794020324655;
-        if (options.refreshedValues) {
-          confirmed.issues[0].summary = 'Observed newer summary';
-          confirmed.issues[0].commentCount = 42;
-          confirmed.issues.find(
-            (issue: TreeSnapshot['issues'][number]) => issue.key === 'CAN-101',
-          )!.commentCount = 99;
+      refreshWork = (async () => {
+        if (options.productionReload) {
+          rendered = (await hydrateWorkspace(rendered)) as typeof saved;
+          const active = rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!;
+          const confirmed = await (
+            options.unobservedRefresh ? originals : handlers
+          ).get('canopy:tree')!(event, active.connectionId, active.rootKey);
+          if (options.holdRendererApply) await rendererApply.promise;
+          refreshedAt = confirmed.fetchedAt;
+          if (options.secondRefresh) holdReply(active.rootKey);
+          const refresh = findNode(
+            rendererAst,
+            (node): node is ts.CallExpression =>
+              ts.isCallExpression(node) &&
+              node.expression.getText() === 'setWorkspace' &&
+              node.arguments[0]
+                ?.getText()
+                .includes('[seenKey]: seedOrExtend(') === true,
+          );
+          rendered = execute(refresh.arguments[0].getText(), {
+            tab: active,
+            confirmed,
+            boundRoots,
+            seedOrExtend,
+            seenRootKey,
+          })(rendered);
+          execute(callbackOf(rendererAst, 'restoreScroll'), {
+            workspaceClose: { current: new WorkspaceClose() },
+            scrollRef: { current: viewport },
+            scrollPositions: { current: new Map() },
+            setWorkspace: (
+              update: (current: typeof rendered) => typeof rendered,
+            ) => {
+              rendered = update(rendered);
+            },
+          })(active);
+        } else
+          viewport.scrollTop =
+            rendered.tabs.find((tab) => tab.id === rendered.activeTabId)
+              ?.scrollTop ?? 0;
+        if (options.wrongViewportScroll) viewport.scrollTop = 0;
+        if (options.lostValidScroll) {
+          viewport.scrollTop = 0;
+          rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!.scrollTop = 0;
         }
-        if (options.newIssue)
-          confirmed.issues.push({
-            ...structuredClone(confirmed.issues[0]),
-            key: 'CAN-999',
-            summary: 'New issue',
+        if (options.wrongInactiveScroll)
+          rendered.tabs.find(
+            (tab) => tab.id !== rendered.activeTabId,
+          )!.scrollTop = 0;
+        if (options.wrongSelectedKey) rendered.tabs[0].selectedKey = 'CAN-101';
+        if (options.wrongSavedView)
+          rendered.savedViews![0].name = 'Corrupted saved view';
+        if (options.wrongActiveSavedView)
+          rendered.activeSavedViewId = 'assigned-to-me';
+        if (options.wrongSeenBaseline)
+          Object.values(rendered.seenRoots!)[0].issues['CAN-100'].seenAt++;
+        if (options.wrongSeenField)
+          rendered.seenRoots!['demo:CAN-100'].issues['CAN-100'].fields.Summary =
+            'Corrupted summary';
+        if (options.wrongSeenCount)
+          rendered.seenRoots!['demo:CAN-100'].issues['CAN-101'].commentCount =
+            999;
+        if (options.wrongTouchedAt)
+          Object.values(rendered.seenRoots!)[0].touchedAt = 1;
+        if (options.invalidTouchedAt)
+          Object.values(rendered.seenRoots!)[0].touchedAt = Number.NaN;
+        if (options.unexpectedIssue)
+          Object.values(rendered.seenRoots!)[0].issues['CAN-998'] = {
+            seenAt: 1,
+            fields: { Summary: 'Unexpected' },
+          };
+        if (options.historicalTouchedAt)
+          rendered.seenRoots!['demo:CAN-9999'].touchedAt++;
+        if (options.wrongSubmittedScroll)
+          rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!.scrollTop = 0;
+        if (options.wrongOrder) rendered.tabs.reverse();
+        if (options.wrongId) rendered.tabs[0].id = 'foreign-tab';
+        if (options.wrongRoot) rendered.tabs[0].rootKey = 'CAN-200';
+        if (options.wrongCount) rendered.tabs.pop();
+        if (options.wrongSelection)
+          rendered.activeTabId =
+            rendered.tabs.find((tab) => tab.id !== saved.activeTabId)?.id ??
+            'foreign-active';
+        if (options.wrongReading)
+          Object.assign(rendered, { reading: { textSize: 'large' } });
+        if (options.wrongRootViews)
+          Object.assign(rendered, {
+            rootViews: { foreign: { hideDone: true } },
           });
-        owner.selfConnectionAudit.refreshedRoots[
-          seenRootKey(active.connectionId, active.rootKey)
-        ] = structuredClone(confirmed);
-        if (options.unobservedRefresh)
-          delete owner.selfConnectionAudit.refreshedRoots[
-            seenRootKey(active.connectionId, active.rootKey)
-          ];
-        refreshedAt = confirmed.fetchedAt;
-        const refresh = findNode(
-          rendererAst,
-          (node): node is ts.CallExpression =>
-            ts.isCallExpression(node) &&
-            node.expression.getText() === 'setWorkspace' &&
-            node.arguments[0]
-              ?.getText()
-              .includes('[seenKey]: seedOrExtend(') === true,
-        );
-        rendered = execute(refresh.arguments[0].getText(), {
-          tab: active,
-          confirmed,
-          boundRoots,
-          seedOrExtend,
-          seenRootKey,
-        })(rendered);
-        execute(callbackOf(rendererAst, 'restoreScroll'), {
-          workspaceClose: { current: new WorkspaceClose() },
-          scrollRef: { current: viewport },
-          scrollPositions: { current: new Map() },
-          setWorkspace: (
-            update: (current: typeof rendered) => typeof rendered,
-          ) => {
-            rendered = update(rendered);
-          },
-        })(active);
-      } else
-        viewport.scrollTop =
-          rendered.tabs.find((tab) => tab.id === rendered.activeTabId)
-            ?.scrollTop ?? 0;
-      if (options.wrongViewportScroll) viewport.scrollTop = 0;
-      if (options.lostValidScroll) {
-        viewport.scrollTop = 0;
-        rendered.tabs.find(
-          (tab) => tab.id === rendered.activeTabId,
-        )!.scrollTop = 0;
-      }
-      if (options.wrongInactiveScroll)
-        rendered.tabs.find(
-          (tab) => tab.id !== rendered.activeTabId,
-        )!.scrollTop = 0;
-      if (options.wrongSelectedKey) rendered.tabs[0].selectedKey = 'CAN-101';
-      if (options.wrongSavedView)
-        rendered.savedViews![0].name = 'Corrupted saved view';
-      if (options.wrongActiveSavedView)
-        rendered.activeSavedViewId = 'assigned-to-me';
-      if (options.wrongSeenBaseline)
-        Object.values(rendered.seenRoots!)[0].issues['CAN-100'].seenAt++;
-      if (options.wrongSeenField)
-        rendered.seenRoots!['demo:CAN-100'].issues['CAN-100'].fields.Summary =
-          'Corrupted summary';
-      if (options.wrongSeenCount)
-        rendered.seenRoots!['demo:CAN-100'].issues['CAN-101'].commentCount =
-          999;
-      if (options.wrongTouchedAt)
-        Object.values(rendered.seenRoots!)[0].touchedAt = 1;
-      if (options.invalidTouchedAt)
-        Object.values(rendered.seenRoots!)[0].touchedAt = Number.NaN;
-      if (options.unexpectedIssue)
-        Object.values(rendered.seenRoots!)[0].issues['CAN-998'] = {
-          seenAt: 1,
-          fields: { Summary: 'Unexpected' },
-        };
-      if (options.historicalTouchedAt)
-        rendered.seenRoots!['demo:CAN-9999'].touchedAt++;
-      if (options.wrongSubmittedScroll)
-        rendered.tabs.find(
-          (tab) => tab.id === rendered.activeTabId,
-        )!.scrollTop = 0;
-      if (options.wrongOrder) rendered.tabs.reverse();
-      if (options.wrongId) rendered.tabs[0].id = 'foreign-tab';
-      if (options.wrongRoot) rendered.tabs[0].rootKey = 'CAN-200';
-      if (options.wrongCount) rendered.tabs.pop();
-      if (options.wrongSelection)
-        rendered.activeTabId =
-          rendered.tabs.find((tab) => tab.id !== saved.activeTabId)?.id ??
-          'foreign-active';
-      if (options.wrongReading)
-        Object.assign(rendered, { reading: { textSize: 'large' } });
-      if (options.wrongRootViews)
-        Object.assign(rendered, { rootViews: { foreign: { hideDone: true } } });
+      })();
+      void refreshWork.catch(() => {});
+      if (!options.productionReload) await refreshWork;
     },
     getByRole: (role: string, args?: { name: string }) => ({
       role,
       name: args?.name,
       nth: (index: number) => ({ index }),
     }),
+    getByText: (text: string) => ({ text }),
     locator: (selector: string) => {
-      assert.equal(selector, '[role=tab] .tab-label b');
-      return {};
+      assert.ok(
+        ['[role=tab] .tab-label b', '.statusbar span[title]'].includes(
+          selector,
+        ),
+      );
+      return { selector };
     },
   };
   const expect = (value: any) => ({
@@ -559,21 +612,44 @@ function restoreModel(
         rendered.tabs.map((t) => t.rootKey),
         roots,
       ),
-    toHaveAttribute: async (key: string, expected: string) =>
+    toBeHidden: async () => {
+      rendererApply.resolve();
+      await refreshWork;
+    },
+    toHaveAttribute: async (key: string, expected: string) => {
+      if (key === 'title') {
+        rendererApply.resolve();
+        await refreshWork;
+      }
       assert.equal(
-        key === 'data-tab-id'
-          ? rendered.tabs[value.index].id
-          : String(
-              options.bothSelected ||
-                rendered.tabs[value.index].id === rendered.activeTabId,
-            ),
+        key === 'title'
+          ? new Date(refreshedAt!).toLocaleString()
+          : key === 'data-tab-id'
+            ? rendered.tabs[value.index].id
+            : String(
+                options.bothSelected ||
+                  rendered.tabs[value.index].id === rendered.activeTabId,
+              ),
         expected,
-      ),
+      );
+    },
     toBeDefined: () => assert.notEqual(value, undefined),
     toBe: (expected: unknown) => assert.equal(value, expected),
     toBeLessThan: (expected: number) =>
       assert.ok(value < expected, `${value} must be less than ${expected}`),
     toBeVisible: async () => {
+      if (value.text === 'Checking for changes') {
+        assert.equal(
+          typeof owner.selfConnectionAudit.releaseRefresh,
+          'function',
+        );
+        assert.equal(
+          refreshedAt,
+          undefined,
+          'Response must stay gated until refresh is visibly running',
+        );
+        return;
+      }
       const active = rendered.tabs.find((t) => t.id === rendered.activeTabId);
       assert.equal(value.role, 'tree');
       assert.equal(
@@ -582,6 +658,19 @@ function restoreModel(
       );
     },
     toEqual: (expected: unknown) => assert.deepEqual(value, expected),
+  });
+  expect.poll = (read: () => Promise<unknown>) => ({
+    toBe: async (value: unknown) => {
+      if (options.cancelBeforeProvider) {
+        await originalStarted.promise;
+        throw Error('readiness failed before provider reply');
+      }
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if ((await read()) === value) return;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(await read(), value);
+    },
   });
   const app = {
     evaluate: (callback: (...args: any[]) => unknown, value: unknown) => {
@@ -592,10 +681,16 @@ function restoreModel(
         'cleanupFailure' in options
       )
         throw options.cleanupFailure;
-      return execute(`(${callback})`, { globalThis: owner, structuredClone })(
-        { ipcMain },
-        value,
-      );
+      cleaningHandlers = callback.toString().includes('const errors = []');
+      if (cleaningHandlers) cleanupAudit = owner.selfConnectionAudit;
+      try {
+        return execute(`(${callback})`, { globalThis: owner, structuredClone })(
+          { ipcMain },
+          value,
+        );
+      } finally {
+        cleaningHandlers = false;
+      }
     },
   };
   const run = () =>
@@ -627,6 +722,31 @@ function restoreModel(
     rendered: () => rendered,
     offset: () => offset,
     refreshedAt: () => refreshedAt,
+    originalTreeCalls: () => originalTreeCalls,
+    settledReplies,
+    attemptedRestorations,
+    originalGate,
+    cleanupAudit: () => cleanupAudit,
+    finishRefresh: () => refreshWork,
+    settleReplies: async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(heldReplies),
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  Error('Held refresh requests did not settle during cleanup'),
+                ),
+              250,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
   };
 }
 
@@ -779,6 +899,7 @@ function lifecycle(
         view: { ...structuredClone(DEFAULT_VIEW), hideDone: true },
       },
     ],
+    seenRoots: { 'demo:CAN-106': { touchedAt: 1, issues: {} } },
     rootViews: {
       [JSON.stringify(['demo', 'CAN-106'])]: structuredClone(DEFAULT_VIEW),
     },
@@ -793,6 +914,7 @@ function lifecycle(
       }
     | undefined;
   let reloads = 0;
+  let treeReply = Promise.resolve();
   let flushes = 0;
   let resets = 0;
   let timerCancelled = false;
@@ -817,6 +939,7 @@ function lifecycle(
   ]) {
     handlers.set(`canopy:${channel}`, () => {});
   }
+  handlers.set('canopy:tree', () => ({ fetchedAt: 1, issues: [] }));
   const originals = new Map(handlers);
   const call = (name: string, ...args: unknown[]) =>
     handlers.get(`canopy:${name}`)!(null, ...args);
@@ -919,6 +1042,8 @@ function lifecycle(
       .replaceAll('export async function', 'async function') +
       '\nexpect.poll = callback => ({toBe: async value => { if (await callback() !== value) throw Error(\"poll mismatch\"); }});\n({captureSelfConnectionWorkspace, restoreSelfConnectionWorkspace, auditSelfConnections});',
     {
+      structuredClone,
+      TextEncoder,
       expect: (locator: { role: string; name?: string; index?: number }) => ({
         toBeDefined: () => assert.notEqual(locator, undefined),
         toBe: (value: unknown) => assert.equal(locator, value),
@@ -928,22 +1053,28 @@ function lifecycle(
             rendered.tabs.map((item) => item.rootKey),
             Array.from(roots),
           ),
-        toHaveAttribute: async (key: string, value: string) =>
+        toHaveAttribute: async (key: string, value: string) => {
+          if (key === 'title') await treeReply;
           assert.equal(
-            key === 'data-tab-id'
-              ? rendered.tabs[locator.index!].id
-              : String(
-                  rendered.tabs[locator.index!].id === rendered.activeTabId,
-                ),
+            key === 'title'
+              ? new Date(1).toLocaleString()
+              : key === 'data-tab-id'
+                ? rendered.tabs[locator.index!].id
+                : String(
+                    rendered.tabs[locator.index!].id === rendered.activeTabId,
+                  ),
             value,
-          ),
+          );
+        },
         toHaveCount: async (count: number) => {
           assert.equal(rendered.tabs.length, count);
           if (options.assertionFailure) throw failure;
         },
         toBeDisabled: async () => {},
         toBeEnabled: async () => {},
-        toBeHidden: async () => {},
+        toBeHidden: async () => {
+          await treeReply;
+        },
         toContainText: async () => {},
         toEqual: (value: unknown) =>
           assert.deepEqual(
@@ -951,6 +1082,7 @@ function lifecycle(
             JSON.parse(JSON.stringify(value)),
           ),
         toBeVisible: async () => {
+          if (locator.name === 'Checking for changes') return;
           const active = rendered.tabs.find(
             (item) => item.id === rendered.activeTabId,
           )!;
@@ -997,9 +1129,19 @@ function lifecycle(
         await context.window.canopy.saveWorkspace(workspace(['FIXTURE']));
       rendered = call('loadWorkspace') as typeof saved;
       refs.workspaceRef.current = rendered;
+      if (mainContext.selfConnectionAudit?.refreshedRoots) {
+        const active = rendered.tabs.find(
+          (tab) => tab.id === rendered.activeTabId,
+        )!;
+        treeReply = Promise.resolve(
+          call('tree', active.connectionId, active.rootKey),
+        ).then(() => {});
+        void treeReply.catch(() => {});
+      }
       if (hydrated) gate = hydrated.held;
     },
     getByRole: locator,
+    getByText: (name: string) => ({ name }),
     locator: () => ({}),
   };
   const mainContext = createContext({ ...main, ipcMain, structuredClone });
@@ -1450,6 +1592,112 @@ test('controlled refresh adds only the new issue baseline and keeps saved baseli
     captured.seenRoots!['demo:CAN-9999'],
   );
 });
+
+for (const failure of [false, true])
+  test(`single applied refresh preserves first seenAt and cancels later/background replies ${failure ? 'after comparison failure' : 'after captured save'}`, async () => {
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        newIssue: true,
+        secondRefresh: true,
+        lateRefresh: true,
+        wrongSeenField: failure,
+      },
+      await capturedReloadWorkspace(),
+    );
+    if (failure) await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+    else await model.run();
+    await model.settleReplies();
+    assert.equal(
+      model.originalTreeCalls(),
+      1,
+      'Later replies must stay gated before the original provider',
+    );
+    assert.equal(model.settledReplies.length, 3);
+    for (const error of model.settledReplies)
+      assert.match(String(error), /refresh canceled/);
+    const baseline =
+      model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-999'];
+    assert.equal(baseline.seenAt, 1794020324655);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+    for (const [key, handler] of model.originals)
+      assert.equal(model.handlers.get(key), handler);
+    assert.deepEqual(model.store.load(), model.saved);
+  });
+
+test('handler cleanup attempts every original and cancels held refreshes when one restoration throws', async () => {
+  const failure = Error('handler restore failed');
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      newIssue: true,
+      secondRefresh: true,
+      lateRefresh: true,
+      handlerCleanupFailure: failure,
+    },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), (error) => error === failure);
+  await model.settleReplies();
+  assert.deepEqual(model.attemptedRestorations, [...model.originals.keys()]);
+  assert.equal(model.settledReplies.length, 3);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  for (const [key, handler] of model.originals)
+    assert.equal(model.handlers.get(key), handler);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('canceling restoration while original tree is pending prevents late evidence and renderer application', async () => {
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, cancelBeforeProvider: true },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), /readiness failed before provider reply/);
+  await assert.rejects(model.finishRefresh(), /refresh canceled/);
+  model.originalGate.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(model.cleanupAudit()!.refreshedRoots, {});
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.equal(model.originalTreeCalls(), 1);
+  for (const [key, handler] of model.originals)
+    assert.equal(model.handlers.get(key), handler);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('recorded refresh evidence waits for renderer application before the captured save', async () => {
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      newIssue: true,
+      holdRendererApply: true,
+    },
+    await capturedReloadWorkspace(),
+  );
+  await model.run();
+  assert.equal(
+    model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-999'].seenAt,
+    1794020324655,
+  );
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+for (const failure of [false, true])
+  test(`identity fixture gates settle during ${failure ? 'failed' : 'successful'} restoration cleanup`, async () => {
+    const model = restoreModel(failure ? { wrongCount: true } : {});
+    let released = 0;
+    model.owner.selfConnectionAudit.identityResolvers = [
+      () => {
+        released++;
+      },
+    ];
+    if (failure) await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+    else await model.run();
+    assert.equal(released, 1);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
 
 test('lifecycle save double rejects invalid views and filters before attempting a write', () => {
   const model = lifecycle();

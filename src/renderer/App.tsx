@@ -1666,7 +1666,11 @@ export function App() {
           throw error;
         }
       },
-      (closeAttempt) => workspaceClose.current.release(closeAttempt),
+      (closeAttempt) => {
+        if (workspaceClose.current.owner !== closeAttempt) return;
+        workspaceClose.current.release(closeAttempt);
+        storeWorkspace((current) => ({ ...current }));
+      },
     );
     return () => {
       unsubscribe();
@@ -2142,13 +2146,13 @@ export function App() {
   }, [editor, saving, online, allRefreshTabs, refreshTab]);
 
   const restoreScroll = useCallback((tab: TabState) => {
-    if (workspaceClose.current.paused) return;
+    if (workspaceClose.current.paused) return false;
     const element = scrollRef.current;
-    if (!element) return;
+    if (!element) return false;
     const savedTop = scrollPositions.current.get(tab.id) ?? tab.scrollTop;
     element.scrollTop = savedTop;
     const scrollTop = element.scrollTop;
-    if (scrollTop === savedTop) return;
+    if (scrollTop === savedTop) return true;
     scrollPositions.current.set(tab.id, scrollTop);
     // Chromium can clamp without emitting another scroll event after a layout
     // restoration. Save the actual offset even while native events are guarded.
@@ -2166,6 +2170,7 @@ export function App() {
         ),
       };
     });
+    return true;
   }, []);
 
   useLayoutEffect(() => {
@@ -2180,9 +2185,8 @@ export function App() {
       pendingScrollRestore.current !== activeTab.id
     )
       return;
-    restoreScroll(activeTab);
-    pendingScrollRestore.current = null;
-  }, [activeTab, Boolean(snapshot), restoreScroll]);
+    if (restoreScroll(activeTab)) pendingScrollRestore.current = null;
+  }, [activeTab, Boolean(snapshot), restoreScroll, workspace]);
 
   const updateTab = useCallback((tabId: string, patch: Partial<TabState>) => {
     if (workspaceClose.current.paused) return;
@@ -4189,10 +4193,18 @@ export function App() {
             connections={connections}
             demoMode={demoMode}
             disconnect={(id, complete) =>
-              workspaceClose.current.track(async () => {
-                await window.canopy.disconnect(id);
-                complete();
-              })
+              workspaceClose.current
+                .track(async () => {
+                  try {
+                    await window.canopy.disconnect(id);
+                  } catch (error) {
+                    return { error };
+                  }
+                  complete();
+                })
+                .then((failure) => {
+                  if (failure) throw failure.error;
+                })
             }
             setConnections={(nextConnections) => {
               setConnections(nextConnections);
@@ -6459,18 +6471,22 @@ export function App() {
                 window.clearTimeout(workspaceSaveTimer.current);
                 workspaceSaveTimer.current = null;
               }
-              try {
-                // This is the only save admitted after the persistence barrier closes.
-                await saveWorkspace(workspaceRef.current, true);
-                await operation();
-                workspaceTransferCommitted.current = true;
-                await window.canopy.reloadWorkspace();
-              } catch (error) {
-                if (!workspaceTransferCommitted.current) {
+              const failure = await workspaceClose.current.track(async () => {
+                try {
+                  // This is the only save admitted after the persistence barrier closes.
+                  await saveWorkspace(workspaceRef.current, true);
+                  await operation();
+                  workspaceTransferCommitted.current = true;
+                } catch (error) {
                   workspaceTransferBusy.current = false;
                   setWorkspaceTransferActive(false);
-                  throw error;
+                  return { error };
                 }
+              });
+              if (failure) throw failure.error;
+              try {
+                await window.canopy.reloadWorkspace();
+              } catch (error) {
                 throw new Error(
                   'Workspace transferred, but reload failed. Restart Canopy before editing.',
                   { cause: error },

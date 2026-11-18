@@ -56,7 +56,7 @@ async function fixture() {
   const controls = {
     flush: async (_script: string) => {},
     release: (_attempt: number) => {},
-    reload: async () => {},
+    reload: () => {},
     onClosed: () => {},
     warning: async () => {},
     write: async (_name: string) => {},
@@ -1230,11 +1230,12 @@ it('a kept-open initial-load failure can repair storage, reload and close normal
   let cleanup = await renderer.initialize(
     async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
   );
-  f.controls.reload = async () => {
+  let initialization!: Promise<() => void>;
+  f.controls.reload = () => {
     cleanup();
     renderer.dispose();
     renderer = createRenderer();
-    cleanup = await renderer.initialize(
+    initialization = renderer.initialize(
       async () => (await f.invoke(window, 'loadWorkspace')) as Workspace | null,
     );
   };
@@ -1251,10 +1252,36 @@ it('a kept-open initial-load failure can repair storage, reload and close normal
     sidebarCollapsed: false,
   };
   await renderer.api.reloadWorkspace();
+  cleanup = await initialization;
   assert.equal(renderer.context.workspaceLoaded.current, false);
   await assert.rejects(renderer.save(saved), /Workspace has not loaded/);
-  f.controls.readWorkspace = async () => structuredClone(saved);
-  await renderer.api.reloadWorkspace();
+  const read = gate();
+  f.controls.readWorkspace = async () => {
+    await read.wait;
+    return structuredClone(saved);
+  };
+  let replied = false;
+  const reload = renderer.api.reloadWorkspace().then(() => {
+    replied = true;
+  });
+  try {
+    await setImmediate();
+    assert.equal(
+      replied,
+      true,
+      'Reload reply must not wait for the replacement read',
+    );
+    assert.equal(renderer.context.workspaceLoaded.current, false);
+    await assert.rejects(renderer.save(saved), /Workspace has not loaded/);
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+  } finally {
+    read.release();
+  }
+  await reload;
+  cleanup = await initialization;
   assert.equal(renderer.context.workspaceLoaded.current, true);
   window.close();
   await setImmediate();
@@ -1485,3 +1512,39 @@ it('successful initialization clears the remembered warning before renderer loss
   assert.equal(window.destroyed, true);
   assert.equal(f.controls.prompts, 0);
 });
+
+for (const lost of ['navigation', 'failed-page'])
+  it(`failed workspace initialization survives replacement ${lost} until recovery acknowledges success`, async () => {
+    const f = await fixture();
+    f.releaseRead();
+    f.releaseLoad();
+    await setImmediate();
+    const window = f.windows[0];
+    f.invoke(window, 'workspaceInitialized', 'Original read failed');
+    await f.invoke(window, 'reloadWorkspace');
+    window.webContents.emit('did-start-navigation', {
+      isMainFrame: true,
+      isSameDocument: false,
+    });
+    if (lost === 'failed-page')
+      window.webContents.emit('did-fail-load', {}, -2, 'ERR_FAILED');
+    f.controls.crashed = true;
+    window.close();
+    await setImmediate();
+    assert.equal(window.destroyed, false);
+    assert.equal(f.controls.prompts, 1);
+    assert.equal(
+      f.controls.warnings[0].message,
+      'The workspace could not load.',
+    );
+    assert.match(f.controls.warnings[0].detail, /Original read failed/);
+    assert.equal(
+      f.writes.filter((write) => write.name === 'workspace').length,
+      0,
+    );
+    f.invoke(window, 'workspaceInitialized', null);
+    window.close();
+    await setImmediate();
+    assert.equal(window.destroyed, true);
+    assert.equal(f.controls.prompts, 1);
+  });

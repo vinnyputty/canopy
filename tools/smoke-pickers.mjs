@@ -472,6 +472,11 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
         const audit = globalThis.selfConnectionAudit;
         if (!audit) return;
         audit.refreshedRoots = {};
+        audit.refreshGates = [];
+        audit.refreshStarted = false;
+        audit.releaseRefresh = undefined;
+        const active = saved.tabs.find((tab) => tab.id === saved.activeTabId);
+        const activeKey = active && `${active.connectionId}:${active.rootKey}`;
         for (const [channel, handler] of audit.handlers) {
           ipcMain.removeHandler(channel);
           // Saves from the fixture renderer must preserve the captured workspace.
@@ -484,14 +489,31 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
                 }
               : channel === 'canopy:tree'
                 ? async (event, connection, key, ...args) => {
-                    const snapshot = await handler(
-                      event,
-                      connection,
-                      key,
-                      ...args,
+                    // Only one active-root refresh may reach the restored document.
+                    // Background and later replies stay outside the captured save.
+                    if (
+                      `${connection}:${key}` !== activeKey ||
+                      audit.refreshStarted
+                    )
+                      return new Promise((_, reject) =>
+                        audit.refreshGates.push(reject),
+                      );
+                    audit.refreshStarted = true;
+                    const canceled = new Promise((_, reject) =>
+                      audit.refreshGates.push(reject),
                     );
+                    const snapshot = await Promise.race([
+                      handler(event, connection, key, ...args),
+                      canceled,
+                    ]);
                     audit.refreshedRoots[`${connection}:${key}`] =
                       structuredClone(snapshot);
+                    await Promise.race([
+                      new Promise((resolve) => {
+                        audit.releaseRefresh = resolve;
+                      }),
+                      canceled,
+                    ]);
                     return snapshot;
                   }
                 : handler,
@@ -519,6 +541,46 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
         (tab) => tab.id === workspace.activeTabId,
       );
       expect(active).toBeDefined();
+      if (
+        await app.evaluate(
+          () =>
+            globalThis.selfConnectionAudit?.handlers.has('canopy:tree') ??
+            false,
+        )
+      ) {
+        await expect
+          .poll(() =>
+            app.evaluate(
+              () =>
+                Object.keys(
+                  globalThis.selfConnectionAudit?.refreshedRoots ?? {},
+                ).length,
+            ),
+          )
+          .toBe(1);
+        await expect(
+          page.getByText('Checking for changes', { exact: true }),
+        ).toBeVisible();
+        await app.evaluate(() =>
+          globalThis.selfConnectionAudit.releaseRefresh(),
+        );
+        const fetchedAt = await app.evaluate(
+          () =>
+            Object.values(globalThis.selfConnectionAudit.refreshedRoots)[0]
+              .fetchedAt,
+        );
+        const updated = await page.evaluate(
+          (time) => new Date(time).toLocaleString(),
+          fetchedAt,
+        );
+        await expect(page.locator('.statusbar span[title]')).toHaveAttribute(
+          'title',
+          updated,
+        );
+        await expect(
+          page.getByText('Checking for changes', { exact: true }),
+        ).toBeHidden();
+      }
       await expect(
         page.getByRole('tree', { name: `${active.rootKey} issue tree` }),
       ).toBeVisible();
@@ -651,11 +713,22 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
       await app.evaluate(({ ipcMain }) => {
         const audit = globalThis.selfConnectionAudit;
         if (!audit) return;
+        const errors = [];
         for (const [channel, handler] of audit.handlers) {
-          ipcMain.removeHandler(channel);
-          ipcMain.handle(channel, handler);
+          try {
+            ipcMain.removeHandler(channel);
+            ipcMain.handle(channel, handler);
+          } catch (error) {
+            errors.push(error);
+          }
         }
+        for (const reject of audit.refreshGates ?? [])
+          reject(new Error('Workspace restoration refresh canceled.'));
+        audit.refreshGates = [];
+        for (const resolve of audit.identityResolvers ?? []) resolve();
+        audit.identityResolvers = [];
         delete globalThis.selfConnectionAudit;
+        if (errors.length) throw errors[0];
       });
     } catch (error) {
       failures.push(error);

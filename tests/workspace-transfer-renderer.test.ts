@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
-import { build } from 'esbuild';
+import { build, transformSync } from 'esbuild';
+import { rendererFixture, gate } from './fixtures/workspace-close';
+import { execute, findNode, sourceFile } from './source-probe';
 
 const importPath = (path: string) => JSON.stringify(path);
 
@@ -118,11 +120,16 @@ test('held import and reload reject old-renderer saves and preserve actual impor
     assert.ok(result, 'Production main close callback not found');
     return result.getText(mainAst);
   }
+  const preload = transformSync(await readFile('src/main/preload.ts', 'utf8'), {
+    loader: 'ts',
+    format: 'cjs',
+  }).code;
   const directory = await mkdtemp(join(tmpdir(), 'canopy-renderer-transfer-'));
   try {
     const source = `
 import assert from 'node:assert/strict'; import * as fs from 'node:fs/promises';
 import {EventEmitter} from 'node:events';
+import {runInNewContext} from 'node:vm';
 import {withScrollPositions} from ${importPath(root + '/src/renderer/scroll-position')};
 import {Storage} from ${importPath(root + '/src/main/storage')};
 import {WorkspaceClose} from ${importPath(root + '/src/renderer/workspace-close')};
@@ -140,6 +147,8 @@ const bytes=()=>fs.readFile(${JSON.stringify(join(directory, 'workspace.json'))}
 const persisted=value=>JSON.parse(JSON.stringify(value));
 const workspaceRef={current:baseline},pendingWorkspaceSave={current:Promise.resolve()},workspaceSaveTimer={current:null},workspaceTransferBusy={current:false},workspaceTransferCommitted={current:false},workspaceLoaded={current:true},appearanceSaving={current:false},demoResetting={current:false};
 const workspaceClose={current:new WorkspaceClose()};
+const document={body:{inert:false},activeElement:null,defaultView:{HTMLElement:class{},addEventListener(){},removeEventListener(){}}};
+const flushSync=operation=>operation(), scrollSaveTimer={current:undefined};
 const workspaceLoadError='Fixture initial read failed';
 ${mainCallback('WorkspaceLoadFailure')}
 const scrollPositions={current:new Map()};
@@ -156,25 +165,31 @@ const text=value=>{assert.equal(typeof value,'string');return value;};
 const applyWorkspaceImport=${mainCallback('applyWorkspaceImport')},rollbackWorkspaceImport=${mainCallback('rollbackWorkspaceImport')};
 const saveWorkspace=${save.arguments[0].getText(ast)},onApply=${attribute(panel.attributes, 'onApply')},flush=${attribute(panel.attributes, 'flush')},onSave=${attribute(appearance.attributes, 'onSave')},close=${attribute(backupDialog.attributes, 'onClose')},onKey=${onKey.initializer!.getText(ast)};
 const workspaceCloseFlush=${closeFlush.arguments[0].getText(ast)};
-async function attemptMainQuit({unavailable=false,onPending=async()=>{},consent=0,initialFailure=false}={}) {
-  let closeSequence=0,closing=false,closingWindow,closeApproved=false,quitting=true,handoffCanceled=false,closed=false,quitCalls=0,prevented=false;
+let preloadApi;
+const ipcRenderer=Object.assign(new EventEmitter(),{invoke:async(channel,...args)=>window.canopy[channel.slice('canopy:'.length)](...args)});
+runInNewContext(${JSON.stringify(preload)},{exports:{},require:()=>({ipcRenderer,contextBridge:{exposeInMainWorld:(_name,api)=>preloadApi=api}})});
+preloadApi.onWorkspaceFlush(workspaceCloseFlush,${closeFlush.arguments[1].getText(ast)});
+let closeSequence=0;
+async function attemptMainQuit({unavailable=false,onPending=async()=>{},consent=0,initialFailure=false,allowTimeout=false}={}) {
+  let closing=false,closingWindow,closeApproved=false,quitting=true,handoffCanceled=false,closed=false,quitCalls=0,prevented=false;
   let expireClose,prompts=0;const warnings=[];
   const setTimeout=(callback,ms)=>{const timer=globalThis.setTimeout(callback,ms);if(ms===15000)expireClose=()=>{clearTimeout(timer);callback();};return timer;};
   let complete;const done=new Promise(resolve=>complete=resolve),errors=[];
   const console={error:(...args)=>{errors.push(args);complete();}};
-  const created=new EventEmitter();created.webContents=Object.assign(new EventEmitter(),{isCrashed:()=>unavailable,executeJavaScript:()=>workspaceCloseFlush(),send:(channel,id)=>{if(channel==='canopy:workspaceCloseReleased')workspaceClose.current.release(id);}});
-  created.isDestroyed=()=>closed;created.destroy=()=>{closed=true;created.emit('closed');complete();};
+  const created=new EventEmitter();created.webContents=Object.assign(new EventEmitter(),{isCrashed:()=>unavailable,executeJavaScript:script=>runInNewContext(script,{window:{canopy:preloadApi}}),send:(channel,id)=>ipcRenderer.emit(channel,{},id)});
+  created.isDestroyed=()=>closed;created.destroy=()=>{closed=true;created.emit('closed');if(workspaceClose.current.owner!==undefined)ipcRenderer.emit('canopy:workspaceCloseReleased',{},workspaceClose.current.owner);complete();};
   let workspaceOwner=created,workspaceInitializationError;
   const rendererUnavailable=unavailable,rendererLoaded=Promise.resolve();
   const windowStateSaver={flush:async()=>{},resume(){}},handoffs={pause(){},resume(){}},saveBounds=()=>{};
-  const dialog={showMessageBox:async(_window,options)=>{warnings.push(options);if(!unavailable&&!initialFailure)throw Error('Healthy renderer must not require abandonment consent');prompts++;return {response:consent};}};
+  const dialog={showMessageBox:async(_window,options)=>{warnings.push(options);if(!unavailable&&!initialFailure&&!allowTimeout)throw Error('Healthy renderer must not require abandonment consent');prompts++;return {response:consent};}};
   const app={quit:()=>{quitCalls++;created.close();}};
   const flushRenderer=${mainCallback('flushRenderer')};
   const flushBeforeClose=${mainCallback('flushBeforeClose')};
   const onClose=${mainCallback('close')};
   created.close=()=>{if(closeApproved)created.destroy();else onClose({preventDefault(){prevented=true;}});};
   created.close();
-  await onPending(()=>({closed,quitCalls,prevented,errors,prompts}),()=>expireClose());
+  try {await onPending(()=>({closed,quitCalls,prevented,errors,prompts}),()=>expireClose());}
+  catch(error) {expireClose?.();throw error;}
   let timeout;
   try {await Promise.race([done,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('Main close did not settle')),5000);})]);}
   finally {clearTimeout(timeout);}
@@ -208,7 +223,7 @@ await assert.rejects(flush(),/transfer is in progress/);
 await assert.rejects(saveWorkspace(baseline),/transfer is in progress/);
 await assert.rejects(onApply(()=>rollbackWorkspaceImport()),/transfer is in progress/);
 assert.equal(await bytes(),heldApplyBytes);
-const heldClose=await attemptMainQuit();assert.equal(heldClose.closed,false);assert.equal(heldClose.quitCalls,0);assert.match(String(heldClose.errors[0]?.[1]),/transfer is in progress/);assert.equal(await bytes(),heldApplyBytes);
+const heldClose=await attemptMainQuit({allowTimeout:true,onPending:async(state,expire)=>{await new Promise(r=>setImmediate(r));assert.equal(state().closed,false,'Healthy close must wait for admitted Apply');await assert.rejects(onApply(()=>rollbackWorkspaceImport()),/Workspace is closing/);expire();}});assert.equal(heldClose.closed,false);assert.equal(heldClose.quitCalls,0);assert.match(String(heldClose.errors[0]?.[1]),/close deadline/i);assert.equal(await bytes(),heldApplyBytes);
 const abandonedApplyClose=await attemptMainQuit({unavailable:true,onPending:async(state,expire)=>{await new Promise(r=>setImmediate(r));assert.equal(state().closed,false);expire();}});
 assert.equal(abandonedApplyClose.closed,false);assert.equal(abandonedApplyClose.prompts,1);assert.equal(abandonedApplyClose.quitCalls,0);assert.equal(pendingWorkspaceTransfers.size,1);assert.equal(await bytes(),heldApplyBytes);
 const lostApplyClose=await attemptMainQuit({unavailable:true,onPending:async state=>{await new Promise(r=>setImmediate(r));assert.equal(state().closed,false,'renderer loss must wait for held Apply with idle bounds');assert.equal(state().quitCalls,0);release();}});await reloading;
@@ -261,35 +276,58 @@ assert.deepEqual(await storage.read('workspace'),persisted(edited));assert.equal
 console.log('PASS guarded Undo after subsequent edits rejects and preserves imported roots/settings and those edits');
 assert.equal(await fs.readFile(${JSON.stringify(join(directory, 'credentials.json'))},'utf8'),'FAKE SAMPLE SENTINEL');
 async function transferDuringCloseSave(operation) {
-  let saveEnter,saveRelease,operationEnter,operationRelease;
+  let saveEnter,saveRelease;
   const saveEntered=new Promise(r=>saveEnter=r),saveHeld=new Promise(r=>saveRelease=r);
-  const operationEntered=new Promise(r=>operationEnter=r),operationHeld=new Promise(r=>operationRelease=r);
   globalThis.rendererStageGate=async(file)=>{if(file.includes('workspace.json.')&&file.endsWith('.tmp')){globalThis.rendererStageGate=undefined;saveEnter();await saveHeld;}};
   const closing=attemptMainQuit();await saveEntered;
-  const applying=onApply(async()=>{operationEnter();await operationHeld;return operation();});
+  let operationCalled=false;
+  await assert.rejects(onApply(async()=>{operationCalled=true;return operation();}),/Workspace is closing/);
+  assert.equal(operationCalled,false);
+  assert.equal(workspaceClose.current.paused,true);
   saveRelease();
-  const result=await closing;await operationEntered;
-  const heldBytes=await bytes();
-  try {
-    assert.equal(result.closed,false,'Close must recheck a transfer started during its awaited save');
-    assert.equal(result.quitCalls,0);
-    assert.match(String(result.errors[0]?.[1]),/transfer is in progress/);
-    assert.equal(workspaceTransferCommitted.current,false);
-    await assert.rejects(saveWorkspace(baseline),/transfer is in progress/);
-    assert.equal(await bytes(),heldBytes);
-  } finally {operationRelease();await applying;}
+  const result=await closing;
+  assert.equal(result.closed,true);
+  assert.equal(result.quitCalls,1);
+  assert.deepEqual(result.errors,[]);
+  assert.equal(workspaceTransferCommitted.current,false);
 }
 workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;reload=()=>{};
 await saveWorkspace(baseline);
 const concurrentPreview=await transfer.preview(backup,mapping,'replace');
 await transferDuringCloseSave(()=>transfer.apply(concurrentPreview.token));
-assert.equal(await bytes(),JSON.stringify(concurrentPreview.workspace));
+assert.equal(await bytes(),JSON.stringify(baseline));
 workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;active=false;
 await transferDuringCloseSave(()=>rollbackWorkspaceImport());
-assert.equal(await bytes(),JSON.stringify(baseline));
+assert.equal(await bytes(),JSON.stringify(workspaceRef.current));
 workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
 const ordinaryClose=await attemptMainQuit();assert.equal(ordinaryClose.closed,true);assert.equal(ordinaryClose.quitCalls,1);assert.deepEqual(ordinaryClose.errors,[]);
-console.log('PASS Apply and Undo started during awaited close save refuse quit until commit; ordinary close recovers');
+console.log('PASS numbered preload close pauses input and refuses new Apply/Undo during final save; ordinary close recovers');
+async function healthyTransferClose(operation,expected) {
+  let enter,release;const entered=new Promise(r=>enter=r),held=new Promise(r=>release=r);
+  const applying=onApply(async()=>{enter();await held;return operation();});await entered;
+  const closing=await attemptMainQuit({onPending:async state=>{
+    await new Promise(r=>setImmediate(r));assert.equal(state().closed,false);
+    assert.equal(workspaceClose.current.paused,true);
+    await assert.rejects(onApply(()=>Promise.resolve()),/Workspace is closing/);
+    release();
+  }});
+  await applying;
+  assert.equal(closing.closed,true);assert.deepEqual(closing.errors,[]);
+  assert.equal(await bytes(),JSON.stringify(expected));
+}
+workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
+const healthyPreview=await transfer.preview(backup,mapping,'replace');
+await healthyTransferClose(()=>applyWorkspaceImport(healthyPreview.token),healthyPreview.workspace);
+workspaceRef.current=hydrate(recoverWorkspaceViews(await storage.read('workspace')));workspaceTransferBusy.current=false;active=false;
+await healthyTransferClose(()=>rollbackWorkspaceImport(),baseline);
+workspaceTransferBusy.current=false;active=false;workspaceRef.current=baseline;
+let failHealthyEnter,failHealthyRelease;const failHealthyEntered=new Promise(r=>failHealthyEnter=r),failHealthyHeld=new Promise(r=>failHealthyRelease=r);
+const rejectedTransfer=assert.rejects(onApply(async()=>{failHealthyEnter();await failHealthyHeld;throw Error('healthy held failure');}),/healthy held failure/);
+await failHealthyEntered;
+const healthyFailedClose=await attemptMainQuit({onPending:async state=>{await new Promise(r=>setImmediate(r));assert.equal(state().closed,false);failHealthyRelease();}});
+await rejectedTransfer;assert.equal(healthyFailedClose.closed,true);assert.deepEqual(healthyFailedClose.errors,[]);assert.equal(workspaceTransferBusy.current,false);
+assert.equal(await bytes(),JSON.stringify(baseline));await saveWorkspace(baseline);
+console.log('PASS healthy close awaits admitted Apply/Undo commit and saves available workspace after precommit failure');
 
 const failurePreview=await transfer.preview(backup,mapping,'replace');
 let failEnter,failRelease;const failEntered=new Promise(r=>failEnter=r),failHeld=new Promise(r=>failRelease=r);
@@ -415,3 +453,100 @@ test('generated renderer imports resolve paths with spaces, quotes and backslash
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+for (const outcome of ['success', 'disconnect-failure', 'write-failure'])
+  test(`Disconnect settlement preserves final snapshot semantics through ${outcome}`, async () => {
+    const source = sourceFile(
+      process.env.CANOPY_CLOSE_RENDERER_SOURCE ?? 'src/renderer/App.tsx',
+    );
+    const connections = findNode(
+      source,
+      (node): node is ts.JsxSelfClosingElement =>
+        ts.isJsxSelfClosingElement(node) &&
+        node.tagName.getText() === 'Connections',
+    );
+    const attribute = connections.attributes.properties.find(
+      (property) =>
+        ts.isJsxAttribute(property) && property.name.getText() === 'disconnect',
+    ) as ts.JsxAttribute;
+    const document = {
+      body: { inert: false },
+      activeElement: null,
+      defaultView: {
+        HTMLElement: class {},
+        addEventListener() {},
+        removeEventListener() {},
+      },
+    };
+    const pending = gate();
+    const h = rendererFixture(document as unknown as Document, async () => {
+      if (outcome === 'write-failure')
+        throw Error('final workspace write failed');
+    });
+    const initial = {
+      ...h.workspaceRef.current,
+      closedTabs: [],
+      tabs: [
+        {
+          id: 'old',
+          connectionId: 'old',
+          rootKey: 'OLD-1',
+          expanded: [],
+          hideDone: false,
+          scrollTop: 0,
+        },
+      ],
+      activeTabId: 'old',
+    };
+    h.setWorkspace(initial);
+    let completed = false;
+    const disconnect = execute(
+      (attribute.initializer as ts.JsxExpression).expression!.getText(),
+      {
+        ...h.context,
+        window: { canopy: { disconnect: () => pending.promise } },
+      },
+    );
+    try {
+      const accepted = disconnect('old', () => {
+        completed = true;
+        h.context.storeWorkspace({ ...initial, tabs: [], activeTabId: null });
+      });
+      const settled =
+        outcome === 'disconnect-failure'
+          ? assert.rejects(accepted, /disconnect refused/)
+          : accepted;
+      const closing = h.api.flushWorkspace(1);
+      const flushed =
+        outcome === 'write-failure'
+          ? assert.rejects(closing, /final workspace write failed/)
+          : closing;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(h.writes.length, 0);
+      assert.equal(completed, false);
+      await assert.rejects(
+        disconnect('old', () => {}),
+        /Workspace is closing/,
+      );
+      if (outcome === 'disconnect-failure')
+        pending.reject(Error('disconnect refused'));
+      else pending.release();
+      await settled;
+      await flushed;
+      assert.equal(completed, outcome !== 'disconnect-failure');
+      if (outcome === 'write-failure')
+        assert.match(h.errors().workspace, /final workspace write failed/);
+      else {
+        assert.deepEqual(
+          h.writes.at(-1),
+          outcome === 'disconnect-failure'
+            ? initial
+            : { ...initial, tabs: [], activeTabId: null },
+        );
+        assert.equal(h.errors().workspace, undefined);
+      }
+    } finally {
+      pending.release();
+      h.dispose();
+    }
+  });

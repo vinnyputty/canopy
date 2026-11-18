@@ -265,20 +265,16 @@ async function recoveryFixture() {
   }
   d.window.HTMLElement.prototype.scrollIntoView = () => {};
   const root = createRoot(d.window.document.querySelector('#host')!);
-  let recoveryOpen = true;
+  function Recovery() {
+    const [open, setOpen] = React.useState(true);
+    return React.createElement(WorkspaceLoadRecovery, {
+      error: 'Could not read saved workspace.',
+      open,
+      onOpenChange: setOpen,
+    });
+  }
   const render = () =>
-    act(async () =>
-      root.render(
-        React.createElement(WorkspaceLoadRecovery, {
-          error: 'Could not read saved workspace.',
-          open: recoveryOpen,
-          onOpenChange: (open: boolean) => {
-            recoveryOpen = open;
-            void render();
-          },
-        }),
-      ),
-    );
+    act(async () => root.render(React.createElement(Recovery)));
   await render();
   const button = (text: string, dialog = true) =>
     [
@@ -310,7 +306,8 @@ async function recoveryFixture() {
   };
 }
 
-test('failed-load recovery renders disclosure, supports Keep open/Escape, reports failed reload and retries explicitly', async () => {
+test('failed-load recovery renders disclosure, supports Keep open/Escape, reports failed reload and retries explicitly', async (t) => {
+  const errors = t.mock.method(console, 'error', () => {});
   const f = await recoveryFixture();
   try {
     const observations: Record<string, string> = {};
@@ -350,6 +347,13 @@ test('failed-load recovery renders disclosure, supports Keep open/Escape, report
     await f.click('Reload workspace');
     assert.equal(f.reloads(), 2);
     assert.equal(f.files.get('workspace.json'), f.saved);
+    await tick();
+    assert.equal(
+      errors.mock.calls.filter((call) => /act\(/.test(call.arguments.join(' ')))
+        .length,
+      0,
+      'Recovery interactions must finish their React act scope',
+    );
     if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
       await writeFile(
         join(process.env.CANOPY_CLOSE_EVIDENCE_DIR, 'rendered-recovery.json'),
@@ -848,8 +852,15 @@ test('production App recovery occupies the main content column and uses existing
       f.d.window.document.querySelector('.welcome-error')!.textContent!,
       /Demo could not open/,
     );
+    const currentSaveError = [
+      ...f.d.window.document.querySelectorAll('.error-banner'),
+    ].find((node) => /Couldn’t save workspace/.test(node.textContent!));
+    assert.ok(
+      currentSaveError,
+      'The workspace save error stays in the document',
+    );
     assert.match(
-      savedError.textContent!,
+      currentSaveError.textContent!,
       /Couldn’t save workspace: Could not write saved workspace/,
     );
     if (process.env.CANOPY_CLOSE_EVIDENCE_DIR)
@@ -949,11 +960,7 @@ for (const outcome of ['success', 'failure', 'keep-open'])
           : accepted;
       const closing = h.api.flushWorkspace(1);
       const flushed =
-        outcome === 'failure'
-          ? assert.rejects(closing, /disconnect failed/)
-          : outcome === 'keep-open'
-            ? assert.rejects(closing, /canceled/)
-            : closing;
+        outcome === 'keep-open' ? assert.rejects(closing, /canceled/) : closing;
       await tick();
       assert.equal(h.writes.length, 0);
       await assert.rejects(
@@ -968,7 +975,8 @@ for (const outcome of ['success', 'failure', 'keep-open'])
       await flushed;
       if (outcome === 'failure') {
         assert.deepEqual(h.workspaceRef.current, initial);
-        assert.equal(h.writes.length, 0);
+        assert.deepEqual(h.writes.at(-1), initial);
+        assert.equal(h.errors().workspace, undefined);
         h.release(1);
       } else {
         const expected = removeConnection(initial, removed);
