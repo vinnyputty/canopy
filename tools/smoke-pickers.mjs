@@ -474,6 +474,7 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
         audit.refreshedRoots = {};
         audit.refreshGates = [];
         audit.refreshStarted = false;
+        audit.replacementDocument = false;
         audit.releaseRefresh = undefined;
         const active = saved.tabs.find((tab) => tab.id === saved.activeTabId);
         const activeKey = active && `${active.connectionId}:${active.rootKey}`;
@@ -484,6 +485,15 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
             channel,
             channel === 'canopy:saveWorkspace'
               ? (event, submitted) => {
+                  if (!audit.stopWatchingDocument) {
+                    const contents = event.sender;
+                    const committed = () => {
+                      audit.replacementDocument = true;
+                    };
+                    contents.once('did-navigate', committed);
+                    audit.stopWatchingDocument = () =>
+                      contents.removeListener('did-navigate', committed);
+                  }
                   audit.submittedWorkspace = structuredClone(submitted);
                   return handler(event, saved);
                 }
@@ -492,6 +502,7 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
                     // Only one active-root refresh may reach the restored document.
                     // Background and later replies stay outside the captured save.
                     if (
+                      !audit.replacementDocument ||
                       `${connection}:${key}` !== activeKey ||
                       audit.refreshStarted
                     )
@@ -503,7 +514,9 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
                       audit.refreshGates.push(reject),
                     );
                     const snapshot = await Promise.race([
-                      handler(event, connection, key, ...args),
+                      Promise.resolve().then(() =>
+                        handler(event, connection, key, ...args),
+                      ),
                       canceled,
                     ]);
                     audit.refreshedRoots[`${connection}:${key}`] =
@@ -722,6 +735,7 @@ export async function restoreSelfConnectionWorkspace(app, page, workspace) {
             errors.push(error);
           }
         }
+        audit.stopWatchingDocument?.();
         for (const reject of audit.refreshGates ?? [])
           reject(new Error('Workspace restoration refresh canceled.'));
         audit.refreshGates = [];

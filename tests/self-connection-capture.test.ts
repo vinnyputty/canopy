@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events';
+import { deadline } from '../tools/audit-lifecycle.mjs';
 import { workspaceError } from '../src/renderer/workspace-error';
 import type { Workspace, TreeSnapshot } from '../src/shared/types';
 import { DemoProvider } from '../src/main/demo-provider';
@@ -315,7 +317,9 @@ function restoreModel(
     { initial: fixture, demoMode: true, structuredClone, validateWorkspace },
   )();
   const html = fileURLToPath(new URL('window.html', import.meta.url));
-  const contents = { mainFrame: { url: pathToFileURL(html).href } };
+  const contents = Object.assign(new EventEmitter(), {
+    mainFrame: { url: pathToFileURL(html).href },
+  });
   const event = { sender: contents, senderFrame: contents.mainFrame };
   const trusted = (handler: (...args: any[]) => unknown) =>
     execute(trust, {
@@ -345,15 +349,20 @@ function restoreModel(
               originalStarted.resolve();
               if (options.cancelBeforeProvider) await originalGate.promise;
               const confirmed = await new DemoProvider().tree(key);
-              confirmed.fetchedAt = options.unobservedRefresh
-                ? saved.seenRoots![seenRootKey(connection, key)].touchedAt
-                : 1794020324655;
+              confirmed.fetchedAt = 1794020324655;
               if (options.refreshedValues) {
                 confirmed.issues[0].summary = 'Observed newer summary';
                 confirmed.issues[0].commentCount = 42;
                 confirmed.issues.find(
                   (issue) => issue.key === 'CAN-101',
                 )!.commentCount = 99;
+              }
+              if (options.unobservedRefresh) {
+                confirmed.issues[0].unavailableFields = [
+                  ...(confirmed.issues[0].unavailableFields ?? []),
+                  'priority',
+                ];
+                delete confirmed.issues[0].commentCount;
               }
               if (options.newIssue)
                 confirmed.issues.push({
@@ -367,6 +376,11 @@ function restoreModel(
         ]
       : []),
   ]);
+  if (options.syncTreeFailure)
+    originals.set('canopy:tree', () => {
+      originalTreeCalls++;
+      throw options.syncTreeFailure;
+    });
   const handlers = new Map<string, (...args: any[]) => any>(
     [...originals].map(([key]) => [key, () => undefined]),
   );
@@ -461,6 +475,12 @@ function restoreModel(
         handlers.get('canopy:saveWorkspace')!(event, value),
       flushWorkspace: async () => {
         if (options.missingSubmission && reloads) return;
+        if (options.unobservedRefresh && reloads) {
+          const baseline =
+            rendered.seenRoots!['demo:CAN-100'].issues['CAN-100'];
+          baseline.fields.Priority = 'High';
+          baseline.commentCount = 42;
+        }
         await window.canopy.saveWorkspace(rendered);
         if (options.lateRefresh && reloads) {
           const active = rendered.tabs.find(
@@ -479,6 +499,18 @@ function restoreModel(
       return await execute(`(${callback})`, { window, document })(value);
     },
     reload: async () => {
+      if (options.outgoingBeforeReload) {
+        holdReply(
+          saved.tabs.find((tab) => tab.id === saved.activeTabId)!.rootKey,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(
+          originalTreeCalls,
+          0,
+          'Outgoing request must not consume the restoration slot',
+        );
+      }
+      contents.emit('did-navigate');
       reloads++;
       // A pending renderer save must still write the captured snapshot here.
       if (!options.missingSubmission)
@@ -496,9 +528,11 @@ function restoreModel(
           const active = rendered.tabs.find(
             (tab) => tab.id === rendered.activeTabId,
           )!;
-          const confirmed = await (
-            options.unobservedRefresh ? originals : handlers
-          ).get('canopy:tree')!(event, active.connectionId, active.rootKey);
+          const confirmed = await handlers.get('canopy:tree')!(
+            event,
+            active.connectionId,
+            active.rootKey,
+          );
           if (options.holdRendererApply) await rendererApply.promise;
           refreshedAt = confirmed.fetchedAt;
           if (options.secondRefresh) holdReply(active.rootKey);
@@ -728,6 +762,7 @@ function restoreModel(
     originalGate,
     cleanupAudit: () => cleanupAudit,
     finishRefresh: () => refreshWork,
+    navigationListeners: () => contents.listenerCount('did-navigate'),
     settleReplies: async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -941,8 +976,9 @@ function lifecycle(
   }
   handlers.set('canopy:tree', () => ({ fetchedAt: 1, issues: [] }));
   const originals = new Map(handlers);
+  const contents = new EventEmitter();
   const call = (name: string, ...args: unknown[]) =>
-    handlers.get(`canopy:${name}`)!(null, ...args);
+    handlers.get(`canopy:${name}`)!({ sender: contents }, ...args);
   const refs = {
     workspaceLoaded: { current: true },
     workspaceRef: { current: rendered },
@@ -1122,6 +1158,7 @@ function lifecycle(
     evaluate: (callback: (...args: any[]) => unknown, value?: unknown) =>
       runInNewContext(`(${callback.toString()})(value)`, { ...context, value }),
     reload: async () => {
+      contents.emit('did-navigate');
       reloads += 1;
       if (options.reloadFailure) throw failure;
       // An old renderer write during navigation must not overwrite the capture.
@@ -1654,9 +1691,15 @@ test('canceling restoration while original tree is pending prevents late evidenc
     { firstActive: true, productionReload: true, cancelBeforeProvider: true },
     await capturedReloadWorkspace(),
   );
-  await assert.rejects(model.run(), /readiness failed before provider reply/);
-  await assert.rejects(model.finishRefresh(), /refresh canceled/);
-  model.originalGate.resolve();
+  try {
+    await assert.rejects(model.run(), /readiness failed before provider reply/);
+    await assert.rejects(
+      deadline(() => model.finishRefresh(), 250, 'Refresh cancellation'),
+      /refresh canceled/,
+    );
+  } finally {
+    model.originalGate.resolve();
+  }
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(model.cleanupAudit()!.refreshedRoots, {});
   assert.equal(model.owner.selfConnectionAudit, undefined);
@@ -1803,10 +1846,16 @@ for (const unobservedRefresh of [false, true])
       captured,
     );
     if (unobservedRefresh) {
-      await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+      await assert.rejects(
+        model.run(),
+        (error: any) =>
+          error.code === 'ERR_ASSERTION' &&
+          /Priority|commentCount/.test(error.message),
+      );
+      assert.equal(model.originalTreeCalls(), 1);
       assert.equal(
         model.rendered().seenRoots!['demo:CAN-100'].touchedAt,
-        captured.seenRoots!['demo:CAN-100'].touchedAt,
+        model.refreshedAt(),
       );
       assert.equal(
         model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'].fields
@@ -1955,3 +2004,45 @@ for (const full of [false, true])
     assert.deepEqual(model.handlers, model.originals);
     assert.equal(model.owner.selfConnectionAudit, undefined);
   });
+
+test('outgoing same-root refresh cannot consume the replacement document admission', async () => {
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, outgoingBeforeReload: true },
+    await capturedReloadWorkspace(),
+  );
+  await model.run();
+  await model.settleReplies();
+  assert.equal(model.originalTreeCalls(), 1);
+  assert.equal(model.settledReplies.length, 1);
+  assert.match(String(model.settledReplies[0]), /refresh canceled/);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.deepEqual(model.handlers, model.originals);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('synchronous original tree rejection is preserved while refresh cancellation settles safely', async () => {
+  const failure = new Error('Sender check failed');
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, syncTreeFailure: failure },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+  await assert.rejects(model.finishRefresh(), (error) => error === failure);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(model.originalTreeCalls(), 1);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.deepEqual(model.handlers, model.originals);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('restoration failure before navigation removes its document listener', async () => {
+  const failure = new Error('Save unavailable');
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, saveFailure: failure },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), (error) => error === failure);
+  assert.equal(model.navigationListeners(), 0);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.deepEqual(model.handlers, model.originals);
+});

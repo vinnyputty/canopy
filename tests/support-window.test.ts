@@ -1527,8 +1527,15 @@ for (const lost of ['navigation', 'failed-page'])
       isSameDocument: false,
     });
     if (lost === 'failed-page')
-      window.webContents.emit('did-fail-load', {}, -2, 'ERR_FAILED');
-    f.controls.crashed = true;
+      window.webContents.emit(
+        'did-fail-load',
+        {},
+        -2,
+        'ERR_FAILED',
+        'file:///failed.html',
+        true,
+      );
+    f.controls.crashed = lost === 'navigation';
     window.close();
     await setImmediate();
     assert.equal(window.destroyed, false);

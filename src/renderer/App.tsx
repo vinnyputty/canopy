@@ -2174,7 +2174,13 @@ export function App() {
   }, []);
 
   useLayoutEffect(() => {
-    if (activeTab && snapshot) restoreScroll(activeTab);
+    if (
+      activeTab &&
+      snapshot &&
+      !restoreScroll(activeTab) &&
+      workspaceClose.current.paused
+    )
+      pendingScrollRestore.current = activeTab.id;
   }, [snapshot, restoreScroll]);
 
   useEffect(() => {

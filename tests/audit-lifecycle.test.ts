@@ -202,17 +202,14 @@ test('liveness probe distinguishes terminated processes, disappearance and probe
 
 const waitForExit = async (pid: number) => {
   const until = Date.now() + 2000;
-  let failure: unknown;
   while (Date.now() < until) {
     try {
       if (!alive(pid)) return;
-      failure = undefined;
-    } catch (error) {
-      failure = error;
-    }
+    } catch {}
     await sleep(20);
   }
-  throw failure ?? new Error('Owned descendant is still alive.');
+  if (!alive(pid)) return;
+  throw new Error('Owned descendant is still alive.');
 };
 
 async function fixture(
@@ -1288,7 +1285,14 @@ test('fixture initialization failure preserves its error and cleans observed rea
   }
 });
 
-for (const outcome of ['gone', 'transient', 'probe-failure', 'still-live'])
+for (const outcome of [
+  'gone',
+  'transient',
+  'probe-failure',
+  'still-live',
+  'last-sleep',
+  'final-probe-failure',
+])
   test(`descendant disposal confirms exit after ${outcome}`, async () => {
     const source = ts.createSourceFile(
       'audit-lifecycle.test.ts',
@@ -1320,11 +1324,15 @@ for (const outcome of ['gone', 'transient', 'probe-failure', 'still-live'])
         probes++;
         if (
           outcome === 'probe-failure' ||
+          (outcome === 'final-probe-failure' && now >= 2000) ||
           (outcome === 'transient' && probes === 1)
         )
           throw error;
         return (
-          outcome === 'still-live' || (outcome === 'transient' && probes === 2)
+          outcome === 'still-live' ||
+          (outcome === 'transient' && probes === 2) ||
+          (outcome === 'last-sleep' && now < 2000) ||
+          (outcome === 'final-probe-failure' && now < 2000)
         );
       },
       async (ms: number) => {
@@ -1333,14 +1341,14 @@ for (const outcome of ['gone', 'transient', 'probe-failure', 'still-live'])
       },
       { now: () => now },
     );
-    if (outcome === 'probe-failure')
+    if (outcome === 'probe-failure' || outcome === 'final-probe-failure')
       await assert.rejects(wait(42), (value) => value === error);
     else if (outcome === 'still-live')
       await assert.rejects(wait(42), /still alive/);
     else await wait(42);
     assert.equal(
       probes,
-      outcome === 'gone' ? 1 : outcome === 'transient' ? 3 : 100,
+      outcome === 'gone' ? 1 : outcome === 'transient' ? 3 : 101,
     );
   });
 
