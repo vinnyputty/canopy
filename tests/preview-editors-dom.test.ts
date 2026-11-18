@@ -32,7 +32,13 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
-async function fixture(api: Partial<CanopyAPI> = {}) {
+async function fixture(
+  api: Partial<CanopyAPI> = {},
+  reconcile: () => void = () => {},
+  subscribeLabels?: React.ComponentProps<
+    typeof IssuePreview
+  >['subscribeLabels'],
+) {
   const dom = new JSDOM(
     '<button id="origin">Origin</button><div id="host"></div>',
     {
@@ -94,8 +100,10 @@ async function fixture(api: Partial<CanopyAPI> = {}) {
           onClose() {
             closed++;
           },
+          subscribeLabels,
           onChanged() {
             changed++;
+            reconcile();
           },
           onAuthoringChanged() {},
           onPreview() {},
@@ -132,6 +140,7 @@ async function fixture(api: Partial<CanopyAPI> = {}) {
       await act(async () =>
         root.render(
           React.createElement(CreateChildDialog, {
+            trackMutation: (operation) => operation(),
             connectionId: 'account',
             parent: issue,
             onClose() {
@@ -375,7 +384,7 @@ test('an earlier label save cannot release or overwrite a later issue save', asy
       f.host.querySelector<HTMLInputElement>('.github-labels input')!.click(),
     );
     await act(async () => first.resolve(issue));
-    assert.equal(f.changed(), 0);
+    assert.equal(f.changed(), 1);
     assert.equal(
       f.host.querySelector<HTMLInputElement>('.github-labels input')!.disabled,
       true,
@@ -388,7 +397,7 @@ test('an earlier label save cannot release or overwrite a later issue save', asy
         labels: [{ id: 'bug', name: 'bug' }],
       }),
     );
-    assert.equal(f.changed(), 1);
+    assert.equal(f.changed(), 2);
     assert.equal(
       f.host.querySelector<HTMLInputElement>('.github-labels input')!.disabled,
       false,
@@ -423,7 +432,7 @@ for (const outcome of ['success', 'failure'] as const) {
           first.resolve({ ...issue, summary: 'Outdated issue result' });
         else first.reject(new Error('Outdated issue failure'));
       });
-      assert.equal(f.changed(), 0);
+      assert.equal(f.changed(), outcome === 'success' ? 1 : 0);
       assert.doesNotMatch(f.host.textContent!, /Outdated issue/);
       assert.equal(
         f.host.querySelector<HTMLInputElement>('.github-labels input')!
@@ -434,7 +443,7 @@ for (const outcome of ['success', 'failure'] as const) {
       await act(async () =>
         second.resolve({ ...issue, labels: [{ id: 'bug', name: 'bug' }] }),
       );
-      assert.equal(f.changed(), 1);
+      assert.equal(f.changed(), outcome === 'success' ? 2 : 1);
       assert.equal(
         f.host.querySelector<HTMLInputElement>('.github-labels input')!
           .disabled,
@@ -594,4 +603,81 @@ test('unsupported child fields retain the provider completion guidance', async (
   } finally {
     await f.close();
   }
+});
+
+test('confirmed labels remain saved when reconciliation callback throws', async () => {
+  const f = await fixture({}, () => {
+    throw Error('reconciliation refused');
+  });
+  try {
+    await f.render();
+    await f.click('Edit labels');
+    await act(async () =>
+      f.host.querySelector<HTMLInputElement>('.github-labels input')!.click(),
+    );
+    assert.equal(f.changed(), 1);
+    assert.equal(
+      f.host.querySelector<HTMLInputElement>('.github-labels input')!.checked,
+      true,
+    );
+    assert.match(f.host.textContent!, /Labels saved/);
+    assert.doesNotMatch(
+      f.host.textContent!,
+      /Labels were not saved|Previous labels restored/,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test('label confirmations respect preview generations and clean up subscriptions', async () => {
+  const callbacks: {
+    key: string;
+    listener: (labels: { id: string; name: string }[]) => void;
+  }[] = [];
+  const released: string[] = [];
+  const f = await fixture(
+    {},
+    () => {},
+    (_connection, key, listener) => {
+      callbacks.push({ key, listener });
+      return () => {
+        released.push(key);
+      };
+    },
+  );
+  try {
+    await f.render('ONE-1');
+    await act(async () => callbacks[0].listener([{ id: 'bug', name: 'bug' }]));
+    await f.render('ONE-2');
+    assert.deepEqual(released, ['ONE-1']);
+    await act(async () => callbacks[0].listener([{ id: 'bug', name: 'bug' }]));
+    await f.click('Edit labels');
+    const checkbox = () =>
+      f.host.querySelector<HTMLInputElement>('.github-labels input')!;
+    assert.equal(
+      checkbox().checked,
+      false,
+      'An obsolete subscriber cannot change the new issue',
+    );
+    f.window.canopy.update = async () => {
+      throw Error('Provider refused');
+    };
+    await act(async () => checkbox().click());
+    assert.equal(
+      checkbox().checked,
+      false,
+      'The new issue cannot roll back to the previous issue labels',
+    );
+    assert.match(f.host.textContent!, /Labels were not saved/);
+    await act(async () => callbacks[1].listener([{ id: 'bug', name: 'bug' }]));
+    assert.equal(
+      checkbox().checked,
+      true,
+      'The current subscriber still receives confirmations',
+    );
+  } finally {
+    await f.close();
+  }
+  assert.deepEqual(released, ['ONE-1', 'ONE-2']);
 });

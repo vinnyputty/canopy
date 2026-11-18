@@ -1852,7 +1852,8 @@ kbd {
   line-height: var(--line-height-heading);
   overflow-wrap: anywhere;
 }
-.connect-dialog {
+.connect-dialog,
+.workspace-recovery-dialog {
   padding: 15px 17px 17px;
 }
 .create-child-form {

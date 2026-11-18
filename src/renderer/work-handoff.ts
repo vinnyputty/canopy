@@ -79,12 +79,14 @@ export function handoffNavigation(
 /** Acknowledge after React commits navigation; no polling, stale session or async navigation. */
 export function useWorkHandoff(
   enabled: boolean,
-  navigate: (intent: WorkHandoff) => void,
+  navigate: (intent: WorkHandoff) => void | false,
   reject: () => void,
+  deferred = false,
 ): void {
   const handlers = useRef({ navigate, reject });
   handlers.current = { navigate, reject };
   const session = useRef<string | undefined>(undefined);
+  const register = useRef<(() => void) | undefined>(undefined);
   const lastId = useRef<string | undefined>(undefined);
   const [delivery, setDelivery] = useState<HandoffDelivery | null>(null);
   const [completed, setCompleted] = useState<{
@@ -96,6 +98,10 @@ export function useWorkHandoff(
     let early: HandoffState | undefined;
     const receive = (state: HandoffState) => {
       if (!live) return;
+      if (state.closeSettled) {
+        register.current?.();
+        return;
+      }
       if (state.session === '' && state.rejected) {
         handlers.current.reject();
         return;
@@ -129,7 +135,15 @@ export function useWorkHandoff(
         setDelivery(state.delivery);
     };
     const unsubscribe = window.canopy.onHandoff(receive);
-    if (enabled)
+    let registering = false;
+    let retryRegistration = false;
+    register.current = () => {
+      if (!enabled || session.current) return;
+      if (registering) {
+        retryRegistration = true;
+        return;
+      }
+      registering = true;
       void window.canopy
         .handoffReady(crypto.randomUUID())
         .then((state) => {
@@ -137,6 +151,7 @@ export function useWorkHandoff(
             void window.canopy.handoffCancel(state.session).catch(() => {});
             return;
           }
+          if (state.closeSettled === false) return;
           session.current = state.session;
           receive(state);
           if (early) receive(early);
@@ -144,8 +159,18 @@ export function useWorkHandoff(
         })
         .catch(() => {
           if (live) handlers.current.reject();
+        })
+        .finally(() => {
+          registering = false;
+          if (live && retryRegistration) {
+            retryRegistration = false;
+            register.current?.();
+          }
         });
+    };
+    if (deferred) register.current();
     return () => {
+      register.current = undefined;
       live = false;
       unsubscribe();
       const owner = session.current;
@@ -154,24 +179,28 @@ export function useWorkHandoff(
     };
   }, [enabled]);
   useEffect(() => {
+    if (!deferred) register.current?.();
+  }, [enabled, deferred]);
+  useEffect(() => {
     if (
+      deferred ||
       !delivery ||
       delivery.session !== session.current ||
       delivery.id === lastId.current
     )
       return;
-    lastId.current = delivery.id;
     let result: 'opened' | 'rejected' = 'rejected';
     try {
       if (delivery.expiresAt <= Date.now()) throw new Error('Expired command.');
-      handlers.current.navigate(delivery.intent);
+      if (handlers.current.navigate(delivery.intent) === false) return;
       result = 'opened';
     } catch {
       handlers.current.reject();
     }
+    lastId.current = delivery.id;
     setDelivery(null);
     setCompleted({ delivery, result });
-  }, [delivery]);
+  }, [delivery, deferred, navigate]);
   useEffect(() => {
     if (!completed || completed.delivery.session !== session.current) return;
     const { delivery, result } = completed;

@@ -12,12 +12,14 @@ export function CreateChildDialog({
   onClose,
   onCreated,
   onOpenJira,
+  trackMutation,
 }: {
   connectionId: string;
   parent: Issue;
   onClose: () => void;
   onCreated: (issue: Issue) => void;
   onOpenJira: () => void;
+  trackMutation: (operation: () => Promise<void>) => Promise<void>;
 }) {
   const [options, setOptions] = useState<ChildCreateOptions | null>(null);
   const [fields, setFields] = useState<ChildCreateFields | null>(null);
@@ -165,16 +167,7 @@ export function CreateChildDialog({
     submitting.current = true;
     setSaving(true);
     setError('');
-    try {
-      const issue = await window.canopy.createChild(connectionId, parent.key, {
-        typeId,
-        summary: summary.trim(),
-        ...(description.trim() ? { description: description.trim() } : {}),
-        ...(assignee ? { assigneeId: assignee.id } : {}),
-        ...(priorityId ? { priorityId } : {}),
-      });
-      onCreated(issue);
-    } catch (cause) {
+    const failed = (cause: unknown) => {
       const message = String(cause instanceof Error ? cause.message : cause);
       if (
         /Jira created (?:[A-Z][A-Z0-9_]*-\d+|the issue without returning its key)/.test(
@@ -183,6 +176,30 @@ export function CreateChildDialog({
       )
         setCreatedUnknown(true);
       setError(message);
+    };
+    try {
+      await trackMutation(async () => {
+        try {
+          const issue = await window.canopy.createChild(
+            connectionId,
+            parent.key,
+            {
+              typeId,
+              summary: summary.trim(),
+              ...(description.trim()
+                ? { description: description.trim() }
+                : {}),
+              ...(assignee ? { assigneeId: assignee.id } : {}),
+              ...(priorityId ? { priorityId } : {}),
+            },
+          );
+          onCreated(issue);
+        } catch (cause) {
+          failed(cause);
+        }
+      });
+    } catch (cause) {
+      failed(cause);
     } finally {
       submitting.current = false;
       setSaving(false);

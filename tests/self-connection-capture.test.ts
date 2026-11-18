@@ -1,14 +1,27 @@
+import { EventEmitter } from 'node:events';
+import { deadline } from '../tools/audit-lifecycle.mjs';
+import { workspaceError } from '../src/renderer/workspace-error';
+import type { Workspace, TreeSnapshot } from '../src/shared/types';
+import { DemoProvider } from '../src/main/demo-provider';
+import { demoWorkspace } from '../src/main/demo';
+import { DEFAULT_READING } from '../src/shared/views';
+import { defaultShortcuts } from '../src/renderer/tree';
+import { DEFAULT_VIEW, migrateViews } from '../src/renderer/table-view';
+import { starterViews } from '../src/renderer/saved-views';
+import { boundRoots, seedOrExtend, seenRootKey } from '../src/renderer/seen';
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { runInNewContext } from 'node:vm';
+import { createContext, runInContext, runInNewContext } from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { validateWorkspace } from '../src/shared/workspace-validation';
 import { execute, findNode, sourceFile } from './source-probe';
 
 const source = readFileSync(
-  new URL('../tools/smoke-pickers.mjs', import.meta.url),
+  process.env.CANOPY_SELF_CONNECTION_SOURCE ??
+    new URL('../tools/smoke-pickers.mjs', import.meta.url),
   'utf8',
 );
 const prefix = 'Self-connection workspace capture: ';
@@ -43,10 +56,11 @@ async function capture(
     source
       .replace("import { expect } from '@playwright/test';", '')
       .replaceAll('export async function', 'async function') +
-      '\nauditSelfConnections;',
+      '\ncaptureSelfConnectionWorkspace;',
     {
       window: {
         canopy: {
+          flushWorkspace: async () => {},
           loadWorkspace: () => {
             loads += 1;
             return load();
@@ -81,20 +95,13 @@ async function capture(
   );
   let error: unknown;
   try {
-    await audit(
-      {
-        evaluate: (_callback: unknown, saved: unknown) => {
-          passed = saved;
-          throw stop;
-        },
+    passed = await audit({
+      evaluate: (callback: () => unknown) => {
+        evaluations += 1;
+        return callback();
       },
-      {
-        evaluate: (callback: () => unknown) => {
-          evaluations += 1;
-          return callback();
-        },
-      },
-    );
+    });
+    throw stop;
   } catch (caught) {
     error = caught;
   }
@@ -243,15 +250,24 @@ const auditSource = ts.createSourceFile(
   true,
   ts.ScriptKind.JS,
 );
-const restoring = findNode(
+const restoration = findNode(
   auditSource,
-  (node): node is ts.TryStatement =>
-    ts.isTryStatement(node) &&
-    !!node.finallyBlock?.getText().includes('waitForTimeout(250)'),
-);
-const restoration = restoring
+  (node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) &&
+    node.name?.text === 'restoreSelfConnectionWorkspace',
+)
   .getText()
-  .replace(restoring.tryBlock.getText(), '{ await auditBody(); }');
+  .replace('export ', '');
+const auditing = findNode(
+  auditSource,
+  (node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) &&
+    node.name?.text === 'auditSelfConnections',
+);
+const auditTry = auditing.body!.statements.find(ts.isTryStatement)!;
+const auditRestoration = auditTry
+  .getText()
+  .replace(auditTry.tryBlock.getText(), '{ await auditBody(); }');
 const mainSource = sourceFile(new URL('../src/main/app.ts', import.meta.url));
 const mainSave = findNode(
   mainSource,
@@ -265,9 +281,13 @@ const trust = findNode(
     node.getText().includes('Untrusted application window.'),
 ).getText();
 
-function restoreModel(options: Record<string, unknown> = {}) {
-  const saved = {
+function restoreModel(
+  options: Record<string, unknown> = {},
+  captured?: Workspace,
+) {
+  const saved: Workspace & { privatePayload: string } = {
     ...workspace(['CAN-100', 'CAN-106']),
+    activeTabId: null,
     theme: 'system',
     shortcuts: {},
     sidebarCollapsed: false,
@@ -279,6 +299,7 @@ function restoreModel(options: Record<string, unknown> = {}) {
       hideDone: false,
       scrollTop: 0,
     })),
+    ...captured,
   };
   saved.activeTabId = options.missingActive
     ? 'missing-active-tab'
@@ -296,7 +317,9 @@ function restoreModel(options: Record<string, unknown> = {}) {
     { initial: fixture, demoMode: true, structuredClone, validateWorkspace },
   )();
   const html = fileURLToPath(new URL('window.html', import.meta.url));
-  const contents = { mainFrame: { url: pathToFileURL(html).href } };
+  const contents = Object.assign(new EventEmitter(), {
+    mainFrame: { url: pathToFileURL(html).href },
+  });
   const event = { sender: contents, senderFrame: contents.mainFrame };
   const trusted = (handler: (...args: any[]) => unknown) =>
     execute(trust, {
@@ -305,6 +328,10 @@ function restoreModel(options: Record<string, unknown> = {}) {
       html,
       pathToFileURL,
     });
+  const rendererApply = deferred();
+  const originalGate = deferred();
+  const originalStarted = deferred();
+  let cleanupAudit: Record<string, any> | undefined;
   const originalSave = trusted((value: unknown) => {
     if ('saveFailure' in options) throw options.saveFailure;
     store.save(value);
@@ -313,7 +340,47 @@ function restoreModel(options: Record<string, unknown> = {}) {
     ['canopy:saveWorkspace', originalSave],
     ['canopy:loadWorkspace', trusted(store.load)],
     ['canopy:connections', () => 'original connections'],
+    ...(options.productionReload
+      ? [
+          [
+            'canopy:tree',
+            async (_event: unknown, connection: string, key: string) => {
+              originalTreeCalls++;
+              originalStarted.resolve();
+              if (options.cancelBeforeProvider) await originalGate.promise;
+              const confirmed = await new DemoProvider().tree(key);
+              confirmed.fetchedAt = 1794020324655;
+              if (options.refreshedValues) {
+                confirmed.issues[0].summary = 'Observed newer summary';
+                confirmed.issues[0].commentCount = 42;
+                confirmed.issues.find(
+                  (issue) => issue.key === 'CAN-101',
+                )!.commentCount = 99;
+              }
+              if (options.unobservedRefresh) {
+                confirmed.issues[0].unavailableFields = [
+                  ...(confirmed.issues[0].unavailableFields ?? []),
+                  'priority',
+                ];
+                delete confirmed.issues[0].commentCount;
+              }
+              if (options.newIssue)
+                confirmed.issues.push({
+                  ...structuredClone(confirmed.issues[0]),
+                  key: 'CAN-999',
+                  summary: 'New issue',
+                });
+              return confirmed;
+            },
+          ] as [string, (...args: any[]) => any],
+        ]
+      : []),
   ]);
+  if (options.syncTreeFailure)
+    originals.set('canopy:tree', () => {
+      originalTreeCalls++;
+      throw options.syncTreeFailure;
+    });
   const handlers = new Map<string, (...args: any[]) => any>(
     [...originals].map(([key]) => [key, () => undefined]),
   );
@@ -327,31 +394,158 @@ function restoreModel(options: Record<string, unknown> = {}) {
     },
     selfConnectionAudit: { handlers: originals },
   };
+  let cleaningHandlers = false;
+  const attemptedRestorations: string[] = [];
   const ipcMain = {
-    removeHandler: (key: string) => handlers.delete(key),
+    removeHandler: (key: string) => {
+      if (cleaningHandlers) {
+        attemptedRestorations.push(key);
+        if (
+          key === 'canopy:loadWorkspace' &&
+          'handlerCleanupFailure' in options
+        )
+          throw options.handlerCleanupFailure;
+      }
+      return handlers.delete(key);
+    },
     handle: (key: string, handler: (...args: any[]) => any) => {
       assert(!handlers.has(key));
       handlers.set(key, handler);
     },
   };
-  let evaluations = 0,
-    reloads = 0,
-    rendered = structuredClone(fixture);
+  let reloads = 0,
+    rendered: Workspace & { privatePayload: string } = structuredClone(fixture);
+  let offset = 0;
+  const viewport = {
+    get scrollHeight() {
+      return (
+        Number(
+          options.viewportMetricMax ??
+            Math.round(Number(options.viewportMax ?? 1000)),
+        ) + 100
+      );
+    },
+    clientHeight: 100,
+    get scrollTop() {
+      return offset;
+    },
+    set scrollTop(value: number) {
+      offset = Math.max(
+        0,
+        Math.min(Number(options.viewportMax ?? 1000), value),
+      );
+    },
+  };
+  const auditViewport = {
+    get scrollHeight() {
+      return viewport.scrollHeight;
+    },
+    get clientHeight() {
+      return viewport.clientHeight;
+    },
+    get scrollTop() {
+      return viewport.scrollTop;
+    },
+    set scrollTop(_value: number) {
+      assert.fail('Audit must not mutate the live viewport');
+    },
+  };
+  const document = {
+    querySelector: (selector: string) => {
+      assert.equal(selector, '.tree-scroll');
+      return options.missingViewport ? null : auditViewport;
+    },
+  };
+  let refreshedAt: number | undefined;
+  let refreshWork = Promise.resolve();
+  let originalTreeCalls = 0;
+  const heldReplies: Promise<unknown>[] = [];
+  const settledReplies: unknown[] = [];
+  const holdReply = (key: string) => {
+    const promise = handlers.get('canopy:tree')!(event, 'demo', key);
+    heldReplies.push(
+      promise.catch((error: unknown) => {
+        settledReplies.push(error);
+      }),
+    );
+  };
   const window = {
     canopy: {
-      saveWorkspace: (value: unknown) =>
-        handlers.get('canopy:saveWorkspace')!(event, value),
+      saveWorkspace: (value: unknown, explicitFlush = false) => {
+        const result = handlers.get('canopy:saveWorkspace')!(
+          event,
+          value,
+          explicitFlush,
+        );
+        if (saveEvents.at(-1) === 'flush-returned') {
+          assert.equal(explicitFlush, false);
+          saveEvents.push('ordinary-save-handler');
+        }
+        return result;
+      },
+      flushWorkspace: async () => {
+        if (
+          (options.missingSubmission ||
+            options.autosaveSubmission ||
+            options.autosaveAfterFlush) &&
+          reloads
+        ) {
+          if (options.autosaveSubmission)
+            await window.canopy.saveWorkspace(rendered);
+          if (options.autosaveAfterFlush) lateAutosave = true;
+          return;
+        }
+        if (options.unobservedRefresh && reloads) {
+          const baseline =
+            rendered.seenRoots!['demo:CAN-100'].issues['CAN-100'];
+          baseline.fields.Priority = 'High';
+          baseline.commentCount = 42;
+        }
+        await window.canopy.saveWorkspace(rendered, true);
+        if (options.lateRefresh && reloads) {
+          const active = rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!;
+          holdReply(active.rootKey);
+          holdReply('INACTIVE-999');
+        }
+        if (options.corruptPersistence && reloads) store.save(fixture);
+      },
       loadWorkspace: () => handlers.get('canopy:loadWorkspace')!(event),
     },
   };
+  const saveEvents: string[] = [];
+  let lateAutosave = false;
   const page = {
-    waitForTimeout: async (ms: number) => assert.equal(ms, 250),
-    evaluate: (callback: (...args: any[]) => unknown, value: unknown) =>
-      execute(`(${callback})`, { window })(value),
+    evaluate: async (callback: (...args: any[]) => unknown, value: unknown) => {
+      const result = await execute(`(${callback})`, { window, document })(
+        value,
+      );
+      if (lateAutosave) {
+        lateAutosave = false;
+        saveEvents.push('flush-returned');
+        await window.canopy.saveWorkspace(rendered);
+        saveEvents.push('ordinary-save-handled');
+      }
+      return result;
+    },
     reload: async () => {
+      if (options.outgoingBeforeReload) {
+        holdReply(
+          saved.tabs.find((tab) => tab.id === saved.activeTabId)!.rootKey,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(
+          originalTreeCalls,
+          0,
+          'Outgoing request must not consume the restoration slot',
+        );
+      }
+      contents.emit('did-navigate');
       reloads++;
       // A pending renderer save must still write the captured snapshot here.
-      await window.canopy.saveWorkspace(fixture);
+      if (!options.missingSubmission)
+        await window.canopy.saveWorkspace(fixture);
       if ('reloadFailure' in options) throw options.reloadFailure;
       rendered = await window.canopy.loadWorkspace();
       assert.deepEqual(
@@ -359,21 +553,120 @@ function restoreModel(options: Record<string, unknown> = {}) {
         saved,
         'Save guard must own persistence through reload',
       );
-      if (options.wrongOrder) rendered.tabs.reverse();
-      if (options.wrongId) rendered.tabs[0].id = 'foreign-tab';
-      if (options.wrongRoot) rendered.tabs[0].rootKey = 'CAN-200';
-      if (options.wrongCount) rendered.tabs.pop();
-      if (options.wrongSelection) rendered.activeTabId = rendered.tabs[0].id;
-      if (options.corruptPersistence) store.save(fixture);
+      refreshWork = (async () => {
+        if (options.productionReload) {
+          rendered = (await hydrateWorkspace(rendered)) as typeof saved;
+          const active = rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!;
+          const confirmed = await handlers.get('canopy:tree')!(
+            event,
+            active.connectionId,
+            active.rootKey,
+          );
+          if (options.holdRendererApply) await rendererApply.promise;
+          refreshedAt = confirmed.fetchedAt;
+          if (options.secondRefresh) holdReply(active.rootKey);
+          const refresh = findNode(
+            rendererAst,
+            (node): node is ts.CallExpression =>
+              ts.isCallExpression(node) &&
+              node.expression.getText() === 'setWorkspace' &&
+              node.arguments[0]
+                ?.getText()
+                .includes('[seenKey]: seedOrExtend(') === true,
+          );
+          rendered = execute(refresh.arguments[0].getText(), {
+            tab: active,
+            confirmed,
+            boundRoots,
+            seedOrExtend,
+            seenRootKey,
+          })(rendered);
+          execute(callbackOf(rendererAst, 'restoreScroll'), {
+            workspaceClose: { current: new WorkspaceClose() },
+            scrollRef: { current: viewport },
+            scrollPositions: { current: new Map() },
+            setWorkspace: (
+              update: (current: typeof rendered) => typeof rendered,
+            ) => {
+              rendered = update(rendered);
+            },
+          })(active);
+        } else
+          viewport.scrollTop =
+            rendered.tabs.find((tab) => tab.id === rendered.activeTabId)
+              ?.scrollTop ?? 0;
+        if (options.wrongViewportScroll) viewport.scrollTop = 0;
+        if (options.lostValidScroll) {
+          viewport.scrollTop = 0;
+          rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!.scrollTop = 0;
+        }
+        if (options.wrongInactiveScroll)
+          rendered.tabs.find(
+            (tab) => tab.id !== rendered.activeTabId,
+          )!.scrollTop = 0;
+        if (options.wrongSelectedKey) rendered.tabs[0].selectedKey = 'CAN-101';
+        if (options.wrongSavedView)
+          rendered.savedViews![0].name = 'Corrupted saved view';
+        if (options.wrongActiveSavedView)
+          rendered.activeSavedViewId = 'assigned-to-me';
+        if (options.wrongSeenBaseline)
+          Object.values(rendered.seenRoots!)[0].issues['CAN-100'].seenAt++;
+        if (options.wrongSeenField)
+          rendered.seenRoots!['demo:CAN-100'].issues['CAN-100'].fields.Summary =
+            'Corrupted summary';
+        if (options.wrongSeenCount)
+          rendered.seenRoots!['demo:CAN-100'].issues['CAN-101'].commentCount =
+            999;
+        if (options.wrongTouchedAt)
+          Object.values(rendered.seenRoots!)[0].touchedAt = 1;
+        if (options.invalidTouchedAt)
+          Object.values(rendered.seenRoots!)[0].touchedAt = Number.NaN;
+        if (options.unexpectedIssue)
+          Object.values(rendered.seenRoots!)[0].issues['CAN-998'] = {
+            seenAt: 1,
+            fields: { Summary: 'Unexpected' },
+          };
+        if (options.historicalTouchedAt)
+          rendered.seenRoots!['demo:CAN-9999'].touchedAt++;
+        if (options.wrongSubmittedScroll)
+          rendered.tabs.find(
+            (tab) => tab.id === rendered.activeTabId,
+          )!.scrollTop = 0;
+        if (options.wrongOrder) rendered.tabs.reverse();
+        if (options.wrongId) rendered.tabs[0].id = 'foreign-tab';
+        if (options.wrongRoot) rendered.tabs[0].rootKey = 'CAN-200';
+        if (options.wrongCount) rendered.tabs.pop();
+        if (options.wrongSelection)
+          rendered.activeTabId =
+            rendered.tabs.find((tab) => tab.id !== saved.activeTabId)?.id ??
+            'foreign-active';
+        if (options.wrongReading)
+          Object.assign(rendered, { reading: { textSize: 'large' } });
+        if (options.wrongRootViews)
+          Object.assign(rendered, {
+            rootViews: { foreign: { hideDone: true } },
+          });
+      })();
+      void refreshWork.catch(() => {});
+      if (!options.productionReload) await refreshWork;
     },
     getByRole: (role: string, args?: { name: string }) => ({
       role,
       name: args?.name,
       nth: (index: number) => ({ index }),
     }),
+    getByText: (text: string) => ({ text }),
     locator: (selector: string) => {
-      assert.equal(selector, '[role=tab] .tab-label b');
-      return {};
+      assert.ok(
+        ['[role=tab] .tab-label b', '.statusbar span[title]'].includes(
+          selector,
+        ),
+      );
+      return { selector };
     },
   };
   const expect = (value: any) => ({
@@ -384,18 +677,44 @@ function restoreModel(options: Record<string, unknown> = {}) {
         rendered.tabs.map((t) => t.rootKey),
         roots,
       ),
-    toHaveAttribute: async (key: string, expected: string) =>
+    toBeHidden: async () => {
+      rendererApply.resolve();
+      await refreshWork;
+    },
+    toHaveAttribute: async (key: string, expected: string) => {
+      if (key === 'title') {
+        rendererApply.resolve();
+        await refreshWork;
+      }
       assert.equal(
-        key === 'data-tab-id'
-          ? rendered.tabs[value.index].id
-          : String(
-              options.bothSelected ||
-                rendered.tabs[value.index].id === rendered.activeTabId,
-            ),
+        key === 'title'
+          ? new Date(refreshedAt!).toLocaleString()
+          : key === 'data-tab-id'
+            ? rendered.tabs[value.index].id
+            : String(
+                options.bothSelected ||
+                  rendered.tabs[value.index].id === rendered.activeTabId,
+              ),
         expected,
-      ),
+      );
+    },
     toBeDefined: () => assert.notEqual(value, undefined),
+    toBe: (expected: unknown) => assert.equal(value, expected),
+    toBeLessThan: (expected: number) =>
+      assert.ok(value < expected, `${value} must be less than ${expected}`),
     toBeVisible: async () => {
+      if (value.text === 'Checking for changes') {
+        assert.equal(
+          typeof owner.selfConnectionAudit.releaseRefresh,
+          'function',
+        );
+        assert.equal(
+          refreshedAt,
+          undefined,
+          'Response must stay gated until refresh is visibly running',
+        );
+        return;
+      }
       const active = rendered.tabs.find((t) => t.id === rendered.activeTabId);
       assert.equal(value.role, 'tree');
       assert.equal(
@@ -405,29 +724,71 @@ function restoreModel(options: Record<string, unknown> = {}) {
     },
     toEqual: (expected: unknown) => assert.deepEqual(value, expected),
   });
+  expect.poll = (read: () => Promise<unknown>) => ({
+    toBe: async (value: unknown) => {
+      if (options.cancelBeforeProvider) {
+        await originalStarted.promise;
+        throw Error('readiness failed before provider reply');
+      }
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if ((await read()) === value) return;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(await read(), value);
+    },
+  });
   const app = {
     evaluate: (callback: (...args: any[]) => unknown, value: unknown) => {
-      evaluations++;
-      if (evaluations === 2 && 'cleanupFailure' in options)
+      if (
+        callback
+          .toString()
+          .includes('delete globalThis.selfConnectionAudit;') &&
+        'cleanupFailure' in options
+      )
         throw options.cleanupFailure;
-      return execute(`(${callback})`, { globalThis: owner })(
-        { ipcMain },
-        value,
-      );
+      if (saveEvents.at(-1) === 'ordinary-save-handled') {
+        const audit = owner.selfConnectionAudit;
+        let submitted = audit.submittedWorkspace;
+        Object.defineProperty(audit, 'submittedWorkspace', {
+          configurable: true,
+          get() {
+            if (saveEvents.at(-1) === 'ordinary-save-handled')
+              saveEvents.push('submission-read');
+            return submitted;
+          },
+          set(value) {
+            submitted = value;
+          },
+        });
+      }
+      cleaningHandlers = callback.toString().includes('const errors = []');
+      if (cleaningHandlers) cleanupAudit = owner.selfConnectionAudit;
+      try {
+        return execute(`(${callback})`, { globalThis: owner, structuredClone })(
+          { ipcMain },
+          value,
+        );
+      } finally {
+        cleaningHandlers = false;
+      }
     },
   };
   const run = () =>
-    execute(`async () => { let failed = false; ${restoration} }`, {
-      app,
-      page,
-      workspace: saved,
-      expect,
-      auditBody: () => {
-        if ('bodyFailure' in options) throw options.bodyFailure;
+    execute(
+      `async () => { ${restoration}; let failed = false; ${auditRestoration} }`,
+      {
+        app,
+        page,
+        workspace: saved,
+        expect,
+        auditBody: () => {
+          if ('bodyFailure' in options) throw options.bodyFailure;
+        },
       },
-    })();
+    )();
   return {
     run,
+    saveEvents,
     saved,
     fixture,
     store,
@@ -438,6 +799,35 @@ function restoreModel(options: Record<string, unknown> = {}) {
     event,
     get reloads() {
       return reloads;
+    },
+    rendered: () => rendered,
+    offset: () => offset,
+    refreshedAt: () => refreshedAt,
+    originalTreeCalls: () => originalTreeCalls,
+    settledReplies,
+    attemptedRestorations,
+    originalGate,
+    cleanupAudit: () => cleanupAudit,
+    finishRefresh: () => refreshWork,
+    navigationListeners: () => contents.listenerCount('did-navigate'),
+    settleReplies: async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(heldReplies),
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  Error('Held refresh requests did not settle during cleanup'),
+                ),
+              250,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }
@@ -451,6 +841,7 @@ for (const firstActive of [false, true])
     for (const [key, handler] of m.originals)
       assert.equal(m.handlers.get(key), handler);
     assert.equal(m.owner.selfConnectionAudit, undefined);
+    assert.equal(m.cleanupAudit()?.readingSubmission, false);
     await m.originalSave(m.event, m.fixture);
     assert.deepEqual(m.store.load(), m.fixture);
     assert.throws(
@@ -477,12 +868,26 @@ for (const option of [
   'bothSelected',
   'wrongTree',
   'corruptPersistence',
+  'wrongReading',
+  'wrongRootViews',
+  'missingSubmission',
+  'autosaveSubmission',
+  'autosaveAfterFlush',
 ])
   test(`restoration refuses ${option} and releases save ownership`, async () => {
     const m = restoreModel({ [option]: true });
     await assert.rejects(m.run(), { code: 'ERR_ASSERTION' });
+    if (option === 'autosaveAfterFlush')
+      assert.deepEqual(m.saveEvents, [
+        'flush-returned',
+        'ordinary-save-handler',
+        'ordinary-save-handled',
+        'submission-read',
+      ]);
+    if (option === 'missingSubmission') assert.deepEqual(m.saveEvents, []);
     assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
     assert.equal(m.owner.selfConnectionAudit, undefined);
+    assert.equal(m.cleanupAudit()?.readingSubmission, false);
   });
 
 for (const primary of [
@@ -499,7 +904,7 @@ for (const primary of [
       await assert.rejects(m.run(), (error) => error === primary);
       assert.equal(m.handlers.get('canopy:saveWorkspace'), m.originalSave);
       assert.equal(m.owner.selfConnectionAudit, undefined);
-      assert.equal(m.reloads, phase === 'reloadFailure' ? 1 : 0);
+      assert.equal(m.reloads, phase === 'saveFailure' ? 0 : 1);
     });
   test(`primary audit failure ${String(primary)} survives restoration failure`, async () => {
     const m = restoreModel({
@@ -523,4 +928,1195 @@ test('cleanup failure refuses an otherwise successful restoration', async () => 
   const cleanupFailure = new Error('cleanup failed');
   const m = restoreModel({ cleanupFailure });
   await assert.rejects(m.run(), (error) => error === cleanupFailure);
+});
+
+const renderer = readFileSync(
+  process.env.CANOPY_CLOSE_RENDERER_SOURCE ??
+    new URL('../src/renderer/App.tsx', import.meta.url),
+  'utf8',
+);
+const rendererAst = ts.createSourceFile(
+  'App.tsx',
+  renderer,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TSX,
+);
+const rendererFlush = findNode(
+  rendererAst,
+  (node): node is ts.CallExpression =>
+    ts.isCallExpression(node) &&
+    node.expression.getText() === 'window.canopy.onWorkspaceFlush',
+);
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function lifecycle(
+  options: {
+    flushFailure?: unknown;
+    failFlush?: boolean;
+    failFlushAt?: number;
+    completeAudit?: boolean;
+    lateReloadSave?: boolean;
+    saveFailure?: boolean;
+    reloadFailure?: boolean;
+    remoteFailure?: boolean;
+    assertionFailure?: boolean;
+    installFailure?: boolean;
+    auditFailure?: unknown;
+  } = {},
+) {
+  const saved = {
+    ...workspace(['CAN-100', 'CAN-106']),
+    theme: 'system',
+    shortcuts: {},
+    sidebarCollapsed: false,
+    activeTabId: 'can-106',
+    tabs: [
+      {
+        ...tab('CAN-100'),
+        expanded: [],
+        hideDone: false,
+        scrollTop: 0,
+        view: { ...structuredClone(DEFAULT_VIEW), filters: { assignee: 'me' } },
+      },
+      {
+        ...tab('CAN-106'),
+        expanded: [],
+        hideDone: true,
+        scrollTop: 0,
+        view: { ...structuredClone(DEFAULT_VIEW), hideDone: true },
+      },
+    ],
+    seenRoots: { 'demo:CAN-106': { touchedAt: 1, issues: {} } },
+    rootViews: {
+      [JSON.stringify(['demo', 'CAN-106'])]: structuredClone(DEFAULT_VIEW),
+    },
+  };
+  let persisted: unknown = workspace(['CAN-100']);
+  let rendered = saved;
+  let gate: ReturnType<typeof deferred> | undefined;
+  let hydrated:
+    | {
+        held: ReturnType<typeof deferred>;
+        started: ReturnType<typeof deferred>;
+      }
+    | undefined;
+  let reloads = 0;
+  let treeReply = Promise.resolve();
+  let flushes = 0;
+  let resets = 0;
+  let timerCancelled = false;
+  const failure = new Error('cleanup failure');
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const originalSave = (_event: unknown, value: unknown) => {
+    validateWorkspace(value as Workspace);
+    if (options.saveFailure) throw failure;
+    persisted = structuredClone(value);
+  };
+  handlers.set('canopy:saveWorkspace', originalSave);
+  handlers.set('canopy:loadWorkspace', () => structuredClone(persisted));
+  for (const channel of [
+    'connections',
+    'connect',
+    'currentUser',
+    'tree',
+    'cachedUsers',
+    'assignees',
+    'validateAssignee',
+    'update',
+  ]) {
+    handlers.set(`canopy:${channel}`, () => {});
+  }
+  handlers.set('canopy:tree', () => ({ fetchedAt: 1, issues: [] }));
+  const originals = new Map(handlers);
+  const contents = new EventEmitter();
+  const call = (name: string, ...args: unknown[]) =>
+    handlers.get(`canopy:${name}`)!({ sender: contents }, ...args);
+  const refs = {
+    workspaceLoaded: { current: true },
+    workspaceRef: { current: rendered },
+    workspaceTransferBusy: { current: false },
+    workspaceClose: { current: new WorkspaceClose() },
+    workspaceTransferCommitted: { current: false },
+    workspaceSaveTimer: { current: 42 as number | null },
+  };
+  const context = {
+    workspaceError,
+    ...refs,
+    demoResetting: { current: false },
+    pendingWorkspaceSave: { current: Promise.resolve() },
+    scrollPositions: { current: {} },
+    withScrollPositions: (value: unknown) => value,
+    setErrors: () => {},
+    window: {
+      clearTimeout: () => {
+        timerCancelled = true;
+      },
+      canopy: {
+        loadWorkspace: () => call('loadWorkspace'),
+        saveWorkspace: async (
+          value: unknown,
+          _attempt?: number,
+          explicitFlush?: boolean,
+        ) => {
+          const pending = gate;
+          gate = undefined;
+          if (pending === hydrated?.held) hydrated?.started.resolve();
+          if (pending) await pending.promise;
+          return call('saveWorkspace', value, explicitFlush);
+        },
+        flushWorkspace: async () => {
+          flushes += 1;
+          if (options.failFlush || options.failFlushAt === flushes)
+            throw options.flushFailure;
+          await flush();
+        },
+      },
+    },
+    document: {
+      querySelector: () => ({
+        scrollTop: 0,
+        scrollHeight: 100,
+        clientHeight: 100,
+      }),
+      querySelectorAll: () =>
+        rendered.tabs.map((item) => ({
+          querySelector: () => ({ textContent: item.rootKey }),
+          getAttribute: () =>
+            item.id === rendered.activeTabId ? 'true' : 'false',
+        })),
+    },
+    console: { log: () => {} },
+  };
+  // Run the renderer's actual queue and flush callbacks against the IPC fixture.
+  const saveNode = findNode(
+    rendererAst,
+    (node): node is ts.VariableDeclaration =>
+      ts.isVariableDeclaration(node) && node.name.getText() === 'saveWorkspace',
+  );
+  const save = execute(saveNode.initializer!.getText(), {
+    ...context,
+    useCallback: (fn: unknown) => fn,
+  });
+  const flush = execute(rendererFlush.arguments[0].getText(), {
+    ...context,
+    saveWorkspace: save,
+  });
+  const main = {
+    canopySmoke: {
+      tree: () => ({
+        issues: [
+          { key: 'CAN-100', assignee: { id: 'alex', name: 'Alex Morgan' } },
+        ],
+      }),
+      validateAssignee: () => ({}),
+      update: () => ({}),
+      remoteUpdate: () => {
+        resets += 1;
+        if (options.remoteFailure) throw failure;
+      },
+    },
+  };
+  let installFailure = options.installFailure;
+  const ipcMain = {
+    _invokeHandlers: handlers,
+    removeHandler: (channel: string) => handlers.delete(channel),
+    handle: (channel: string, handler: (...args: any[]) => unknown) => {
+      handlers.set(channel, handler);
+      if (installFailure && channel === 'canopy:currentUser') {
+        installFailure = false;
+        throw options.auditFailure;
+      }
+    },
+  };
+  const functions = runInNewContext(
+    source
+      .replace("import { expect } from '@playwright/test';", '')
+      .replaceAll('export async function', 'async function') +
+      '\nexpect.poll = callback => ({toBe: async value => { if (await callback() !== value) throw Error(\"poll mismatch\"); }});\n({captureSelfConnectionWorkspace, restoreSelfConnectionWorkspace, auditSelfConnections});',
+    {
+      structuredClone,
+      TextEncoder,
+      expect: (locator: { role: string; name?: string; index?: number }) => ({
+        toBeDefined: () => assert.notEqual(locator, undefined),
+        toBe: (value: unknown) => assert.equal(locator, value),
+        toBeLessThan: (value: number) => assert.ok(Number(locator) < value),
+        toHaveText: async (roots: string[]) =>
+          assert.deepEqual(
+            rendered.tabs.map((item) => item.rootKey),
+            Array.from(roots),
+          ),
+        toHaveAttribute: async (key: string, value: string) => {
+          if (key === 'title') await treeReply;
+          assert.equal(
+            key === 'title'
+              ? new Date(1).toLocaleString()
+              : key === 'data-tab-id'
+                ? rendered.tabs[locator.index!].id
+                : String(
+                    rendered.tabs[locator.index!].id === rendered.activeTabId,
+                  ),
+            value,
+          );
+        },
+        toHaveCount: async (count: number) => {
+          assert.equal(rendered.tabs.length, count);
+          if (options.assertionFailure) throw failure;
+        },
+        toBeDisabled: async () => {},
+        toBeEnabled: async () => {},
+        toBeHidden: async () => {
+          await treeReply;
+        },
+        toContainText: async () => {},
+        toEqual: (value: unknown) =>
+          assert.deepEqual(
+            JSON.parse(JSON.stringify(locator)),
+            JSON.parse(JSON.stringify(value)),
+          ),
+        toBeVisible: async () => {
+          if (locator.name === 'Checking for changes') return;
+          const active = rendered.tabs.find(
+            (item) => item.id === rendered.activeTabId,
+          )!;
+          assert.equal(locator.name, `${active.rootKey} issue tree`);
+        },
+      }),
+    },
+  );
+  let connection = 'demo';
+  const locator = (role: string, args?: { name?: string }): any => ({
+    role,
+    ...args,
+    fill: async () => {},
+    press: async () => {},
+    nth: (index: number) => ({
+      index,
+      click: () => {
+        connection = index ? 'other' : 'demo';
+      },
+    }),
+    click: () => {
+      if (!options.completeAudit) throw options.auditFailure;
+      if (args?.name === 'Verify and save Jira') {
+        call('connect');
+        void call('currentUser', 'demo');
+      }
+      if (args?.name === 'Assign to me') {
+        const account = connection === 'other' ? 'sam' : 'jordan';
+        call('validateAssignee', connection, 'CAN-100', account, true);
+        call('update', connection, 'CAN-100', { assigneeId: account });
+      }
+    },
+  });
+  const page = {
+    getByLabel: (name: string) => locator('label', { name }),
+    getByPlaceholder: (name: string) => locator('placeholder', { name }),
+    evaluate: (callback: (...args: any[]) => unknown, value?: unknown) =>
+      runInNewContext(`(${callback.toString()})(value)`, { ...context, value }),
+    reload: async () => {
+      contents.emit('did-navigate');
+      reloads += 1;
+      if (options.reloadFailure) throw failure;
+      // An old renderer write during navigation must not overwrite the capture.
+      if (options.lateReloadSave !== false)
+        await context.window.canopy.saveWorkspace(workspace(['FIXTURE']));
+      rendered = call('loadWorkspace') as typeof saved;
+      refs.workspaceRef.current = rendered;
+      if (mainContext.selfConnectionAudit?.refreshedRoots) {
+        const active = rendered.tabs.find(
+          (tab) => tab.id === rendered.activeTabId,
+        )!;
+        treeReply = Promise.resolve(
+          call('tree', active.connectionId, active.rootKey),
+        ).then(() => {});
+        void treeReply.catch(() => {});
+      }
+      if (hydrated) gate = hydrated.held;
+    },
+    getByRole: locator,
+    getByText: (name: string) => ({ name }),
+    locator: () => ({}),
+  };
+  const mainContext = createContext({ ...main, ipcMain, structuredClone });
+  const app = {
+    evaluate: (callback: (...args: any[]) => unknown, value?: unknown) => {
+      mainContext.value = value;
+      return runInContext(
+        `(${callback.toString()})({ipcMain}, value)`,
+        mainContext,
+      );
+    },
+  };
+  return {
+    saved,
+    originalSave,
+    render: (value: typeof saved) => {
+      rendered = value;
+      refs.workspaceRef.current = value;
+    },
+    holdReloadSave: () => {
+      hydrated = { held: deferred(), started: deferred() };
+      return hydrated;
+    },
+    page,
+    app,
+    functions,
+    handlers,
+    originals,
+    failure,
+    persisted: () => persisted,
+    rendered: () => rendered,
+    stats: () => ({ reloads, flushes, resets, timerCancelled }),
+    fixture: () => {
+      mainContext.selfConnectionAudit = { handlers: new Map(originals) };
+      handlers.set('canopy:saveWorkspace', () => {});
+      rendered = { ...saved, ...workspace(['FIXTURE']) } as typeof saved;
+      refs.workspaceRef.current = rendered;
+    },
+    hold: () => {
+      gate = deferred();
+      return gate;
+    },
+    save,
+    auditPresent: () => Boolean(mainContext.selfConnectionAudit),
+  };
+}
+
+test('settled capture waits for queued writes and preserves current active root and view state', async () => {
+  const h = lifecycle();
+  h.originals.get('canopy:saveWorkspace')!(null, h.saved);
+  const current = {
+    ...h.saved,
+    activeTabId: 'can-100',
+    tabs: h.saved.tabs.slice(0, 1),
+  };
+  h.render(current);
+  const held = h.hold();
+  const oldSave = h.save(h.saved);
+  await Promise.resolve();
+  let finished = false;
+  const capturing = h.functions
+    .captureSelfConnectionWorkspace(h.page)
+    .then((value: unknown) => {
+      finished = true;
+      return value;
+    });
+  await Promise.resolve();
+  assert.equal(finished, false);
+  held.resolve();
+  await oldSave;
+  assert.deepEqual(await capturing, current);
+  assert.deepEqual(h.persisted(), current);
+  assert.equal(h.stats().timerCancelled, true);
+});
+
+test('restoration drains pending fixture saves and protects the complete workspace during reload', async () => {
+  const h = lifecycle();
+  h.fixture();
+  const fixtureSave = h.handlers.get('canopy:saveWorkspace');
+  const hydrated = h.holdReloadSave();
+  const held = h.hold();
+  const pending = h.save(workspace(['FIXTURE']));
+  await Promise.resolve();
+  const restoring = h.functions.restoreSelfConnectionWorkspace(
+    h.app,
+    h.page,
+    h.saved,
+  );
+  await Promise.resolve();
+  assert.equal(h.handlers.get('canopy:saveWorkspace'), fixtureSave);
+  assert.equal(h.stats().reloads, 0);
+  held.resolve();
+  await pending;
+  await hydrated.started.promise;
+  assert.notEqual(
+    h.handlers.get('canopy:saveWorkspace'),
+    h.originals.get('canopy:saveWorkspace'),
+  );
+  assert.equal(h.auditPresent(), true);
+  hydrated.held.resolve();
+  await restoring;
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.equal(h.stats().flushes, 2);
+  assert.equal(h.stats().resets, 1);
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
+});
+
+test('capture refuses a failed flush without loading or installing the fixture', async () => {
+  for (const primary of [
+    new Error('flush failed'),
+    undefined,
+    null,
+    false,
+    0,
+    '',
+  ]) {
+    const h = lifecycle({ failFlush: true, flushFailure: primary });
+    let rejected = false;
+    try {
+      await h.functions.auditSelfConnections(h.app, h.page);
+    } catch (error) {
+      rejected = true;
+      assert.equal(error, primary);
+    }
+    assert.equal(rejected, true);
+    assert.deepEqual(h.handlers, h.originals);
+    assert.equal(h.stats().reloads, 0);
+    assert.equal(h.auditPresent(), false);
+  }
+});
+
+test('restoration releases every handler after flush, save, reload, assertion or fixture-reset failures', async () => {
+  for (const options of [
+    { failFlush: true, flushFailure: null },
+    { failFlushAt: 1, flushFailure: null },
+    { failFlushAt: 1, flushFailure: null, remoteFailure: true },
+    { failFlushAt: 2, flushFailure: null },
+    { saveFailure: true },
+    { reloadFailure: true },
+    { assertionFailure: true },
+    { remoteFailure: true },
+  ]) {
+    const h = lifecycle(options);
+    h.fixture();
+    let rejected = false;
+    try {
+      await h.functions.restoreSelfConnectionWorkspace(h.app, h.page, h.saved);
+    } catch (error) {
+      rejected = true;
+      assert.equal(
+        error,
+        options.failFlush || options.failFlushAt ? null : h.failure,
+      );
+    }
+    assert.equal(rejected, true);
+    assert.deepEqual(h.handlers, h.originals);
+    assert.equal(h.auditPresent(), false);
+    if (options.failFlush || options.remoteFailure) {
+      assert.deepEqual(h.persisted(), h.saved);
+      assert.deepEqual(h.rendered(), h.saved);
+    }
+  }
+});
+
+test('audit preserves raw assertion and partial-installation failures across failed cleanup', async () => {
+  for (const primary of [
+    new Error('audit failed'),
+    undefined,
+    null,
+    false,
+    0,
+    '',
+  ]) {
+    for (const installFailure of [false, true]) {
+      const h = lifecycle({
+        auditFailure: primary,
+        installFailure,
+        remoteFailure: true,
+      });
+      let rejected = false;
+      try {
+        await h.functions.auditSelfConnections(h.app, h.page);
+      } catch (error) {
+        rejected = true;
+        assert.equal(error, primary);
+      }
+      assert.equal(rejected, true);
+      assert.deepEqual(h.handlers, h.originals);
+      assert.equal(h.auditPresent(), false);
+    }
+  }
+});
+
+test('a completed audit reports restoration failure and restores the original handlers', async () => {
+  const h = lifecycle({ completeAudit: true, remoteFailure: true });
+  await assert.rejects(
+    h.functions.auditSelfConnections(h.app, h.page),
+    (error: unknown) => error === h.failure,
+  );
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
+});
+
+test('restoration explicitly persists the capture when navigation has no late renderer save', async () => {
+  const h = lifecycle({ lateReloadSave: false });
+  h.fixture();
+  await h.functions.restoreSelfConnectionWorkspace(h.app, h.page, h.saved);
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.deepEqual(h.handlers, h.originals);
+});
+
+test('a completed audit restores the full workspace and returns successfully', async () => {
+  const h = lifecycle({ completeAudit: true });
+  await h.functions.auditSelfConnections(h.app, h.page);
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
+});
+
+test('restoration also completes when fixture installation never created handler state', async () => {
+  const h = lifecycle({ lateReloadSave: false });
+  await h.functions.restoreSelfConnectionWorkspace(h.app, h.page, h.saved);
+  assert.deepEqual(h.persisted(), h.saved);
+  assert.deepEqual(h.rendered(), h.saved);
+  assert.deepEqual(h.handlers, h.originals);
+  assert.equal(h.auditPresent(), false);
+});
+
+function callbackOf(ast: ts.SourceFile, name: string) {
+  const node = findNode(
+    ast,
+    (node): node is ts.VariableDeclaration =>
+      ts.isVariableDeclaration(node) && node.name.getText() === name,
+  );
+  return (node.initializer as ts.CallExpression).arguments[0].getText();
+}
+async function hydrateWorkspace(saved: Workspace): Promise<Workspace> {
+  let hydrated = saved,
+    error: unknown,
+    done!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    done = resolve;
+  });
+  const initialization = findNode(
+    rendererAst,
+    (node): node is ts.CallExpression =>
+      ts.isCallExpression(node) &&
+      node.expression.getText() === 'useEffect' &&
+      node.getText().includes('window.canopy.demoTimeScale()'),
+  );
+  const empty = findNode(
+    rendererAst,
+    (node): node is ts.VariableDeclaration =>
+      ts.isVariableDeclaration(node) &&
+      node.name.getText() === 'EMPTY_WORKSPACE',
+  );
+  const PLATFORM_SHORTCUTS = defaultShortcuts();
+  const EMPTY_WORKSPACE = execute(`()=>(${empty.initializer!.getText()})`, {
+    PLATFORM_SHORTCUTS,
+  })();
+  const cleanup = execute(initialization.arguments[0].getText(), {
+    workspaceLoaded: { current: false },
+    workspaceError,
+    demoTimeScale: { current: 1 },
+    document: { title: '' },
+    setWorkspace: (value: Workspace) => {
+      hydrated = value;
+    },
+    setWorkspaceLoadError: (value: unknown) => {
+      error = value;
+    },
+    setErrors() {},
+    setReady: () => done(),
+    setDemoMode() {},
+    setConnections() {},
+    setHandoffHydrated() {},
+    EMPTY_WORKSPACE,
+    PLATFORM_SHORTCUTS,
+    DEFAULT_READING,
+    starterViews,
+    migrateViews,
+    window: {
+      canopy: {
+        workspaceInitialized: async () => {},
+        connections: async () => [{ id: 'demo' }],
+        loadWorkspace: async () => saved,
+        demoMode: async () => false,
+        demoTimeScale: async () => 1,
+      },
+    },
+  })();
+  await ready;
+  cleanup();
+  if (error) throw Error(String(error));
+  return hydrated;
+}
+async function capturedReloadWorkspace() {
+  const provider = new DemoProvider();
+  const baseline = await provider.tree('CAN-100');
+  baseline.fetchedAt = 1794020317961;
+  const captured = await hydrateWorkspace({
+    ...structuredClone(demoWorkspace),
+    tabs: [
+      {
+        ...demoWorkspace.tabs[0],
+        id: 'captured-0',
+        selectedKey: 'CAN-110',
+        expanded: ['CAN-100'],
+        hideDone: true,
+        scrollTop: 34,
+      },
+      {
+        ...demoWorkspace.tabs[0],
+        id: 'captured-1',
+        rootKey: 'CAN-106',
+        scrollTop: 34,
+      },
+    ],
+    activeTabId: 'captured-0',
+    seenRoots: {
+      'demo:CAN-100': seedOrExtend(undefined, baseline),
+      'demo:CAN-9999': { touchedAt: 123, issues: {} },
+    },
+  });
+  captured.seenRoots!['demo:CAN-100'].issues['CAN-101'].commentCount = 7;
+  return JSON.parse(JSON.stringify(captured)) as Workspace;
+}
+
+test('reload restoration accepts production hydration, refresh metadata and an actual viewport clamp without changing its captured file', async () => {
+  const captured = await capturedReloadWorkspace();
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, viewportMax: 0 },
+    captured,
+  );
+  await model.run();
+  assert.equal(model.offset(), 0);
+  assert.equal(model.rendered().tabs[0].scrollTop, 0);
+  assert.equal(model.rendered().tabs[1].scrollTop, 34);
+  assert.equal(
+    model.rendered().seenRoots!['demo:CAN-100'].touchedAt,
+    1794020324655,
+  );
+  assert.ok(Object.hasOwn(model.rendered(), 'pinnedRoots'));
+  assert.ok(
+    Object.hasOwn(
+      model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'],
+      'commentCount',
+    ),
+  );
+  assert.deepEqual(model.store.load(), model.saved);
+  assert.equal(model.store.load().tabs[0].scrollTop, 34);
+});
+
+test('reload restoration keeps a valid scroll offset exactly', async () => {
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, viewportMax: 100 },
+    await capturedReloadWorkspace(),
+  );
+  await model.run();
+  assert.equal(model.offset(), 34);
+  assert.equal(model.rendered().tabs[0].scrollTop, 34);
+});
+for (const option of [
+  'unexpectedIssue',
+  'historicalTouchedAt',
+  'wrongReading',
+  'wrongRootViews',
+  'wrongOrder',
+  'wrongId',
+  'wrongRoot',
+  'wrongSelection',
+  'wrongSavedView',
+  'wrongActiveSavedView',
+  'wrongSelectedKey',
+  'wrongSeenBaseline',
+  'wrongSeenField',
+  'wrongSeenCount',
+  'wrongTouchedAt',
+  'invalidTouchedAt',
+  'wrongInactiveScroll',
+  'wrongSubmittedScroll',
+  'lostValidScroll',
+  'wrongViewportScroll',
+  'missingSubmission',
+  'autosaveSubmission',
+  'autosaveAfterFlush',
+  'missingViewport',
+])
+  test(`production reload restoration rejects ${option} and preserves fixture ownership`, async () => {
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        viewportMax: 100,
+        [option]: true,
+      },
+      await capturedReloadWorkspace(),
+    );
+    await assert.rejects(
+      model.run(),
+      option === 'missingViewport'
+        ? /has no scroll viewport/
+        : { code: 'ERR_ASSERTION' },
+    );
+    if (option === 'autosaveAfterFlush')
+      assert.deepEqual(model.saveEvents, [
+        'flush-returned',
+        'ordinary-save-handler',
+        'ordinary-save-handled',
+        'submission-read',
+      ]);
+    if (option === 'missingSubmission') assert.deepEqual(model.saveEvents, []);
+    if (option === 'lostValidScroll' || option === 'wrongViewportScroll')
+      assert.equal(
+        model.offset(),
+        0,
+        'the assertion must restore rather than repair the observed viewport',
+      );
+    assert.equal(
+      model.handlers.get('canopy:saveWorkspace'),
+      model.originalSave,
+    );
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+    assert.deepEqual(model.store.load(), model.saved);
+  });
+
+test('controlled refresh adds only the new issue baseline and keeps saved baseline values and unrelated recency', async () => {
+  const captured = await capturedReloadWorkspace();
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      viewportMax: 100,
+      newIssue: true,
+    },
+    captured,
+  );
+  await model.run();
+  assert.equal(
+    model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-999'].fields
+      .Summary,
+    'New issue',
+  );
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'],
+      ),
+    ),
+    captured.seenRoots!['demo:CAN-100'].issues['CAN-100'],
+  );
+  assert.deepEqual(
+    model.rendered().seenRoots!['demo:CAN-9999'],
+    captured.seenRoots!['demo:CAN-9999'],
+  );
+});
+
+for (const failure of [false, true])
+  test(`single applied refresh preserves first seenAt and cancels later/background replies ${failure ? 'after comparison failure' : 'after captured save'}`, async () => {
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        newIssue: true,
+        secondRefresh: true,
+        lateRefresh: true,
+        wrongSeenField: failure,
+      },
+      await capturedReloadWorkspace(),
+    );
+    if (failure) await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+    else await model.run();
+    await model.settleReplies();
+    assert.equal(
+      model.originalTreeCalls(),
+      1,
+      'Later replies must stay gated before the original provider',
+    );
+    assert.equal(model.settledReplies.length, 3);
+    for (const error of model.settledReplies)
+      assert.match(String(error), /refresh canceled/);
+    const baseline =
+      model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-999'];
+    assert.equal(baseline.seenAt, 1794020324655);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+    for (const [key, handler] of model.originals)
+      assert.equal(model.handlers.get(key), handler);
+    assert.deepEqual(model.store.load(), model.saved);
+  });
+
+test('handler cleanup attempts every original and cancels held refreshes when one restoration throws', async () => {
+  const failure = Error('handler restore failed');
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      newIssue: true,
+      secondRefresh: true,
+      lateRefresh: true,
+      handlerCleanupFailure: failure,
+    },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), (error) => error === failure);
+  await model.settleReplies();
+  assert.deepEqual(model.attemptedRestorations, [...model.originals.keys()]);
+  assert.equal(model.settledReplies.length, 3);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  for (const [key, handler] of model.originals)
+    assert.equal(model.handlers.get(key), handler);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('canceling restoration while original tree is pending prevents late evidence and renderer application', async () => {
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, cancelBeforeProvider: true },
+    await capturedReloadWorkspace(),
+  );
+  try {
+    await assert.rejects(model.run(), /readiness failed before provider reply/);
+    await assert.rejects(
+      deadline(() => model.finishRefresh(), 250, 'Refresh cancellation'),
+      /refresh canceled/,
+    );
+  } finally {
+    model.originalGate.resolve();
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(model.cleanupAudit()!.refreshedRoots, {});
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.equal(model.originalTreeCalls(), 1);
+  for (const [key, handler] of model.originals)
+    assert.equal(model.handlers.get(key), handler);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('recorded refresh evidence waits for renderer application before the captured save', async () => {
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      newIssue: true,
+      holdRendererApply: true,
+    },
+    await capturedReloadWorkspace(),
+  );
+  await model.run();
+  assert.equal(
+    model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-999'].seenAt,
+    1794020324655,
+  );
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+for (const failure of [false, true])
+  test(`identity fixture gates settle during ${failure ? 'failed' : 'successful'} restoration cleanup`, async () => {
+    const model = restoreModel(failure ? { wrongCount: true } : {});
+    let released = 0;
+    model.owner.selfConnectionAudit.identityResolvers = [
+      () => {
+        released++;
+      },
+    ];
+    if (failure) await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+    else await model.run();
+    assert.equal(released, 1);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+test('lifecycle save double rejects invalid views and filters before attempting a write', () => {
+  const model = lifecycle();
+  assert.throws(
+    () =>
+      model.originalSave(null, {
+        ...model.saved,
+        rootViews: { invalid: { hideDone: true } },
+      }),
+    /Invalid table view/,
+  );
+  assert.throws(
+    () =>
+      model.originalSave(null, {
+        ...model.saved,
+        tabs: model.saved.tabs.map((tab) => ({
+          ...tab,
+          filters: { assignee: 'alex' },
+        })),
+      }),
+    /Invalid assignee filter/,
+  );
+});
+
+for (const viewportMetricMax of [20, 21])
+  test(`reload restoration accepts fractional clamp with integer range ${viewportMetricMax}`, async () => {
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        viewportMax: 20.5,
+        viewportMetricMax,
+      },
+      await capturedReloadWorkspace(),
+    );
+    await model.run();
+    assert.equal(model.offset(), 20.5);
+    assert.equal(model.rendered().tabs[0].scrollTop, 20.5);
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+test('reload restoration preserves fractional in-range offsets exactly', async () => {
+  const captured = await capturedReloadWorkspace();
+  captured.tabs[0].scrollTop = 12.25;
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      viewportMax: 20.5,
+      viewportMetricMax: 21,
+    },
+    captured,
+  );
+  await model.run();
+  assert.equal(model.offset(), 12.25);
+  assert.equal(model.rendered().tabs[0].scrollTop, 12.25);
+  assert.deepEqual(model.store.load(), model.saved);
+  assert.deepEqual(model.handlers, model.originals);
+});
+
+for (const option of [
+  'wrongViewportScroll',
+  'lostValidScroll',
+  'wrongSubmittedScroll',
+])
+  test(`fractional in-range restoration refuses ${option} and restores ownership`, async () => {
+    const captured = await capturedReloadWorkspace();
+    captured.tabs[0].scrollTop = 12.25;
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        viewportMax: 20.5,
+        viewportMetricMax: 21,
+        [option]: true,
+      },
+      captured,
+    );
+    await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+for (const unobservedRefresh of [false, true])
+  test(`existing baseline enrichment ${unobservedRefresh ? 'refuses unobserved additions' : 'accepts observed missing fields and counts'}`, async () => {
+    const captured = await capturedReloadWorkspace();
+    const baseline = captured.seenRoots!['demo:CAN-100'].issues['CAN-100'];
+    delete baseline.fields.Priority;
+    delete baseline.commentCount;
+    const retained = structuredClone(
+      captured.seenRoots!['demo:CAN-100'].issues['CAN-101'],
+    );
+    const model = restoreModel(
+      {
+        firstActive: true,
+        productionReload: true,
+        refreshedValues: true,
+        unobservedRefresh,
+      },
+      captured,
+    );
+    if (unobservedRefresh) {
+      await assert.rejects(
+        model.run(),
+        (error: any) =>
+          error.code === 'ERR_ASSERTION' &&
+          /Priority|commentCount/.test(error.message),
+      );
+      assert.equal(model.originalTreeCalls(), 1);
+      assert.equal(
+        model.rendered().seenRoots!['demo:CAN-100'].touchedAt,
+        model.refreshedAt(),
+      );
+      assert.equal(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'].fields
+          .Priority,
+        'High',
+      );
+      assert.equal(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100']
+          .commentCount,
+        42,
+      );
+    } else {
+      await model.run();
+      const enriched =
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-100'];
+      assert.equal(enriched.fields.Priority, 'High');
+      assert.equal(enriched.commentCount, 42);
+      assert.equal(enriched.fields.Summary, baseline.fields.Summary);
+      assert.equal(enriched.seenAt, baseline.seenAt);
+      assert.deepEqual(
+        model.rendered().seenRoots!['demo:CAN-100'].issues['CAN-101'],
+        retained,
+      );
+      assert.deepEqual(
+        model.rendered().seenRoots!['demo:CAN-9999'],
+        captured.seenRoots!['demo:CAN-9999'],
+      );
+    }
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+test('reload restoration refuses a whole-pixel boundary discrepancy', async () => {
+  const model = restoreModel(
+    {
+      firstActive: true,
+      productionReload: true,
+      viewportMax: 19,
+      viewportMetricMax: 20,
+    },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+  assert.deepEqual(model.handlers, model.originals);
+  assert.deepEqual(model.store.load(), model.saved);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+});
+
+for (const full of [false, true])
+  test(`baseline restoration ${full ? 'refuses admission at' : 'admits below'} the retained issue limit`, async () => {
+    const captured = await capturedReloadWorkspace();
+    const root = captured.seenRoots!['demo:CAN-100'];
+    for (let n = 0; Object.keys(root.issues).length < (full ? 1000 : 999); n++)
+      root.issues[`OLD-${n}`] = {
+        seenAt: 1,
+        fields: { Summary: 'Retained historical issue' },
+      };
+    validateWorkspace(captured);
+    const model = restoreModel(
+      { firstActive: true, productionReload: true, newIssue: true },
+      captured,
+    );
+    await model.run();
+    const restored = model.rendered().seenRoots!['demo:CAN-100'];
+    assert.equal(Object.keys(restored.issues).length, 1000);
+    assert.equal(Boolean(restored.issues['CAN-999']), !full);
+    for (const [key, issue] of Object.entries(root.issues))
+      assert.deepEqual(JSON.parse(JSON.stringify(restored.issues[key])), issue);
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+for (const missingRoot of [false, true])
+  for (const unexpectedIssue of [false, true])
+    test(`shared baseline byte pressure ${missingRoot ? 'without an active baseline' : 'with an active baseline'} ${unexpectedIssue ? 'rejects unobserved additions' : 'retains saved baselines and refuses observed admission'}`, async () => {
+      const captured = await capturedReloadWorkspace();
+      if (missingRoot) delete captured.seenRoots!['demo:CAN-100'];
+      for (const key of [
+        missingRoot ? 'demo:CAN-7777' : 'demo:CAN-100',
+        'demo:CAN-9999',
+        'demo:CAN-8888',
+      ]) {
+        const root = (captured.seenRoots![key] ??= {
+          touchedAt: 123,
+          issues: {},
+        });
+        for (let n = 0; n < 400; n++)
+          root.issues[`OLD-${n}`] = {
+            seenAt: 1,
+            fields: { Summary: '界'.repeat(300), Type: '界'.repeat(300) },
+          };
+      }
+      validateWorkspace(captured);
+      assert.ok(
+        new TextEncoder().encode(JSON.stringify(captured.seenRoots))
+          .byteLength > 2_000_000,
+      );
+      const model = restoreModel(
+        {
+          firstActive: true,
+          productionReload: true,
+          newIssue: true,
+          unexpectedIssue,
+        },
+        captured,
+      );
+      if (unexpectedIssue)
+        await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+      else await model.run();
+      const restored = model.rendered().seenRoots!;
+      assert.equal(restored['demo:CAN-100']?.issues['CAN-999'], undefined);
+      if (missingRoot) assert.equal(restored['demo:CAN-100'], undefined);
+      if (!unexpectedIssue) assert.deepEqual(restored, captured.seenRoots);
+      assert.deepEqual(model.store.load(), model.saved);
+      assert.deepEqual(model.handlers, model.originals);
+      assert.equal(model.owner.selfConnectionAudit, undefined);
+    });
+
+for (const full of [false, true])
+  test(`baseline restoration ${full ? 'refuses admission at' : 'admits below'} the retained root limit`, async () => {
+    const captured = await capturedReloadWorkspace();
+    delete captured.seenRoots!['demo:CAN-100'];
+    for (
+      let n = 0;
+      Object.keys(captured.seenRoots!).length < (full ? 12 : 11);
+      n++
+    )
+      captured.seenRoots![`demo:OLD-${n}`] = {
+        touchedAt: 123,
+        issues: { 'OLD-1': { seenAt: 1, fields: { Summary: 'Historical' } } },
+      };
+    validateWorkspace(captured);
+    const model = restoreModel(
+      { firstActive: true, productionReload: true },
+      captured,
+    );
+    await model.run();
+    const restored = model.rendered().seenRoots!;
+    assert.equal(Object.keys(restored).length, 12);
+    assert.equal(Boolean(restored['demo:CAN-100']), !full);
+    for (const [key, root] of Object.entries(captured.seenRoots!))
+      assert.deepEqual(restored[key], root);
+    assert.deepEqual(model.store.load(), model.saved);
+    assert.deepEqual(model.handlers, model.originals);
+    assert.equal(model.owner.selfConnectionAudit, undefined);
+  });
+
+test('outgoing same-root refresh cannot consume the replacement document admission', async () => {
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, outgoingBeforeReload: true },
+    await capturedReloadWorkspace(),
+  );
+  await model.run();
+  await model.settleReplies();
+  assert.equal(model.originalTreeCalls(), 1);
+  assert.equal(model.settledReplies.length, 1);
+  assert.match(String(model.settledReplies[0]), /refresh canceled/);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.deepEqual(model.handlers, model.originals);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('synchronous original tree rejection is preserved while refresh cancellation settles safely', async () => {
+  const failure = new Error('Sender check failed');
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, syncTreeFailure: failure },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), { code: 'ERR_ASSERTION' });
+  await assert.rejects(model.finishRefresh(), (error) => error === failure);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(model.originalTreeCalls(), 1);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.deepEqual(model.handlers, model.originals);
+  assert.deepEqual(model.store.load(), model.saved);
+});
+
+test('restoration failure before navigation removes its document listener', async () => {
+  const failure = new Error('Save unavailable');
+  const model = restoreModel(
+    { firstActive: true, productionReload: true, saveFailure: failure },
+    await capturedReloadWorkspace(),
+  );
+  await assert.rejects(model.run(), (error) => error === failure);
+  assert.equal(model.navigationListeners(), 0);
+  assert.equal(model.owner.selfConnectionAudit, undefined);
+  assert.deepEqual(model.handlers, model.originals);
 });

@@ -1,5 +1,61 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CanopyAPI } from '../shared/types';
+import type { CanopyAPI, WorkspaceFlushFailure } from '../shared/types';
+let flushHandler:
+  ((attempt?: number) => Promise<void | WorkspaceFlushFailure>) | undefined;
+let releaseHandler: ((attempt: number) => void) | undefined;
+let closeAttempt: number | undefined;
+let releasedThrough = 0;
+let transferInProgress = false;
+let transferAdmitted = false;
+async function transferWorkspace(
+  channel: string,
+  beforeTransfer?: () => Promise<void>,
+  token?: string,
+  beforeBarrier?: () => Promise<void>,
+) {
+  transferAdmitted = true;
+  try {
+    if (beforeBarrier) await beforeBarrier();
+    transferInProgress = true;
+    await beforeTransfer?.();
+    return await ipcRenderer.invoke(
+      channel,
+      ...(token === undefined ? [] : [token]),
+    );
+  } catch (error) {
+    transferInProgress = false;
+    transferAdmitted = false;
+    throw error;
+  }
+}
+ipcRenderer.on('canopy:workspaceCloseReleased', (_event, attempt: number) => {
+  releasedThrough = Math.max(releasedThrough, attempt);
+  if (closeAttempt === attempt) closeAttempt = undefined;
+  releaseHandler?.(attempt);
+});
+const mutations = new Set([
+  'saveWorkspace',
+  'applyWorkspaceImport',
+  'rollbackWorkspaceImport',
+  'reloadWorkspace',
+  'workspaceInitialized',
+  'resetDemo',
+  'launchDemo',
+  'closeDemo',
+  'connect',
+  'connectGithub',
+  'disconnect',
+  'withIssueMutations',
+  'update',
+  'author',
+  'createChild',
+  'rank',
+  'updatePreferences',
+]);
+let ready: () => void;
+const flushReady = new Promise<void>((resolve) => {
+  ready = resolve;
+});
 const api: CanopyAPI = {
   handoffReady: (clientId) =>
     ipcRenderer.invoke('canopy:handoffReady', clientId),
@@ -25,6 +81,32 @@ const api: CanopyAPI = {
   cancelUpdateCheck: () => ipcRenderer.invoke('canopy:cancelUpdateCheck'),
   dismissUpdateNotice: () => ipcRenderer.invoke('canopy:dismissUpdateNotice'),
   openRelease: (tag) => ipcRenderer.invoke('canopy:openRelease', tag),
+  onWorkspaceFlush: (handler, release) => {
+    flushHandler = handler;
+    releaseHandler = release;
+    ready();
+    return () => {
+      if (flushHandler !== handler) return;
+      flushHandler = undefined;
+      releaseHandler = undefined;
+    };
+  },
+  flushWorkspace: async (attempt) => {
+    await flushReady;
+    if (attempt !== undefined) {
+      if (
+        attempt <= releasedThrough ||
+        (closeAttempt !== undefined && attempt < closeAttempt)
+      )
+        throw new Error('Workspace close was canceled.');
+      closeAttempt = attempt;
+    }
+    if (!flushHandler) throw new Error('Workspace is not ready to save.');
+    const result = await flushHandler(attempt);
+    if (result && attempt === undefined)
+      throw new Error(result.initializationError);
+    return result;
+  },
   diagnostics: () => ipcRenderer.invoke('canopy:diagnostics'),
   exportDiagnostics: (reviewed) =>
     ipcRenderer.invoke('canopy:exportDiagnostics', reviewed),
@@ -100,6 +182,26 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:assignees', id, key, query, startAt, refresh),
   validateAssignee: (id, key, accountId, refresh) =>
     ipcRenderer.invoke('canopy:validateAssignee', id, key, accountId, refresh),
+  withIssueMutations: async (operation) => {
+    let active = true;
+    const invoke = (channel: string, ...args: unknown[]) => {
+      if (!active)
+        return Promise.reject(new Error('Issue mutation has finished.'));
+      if (transferInProgress)
+        return Promise.reject(
+          new Error('Workspace transfer is in progress; wait for reload.'),
+        );
+      return ipcRenderer.invoke(channel, ...args);
+    };
+    try {
+      return await operation({
+        update: (...args) => invoke('canopy:update', ...args),
+        rank: (...args) => invoke('canopy:rank', ...args),
+      });
+    } finally {
+      active = false;
+    }
+  },
   update: (id, key, patch) =>
     ipcRenderer.invoke('canopy:update', id, key, patch),
   childCreateOptions: (id, key, refresh) =>
@@ -120,16 +222,41 @@ const api: CanopyAPI = {
     ipcRenderer.invoke('canopy:chooseWorkspaceBackup'),
   previewWorkspaceImport: (backup, mapping, mode) =>
     ipcRenderer.invoke('canopy:previewWorkspaceImport', backup, mapping, mode),
-  applyWorkspaceImport: (token) =>
-    ipcRenderer.invoke('canopy:applyWorkspaceImport', token),
+  applyWorkspaceImport: (token, beforeTransfer, beforeBarrier) =>
+    transferWorkspace(
+      'canopy:applyWorkspaceImport',
+      beforeTransfer,
+      token,
+      beforeBarrier,
+    ),
   canUndoWorkspaceImport: () =>
     ipcRenderer.invoke('canopy:canUndoWorkspaceImport'),
-  rollbackWorkspaceImport: () =>
-    ipcRenderer.invoke('canopy:rollbackWorkspaceImport'),
+  rollbackWorkspaceImport: (beforeTransfer, beforeBarrier) =>
+    transferWorkspace(
+      'canopy:rollbackWorkspaceImport',
+      beforeTransfer,
+      undefined,
+      beforeBarrier,
+    ),
   reloadWorkspace: () => ipcRenderer.invoke('canopy:reloadWorkspace'),
+  workspaceReloadFailed: () =>
+    ipcRenderer.invoke('canopy:workspaceReloadFailed'),
+  workspaceInitialized: (error) =>
+    ipcRenderer.invoke('canopy:workspaceInitialized', error),
   loadWorkspace: () => ipcRenderer.invoke('canopy:loadWorkspace'),
-  saveWorkspace: (workspace) =>
-    ipcRenderer.invoke('canopy:saveWorkspace', workspace),
+  saveWorkspace: (workspace, attempt, explicitFlush, transferFlush) => {
+    if (transferAdmitted && !transferFlush)
+      return Promise.reject(
+        new Error('Workspace transfer is in progress; wait for reload.'),
+      );
+    if (closeAttempt !== undefined && attempt !== closeAttempt)
+      return Promise.reject(
+        new Error('Workspace is closing; wait for saving to finish.'),
+      );
+    if (attempt !== undefined && attempt <= releasedThrough)
+      return Promise.reject(new Error('Workspace close was canceled.'));
+    return ipcRenderer.invoke('canopy:saveWorkspace', workspace, explicitFlush);
+  },
   copyIssueLink: (id, key) =>
     ipcRenderer.invoke('canopy:copyIssueLink', id, key),
   openIssue: (id, key) => ipcRenderer.invoke('canopy:openIssue', id, key),
@@ -137,4 +264,20 @@ const api: CanopyAPI = {
   openComment: (id, key, commentId) =>
     ipcRenderer.invoke('canopy:openComment', id, key, commentId),
 };
+for (const [name, method] of Object.entries(api)) {
+  if (name === 'saveWorkspace' || !mutations.has(name)) continue;
+  Object.assign(api, {
+    [name]: (...args: unknown[]) => {
+      if (closeAttempt !== undefined)
+        return Promise.reject(
+          new Error('Workspace is closing; wait for saving to finish.'),
+        );
+      if (transferAdmitted && name !== 'reloadWorkspace')
+        return Promise.reject(
+          new Error('Workspace transfer is in progress; wait for reload.'),
+        );
+      return method(...args);
+    },
+  });
+}
 contextBridge.exposeInMainWorld('canopy', api);

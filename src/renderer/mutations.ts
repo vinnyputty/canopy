@@ -1,6 +1,7 @@
 import { MAX_TREE_ISSUES } from '../shared/types';
 import type {
   CanopyAPI,
+  Choice,
   EditOptions,
   Issue,
   IssuePatch,
@@ -10,6 +11,8 @@ import type {
 } from '../shared/types';
 import { reconcileSnapshot } from './tree';
 import type { StatusPath } from './status-paths';
+
+type IssueWrites = Pick<CanopyAPI, 'update' | 'rank'>;
 
 type Fields = Partial<
   Pick<Issue, 'summary' | 'priority' | 'assignee' | 'status' | 'labels'>
@@ -105,6 +108,25 @@ function optimisticFields(
 // Field writes share an issue queue; ranks share a connection queue.
 export class Mutations {
   revision = 0;
+  private confirmedLabels = new Map<string, Choice[]>();
+  private labelSubscribers = new Map<string, Set<(labels: Choice[]) => void>>();
+  subscribeLabels(
+    connectionId: string,
+    key: string,
+    listener: (labels: Choice[]) => void,
+  ) {
+    const identity = `${connectionId}:${key}`;
+    const listeners =
+      this.labelSubscribers.get(identity) ??
+      new Set<(labels: Choice[]) => void>();
+    this.labelSubscribers.set(identity, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size && this.labelSubscribers.get(identity) === listeners)
+        this.labelSubscribers.delete(identity);
+    };
+  }
   private bases: Record<string, TreeSnapshot> = {};
   private protectedSnapshots = new Set<string>();
   private evicted = new Set<string>();
@@ -225,6 +247,9 @@ export class Mutations {
     private snapshotBudget = 64 * 1024 * 1024,
     private sharedSnapshots?: (tab: TabState) => (TreeSnapshot | undefined)[],
     private displayedIssues?: (tab: TabState) => Iterable<Issue>,
+    private run: (
+      operation: (writes: IssueWrites) => Promise<boolean>,
+    ) => Promise<boolean> = (operation) => operation(this.api),
   ) {}
 
   beginRefresh() {
@@ -399,12 +424,86 @@ export class Mutations {
         this.confirmedEdit?.(connectionId, issue, Object.keys(change.fields));
     }
   }
-  acceptConfirmedLabels(connectionId: string, issue: Issue) {
+  private acceptConfirmedLabels(connectionId: string, issue: Issue) {
     this.confirm(connectionId, {
       key: issue.key,
       fields: { labels: issue.labels },
     });
     this.publish();
+  }
+  editLabels(
+    connectionId: string,
+    key: string,
+    name: string,
+    selected: boolean,
+    initial: Choice[],
+  ): Promise<Issue> {
+    return this.writeIssue(connectionId, key, () => {
+      const current = (
+        this.confirmedLabels.get(`${connectionId}:${key}`) ?? initial
+      ).map((label) => label.name);
+      return {
+        labels: selected
+          ? [...new Set([...current, name])]
+          : current.filter((label) => label !== name),
+      };
+    });
+  }
+  async writeIssue(
+    connectionId: string,
+    key: string,
+    patch: IssuePatch | (() => IssuePatch),
+  ): Promise<Issue> {
+    let issue: Issue | undefined;
+    let failure: unknown;
+    await this.run(async (writes) => {
+      try {
+        issue = await this.serialize(`${connectionId}:${key}`, async () => {
+          const next = typeof patch === 'function' ? patch() : patch;
+          const confirmed = await writes.update(connectionId, key, next);
+          if (next.labels !== undefined) {
+            this.confirmedLabels.set(
+              `${connectionId}:${key}`,
+              confirmed.labels ?? [],
+            );
+            for (const listener of [
+              ...(this.labelSubscribers.get(`${connectionId}:${key}`) ?? []),
+            ]) {
+              try {
+                listener(confirmed.labels ?? []);
+              } catch {}
+            }
+            this.acceptConfirmedLabels(connectionId, confirmed);
+          }
+          return confirmed;
+        });
+        return true;
+      } catch (error) {
+        failure = error;
+        return false;
+      }
+    });
+    if (!issue) throw failure;
+    return issue;
+  }
+  private serialize<T>(
+    queueKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.queues.get(queueKey) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(
+      () => {},
+      () => {},
+    );
+    this.queues.set(queueKey, tail);
+    void tail.then(() => {
+      if (this.queues.get(queueKey) === tail) {
+        this.queues.delete(queueKey);
+        this.confirmedLabels.delete(queueKey);
+      }
+    });
+    return result;
   }
   private enqueue(
     connectionId: string,
@@ -417,8 +516,7 @@ export class Mutations {
     this.entries.push(entry);
     this.publish();
     const queueKey = `${connectionId}:${change.fields ? change.key : 'rank'}`;
-    const previous = this.queues.get(queueKey) ?? Promise.resolve();
-    const result = previous.then(async () => {
+    const result = this.serialize(queueKey, async () => {
       entry.before = this.find(connectionId, change.key);
       try {
         const confirmed = await execute(entry);
@@ -440,14 +538,40 @@ export class Mutations {
         this.publish();
       }
     });
-    const tail = result.then(() => {});
-    this.queues.set(queueKey, tail);
-    void tail.then(() => {
-      if (this.queues.get(queueKey) === tail) this.queues.delete(queueKey);
-    });
     return result;
   }
+  private async admit(operation: (writes: IssueWrites) => Promise<boolean>) {
+    try {
+      return await this.run(operation);
+    } catch (error) {
+      this.error(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }
   update(
+    connectionId: string,
+    key: string,
+    patch: IssuePatch,
+    options?: Partial<EditOptions>,
+    record = true,
+    token?: symbol,
+    ifCurrent?: (issue?: Issue) => boolean,
+  ): Promise<boolean> {
+    return this.admit((writes) =>
+      this.updateIssue(
+        writes,
+        connectionId,
+        key,
+        patch,
+        options,
+        record,
+        token,
+        ifCurrent,
+      ),
+    );
+  }
+  private updateIssue(
+    writes: IssueWrites,
     connectionId: string,
     key: string,
     patch: IssuePatch,
@@ -461,7 +585,7 @@ export class Mutations {
       { key, fields: optimisticFields(patch, options) },
       async (entry) => {
         if (ifCurrent && !ifCurrent(entry.before)) return { key, fields: {} };
-        const issue = await this.api.update(connectionId, key, patch);
+        const issue = await writes.update(connectionId, key, patch);
         const fields: Fields = {};
         if (patch.summary !== undefined) fields.summary = issue.summary;
         if (patch.priorityId !== undefined) fields.priority = issue.priority;
@@ -498,9 +622,20 @@ export class Mutations {
     key: string,
     origin: Status,
     path: StatusPath,
+  ): Promise<boolean> {
+    return this.admit((writes) =>
+      this.transitionIssuePath(writes, connectionId, key, origin, path),
+    );
+  }
+  private transitionIssuePath(
+    writes: IssueWrites,
+    connectionId: string,
+    key: string,
+    origin: Status,
+    path: StatusPath,
   ) {
     return this.enqueue(connectionId, { key, fields: {} }, async (entry) => {
-      let current = await this.api.update(connectionId, key, {});
+      let current = await writes.update(connectionId, key, {});
       if (current.status.id !== origin.id)
         throw new Error(
           `Status changed to ${current.status.name}. Refresh the path and try again.`,
@@ -518,7 +653,7 @@ export class Mutations {
             );
           if (visited.has(step.to.id))
             throw new Error('The planned path contains a cycle.');
-          current = await this.api.update(connectionId, key, {
+          current = await writes.update(connectionId, key, {
             transitionId: step.id,
           });
           stepReturned = true;
@@ -531,7 +666,7 @@ export class Mutations {
         } catch (error) {
           let statusLabel = 'Actual status';
           try {
-            current = await this.api.update(connectionId, key, {});
+            current = await writes.update(connectionId, key, {});
             if (current.status.id !== entry.statusPath.at(-1)?.id) {
               if (stepReturned) entry.statusPath.push(current.status);
               else entry.undoUnavailable = true;
@@ -551,6 +686,27 @@ export class Mutations {
     });
   }
   rank(
+    connectionId: string,
+    key: string,
+    anchor: string,
+    position: 'before' | 'after' = 'before',
+    record = true,
+    verifiedSnapshot?: TreeSnapshot,
+  ): Promise<boolean> {
+    return this.admit((writes) =>
+      this.rankIssue(
+        writes,
+        connectionId,
+        key,
+        anchor,
+        position,
+        record,
+        verifiedSnapshot,
+      ),
+    );
+  }
+  private rankIssue(
+    writes: IssueWrites,
     connectionId: string,
     key: string,
     anchor: string,
@@ -596,13 +752,19 @@ export class Mutations {
         entry.order = base?.issues
           .filter((issue) => issue.parentKey === moving.parentKey)
           .map((issue) => issue.key);
-        await this.api.rank(connectionId, key, anchor, position);
+        await writes.rank(connectionId, key, anchor, position);
         return { key, anchor, position };
       },
       record,
     );
   }
-  async undo(
+  undo(connectionId?: string, key?: string, token?: symbol): Promise<boolean> {
+    return this.admit((writes) =>
+      this.undoIssue(writes, connectionId, key, token),
+    );
+  }
+  private async undoIssue(
+    writes: IssueWrites,
     connectionId?: string,
     key?: string,
     token?: symbol,
@@ -675,7 +837,7 @@ export class Mutations {
               throw new UndoUnavailable(
                 `No supported reverse transition from ${actual.name} to ${path[index].name}.`,
               );
-            const result = await this.api.update(connectionId, change.key, {
+            const result = await writes.update(connectionId, change.key, {
               transitionId: reverse.id,
             });
             actual = result.status;
@@ -694,8 +856,7 @@ export class Mutations {
         } catch (error) {
           let statusLabel = 'Actual status';
           try {
-            actual = (await this.api.update(connectionId, change.key, {}))
-              .status;
+            actual = (await writes.update(connectionId, change.key, {})).status;
             this.confirm(connectionId, {
               key: change.key,
               fields: { status: actual },
@@ -825,8 +986,16 @@ export class Mutations {
       }
       assertCurrent();
       const success = patch
-        ? await this.update(connectionId, change.key, patch, options, false)
-        : await this.rank(
+        ? await this.updateIssue(
+            writes,
+            connectionId,
+            change.key,
+            patch,
+            options,
+            false,
+          )
+        : await this.rankIssue(
+            writes,
             connectionId,
             change.key,
             anchor!,

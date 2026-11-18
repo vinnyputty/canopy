@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
@@ -43,6 +44,7 @@ function fixture() {
   const document = dom.window.document as Document;
   const frames: FrameRequestCallback[] = [];
   const scope = {
+    workspaceClose: { current: new WorkspaceClose() },
     document,
     useCallback: (run: unknown) => run,
     requestAnimationFrame: (run: FrameRequestCallback) => frames.push(run),

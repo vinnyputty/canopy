@@ -162,6 +162,29 @@ export class WorkHandoffQueue {
     return true;
   }
 
+  replaceRenderer(): void {
+    if (this.stopped) return;
+    if (this.current) {
+      const item = this.current;
+      clearTimeout(item.expires);
+      clearTimeout(item.deadline);
+      const retained: Pending = {
+        ...item,
+        expiresAt: item.delivery.expiresAt,
+        expires: setTimeout(
+          () => this.expire(retained),
+          Math.max(0, item.delivery.expiresAt - Date.now()),
+        ),
+      };
+      retained.expires.unref();
+      this.pending.unshift(retained);
+      this.current = undefined;
+    }
+    this.session = undefined;
+    this.owner = undefined;
+    this.send = undefined;
+  }
+
   pause(): void {
     if (this.stopped || this.paused) return;
     this.paused = true;
@@ -220,7 +243,10 @@ export class WorkHandoffQueue {
       id: randomUUID(),
       intent: item.intent,
     };
-    const deadline = setTimeout(() => this.expire(item), HANDOFF_ACK_MS);
+    const deadline = setTimeout(
+      () => this.expire(item),
+      Math.max(0, delivery.expiresAt - Date.now()),
+    );
     deadline.unref();
     this.current = { ...item, delivery, deadline };
     if (notify) this.send({ session: this.session, delivery });

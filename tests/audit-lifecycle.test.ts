@@ -5,6 +5,7 @@ import childProcess, { type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, rm, access, readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -42,11 +43,173 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0];
+      return state !== 'Z' && state !== 'X';
+    }
+    if (process.platform === 'darwin') {
+      const result = childProcess.spawnSync(
+        'ps',
+        ['-o', 'stat=', '-p', String(pid)],
+        {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 1000,
+        },
+      );
+      if (result.error) throw result.error;
+      if (result.stderr.trim() || (result.status !== 0 && result.status !== 1))
+        throw new Error(
+          `Process probe failed: ${result.stderr || result.signal || result.status}`,
+        );
+      const state = result.stdout.trim();
+      if (result.status === 1 && state)
+        throw new Error('Process probe failed.');
+      return state !== '' && !/^[ZX]/.test(state);
+    }
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    if (
+      (error as NodeJS.ErrnoException).code === 'ESRCH' ||
+      (process.platform === 'linux' &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT')
+    )
+      return false;
     throw error;
   }
+};
+
+test('liveness probe distinguishes terminated processes, disappearance and probe failures', () => {
+  const source = ts.createSourceFile(
+    'audit-lifecycle.test.ts',
+    readFileSync(new URL(import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const declaration = source.statements
+    .filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations])
+    .find((entry) => entry.name.getText(source) === 'alive')!;
+  const callback = ts.transpile(declaration.initializer!.getText(source), {
+    target: ts.ScriptTarget.ES2022,
+  });
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    let killError: unknown;
+    let probeError: unknown;
+    let state = '';
+    let stderr = '';
+    let status = 0;
+    let probes = 0;
+    const probe = new Function(
+      'process',
+      'readFileSync',
+      'childProcess',
+      `return (${callback.trim().replace(/;$/, '')});`,
+    )(
+      {
+        platform,
+        kill(pid: number, signal: number) {
+          assert.equal(pid, 42);
+          assert.equal(signal, 0);
+          if (killError) throw killError;
+        },
+      },
+      (file: string, encoding: string) => {
+        assert.equal(file, '/proc/42/stat');
+        assert.equal(encoding, 'utf8');
+        probes++;
+        if (probeError) throw probeError;
+        return `42 (process (with spaces)) ${state} 1 2 3`;
+      },
+      {
+        spawnSync(command: string, args: string[], options: any) {
+          assert.equal(options.timeout, 1000);
+          assert.equal(command, 'ps');
+          assert.deepEqual(args, ['-o', 'stat=', '-p', '42']);
+          probes++;
+          return { error: probeError, status, stdout: ` ${state} \n`, stderr };
+        },
+      },
+    ) as (pid: number) => boolean;
+    for (state of ['R', 'S', 'T', 'T+']) assert.equal(probe(42), true);
+    if (platform !== 'win32') {
+      for (state of ['Z', 'X']) assert.equal(probe(42), false);
+      if (platform === 'darwin') {
+        for (state of ['Z+', 'X+', '']) assert.equal(probe(42), false);
+        probeError = Object.assign(new Error('ps executable missing'), {
+          code: 'ENOENT',
+        });
+        assert.throws(
+          () => probe(42),
+          (error) => error === probeError,
+        );
+      }
+      state = 'S';
+      probeError = Object.assign(new Error('disappeared after kill(0)'), {
+        code: platform === 'linux' ? 'ENOENT' : undefined,
+        status: platform === 'darwin' ? 1 : undefined,
+      });
+      if (platform === 'darwin') {
+        probeError = undefined;
+        status = 1;
+        state = '';
+      }
+      assert.equal(probe(42), false);
+      if (platform === 'darwin') {
+        stderr = 'ps: allocation failed';
+        assert.throws(() => probe(42), /Process probe failed/);
+        status = 0;
+        stderr = 'ps: sysctl failed';
+        assert.throws(() => probe(42), /Process probe failed/);
+        stderr = '';
+        status = 2;
+        assert.throws(() => probe(42), /Process probe failed/);
+        status = 1;
+        state = 'S';
+        assert.throws(() => probe(42), /Process probe failed/);
+        status = 0;
+        probeError = Object.assign(new Error('timed out'), {
+          code: 'ETIMEDOUT',
+          status: null,
+        });
+        assert.throws(
+          () => probe(42),
+          (error) => error === probeError,
+        );
+        status = 0;
+      }
+      probeError = Object.assign(new Error('probe failed'), { status: 2 });
+      assert.throws(
+        () => probe(42),
+        (error) => error === probeError,
+      );
+      probeError = undefined;
+    } else assert.equal(probes, 0);
+    killError = Object.assign(new Error('absent'), { code: 'ESRCH' });
+    const before = probes;
+    assert.equal(probe(42), false);
+    assert.equal(probes, before);
+    killError = Object.assign(new Error('permission denied'), {
+      code: 'EPERM',
+    });
+    assert.throws(
+      () => probe(42),
+      (error) => error === killError,
+    );
+  }
+});
+
+const waitForExit = async (pid: number) => {
+  const until = Date.now() + 2000;
+  while (Date.now() < until) {
+    try {
+      if (!alive(pid)) return;
+    } catch {}
+    await sleep(20);
+  }
+  if (!alive(pid)) return;
+  throw new Error('Owned descendant is still alive.');
 };
 
 async function fixture(
@@ -79,8 +242,7 @@ async function fixture(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
       }
-      for (let i = 0; i < 100 && alive(descendant); i++) await sleep(20);
-      assert.equal(alive(descendant), false);
+      await waitForExit(descendant);
     }
     await rm(profile, { recursive: true, force: true });
   };
@@ -1120,5 +1282,144 @@ test('fixture initialization failure preserves its error and cleans observed rea
       for (let i = 0; i < 100 && alive(descendant); i++) await sleep(20);
     }
     if (profile) await rm(profile, { recursive: true, force: true });
+  }
+});
+
+for (const outcome of [
+  'gone',
+  'transient',
+  'probe-failure',
+  'still-live',
+  'last-sleep',
+  'final-probe-failure',
+])
+  test(`descendant disposal confirms exit after ${outcome}`, async () => {
+    const source = ts.createSourceFile(
+      'audit-lifecycle.test.ts',
+      readFileSync(new URL(import.meta.url), 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const declaration = source.statements
+      .filter(ts.isVariableStatement)
+      .flatMap((statement) => [...statement.declarationList.declarations])
+      .find((entry) => entry.name.getText(source) === 'waitForExit')!;
+    const callback = ts
+      .transpile(declaration.initializer!.getText(source), {
+        target: ts.ScriptTarget.ES2022,
+      })
+      .trim()
+      .replace(/;$/, '');
+    let now = 0,
+      probes = 0;
+    const error = new Error('ps: allocation failed');
+    const wait = new Function(
+      'alive',
+      'sleep',
+      'Date',
+      `return (${callback});`,
+    )(
+      (pid: number) => {
+        assert.equal(pid, 42);
+        probes++;
+        if (
+          outcome === 'probe-failure' ||
+          (outcome === 'final-probe-failure' && now >= 2000) ||
+          (outcome === 'transient' && probes === 1)
+        )
+          throw error;
+        return (
+          outcome === 'still-live' ||
+          (outcome === 'transient' && probes === 2) ||
+          (outcome === 'last-sleep' && now < 2000) ||
+          (outcome === 'final-probe-failure' && now < 2000)
+        );
+      },
+      async (ms: number) => {
+        assert.equal(ms, 20);
+        now += ms;
+      },
+      { now: () => now },
+    );
+    if (outcome === 'probe-failure' || outcome === 'final-probe-failure')
+      await assert.rejects(wait(42), (value) => value === error);
+    else if (outcome === 'still-live')
+      await assert.rejects(wait(42), /still alive/);
+    else await wait(42);
+    assert.equal(
+      probes,
+      outcome === 'gone' ? 1 : outcome === 'transient' ? 3 : 101,
+    );
+  });
+
+test('descendant disposal preserves the profile until a successful exit probe', async () => {
+  const source = ts.createSourceFile(
+    'audit-lifecycle.test.ts',
+    readFileSync(new URL(import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  let dispose!: ts.VariableDeclaration;
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer &&
+      node.name.getText(source) === 'dispose'
+    )
+      dispose = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const callback = ts
+    .transpile(dispose.initializer!.getText(source), {
+      target: ts.ScriptTarget.ES2022,
+    })
+    .trim()
+    .replace(/;$/, '');
+  for (const confirmed of [false, true]) {
+    let removed = false,
+      signaled = false,
+      probes = 0;
+    const error = new Error('Exit could not be confirmed');
+    const run = new Function(
+      'owner',
+      'disposeProcess',
+      'child',
+      'process',
+      'descendant',
+      'waitForExit',
+      'rm',
+      'profile',
+      `return (${callback});`,
+    )(
+      { restore() {} },
+      async () => {},
+      {},
+      {
+        platform: 'darwin',
+        kill: (pid: number, signal: string) => {
+          assert.equal(pid, 42);
+          assert.equal(signal, 'SIGKILL');
+          signaled = true;
+        },
+      },
+      42,
+      async (pid: number) => {
+        assert.equal(pid, 42);
+        probes++;
+        assert.equal(removed, false);
+        if (!confirmed) throw error;
+      },
+      async () => {
+        assert.equal(probes, 1);
+        removed = true;
+      },
+      'owned-profile',
+    );
+    if (confirmed) await run();
+    else await assert.rejects(run(), (value) => value === error);
+    assert.equal(signaled, true);
+    assert.equal(probes, 1);
+    assert.equal(removed, confirmed);
   }
 });

@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { InboxPanel } from '../src/renderer/InboxPanel';
@@ -128,6 +129,8 @@ function mainRequests() {
   const webContents = new EventEmitter();
   let updateCancellations = 0;
   const context = {
+    workspaceDocument: 0,
+    workspaceInitializationError: undefined,
     initialLoad: false,
     cancelHandoffs: () => {},
     AbortController,
@@ -1363,6 +1366,7 @@ for (const [checkpoint, name] of [
       .map((n) => `const ${n.getText(source)};`)
       .join('\n');
     const context: any = {
+      workspaceClose: { current: new WorkspaceClose() },
       relationshipDestination,
       organizeSidebar,
       ancestorPath,

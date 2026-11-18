@@ -1,3 +1,4 @@
+import { WorkspaceClose } from '../src/renderer/workspace-close';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import ts from 'typescript';
@@ -93,6 +94,7 @@ function harness(
   };
   const focusOrigin = {};
   const setters = {
+    workspaceClose: { current: new WorkspaceClose() },
     setInboxOpen: (value: boolean) => {
       inboxOpen = value;
     },
@@ -154,10 +156,22 @@ function harness(
       rootKey: 'CAN-1',
       fetchedAt: 1,
       warnings: [],
-      issues: [],
+      issues: [
+        {
+          id: 'CAN-1',
+          key: 'CAN-1',
+          summary: 'Confirmed root',
+          type: 'Task',
+          status: { id: 'open', name: 'Open', category: 'new' },
+          priority: null,
+          assignee: null,
+          links: [],
+        },
+      ],
     },
   };
   const handoff = execute(handoffCall.arguments[1].getText(), {
+    workspaceClose: setters.workspaceClose,
     handoffNavigation,
     connectionsRef: {
       current: [
@@ -200,6 +214,8 @@ function harness(
     withScrollPositions,
     scrollPositions: { current: new Map<string, number>() },
     workspaceTransferBusy: { current: false },
+    workspaceClose: { current: new WorkspaceClose() },
+    workspaceLoaded: { current: true },
     pendingWorkspaceSave: { current: Promise.resolve() },
     window: {
       canopy: {
@@ -210,6 +226,7 @@ function harness(
     },
   });
   return {
+    controller: setters.workspaceClose.current,
     persist: async () => {
       await save(workspace);
       return persisted!;
@@ -408,3 +425,45 @@ for (const provider of ['jira', 'github'] as const) {
     });
   }
 }
+
+test('handoff navigation defers issue and view intents during transfer without UI changes', async () => {
+  const h = harness();
+  const before = h.state();
+  const document = {
+    body: { inert: false },
+    activeElement: null,
+    defaultView: {
+      HTMLElement: class {},
+      addEventListener() {},
+      removeEventListener() {},
+    },
+  } as unknown as Document;
+  await h.controller.beginTransfer(document);
+  for (const intent of [
+    { kind: 'view', view: 'handoff-view' },
+    {
+      kind: 'issue',
+      connection: 'fixture',
+      provider: 'jira',
+      host: 'example.invalid',
+      root: 'CAN-1',
+      key: 'CAN-1',
+    },
+  ]) {
+    assert.equal(h.handoff(intent), false);
+    assert.deepEqual(h.state(), before);
+  }
+  h.controller.endTransfer();
+  h.handoff({
+    kind: 'issue',
+    connection: 'fixture',
+    provider: 'jira',
+    host: 'example.invalid',
+    root: 'CAN-1',
+    key: 'CAN-1',
+  });
+  assert.equal(h.state().workspace.tabs[0].selectedKey, 'CAN-1');
+  assert.notDeepEqual(h.state(), before);
+  h.handoff({ kind: 'view', view: 'handoff-view' });
+  assert.equal(h.state().workspace.activeSavedViewId, 'handoff-view');
+});

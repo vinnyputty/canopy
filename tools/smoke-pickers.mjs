@@ -405,8 +405,9 @@ export async function auditPickers(app, page) {
   await page.locator('.view-settings > summary').click();
 }
 
-export async function auditSelfConnections(app, page) {
-  const workspace = await page.evaluate(async () => {
+export async function captureSelfConnectionWorkspace(page) {
+  return page.evaluate(async () => {
+    await window.canopy.flushWorkspace();
     const saved = await window.canopy.loadWorkspace();
     // Observe this capture and the current tab roots in the same callback.
     // Renderer console output is retained by the smoke's recentOutput listener.
@@ -449,84 +450,395 @@ export async function auditSelfConnections(app, page) {
     }
     return saved;
   });
-  await app.evaluate(async ({ ipcMain }, workspace) => {
-    const demo = globalThis.canopySmoke;
-    const handlers = new Map();
-    const replace = (name, handler) => {
-      const channel = `canopy:${name}`;
-      handlers.set(channel, ipcMain._invokeHandlers.get(channel));
-      ipcMain.removeHandler(channel);
-      ipcMain.handle(channel, handler);
-    };
-    globalThis.selfConnectionAudit = { handlers, writes: [], validations: [] };
-    const tab = workspace.tabs[0];
-    const otherTree = await demo.tree(tab.rootKey);
-    replace('connections', () =>
-      ['demo', 'other'].map((id) => ({
-        id,
-        name: id,
-        url: 'https://example.invalid',
-        provider: 'demo',
-      })),
-    );
-    replace('loadWorkspace', () => ({
-      ...workspace,
-      activeTabId: 'first',
-      tabs: [
-        { ...tab, id: 'first', connectionId: 'demo' },
-        { ...tab, id: 'second', connectionId: 'other' },
-      ],
-    }));
-    replace('saveWorkspace', () => {});
-    let replacements = 0;
-    globalThis.selfConnectionAudit.identityResolvers = [];
-    replace('connect', () => {
-      replacements += 1;
-      return ['demo', 'other'].map((id) => ({
-        id,
-        name: id,
-        url: 'https://example.invalid',
-        provider: 'demo',
-      }));
-    });
-    replace('currentUser', (_event, connection) => {
-      if (replacements && connection === 'demo')
-        return new Promise((resolve) => {
-          const account =
-            replacements === 1
-              ? { id: 'sam', name: 'Sam Rivera' }
-              : { id: 'jordan', name: 'Jordan Lee' };
-          globalThis.selfConnectionAudit.identityResolvers.push(() =>
-            resolve(account),
+}
+
+export async function restoreSelfConnectionWorkspace(app, page, workspace) {
+  const failures = [];
+  try {
+    try {
+      await page.evaluate(() => window.canopy.flushWorkspace());
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await app.evaluate(() =>
+        globalThis.canopySmoke.remoteUpdate('CAN-100', { assigneeId: 'alex' }),
+      );
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await app.evaluate(({ ipcMain }, saved) => {
+        const audit = globalThis.selfConnectionAudit;
+        if (!audit) return;
+        audit.refreshedRoots = {};
+        audit.refreshGates = [];
+        audit.refreshStarted = false;
+        audit.replacementDocument = false;
+        audit.releaseRefresh = undefined;
+        const active = saved.tabs.find((tab) => tab.id === saved.activeTabId);
+        const activeKey = active && `${active.connectionId}:${active.rootKey}`;
+        for (const [channel, handler] of audit.handlers) {
+          ipcMain.removeHandler(channel);
+          // Saves from the fixture renderer must preserve the captured workspace.
+          ipcMain.handle(
+            channel,
+            channel === 'canopy:saveWorkspace'
+              ? (event, submitted, explicitFlush) => {
+                  if (!audit.stopWatchingDocument) {
+                    const contents = event.sender;
+                    const committed = () => {
+                      audit.replacementDocument = true;
+                    };
+                    contents.once('did-navigate', committed);
+                    audit.stopWatchingDocument = () =>
+                      contents.removeListener('did-navigate', committed);
+                  }
+                  if (!audit.readingSubmission || explicitFlush)
+                    audit.submittedWorkspace = structuredClone(submitted);
+                  return handler(event, saved);
+                }
+              : channel === 'canopy:tree'
+                ? async (event, connection, key, ...args) => {
+                    // Only one active-root refresh may reach the restored document.
+                    // Background and later replies stay outside the captured save.
+                    if (
+                      !audit.replacementDocument ||
+                      `${connection}:${key}` !== activeKey ||
+                      audit.refreshStarted
+                    )
+                      return new Promise((_, reject) =>
+                        audit.refreshGates.push(reject),
+                      );
+                    audit.refreshStarted = true;
+                    const canceled = new Promise((_, reject) =>
+                      audit.refreshGates.push(reject),
+                    );
+                    const snapshot = await Promise.race([
+                      Promise.resolve().then(() =>
+                        handler(event, connection, key, ...args),
+                      ),
+                      canceled,
+                    ]);
+                    audit.refreshedRoots[`${connection}:${key}`] =
+                      structuredClone(snapshot);
+                    await Promise.race([
+                      new Promise((resolve) => {
+                        audit.releaseRefresh = resolve;
+                      }),
+                      canceled,
+                    ]);
+                    return snapshot;
+                  }
+                : handler,
           );
-        });
-      return connection === 'demo'
-        ? { id: 'alex', name: 'Alex Morgan' }
-        : { id: 'sam', name: 'Sam Rivera' };
-    });
-    replace('tree', (_event, connection, key) =>
-      connection === 'other' ? otherTree : demo.tree(key),
-    );
-    replace('cachedUsers', () => []);
-    replace('assignees', () => ({ users: [] }));
-    replace('validateAssignee', (_event, connection, key, account, fresh) => {
-      globalThis.selfConnectionAudit.validations.push({
-        connection,
-        account,
-        fresh,
+        }
+      }, workspace);
+      await page.evaluate(
+        (saved) => window.canopy.saveWorkspace(saved),
+        workspace,
+      );
+      await page.reload();
+      await expect(page.getByRole('tab')).toHaveCount(workspace.tabs.length);
+      await expect(page.locator('[role=tab] .tab-label b')).toHaveText(
+        workspace.tabs.map((tab) => tab.rootKey),
+      );
+      for (const [index, tab] of workspace.tabs.entries()) {
+        const restored = page.getByRole('tab').nth(index);
+        await expect(restored).toHaveAttribute('data-tab-id', tab.id);
+        await expect(restored).toHaveAttribute(
+          'aria-selected',
+          String(tab.id === workspace.activeTabId),
+        );
+      }
+      const active = workspace.tabs.find(
+        (tab) => tab.id === workspace.activeTabId,
+      );
+      expect(active).toBeDefined();
+      if (
+        await app.evaluate(
+          () =>
+            globalThis.selfConnectionAudit?.handlers.has('canopy:tree') ??
+            false,
+        )
+      ) {
+        await expect
+          .poll(() =>
+            app.evaluate(
+              () =>
+                Object.keys(
+                  globalThis.selfConnectionAudit?.refreshedRoots ?? {},
+                ).length,
+            ),
+          )
+          .toBe(1);
+        await expect(
+          page.getByText('Checking for changes', { exact: true }),
+        ).toBeVisible();
+        await app.evaluate(() =>
+          globalThis.selfConnectionAudit.releaseRefresh(),
+        );
+        const fetchedAt = await app.evaluate(
+          () =>
+            Object.values(globalThis.selfConnectionAudit.refreshedRoots)[0]
+              .fetchedAt,
+        );
+        const updated = await page.evaluate(
+          (time) => new Date(time).toLocaleString(),
+          fetchedAt,
+        );
+        await expect(page.locator('.statusbar span[title]')).toHaveAttribute(
+          'title',
+          updated,
+        );
+        await expect(
+          page.getByText('Checking for changes', { exact: true }),
+        ).toBeHidden();
+      }
+      await expect(
+        page.getByRole('tree', { name: `${active.rootKey} issue tree` }),
+      ).toBeVisible();
+      await app.evaluate(() => {
+        if (globalThis.selfConnectionAudit) {
+          delete globalThis.selfConnectionAudit.submittedWorkspace;
+          globalThis.selfConnectionAudit.readingSubmission = true;
+        }
       });
-      return demo.validateAssignee(key, account, fresh);
-    });
-    replace('update', (_event, connection, key, patch) => {
-      globalThis.selfConnectionAudit.writes.push({ connection, patch });
-      if (connection === 'demo') return demo.update(key, patch);
-      const issue = otherTree.issues.find((issue) => issue.key === key);
-      issue.assignee = { id: 'sam', name: 'Sam Rivera' };
-      return issue;
-    });
-  }, workspace);
+      await page.evaluate(() => window.canopy.flushWorkspace());
+      const submission = await app.evaluate(() => {
+        const audit = globalThis.selfConnectionAudit;
+        return audit
+          ? {
+              workspace: audit.submittedWorkspace,
+              refreshedRoots: audit.refreshedRoots,
+            }
+          : null;
+      });
+      if (submission) {
+        expect(submission.workspace).toBeDefined();
+        const actual = JSON.parse(JSON.stringify(submission.workspace));
+        const expected = JSON.parse(JSON.stringify(workspace));
+        const scroll = await page.evaluate((savedTop) => {
+          const element = document.querySelector('.tree-scroll');
+          if (!element)
+            throw new Error('Restored tree has no scroll viewport.');
+          const observed = element.scrollTop;
+          const maximum = Math.max(
+            0,
+            element.scrollHeight - element.clientHeight,
+          );
+          return { observed, maximum, savedTop };
+        }, active.scrollTop ?? 0);
+        const clamped = Math.max(0, Math.min(scroll.savedTop, scroll.maximum));
+        // Integer layout metrics can round a fractional range boundary.
+        if (scroll.savedTop >= scroll.maximum - 1)
+          expect(Math.abs(scroll.observed - clamped)).toBeLessThan(1);
+        else expect(scroll.observed).toBe(clamped);
+        expected.tabs.find((tab) => tab.id === active.id).scrollTop =
+          scroll.observed;
+        const sizeOf = (value) =>
+          new TextEncoder().encode(JSON.stringify(value)).byteLength;
+        for (const [key, snapshot] of Object.entries(
+          submission.refreshedRoots ?? {},
+        )) {
+          const roots = (expected.seenRoots ??= {});
+          let retained = roots[key];
+          if (!retained) {
+            if (Object.keys(roots).length >= 12) continue;
+            const empty = { touchedAt: snapshot.fetchedAt, issues: {} };
+            const delta =
+              sizeOf({ [key]: empty }) - (Object.keys(roots).length ? 1 : 2);
+            if (sizeOf(roots) + delta > 2_000_000) continue;
+            retained = roots[key] = empty;
+          }
+          const root = structuredClone(retained);
+          root.touchedAt = snapshot.fetchedAt;
+          for (const issue of snapshot.issues.slice(0, 1000)) {
+            const previous = root.issues[issue.key];
+            const unavailable = new Set(issue.unavailableFields);
+            const fields = {};
+            const clipped = (value) => value.slice(0, 300);
+            for (const [field, title, value] of [
+              ['summary', 'Summary', issue.summary],
+              ['type', 'Type', issue.type],
+              ['parent', 'Parent', issue.parentKey ?? null],
+              ['priority', 'Priority', issue.priority?.name || null],
+              ['assignee', 'Assignee', issue.assignee?.name || null],
+              ['status', 'Status', issue.status.name],
+            ])
+              if (!unavailable.has(field))
+                fields[title] = value === null ? null : clipped(value);
+            if (issue.updated) fields['Last activity'] = clipped(issue.updated);
+            if (
+              issue.labels &&
+              issue.labels.length <= 20 &&
+              !unavailable.has('labels')
+            )
+              fields.Labels = issue.labels
+                .map((label) => label.name.slice(0, 80))
+                .sort();
+            const current = {
+              seenAt: snapshot.fetchedAt,
+              fields,
+              ...(Number.isSafeInteger(issue.commentCount) &&
+              issue.commentCount >= 0
+                ? { commentCount: issue.commentCount }
+                : {}),
+            };
+            root.issues[issue.key] = previous
+              ? {
+                  ...previous,
+                  fields: { ...current.fields, ...previous.fields },
+                  ...((previous.commentCount ?? current.commentCount) !==
+                  undefined
+                    ? {
+                        commentCount:
+                          previous.commentCount ?? current.commentCount,
+                      }
+                    : {}),
+                }
+              : current;
+          }
+          let bytes = sizeOf(expected.seenRoots);
+          let count = Object.keys(retained.issues).length;
+          for (const [issueKey, issue] of Object.entries(root.issues)) {
+            const previous = retained.issues[issueKey];
+            if (!previous && count >= 1000) continue;
+            const size = sizeOf([issueKey, issue]);
+            const delta = previous
+              ? size - sizeOf([issueKey, previous])
+              : size - 2 + (count ? 1 : 0);
+            if (bytes + delta > 2_000_000) continue;
+            if (!previous) count++;
+            retained.issues[issueKey] = issue;
+            bytes += delta;
+          }
+          const delta = sizeOf(root.touchedAt) - sizeOf(retained.touchedAt);
+          if (bytes + delta <= 2_000_000) retained.touchedAt = root.touchedAt;
+        }
+        expect(actual).toEqual(expected);
+      }
+      expect(await page.evaluate(() => window.canopy.loadWorkspace())).toEqual(
+        workspace,
+      );
+    } catch (error) {
+      failures.push(error);
+    }
+  } finally {
+    try {
+      await app.evaluate(({ ipcMain }) => {
+        const audit = globalThis.selfConnectionAudit;
+        if (!audit) return;
+        const errors = [];
+        for (const [channel, handler] of audit.handlers) {
+          try {
+            ipcMain.removeHandler(channel);
+            ipcMain.handle(channel, handler);
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        audit.readingSubmission = false;
+        audit.stopWatchingDocument?.();
+        for (const reject of audit.refreshGates ?? [])
+          reject(new Error('Workspace restoration refresh canceled.'));
+        audit.refreshGates = [];
+        for (const resolve of audit.identityResolvers ?? []) resolve();
+        audit.identityResolvers = [];
+        delete globalThis.selfConnectionAudit;
+        if (errors.length) throw errors[0];
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length) throw failures[0];
+}
+
+export async function auditSelfConnections(app, page) {
+  const workspace = await captureSelfConnectionWorkspace(page);
   let failed = false;
   try {
+    await app.evaluate(async ({ ipcMain }, workspace) => {
+      const demo = globalThis.canopySmoke;
+      const handlers = new Map();
+      const replace = (name, handler) => {
+        const channel = `canopy:${name}`;
+        handlers.set(channel, ipcMain._invokeHandlers.get(channel));
+        ipcMain.removeHandler(channel);
+        ipcMain.handle(channel, handler);
+      };
+      globalThis.selfConnectionAudit = {
+        handlers,
+        writes: [],
+        validations: [],
+      };
+      const tab = workspace.tabs[0];
+      const otherTree = await demo.tree(tab.rootKey);
+      replace('connections', () =>
+        ['demo', 'other'].map((id) => ({
+          id,
+          name: id,
+          url: 'https://example.invalid',
+          provider: 'demo',
+        })),
+      );
+      replace('loadWorkspace', () => ({
+        ...workspace,
+        activeTabId: 'first',
+        tabs: [
+          { ...tab, id: 'first', connectionId: 'demo' },
+          { ...tab, id: 'second', connectionId: 'other' },
+        ],
+      }));
+      replace('saveWorkspace', () => {});
+      let replacements = 0;
+      globalThis.selfConnectionAudit.identityResolvers = [];
+      replace('connect', () => {
+        replacements += 1;
+        return ['demo', 'other'].map((id) => ({
+          id,
+          name: id,
+          url: 'https://example.invalid',
+          provider: 'demo',
+        }));
+      });
+      replace('currentUser', (_event, connection) => {
+        if (replacements && connection === 'demo')
+          return new Promise((resolve) => {
+            const account =
+              replacements === 1
+                ? { id: 'sam', name: 'Sam Rivera' }
+                : { id: 'jordan', name: 'Jordan Lee' };
+            globalThis.selfConnectionAudit.identityResolvers.push(() =>
+              resolve(account),
+            );
+          });
+        return connection === 'demo'
+          ? { id: 'alex', name: 'Alex Morgan' }
+          : { id: 'sam', name: 'Sam Rivera' };
+      });
+      replace('tree', (_event, connection, key) =>
+        connection === 'other' ? otherTree : demo.tree(key),
+      );
+      replace('cachedUsers', () => []);
+      replace('assignees', () => ({ users: [] }));
+      replace('validateAssignee', (_event, connection, key, account, fresh) => {
+        globalThis.selfConnectionAudit.validations.push({
+          connection,
+          account,
+          fresh,
+        });
+        return demo.validateAssignee(key, account, fresh);
+      });
+      replace('update', (_event, connection, key, patch) => {
+        globalThis.selfConnectionAudit.writes.push({ connection, patch });
+        if (connection === 'demo') return demo.update(key, patch);
+        const issue = otherTree.issues.find((issue) => issue.key === key);
+        issue.assignee = { id: 'sam', name: 'Sam Rivera' };
+        return issue;
+      });
+    }, workspace);
     await page.reload();
     const field = () =>
       page.getByRole('button', {
@@ -637,84 +949,7 @@ export async function auditSelfConnections(app, page) {
     throw error;
   } finally {
     try {
-      // Let the app's debounced save of the two-tab fixture reach the stub
-      // before restoring the real workspace handler.
-      await page.waitForTimeout(250);
-      await app.evaluate(async ({ ipcMain }, saved) => {
-        const audit = globalThis.selfConnectionAudit;
-        let temporarySaveHandlerInstalled = false;
-        try {
-          await globalThis.canopySmoke.remoteUpdate('CAN-100', {
-            assigneeId: 'alex',
-          });
-          for (const [channel, handler] of audit.handlers) {
-            ipcMain.removeHandler(channel);
-            // Pending renderer saves must preserve the captured workspace until reload.
-            ipcMain.handle(
-              channel,
-              channel === 'canopy:saveWorkspace'
-                ? (event) => handler(event, saved)
-                : handler,
-            );
-          }
-          temporarySaveHandlerInstalled = true;
-        } finally {
-          if (!temporarySaveHandlerInstalled) {
-            for (const [channel, handler] of audit.handlers) {
-              ipcMain.removeHandler(channel);
-              ipcMain.handle(channel, handler);
-            }
-            delete globalThis.selfConnectionAudit;
-          }
-        }
-      }, workspace);
-      let restorationFailed = false;
-      try {
-        await page.evaluate(
-          (saved) => window.canopy.saveWorkspace(saved),
-          workspace,
-        );
-        await page.reload();
-        await expect(page.getByRole('tab')).toHaveCount(workspace.tabs.length);
-        await expect(page.locator('[role=tab] .tab-label b')).toHaveText(
-          workspace.tabs.map((tab) => tab.rootKey),
-        );
-        for (const [index, tab] of workspace.tabs.entries()) {
-          const restored = page.getByRole('tab').nth(index);
-          await expect(restored).toHaveAttribute('data-tab-id', tab.id);
-          await expect(restored).toHaveAttribute(
-            'aria-selected',
-            String(tab.id === workspace.activeTabId),
-          );
-        }
-        const active = workspace.tabs.find(
-          (tab) => tab.id === workspace.activeTabId,
-        );
-        expect(active).toBeDefined();
-        await expect(
-          page.getByRole('tree', { name: `${active.rootKey} issue tree` }),
-        ).toBeVisible();
-        expect(
-          await page.evaluate(() => window.canopy.loadWorkspace()),
-        ).toEqual(workspace);
-      } catch (error) {
-        restorationFailed = true;
-        throw error;
-      } finally {
-        try {
-          await app.evaluate(({ ipcMain }) => {
-            const channel = 'canopy:saveWorkspace';
-            ipcMain.removeHandler(channel);
-            ipcMain.handle(
-              channel,
-              globalThis.selfConnectionAudit.handlers.get(channel),
-            );
-            delete globalThis.selfConnectionAudit;
-          });
-        } catch (error) {
-          if (!restorationFailed) throw error;
-        }
-      }
+      await restoreSelfConnectionWorkspace(app, page, workspace);
     } catch (error) {
       if (!failed) throw error;
     }

@@ -134,6 +134,7 @@ async function fixture(dom?: Window, notify = () => {}) {
     notify();
   };
   const save = run(`(${init(app, 'updateIssue')})`, {
+    workspaceClose: { current: { blocked: false } },
     useCallback: (fn: unknown) => fn,
     activeTab: tab,
     activeIdRef,

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { before, test } from 'node:test';
@@ -25,7 +26,7 @@ before(async () => {
   }
   seedSource = await expression('tools/smoke-backup-cases.mjs', 'seed', true);
   preloadReload = await expression('src/main/preload.ts', 'reloadWorkspace');
-  mainReload = await expression('src/main/app.ts', 'reloadWorkspace');
+  mainReload = await expression('src/main/app.ts', 'reloadWorkspace', true);
 });
 
 function model(
@@ -44,18 +45,27 @@ function model(
   let releaseSave!: () => void, releaseLoad!: () => void;
   const saving = new Promise<void>((resolve) => (releaseSave = resolve));
   const loading = new Promise<void>((resolve) => (releaseLoad = resolve));
-  const reload = runInNewContext(`(${mainReload})`, {
-    window: {
-      webContents: {
-        reload() {
-          assert(saved, 'Reload must follow completed save');
-          events.push('reload');
-          visible = false;
-          documentAlive = false;
-        },
+  const reload = runInNewContext(
+    ts.transpileModule(`const actualReload = ${mainReload}; actualReload;`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText,
+    {
+      committedTransferOwner: undefined,
+      clearTransferReload: undefined,
+      window: {
+        on: () => {},
+        once: () => {},
+        webContents: Object.assign(new EventEmitter(), {
+          reload() {
+            assert(saved, 'Reload must follow completed save');
+            events.push('reload');
+            visible = false;
+            documentAlive = false;
+          },
+        }),
       },
     },
-  }) as () => void;
+  ) as () => void;
   const rendererReload = runInNewContext(`(${preloadReload})`, {
     ipcRenderer: {
       invoke: async (channel: string) => {

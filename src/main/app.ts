@@ -66,8 +66,9 @@ configureLinuxCredentialStore((store) =>
 if (process.env.CANOPY_USER_DATA)
   app.setPath('userData', process.env.CANOPY_USER_DATA);
 let window: BrowserWindow | null = null;
+let replacingHandoffRenderer = false;
 const handoffs = new WorkHandoffQueue(() => {
-  if (window && !window.isDestroyed()) {
+  if (!replacingHandoffRenderer && window && !window.isDestroyed()) {
     try {
       window.webContents.send('canopy:handoff', {
         session: '',
@@ -84,6 +85,16 @@ let focusWindow = () => {
   focusRequested = true;
 };
 const html = join(__dirname, 'renderer/index.html');
+class WorkspaceLoadFailure extends Error {}
+class WorkspaceSnapshotUnconfirmed extends Error {
+  constructor(cause?: unknown) {
+    super(
+      'The renderer disappeared before confirming the final workspace save.',
+      { cause },
+    );
+  }
+}
+
 function text(value: unknown, limit = 500): string {
   if (typeof value !== 'string' || !value.trim() || value.length > limit)
     throw new Error('Invalid input.');
@@ -297,6 +308,101 @@ async function start(
     relationshipRequests.delete(owner);
   };
   let demoLaunch: symbol | null = null;
+  let savingWorkspace: Promise<void> = Promise.resolve();
+  const pendingWorkspaceTransfers = new Set<Promise<Workspace>>();
+  const trackWorkspaceTransfer = (operation: Promise<Workspace>) => {
+    const owner = window;
+    pendingWorkspaceTransfers.add(operation);
+    return operation
+      .then((workspace) => {
+        committedTransferOwner = owner ?? undefined;
+        return workspace;
+      })
+      .finally(() => pendingWorkspaceTransfers.delete(operation));
+  };
+  let committedTransferOwner: BrowserWindow | undefined;
+  let replacingTransferOwner: BrowserWindow | undefined;
+  let departingHandoffOwner: BrowserWindow | undefined;
+  let clearTransferReload: (() => void) | undefined;
+  const showWorkspaceReloadFailure = (
+    owner: BrowserWindow,
+    message = 'Workspace transferred, but reload failed. Restart Canopy before editing.',
+  ) =>
+    dialog.showMessageBox(owner, {
+      type: 'error',
+      message,
+      buttons: ['OK'],
+      defaultId: 0,
+      cancelId: 0,
+    });
+  const reloadWorkspace = () => {
+    const owner = window;
+    if (!owner) return;
+    if (!clearTransferReload) {
+      const transferred = committedTransferOwner === owner;
+      if (transferred) {
+        handoffs.replaceRenderer();
+        replacingHandoffRenderer = true;
+        replacingTransferOwner = owner;
+        departingHandoffOwner = owner;
+      }
+      const contents = owner.webContents;
+      const cleanup = () => {
+        contents.removeListener('did-fail-load', failed);
+        contents.removeListener('did-finish-load', loaded);
+        contents.removeListener('destroyed', cleanup);
+        owner.removeListener('closed', cleanup);
+        if (clearTransferReload === cleanup) clearTransferReload = undefined;
+        if (replacingTransferOwner === owner)
+          replacingTransferOwner = undefined;
+      };
+      const failed = (
+        _event: unknown,
+        code: number,
+        _description: string,
+        _url: string,
+        mainFrame: boolean,
+      ) => {
+        if (
+          !mainFrame ||
+          code === -3 ||
+          window !== owner ||
+          owner.isDestroyed()
+        )
+          return;
+        cleanup();
+        void showWorkspaceReloadFailure(
+          owner,
+          transferred
+            ? undefined
+            : 'The workspace could not load. Restart Canopy to try again.',
+        ).catch(() => {});
+      };
+      const loaded = () => {
+        cleanup();
+        if (committedTransferOwner === owner)
+          committedTransferOwner = undefined;
+      };
+      clearTransferReload = cleanup;
+      contents.on('did-fail-load', failed);
+      contents.once('did-finish-load', loaded);
+      contents.once('destroyed', cleanup);
+      owner.once('closed', cleanup);
+    }
+    try {
+      owner.webContents.reload();
+    } catch (error) {
+      clearTransferReload?.();
+      departingHandoffOwner = undefined;
+      replacingHandoffRenderer = false;
+      throw error;
+    }
+  };
+  let receivedWorkspace: Workspace | undefined;
+  let retryUnavailableWorkspace = false;
+  let workspaceOwner: BrowserWindow | undefined;
+  let workspaceDocument = 0;
+  let workspaceInitializationError: string | undefined;
   let reviewedDiagnostics: string | undefined;
   let creatingWindow: Promise<void> | null = null;
   let supportPending = false;
@@ -340,10 +446,15 @@ async function start(
         )
       )
         throw new Error('Invalid handoff owner.');
-      if (quitting || closingWindow || !window || window.isDestroyed())
+      if (!window || window.isDestroyed())
         throw new Error('Canopy is closing.');
+      if (closingWindow) return { session: '', closeSettled: false };
+      if (quitting) throw new Error('Canopy is closing.');
       const owner = window;
+      if (departingHandoffOwner === owner)
+        throw new Error('Canopy is replacing the workspace.');
       resetHandoffCancellation();
+      replacingHandoffRenderer = false;
       return handoffs.ready((state) => {
         if (window === owner && !owner.isDestroyed()) {
           try {
@@ -819,14 +930,30 @@ async function start(
       mapping: Record<string, string>,
       mode: ImportMode,
     ) => transfer.preview(backup, mapping, mode),
-    applyWorkspaceImport: (token: string) => transfer.apply(text(token)),
+    applyWorkspaceImport: (token: string) =>
+      trackWorkspaceTransfer(transfer.apply(text(token))),
     canUndoWorkspaceImport: () => transfer.canUndo(),
-    rollbackWorkspaceImport: () => transfer.rollback(),
-    reloadWorkspace: () => window?.webContents.reload(),
+    rollbackWorkspaceImport: () => trackWorkspaceTransfer(transfer.rollback()),
+    reloadWorkspace,
+    workspaceReloadFailed: async () => {
+      await showWorkspaceReloadFailure(window!);
+    },
+    workspaceInitialized: (error: string | null) => {
+      workspaceInitializationError =
+        error === null ? undefined : text(error, 10000);
+    },
     loadWorkspace: async () => {
       if (demoMode) return structuredClone(demoWorkspaceState);
-      const saved = await storage.read<Workspace>('workspace');
-      return saved ? recoverWorkspaceViews(saved) : null;
+      const document = workspaceDocument;
+      try {
+        const saved = await storage.read<Workspace>('workspace');
+        return saved ? recoverWorkspaceViews(saved) : null;
+      } catch (error) {
+        if (document === workspaceDocument)
+          workspaceInitializationError =
+            error instanceof Error ? error.message : String(error);
+        throw error;
+      }
     },
     saveWorkspace: (value: Workspace) => {
       const valid = validateWorkspace(value);
@@ -834,7 +961,11 @@ async function start(
         demoWorkspaceState = structuredClone(valid);
         return;
       }
-      return storage.write('workspace', valid);
+      workspaceOwner = window ?? undefined;
+      receivedWorkspace = valid;
+      retryUnavailableWorkspace = false;
+      savingWorkspace = storage.write('workspace', valid);
+      return savingWorkspace;
     },
     copyIssueLink: (id: string, issue: string) =>
       demoMode && id === fixture?.connection.id
@@ -908,18 +1039,31 @@ async function start(
       },
     });
     const created = window;
+    workspaceInitializationError = undefined;
+    workspaceDocument++;
     let initialLoad = true;
     let handoffCanceled = false;
-    const cancelHandoffs = () => {
-      if (handoffCanceled || window !== created) return;
+    let closeApproved = false;
+    const cancelHandoffs = (force = false) => {
+      if (
+        window !== created ||
+        (!force && (handoffCanceled || replacingTransferOwner === created))
+      )
+        return;
       handoffCanceled = true;
-      handoffs.cancel();
+      if (force) {
+        clearTransferReload?.();
+        departingHandoffOwner = undefined;
+        replacingHandoffRenderer = false;
+      }
+      if (!closeApproved) handoffs.cancel();
     };
     resetHandoffCancellation = () => {
       handoffCanceled = false;
     };
     created.webContents.on('did-start-navigation', (details) => {
       if (!details.isMainFrame || details.isSameDocument) return;
+      workspaceDocument++;
       // Reload/navigation can destroy the renderer before its cancellation IPC
       // arrives. Release the departing document's provider reads in main too.
       for (const controller of trees.values()) controller.abort();
@@ -927,15 +1071,19 @@ async function start(
       clearRelationshipRequests();
       if (!initialLoad) cancelHandoffs();
     });
+    created.webContents.on('did-navigate', () => {
+      if (window === created && departingHandoffOwner === created)
+        departingHandoffOwner = undefined;
+    });
     created.webContents.on('render-process-gone', () => {
       clearRelationshipRequests();
-      cancelHandoffs();
+      cancelHandoffs(true);
     });
     created.webContents.on('did-start-loading', () => {
       if (window === created) supportSubscriber = null;
     });
     created.webContents.on('destroyed', () => {
-      cancelHandoffs();
+      cancelHandoffs(true);
       updates.cancel();
       for (const controller of trees.values()) controller.abort();
       trees.clear();
@@ -947,8 +1095,178 @@ async function start(
       (state) => storage.write('window', state),
       (error) => console.error('Could not save window state:', error),
     );
-    let closeApproved = false;
+    let closeSequence = 0;
     let closing = false;
+    let rendererLoaded: Promise<void>;
+    let rendererUnavailable = false;
+    created.webContents.on('render-process-gone', () => {
+      rendererUnavailable = true;
+    });
+    created.webContents.on(
+      'did-fail-load',
+      (_event, code, _description, _url, mainFrame) => {
+        if (mainFrame && code !== -3) rendererUnavailable = true;
+      },
+    );
+    created.webContents.on('did-finish-load', () => {
+      rendererUnavailable =
+        created.webContents.getURL() !== pathToFileURL(html).href;
+    });
+    const flushRenderer = async (signal: AbortSignal, closeAttempt: number) => {
+      const requestedFinalSnapshot =
+        !rendererUnavailable && !created.webContents.isCrashed();
+      if (requestedFinalSnapshot) {
+        let unavailable: () => void;
+        const failedLoad = (
+          _event: unknown,
+          code: number,
+          _description: string,
+          _url: string,
+          mainFrame: boolean,
+        ) => {
+          if (mainFrame && code !== -3) unavailable();
+        };
+        const lostRenderer = new Promise<true>((resolve) => {
+          unavailable = () => resolve(true);
+          created.webContents.once('render-process-gone', unavailable);
+          created.webContents.on('did-fail-load', failedLoad);
+        });
+        const unsubscribe = () => {
+          created.webContents.removeListener(
+            'render-process-gone',
+            unavailable!,
+          );
+          created.webContents.removeListener('did-fail-load', failedLoad);
+          signal.removeEventListener('abort', unsubscribe);
+        };
+        signal.addEventListener('abort', unsubscribe, { once: true });
+        try {
+          const lost = await Promise.race([
+            lostRenderer,
+            (async () => {
+              await rendererLoaded;
+              signal.throwIfAborted();
+              const result = await created.webContents.executeJavaScript(
+                `window.canopy.flushWorkspace(${closeAttempt})`,
+              );
+              if (result && typeof result.initializationError === 'string')
+                throw new WorkspaceLoadFailure(result.initializationError);
+              return false;
+            })(),
+          ]);
+          if (!lost) return false;
+        } catch (error) {
+          if (
+            error instanceof WorkspaceLoadFailure ||
+            (!rendererUnavailable && !created.webContents.isCrashed())
+          )
+            throw error;
+        } finally {
+          unsubscribe();
+        }
+      }
+      try {
+        // Preserve writes already received when an unavailable renderer cannot
+        // supply newer state. The overall close deadline also bounds this drain.
+        if (
+          retryUnavailableWorkspace &&
+          receivedWorkspace &&
+          workspaceOwner === created
+        ) {
+          retryUnavailableWorkspace = false;
+          savingWorkspace = storage.write('workspace', receivedWorkspace);
+        }
+        try {
+          await savingWorkspace;
+        } catch (error) {
+          if (workspaceOwner === created && !created.isDestroyed())
+            retryUnavailableWorkspace = true;
+          throw error;
+        }
+        while (pendingWorkspaceTransfers.size)
+          await Promise.all(pendingWorkspaceTransfers);
+        if (workspaceInitializationError)
+          throw new WorkspaceLoadFailure(
+            `Workspace could not load: ${workspaceInitializationError}`,
+          );
+        signal.throwIfAborted();
+      } catch (error) {
+        if (requestedFinalSnapshot && !(error instanceof WorkspaceLoadFailure))
+          throw new WorkspaceSnapshotUnconfirmed(error);
+        throw error;
+      }
+      if (requestedFinalSnapshot) throw new WorkspaceSnapshotUnconfirmed();
+      return true;
+    };
+    const flushBeforeClose = async () => {
+      const timedOut = new Error(
+        'Workspace save did not finish before the close deadline.',
+      );
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const attempt = new AbortController();
+      const closeAttempt = ++closeSequence;
+      try {
+        const [, forceClose] = await Promise.race([
+          Promise.all([
+            windowStateSaver.flush(),
+            flushRenderer(attempt.signal, closeAttempt),
+          ]).then(async (result) => {
+            attempt.signal.throwIfAborted();
+            await windowStateSaver.flush();
+            return result;
+          }),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(timedOut), 15_000);
+          }),
+        ]);
+        return forceClose;
+      } catch (error) {
+        attempt.abort();
+        if (!created.isDestroyed())
+          created.webContents.send(
+            'canopy:workspaceCloseReleased',
+            closeAttempt,
+          );
+        if (
+          error !== timedOut &&
+          !(error instanceof WorkspaceLoadFailure) &&
+          !(error instanceof WorkspaceSnapshotUnconfirmed) &&
+          !rendererUnavailable &&
+          !created.webContents.isCrashed()
+        )
+          throw error;
+        const { response } = await dialog.showMessageBox(created, {
+          type: 'warning',
+          message:
+            error instanceof WorkspaceLoadFailure
+              ? 'The workspace could not load.'
+              : error === timedOut
+                ? 'The workspace save has not finished.'
+                : 'The workspace could not be saved.',
+          detail:
+            error instanceof WorkspaceLoadFailure
+              ? `${error.message}\n\nYour saved workspace will be left unchanged. Changes made since loading failed have not been saved and will be lost if you close anyway. Keep Canopy open to repair the problem or use Reload workspace.`
+              : error === timedOut ||
+                  error instanceof WorkspaceSnapshotUnconfirmed
+                ? 'Keep Canopy open to allow saving or recovery. Closing anyway abandons unfinished writes and may lose the latest workspace changes.'
+                : `${error instanceof Error ? error.message : String(error)}\n\nThe renderer is unavailable. Keep Canopy open to repair storage and retry closing; only workspace changes already received can be retried. Closing anyway abandons those changes.`,
+          buttons: ['Keep open', 'Close anyway'],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        if (response !== 1) throw error;
+        if (workspaceOwner === created) {
+          workspaceOwner = undefined;
+          retryUnavailableWorkspace = false;
+          receivedWorkspace = undefined;
+          savingWorkspace = Promise.resolve();
+        }
+        return true;
+      } finally {
+        attempt.abort();
+        clearTimeout(deadline);
+      }
+    };
     const saveBounds = () => {
       if (
         demoMode ||
@@ -983,11 +1301,38 @@ async function start(
       };
       created.once('closed', finishClosing);
       saveBounds();
-      void windowStateSaver.flush().finally(() => {
-        closeApproved = true;
-        if (quitting) app.quit();
-        else if (!created.isDestroyed()) created.close();
-      });
+      void flushBeforeClose()
+        .then((forceClose) => {
+          closeApproved = true;
+          if (forceClose) created.destroy();
+          if (quitting) app.quit();
+          else if (!created.isDestroyed()) created.close();
+        })
+        .catch((error) => {
+          closing = false;
+          quitting = false;
+          windowStateSaver.resume();
+          handoffCanceled = false;
+          handoffs.resume();
+          created.removeListener('closed', finishClosing);
+          finishClosing();
+          if (window === created && !created.isDestroyed()) {
+            try {
+              created.webContents.send('canopy:handoff', {
+                session: '',
+                closeSettled: true,
+              });
+            } catch {}
+          }
+          console.error('Could not save workspace before closing:', error);
+        });
+    });
+    created.on('query-session-end', (event) => {
+      // Windows marks forced termination as critical; that request cannot
+      // promise time to persist and must not start another blocking close.
+      if (closeApproved || event.reasons.includes('critical')) return;
+      event.preventDefault();
+      app.quit();
     });
     if (saved?.maximized) {
       // X11 must receive maximized state before mapping to retain normal bounds.
@@ -1014,16 +1359,24 @@ async function start(
       (_wc, _permission, callback) => callback(false),
     );
     created.on('closed', () => {
+      cancelHandoffs(true);
+      if (committedTransferOwner === created)
+        committedTransferOwner = undefined;
       for (const controller of trees.values()) controller.abort();
       trees.clear();
       if (window === created) {
         window = null;
         supportSubscriber = null;
+        replacingHandoffRenderer = false;
         handoffs.resume(true);
       }
     });
+    rendererLoaded = created.loadFile(html).catch((error) => {
+      rendererUnavailable = true;
+      throw error;
+    });
     try {
-      await created.loadFile(html);
+      await rendererLoaded;
       initialLoad = false;
     } catch (error) {
       if (window === created) {

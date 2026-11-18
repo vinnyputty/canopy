@@ -1,3 +1,4 @@
+import { WorkspaceTransferReloadError } from './workspace-error';
 import React, { useState, useEffect } from 'react';
 import type { Connection, Workspace } from '../shared/types';
 import type {
@@ -13,7 +14,12 @@ export function WorkspaceBackupPanel({
 }: {
   connections: Connection[];
   flush: () => Promise<void>;
-  onApply: (operation: () => Promise<Workspace>) => Promise<void>;
+  onApply: (
+    operation: (
+      beforeTransfer: () => Promise<void>,
+      beforeBarrier: () => Promise<void>,
+    ) => Promise<Workspace>,
+  ) => Promise<void>;
 }) {
   const [exported, setExported] = useState<{
     token: string;
@@ -26,6 +32,7 @@ export function WorkspaceBackupPanel({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [transferCommitted, setTransferCommitted] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   useEffect(() => {
     void window.canopy
@@ -36,10 +43,12 @@ export function WorkspaceBackupPanel({
   async function run(action: () => Promise<void>) {
     setBusy(true);
     setError('');
+    setTransferCommitted(false);
     setMessage('');
     try {
       await action();
     } catch (error) {
+      setTransferCommitted(error instanceof WorkspaceTransferReloadError);
       setError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
@@ -239,8 +248,12 @@ export function WorkspaceBackupPanel({
                     void run(async () => {
                       const token = preview.token;
                       setPreview(null);
-                      await onApply(() =>
-                        window.canopy.applyWorkspaceImport(token),
+                      await onApply((beforeTransfer, beforeBarrier) =>
+                        window.canopy.applyWorkspaceImport(
+                          token,
+                          beforeTransfer,
+                          beforeBarrier,
+                        ),
                       );
                       setCanUndo(true);
                       setMessage(
@@ -259,7 +272,12 @@ export function WorkspaceBackupPanel({
           <button
             onClick={() =>
               void run(async () => {
-                await onApply(() => window.canopy.rollbackWorkspaceImport());
+                await onApply((beforeTransfer, beforeBarrier) =>
+                  window.canopy.rollbackWorkspaceImport(
+                    beforeTransfer,
+                    beforeBarrier,
+                  ),
+                );
                 setCanUndo(false);
                 setMessage('Import undone.');
               })
@@ -271,8 +289,9 @@ export function WorkspaceBackupPanel({
       </fieldset>
       {error && (
         <p role="alert" className="dialog-error">
-          {error} Existing workspace remains intact if applying fails. Preview
-          again after changes.
+          {error}
+          {!transferCommitted &&
+            ' Existing workspace remains intact if applying fails. Preview again after changes.'}
         </p>
       )}
       {message && <p role="status">{message}</p>}

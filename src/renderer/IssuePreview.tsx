@@ -47,6 +47,16 @@ export function IssuePreview({
   onWidth,
   onClose,
   onChanged,
+  subscribeLabels,
+  editLabels = (connectionId, key, name, selected, initial) =>
+    window.canopy.update(connectionId, key, {
+      labels: selected
+        ? [...new Set([...initial.map((label) => label.name), name])]
+        : initial
+            .filter((label) => label.name !== name)
+            .map((label) => label.name),
+    }),
+  trackMutation = (operation) => operation(),
   onAuthoringChanged,
   onPreview,
   onJump,
@@ -69,6 +79,19 @@ export function IssuePreview({
   onWidth: (width: number) => void;
   onClose: () => void;
   onChanged: (issue: Issue) => void;
+  subscribeLabels?: (
+    connectionId: string,
+    key: string,
+    listener: (labels: Choice[]) => void,
+  ) => () => void;
+  editLabels?: (
+    connectionId: string,
+    key: string,
+    name: string,
+    selected: boolean,
+    initial: Choice[],
+  ) => Promise<Issue>;
+  trackMutation?: (operation: () => Promise<void>) => Promise<void>;
   onAuthoringChanged: () => void;
   onPreview: (key: string) => void;
   onJump: (key: string) => void;
@@ -92,14 +115,36 @@ export function IssuePreview({
   const [attempt, setAttempt] = useState(0);
   const [retrying, setRetrying] = useState(false);
   const previewGeneration = useRef(0);
+  const labelConfirmation = useRef<{ version: number; labels?: Choice[] }>({
+    version: 0,
+  });
+  const labelsWriting = useRef(false);
   useLayoutEffect(() => {
     previewGeneration.current++;
+    labelConfirmation.current = { version: 0 };
+    labelsWriting.current = false;
     olderComments.reset();
     return () => {
       previewGeneration.current++;
       olderComments.reset();
     };
   }, [connectionId, issueKey, attempt, olderComments]);
+  useLayoutEffect(() => {
+    const generation = previewGeneration.current;
+    return subscribeLabels?.(connectionId, issueKey, (labels) => {
+      if (previewGeneration.current !== generation) return;
+      labelConfirmation.current = {
+        version: labelConfirmation.current.version + 1,
+        labels,
+      };
+      if (!labelsWriting.current)
+        setData((current) =>
+          current
+            ? { ...current, issue: { ...current.issue, labels } }
+            : current,
+        );
+    });
+  }, [connectionId, issueKey, attempt, subscribeLabels]);
   const [labels, setLabels] = useState<Choice[]>([]);
   const [editingLabels, setEditingLabels] = useState(false);
   const [savingLabels, setSavingLabels] = useState(false);
@@ -136,10 +181,19 @@ export function IssuePreview({
     if (!sameIssue) setData(undefined);
     setRetrying(sameIssue);
     setError('');
+    const labelVersion = labelConfirmation.current.version;
     window.canopy.preview(connectionId, issueKey).then(
       (result) => {
         if (live && generation === previewGeneration.current) {
-          setData(result);
+          const confirmation = labelConfirmation.current;
+          setData(
+            confirmation.version !== labelVersion && confirmation.labels
+              ? {
+                  ...result,
+                  issue: { ...result.issue, labels: confirmation.labels },
+                }
+              : result,
+          );
           olderComments.reset(connectionId, issueKey, result.commentPage);
           setRetrying(false);
         }
@@ -232,6 +286,7 @@ export function IssuePreview({
   const toggleLabel = async (name: string) => {
     if (!data || savingLabels) return;
     const requestGeneration = previewGeneration.current;
+    labelsWriting.current = true;
     setSavingLabels(true);
     setLabelsError('');
     setLabelsSaved(false);
@@ -246,25 +301,44 @@ export function IssuePreview({
         labels: next.map((value) => ({ id: value, name: value })),
       },
     });
-    try {
-      const issue = await window.canopy.update(connectionId, issueKey, {
-        labels: next,
-      });
+    let confirmed = false;
+    const failed = (reason: unknown) => {
+      if (confirmed) return;
       if (previewGeneration.current === requestGeneration) {
-        setData({ ...data, issue: { ...issue, links: data.issue.links } });
-        onChanged(issue);
-        setLabelsSaved(true);
-      }
-    } catch (reason) {
-      if (previewGeneration.current === requestGeneration) {
-        setData(data);
+        const labels = labelConfirmation.current.labels;
+        setData(labels ? { ...data, issue: { ...data.issue, labels } } : data);
         setLabelsError(
           `Labels were not saved. Previous labels restored; try the change again or open GitHub. ${String(reason)}`,
         );
       }
+    };
+    try {
+      await trackMutation(async () => {
+        try {
+          const issue = await editLabels(
+            connectionId,
+            issueKey,
+            name,
+            !current.includes(name),
+            data.issue.labels ?? [],
+          );
+          confirmed = true;
+          if (previewGeneration.current === requestGeneration) {
+            setData({ ...data, issue: { ...issue, links: data.issue.links } });
+            setLabelsSaved(true);
+          }
+          onChanged(issue);
+        } catch (reason) {
+          failed(reason);
+        }
+      });
+    } catch (reason) {
+      failed(reason);
     } finally {
-      if (previewGeneration.current === requestGeneration)
+      if (previewGeneration.current === requestGeneration) {
+        labelsWriting.current = false;
         setSavingLabels(false);
+      }
     }
   };
   const clamp = (next: number) => Math.max(300, Math.min(720, next));
